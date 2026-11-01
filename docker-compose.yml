@@ -21,8 +21,10 @@ services:
     volumes:
       # Both mounts are load-bearing: config.yaml and the SQLite DB must
       # survive `docker compose down && up` and image rebuilds.
-      - ./config:/config
-      - ./data:/data
+      # The router installer (install/router.sh) keeps them outside the checkout:
+      # FOUNDRY_CONFIG_DIR / FOUNDRY_DATA_DIR_HOST in .env (default: next to this file).
+      - ${FOUNDRY_CONFIG_DIR:-./config}:/config
+      - ${FOUNDRY_DATA_DIR_HOST:-./data}:/data
     environment:
       - MERIDIAN_API_KEY=${MERIDIAN_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}

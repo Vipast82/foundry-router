@@ -704,6 +704,14 @@ class Services:
 def create_app(config_path: Optional[Path] = None,
                database_path: Optional[Path] = None) -> FastAPI:
     config_store = ConfigStore(config_path)
+    # a restore staged from a backup (backup.py) goes in place before anything is opened
+    from . import backup as _backup
+    _data = Path(database_path).parent if database_path else data_dir()
+    try:
+        restored = _backup.apply_pending(_data, Path(config_store.path).parent)
+    except Exception:                                            # noqa: BLE001
+        logging.getLogger("foundry_router").exception("applying the staged restore failed")
+        restored = None
     cfg = config_store.load()
     logging.basicConfig(
         level=getattr(logging, cfg.logging.level.upper(), logging.INFO),
@@ -711,6 +719,7 @@ def create_app(config_path: Optional[Path] = None,
 
     db = Database(database_path or (data_dir() / "foundry.sqlite"))
     services = Services(config_store, db)
+    services.restored_from = restored
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -725,6 +734,10 @@ def create_app(config_path: Optional[Path] = None,
             except Exception:
                 log.exception("mcp aggregator failed to start")
             db.log_event("info", "main", "foundry-router started")
+            if restored:
+                db.log_event("warning", "backup",
+                             f"restored from the backup made {restored.get('created')} on "
+                             f"{restored.get('host')} (router v{restored.get('router_version')})")
             yield
             await services.shutdown()
 
@@ -787,5 +800,11 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(secrets_router)
     from .machines import router as machines_router
     app.include_router(machines_router)
+    from .provider_keys import router as provider_keys_router
+    app.include_router(provider_keys_router)
+    from .backup import router as backup_router
+    app.include_router(backup_router)
+    from .ui.setup_wizard import router as setup_wizard_router
+    app.include_router(setup_wizard_router)
     app.include_router(ui_router)
     return app

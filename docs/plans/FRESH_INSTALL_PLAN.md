@@ -4,7 +4,11 @@
 - Victor answered on 2026-10-31: the recommended answer for every decision (D1–D6 in §7).
 - **Phase 1 is built (v0.160.0):** Access → Machines, enrollment codes, `create-slot-lxc.sh` and the
   one-shot `setup-host.sh` (docs/INSTALL_SLOTS.md).
-- Phases 2–4 are next. D6 (where the workstation pieces live after the move) is decided later.
+- **Phase 2 is built (v0.161.0):** install/router.sh, the first-run setup wizard (/ui/setup),
+  provider keys in provider-keys.env, and encrypted Backup & restore (docs/INSTALL_ROUTER.md).
+  The game step takes id, name, branch and implementer; the game's clone URL moves to phase 3,
+  where the workstation clones it.
+- Phases 3–4 are next. D6 (where the workstation pieces live after the move) is decided later.
 
 Victor wants two things:
 - a one-shot, user-friendly slot installer that asks for whatever it needs, so the container

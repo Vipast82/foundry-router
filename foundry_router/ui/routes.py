@@ -79,6 +79,8 @@ async def status(request: Request):
         "tool_count": len(svc.tool_registry.enabled()),
         "last_tool_sync": svc.tool_registry.last_sync,
         "mcp_servers": [s.name for s in cfg.mcp_servers],
+        # the web UI opens the first-run wizard (/ui/setup) while this is false
+        "setup_completed": bool(cfg.setup.completed),
     }
 
 

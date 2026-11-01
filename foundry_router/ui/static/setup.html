@@ -1,0 +1,562 @@
+<!doctype html>
+<!--
+  Foundry Router first-run setup wizard (/ui/setup, ui/setup_wizard.py).
+  Every step calls the same /admin/api routes as the matching tab of the full UI
+  (/ui), so nothing here is a second way to configure the router. The full UI opens
+  this page by itself while setup.completed is false (a fresh install).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foundry Router setup</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#14110e; --panel:#1c1814; --panel-2:#26201a; --line:#352c23; --fg:#ebe5db; --dim:#a39684;
+    --accent:#ff8a1e; --on-accent:#1a1206; --info:#7db4d8;
+    --ok:#6cc47c; --bad:#ef5d50; --warn:#e8aa3c;
+    --ok-bg:#183020; --bad-bg:#3c1a17; --warn-bg:#382c14; --info-bg:#172a37;
+    --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --num-font: Bahnschrift, "DIN Alternate", "Barlow Semi Condensed", "Arial Narrow", var(--ui-font);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg:#eef0ed; --panel:#ffffff; --panel-2:#e4e7e3; --line:#d3d7d1; --fg:#1d211e; --dim:#5a625b;
+    --accent:#b8560a; --on-accent:#ffffff; --info:#2b6890;
+    --ok:#25803d; --bad:#bf3328; --warn:#946200;
+    --ok-bg:#e1f1e4; --bad-bg:#fbe3e0; --warn-bg:#f8edd2; --info-bg:#e1edf5;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 var(--ui-font); }
+  header { display:flex; align-items:center; gap:14px; padding:10px clamp(12px,2vw,40px);
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font:600 18px/1.1 var(--num-font); margin:0; color:var(--accent); }
+  header .sub { color:var(--dim); font-size:12px; }
+  header .tools { margin-left:auto; display:flex; gap:6px; }
+  .wrap { display:grid; grid-template-columns:240px minmax(0,1fr); gap:18px;
+          padding:18px clamp(12px,2vw,40px); max-width:1180px; }
+  aside ol { list-style:none; margin:0; padding:0; }
+  aside li button { display:flex; width:100%; gap:9px; align-items:center; text-align:left;
+                    background:none; border:1px solid transparent; border-radius:6px; color:var(--dim);
+                    padding:8px 10px; cursor:pointer; font:500 14px/1.2 var(--num-font); }
+  aside li button:hover { color:var(--fg); }
+  aside li button.cur { background:var(--panel); border-color:var(--line); color:var(--fg); }
+  aside .dot { width:20px; height:20px; border-radius:50%; flex:none; display:grid; place-items:center;
+               font-size:11px; border:1px solid var(--line); color:var(--dim); }
+  aside .dot.done { background:var(--ok-bg); color:var(--ok); border-color:var(--ok); }
+  aside .dot.skip { background:var(--warn-bg); color:var(--warn); border-color:var(--warn); }
+  h2 { font:600 20px/1.25 var(--num-font); margin:0 0 4px; }
+  h3 { font:600 15px/1.3 var(--num-font); margin:0 0 6px; }
+  p { margin:6px 0; }
+  .hint { color:var(--dim); font-size:12.5px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:7px; padding:14px 16px; margin:12px 0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:7px 0; }
+  .row > label { color:var(--dim); font-size:12.5px; min-width:150px; }
+  input, select { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:5px;
+                  padding:6px 9px; font-size:13px; }
+  input[type=checkbox] { accent-color:var(--accent); }
+  button.act { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:5px;
+               padding:6px 12px; cursor:pointer; font-size:13px; white-space:nowrap; }
+  button.act:hover { border-color:var(--accent); }
+  button.act:disabled { opacity:.4; cursor:not-allowed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600; }
+  a { color:var(--info); }
+  a.act { display:inline-block; text-decoration:none; color:var(--fg); border:1px solid var(--line);
+          border-radius:5px; padding:6px 12px; font-size:13px; }
+  a.act:hover { border-color:var(--accent); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:9px; font-size:11.5px; white-space:nowrap; }
+  .ok { background:var(--ok-bg); color:var(--ok); } .bad { background:var(--bad-bg); color:var(--bad); }
+  .warn { background:var(--warn-bg); color:var(--warn); } .info { background:var(--info-bg); color:var(--info); }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:500; }
+  code, .mono { font-family:ui-monospace, Consolas, monospace; font-size:12.5px; }
+  .keybox { font:600 16px/1.3 ui-monospace, Consolas, monospace; padding:10px 12px; border:1px dashed var(--accent);
+            border-radius:6px; overflow-wrap:anywhere; background:var(--bg); }
+  .nav { display:flex; gap:8px; margin-top:18px; align-items:center; }
+  .nav .sp { flex:1; }
+  .choice { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  #toast { position:fixed; bottom:16px; right:16px; background:var(--panel); border:1px solid var(--accent);
+           padding:9px 14px; border-radius:6px; display:none; max-width:460px; z-index:20; }
+  #toast.err { border-color:var(--bad); }
+  @media (max-width: 760px) {
+    .wrap { grid-template-columns:1fr; padding:12px 16px; }
+    aside ol { display:flex; overflow-x:auto; gap:4px; }
+    aside li button { white-space:nowrap; }
+    .choice { grid-template-columns:1fr; }
+    .row > label { min-width:0; width:100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Foundry Router setup</h1><div class="sub" id="ver"></div></div>
+  <div class="tools">
+    <a class="act" href="/ui" id="full-ui" title="The full web UI (every setting here is also there)">Open the full UI</a>
+    <button class="act" id="theme-btn">Light</button>
+  </div>
+</header>
+<div class="wrap"><aside><ol id="steps"></ol></aside><main id="main"><p class="hint">Loading…</p></main></div>
+<div id="toast"></div>
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const adminKey = () => { try { return localStorage.getItem("foundryAdminKey") || ""; } catch (e) { return ""; } };
+function toast(msg, err = false) {
+  const t = $("#toast"); t.textContent = msg; t.className = err ? "err" : ""; t.style.display = "block";
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.style.display = "none"; }, err ? 7000 : 3500);
+}
+async function api(path, opts = {}) {
+  const headers = {"Content-Type": "application/json", ...(opts.headers || {})};
+  if (adminKey()) headers.Authorization = "Bearer " + adminKey();
+  const r = await fetch("/admin/api/" + path, {method: opts.method || "GET", headers,
+    body: opts.raw !== undefined ? opts.raw : (opts.body !== undefined ? JSON.stringify(opts.body) : undefined)});
+  const text = await r.text().catch(() => "");
+  let data = {}; try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {}; }
+  if (r.status === 401 || (r.status === 403 && (data.error || {}).code === "admin_key_required")) {
+    const k = prompt("This router's web UI needs an admin key:");
+    if (k) { try { localStorage.setItem("foundryAdminKey", k.trim()); } catch (e) {} return api(path, opts); }
+  }
+  if (!r.ok) {
+    const e = data.error;
+    throw new Error((e && typeof e === "object" ? e.message : e) || data.detail || `HTTP ${r.status}`);
+  }
+  return data;
+}
+const busy = async (btn, fn) => {
+  const label = btn.textContent; btn.disabled = true; btn.textContent = "Working…";
+  try { return await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = label; }
+};
+
+// ---------------------------------------------------------------- theme
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("fr-theme", t); } catch (e) {}
+  $("#theme-btn").textContent = t === "light" ? "Dark" : "Light";
+}
+(() => {
+  let saved = ""; try { saved = localStorage.getItem("fr-theme") || ""; } catch (e) {}
+  const osLight = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (osLight ? "light" : "dark"));
+  $("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+})();
+
+// ---------------------------------------------------------------- steps
+const STEPS = [
+  ["start", "Start"], ["admin", "Protect the web UI"], ["secrets", "Secret store"],
+  ["backends", "Backends"], ["personas", "Personas"], ["budgets", "Budgets"],
+  ["game", "Game"], ["machines", "Machines"], ["finish", "Finish"]];
+let W = null;
+let cur = (location.hash || "").slice(1) || "";
+const skipped = new Set(JSON.parse(sessionStorage.getItem("fr-setup-skipped") || "[]"));
+const skip = id => { skipped.add(id); sessionStorage.setItem("fr-setup-skipped", JSON.stringify([...skipped])); };
+const done = id => id === "start" ? true : id === "finish" ? W.completed : !!(W.steps[id] || {}).done;
+
+async function load() {
+  W = await api("setup/wizard");
+  $("#ver").textContent = `v${W.version}` + (W.completed ? " · setup finished" : "");
+  if (!STEPS.some(s => s[0] === cur)) cur = "start";
+  draw();
+}
+function go(id) { cur = id; history.replaceState(null, "", "#" + id); draw(); window.scrollTo(0, 0); }
+function next() { const i = STEPS.findIndex(s => s[0] === cur); go(STEPS[Math.min(i + 1, STEPS.length - 1)][0]); }
+function back() { const i = STEPS.findIndex(s => s[0] === cur); go(STEPS[Math.max(i - 1, 0)][0]); }
+function navButtons(opts = {}) {
+  return `<div class="nav">${cur !== "start" ? '<button class="act" data-nav="back">Back</button>' : ""}<span class="sp"></span>
+    ${opts.optional ? '<button class="act" data-nav="skip">Skip this step</button>' : ""}
+    <button class="act primary" data-nav="next">${opts.nextLabel || "Next"}</button></div>`;
+}
+function bindNav(root) {
+  root.querySelectorAll("[data-nav]").forEach(b => b.onclick = () => {
+    if (b.dataset.nav === "back") back();
+    else { if (b.dataset.nav === "skip") skip(cur); next(); }
+  });
+}
+function draw() {
+  $("#steps").innerHTML = STEPS.map(([id, title], i) => {
+    const cls = done(id) && id !== "start" ? "done" : skipped.has(id) ? "skip" : "";
+    return `<li><button class="${id === cur ? "cur" : ""}" data-go="${id}"><span class="dot ${cls}">${cls === "done" ? "✓" : i}</span>${esc(title)}</button></li>`;
+  }).join("");
+  document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
+  const m = $("#main");
+  m.innerHTML = VIEWS[cur]();
+  bindNav(m);
+  (BIND[cur] || (() => {}))(m);
+}
+
+// ---------------------------------------------------------------- views
+const VIEWS = {}, BIND = {};
+
+VIEWS.start = () => {
+  const r = W.restored, st = W.staged_restore;
+  const plainWarn = location.protocol === "http:" && !W.https.allow_http
+    ? `<div class="card"><span class="pill bad">HTTPS only</span> This router takes passphrases and keys only over HTTPS: open
+        <code>https://${esc(location.hostname)}:${esc(W.https.port)}/ui/setup</code>.</div>` : "";
+  return `<h2>Welcome</h2>
+    <p class="hint">This wizard sets up the router in order. Each step is also in the full UI, so you can skip any step and come back later.</p>
+    ${plainWarn}
+    ${r ? `<div class="card"><span class="pill ok">restored</span> This router was restored from the backup made <b>${esc(r.created)}</b>
+        on <b>${esc(r.host)}</b> (router v${esc(r.router_version)}).
+        ${r.has_secret_store ? " Its secret store is locked: unlock it with that router's passphrase in the next steps." : ""}</div>` : ""}
+    ${st ? `<div class="card"><span class="pill warn">restore waiting</span> A restore from the backup made <b>${esc(st.created)}</b> on
+        <b>${esc(st.host)}</b> is ready. It is applied when the router restarts.
+        <div class="row"><button class="act primary" id="rs-restart">Restart and restore now</button>
+        <button class="act" id="rs-cancel">Cancel the restore</button></div></div>` : ""}
+    <div class="choice">
+      <div class="card"><h3>Set up a new router</h3>
+        <p class="hint">Walk through admin key, secret store, backends, personas, budgets, your game and machines.</p>
+        <button class="act primary" data-nav="next">Start setup</button></div>
+      <div class="card"><h3>Restore from a backup</h3>
+        <p class="hint">Moving to a new machine? Pick the <code>.fbak</code> file made on the old router (Logs → Data → Backup) and enter its backup passphrase.
+          Everything comes back: settings, personas, client keys, machines, history, the secret store (still locked) and the provider keys.</p>
+        <div class="row"><input type="file" id="rs-file" accept=".fbak"></div>
+        <div class="row"><input type="password" id="rs-pass" placeholder="backup passphrase" autocomplete="off" style="flex:1;min-width:200px">
+          <button class="act" id="rs-go">Restore</button></div>
+        <div id="rs-msg" class="hint"></div></div>
+    </div>`;
+};
+async function restartAndWait(msgEl) {
+  await api("restart", {method: "POST"});
+  msgEl.textContent = "Restarting the router…";
+  const t0 = Date.now();
+  await new Promise(r => setTimeout(r, 2500));
+  while (Date.now() - t0 < 180000) {
+    try { const h = await fetch("/health", {cache: "no-store"}); if (h.ok) { location.reload(); return; } } catch (e) {}
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  msgEl.textContent = "The router did not come back within 3 minutes: check that its container is running (docker compose ps).";
+}
+BIND.start = m => {
+  const msg = $("#rs-msg", m) || document.createElement("div");
+  if ($("#rs-restart", m)) $("#rs-restart", m).onclick = e => busy(e.target, () => restartAndWait(msg));
+  if ($("#rs-cancel", m)) $("#rs-cancel", m).onclick = e => busy(e.target, async () => { await api("backup/restore", {method: "DELETE"}); await load(); });
+  $("#rs-go", m).onclick = e => busy(e.target, async () => {
+    const f = $("#rs-file", m).files[0];
+    if (!f) throw new Error("pick the .fbak backup file first");
+    msg.textContent = `Uploading ${f.name} (${(f.size / 1048576).toFixed(1)} MB)…`;
+    const up = await api("backup/restore/upload", {method: "POST", raw: f, headers: {"Content-Type": "application/octet-stream"}});
+    msg.textContent = `Backup made ${up.backup.created} on ${up.backup.host} (router v${up.backup.router_version}). Checking it…`;
+    const r = await api("backup/restore", {method: "POST", body: {passphrase: $("#rs-pass", m).value}});
+    $("#rs-pass", m).value = "";
+    msg.textContent = `Checked: ${r.staged.files} files. Restarting to put them in place…`;
+    await restartAndWait(msg);
+  });
+};
+
+VIEWS.admin = () => {
+  const s = W.steps.admin;
+  return `<h2>Protect the web UI <span class="pill info">optional</span></h2>
+    <p class="hint">Without an admin key, anyone on your network who opens this page can change the router. With one, the UI asks for the key once per browser.
+      You can turn this on or off later on Access → Clients &amp; Keys.</p>
+    <div class="card">${s.protect_admin ? '<span class="pill ok">protected</span> The web UI needs an admin key.' :
+      `<span class="pill warn">not protected</span>${s.admins.length ? ` Admin keys exist: ${s.admins.map(esc).join(", ")}.` : ""}`}</div>
+    ${s.protect_admin ? "" : `<div class="card"><h3>1. Make your admin key</h3>
+      <p class="hint">The router shows it <b>once</b> and keeps only a hash. Save it in your password manager. This browser remembers it.</p>
+      <div class="row"><label>name</label><input id="ad-name" value="${s.admins.includes("admin") ? "admin-2" : "admin"}" style="width:160px">
+        <button class="act primary" id="ad-make">Make the admin key</button></div>
+      <div id="ad-key"></div></div>
+      <div class="card"><h3>2. Turn protection on</h3>
+      <p class="hint">Only after this browser has the key (step 1, or enter an existing one when asked).</p>
+      <button class="act" id="ad-protect" ${adminKey() ? "" : "disabled"}>Protect the web UI</button></div>`}
+    ${navButtons({optional: !s.protect_admin})}`;
+};
+BIND.admin = m => {
+  if (!$("#ad-make", m)) return;
+  $("#ad-make", m).onclick = e => busy(e.target, async () => {
+    const r = await api("setup/clients", {method: "POST", body: {name: $("#ad-name", m).value.trim(), scopes: ["admin"],
+      note: "made by the setup wizard"}});
+    try { localStorage.setItem("foundryAdminKey", r.key); } catch (e2) {}
+    $("#ad-key", m).innerHTML = `<p><b>Your admin key</b> (shown once):</p><div class="keybox" id="ad-k">${esc(r.key)}</div>
+      <div class="row"><button class="act" id="ad-copy">Copy</button><span class="hint">Saved in this browser too.</span></div>`;
+    $("#ad-copy", m).onclick = () => navigator.clipboard.writeText(r.key).then(() => toast("Copied"), () => toast("Select it and copy", true));
+    $("#ad-protect", m).disabled = false;
+    W = await api("setup/wizard");
+  });
+  $("#ad-protect", m).onclick = e => busy(e.target, async () => {
+    await api("setup/client_auth", {method: "POST", body: {protect_admin: true}});
+    toast("The web UI is protected"); await load();
+  });
+};
+
+VIEWS.secrets = () => {
+  const st = W.steps.secrets.state;
+  const pill = {uninitialized: '<span class="pill warn">no passphrase yet</span>', locked: '<span class="pill warn">locked</span>',
+                unlocked: '<span class="pill ok">unlocked</span>'}[st];
+  return `<h2>Secret store</h2>
+    <p class="hint">Keys that Studio slots and other machines pull from the router (for example the Roblox Open Cloud key) are kept encrypted under a
+      <b>passphrase</b>. The router never stores the passphrase: after every restart the store is locked until you enter it on Access → Secrets.
+      Write it down somewhere safe. Without it the stored secrets cannot be recovered, not even from a backup.</p>
+    <div class="card">${pill}</div>
+    ${st === "uninitialized" ? `<div class="card"><h3>Choose the passphrase</h3>
+      <div class="row"><label>passphrase (12+ characters)</label><input type="password" id="sp-1" autocomplete="new-password" style="width:300px"></div>
+      <div class="row"><label>again</label><input type="password" id="sp-2" autocomplete="new-password" style="width:300px"></div>
+      <button class="act primary" id="sp-init">Set the passphrase</button></div>` : ""}
+    ${st === "locked" ? `<div class="card"><h3>Unlock</h3>
+      <div class="row"><input type="password" id="sp-u" autocomplete="off" style="width:300px" placeholder="passphrase">
+      <button class="act primary" id="sp-unlock">Unlock</button></div></div>` : ""}
+    <p class="hint">Values are added later on Access → Secrets.</p>
+    ${navButtons({optional: st === "uninitialized"})}`;
+};
+BIND.secrets = m => {
+  if ($("#sp-init", m)) $("#sp-init", m).onclick = e => busy(e.target, async () => {
+    const a = $("#sp-1", m).value, b = $("#sp-2", m).value;
+    if (a !== b) throw new Error("the two passphrases differ");
+    await api("secrets/init", {method: "POST", body: {passphrase: a}});
+    $("#sp-1", m).value = $("#sp-2", m).value = "";
+    toast("Secret store ready"); await load();
+  });
+  if ($("#sp-unlock", m)) $("#sp-unlock", m).onclick = e => busy(e.target, async () => {
+    await api("secrets/unlock", {method: "POST", body: {passphrase: $("#sp-u", m).value}});
+    toast("Unlocked"); await load();
+  });
+};
+
+const TEMPLATES = {
+  meridian: {label: "Meridian (Claude subscription)", name: "meridian", type: "anthropic-compatible", port: 3456, path: "",
+             key: "MERIDIAN_API_KEY", extra: {helpers_allowed: 0}, help: "The Meridian bridge on your network."},
+  cliproxy: {label: "CLIProxyAPI (ChatGPT subscription)", name: "cliproxy", type: "openai-compatible", port: 8317, path: "/v1",
+             key: "CLIPROXY_API_KEY", mgmt: "CLIPROXY_MGMT_KEY", extra: {flavor: "cliproxyapi"},
+             help: "Your own CLIProxyAPI instance. The management key lets Foundry read ChatGPT's 5 h / weekly usage."},
+  llamacpp: {label: "llama.cpp server (local model)", name: "llamacpp-1", type: "openai-compatible", port: 8080, path: "",
+             extra: {flavor: "llamacpp"}, help: "llama-server (or llama-swap in front of it)."},
+  ollama: {label: "Ollama", name: "ollama-1", type: "ollama", port: 11434, path: "", help: "An Ollama server."},
+  openai: {label: "Other OpenAI-compatible server", name: "openai-1", type: "openai-compatible", port: 8000, path: "/v1",
+           key: "", help: "vLLM, OpenRouter, any /v1/chat/completions server. Give its key a name, e.g. OPENROUTER_API_KEY."},
+};
+VIEWS.backends = () => {
+  const s = W.steps.backends;
+  const rows = s.backends.map(b => `<tr><td class="mono">${esc(b.name)}</td><td class="mono">${esc(b.url)}</td>
+    <td>${b.example ? '<span class="pill warn">example: edit or remove</span>' : b.enabled === false ? '<span class="pill">parked</span>' :
+      b.healthy ? '<span class="pill ok">reachable</span>' : `<span class="pill bad">not reachable</span>`}
+      ${b.models && b.models.length ? `<div class="hint">${b.models.length} model(s)</div>` : ""}</td>
+    <td style="white-space:nowrap"><button class="act" data-test="${esc(b.name)}" ${b.example ? "disabled" : ""}>Test</button>
+      <button class="act" data-del="${esc(b.name)}">Remove</button></td></tr>`).join("");
+  const keys = s.provider_keys.map(k => `<tr><td class="mono">${esc(k.name)}</td><td class="hint">${esc(k.label)}${k.used_by.length ? `<div>used by ${k.used_by.map(esc).join(", ")}</div>` : ""}</td>
+    <td>${k.source === "environment" ? '<span class="pill info">set in the host .env</span>' : k.set ? '<span class="pill ok">set</span>' : '<span class="pill">not set</span>'}</td>
+    <td style="white-space:nowrap">${k.source === "environment" ? "" : `<button class="act" data-pk="${esc(k.name)}">${k.set ? "Replace" : "Set"}</button>
+      ${k.set ? `<button class="act" data-pkc="${esc(k.name)}">Clear</button>` : ""}`}</td></tr>`).join("");
+  const opts = Object.entries(TEMPLATES).map(([id, t]) => `<option value="${id}">${esc(t.label)}</option>`).join("");
+  return `<h2>Backends</h2>
+    <p class="hint">The model servers the router sends work to. A fresh install lists example servers: remove them, then add yours.
+      Each backend's own installer prints its address and key.</p>
+    <div class="card"><h3>Configured</h3>
+      ${s.backends.some(b => b.example) ? '<div class="row"><button class="act" id="bk-noex">Remove all example servers</button></div>' : ""}
+      ${rows ? `<table><tr><th>name</th><th>address</th><th>state</th><th></th></tr>${rows}</table>` : '<p class="hint">None yet.</p>'}</div>
+    <div class="card"><h3>Add a backend</h3>
+      <div class="row"><label>what it is</label><select id="bk-t">${opts}</select></div>
+      <div class="row"><label>name</label><input id="bk-name" style="width:200px"></div>
+      <div class="row"><label>address</label><input id="bk-url" style="width:340px" placeholder="http://192.168.0.40:3456"></div>
+      <div class="row" id="bk-keyrow"><label>key <span id="bk-keyname" class="mono"></span></label>
+        <input type="password" id="bk-key" autocomplete="off" style="width:300px" placeholder="leave empty if it needs none">
+        <input id="bk-keyvar" style="width:220px" placeholder="KEY_NAME" title="The name the key is kept under"></div>
+      <div class="row" id="bk-mgmtrow"><label>management key (optional)</label>
+        <input type="password" id="bk-mgmt" autocomplete="off" style="width:300px"></div>
+      <p class="hint" id="bk-help"></p>
+      <button class="act primary" id="bk-add">Add and test</button></div>
+    <div class="card"><h3>Provider keys</h3>
+      <p class="hint">Keys the router itself uses to reach backends. They are kept in <code>provider-keys.env</code> beside config.yaml, never shown again,
+        and included (encrypted) in backups. A key set in the host's <code>.env</code> wins and can only be changed there.</p>
+      <table>${keys}</table></div>
+    ${navButtons()}`;
+};
+BIND.backends = m => {
+  const t = () => TEMPLATES[$("#bk-t", m).value];
+  const fill = () => {
+    const x = t();
+    $("#bk-name", m).value = x.name;
+    $("#bk-url", m).placeholder = `http://192.168.0.40:${x.port}${x.path}`;
+    $("#bk-keyrow", m).style.display = x.key === undefined ? "none" : "";
+    $("#bk-keyvar", m).style.display = x.key ? "none" : "";
+    $("#bk-keyname", m).textContent = x.key ? `(${x.key})` : "";
+    $("#bk-mgmtrow", m).style.display = x.mgmt ? "" : "none";
+    $("#bk-help", m).textContent = x.help;
+  };
+  $("#bk-t", m).onchange = fill; fill();
+  const backends = async () => ((((await api("config")).backend_pool || {}).internal || {}).backends || []);
+  $("#bk-add", m).onclick = e => busy(e.target, async () => {
+    const x = t(), name = $("#bk-name", m).value.trim(), url = $("#bk-url", m).value.trim().replace(/\/+$/, "");
+    if (!name || !/^https?:\/\//.test(url)) throw new Error("give it a name and an address starting with http:// or https://");
+    const keyVal = $("#bk-key", m).value.trim();
+    const keyName = x.key || $("#bk-keyvar", m).value.trim().toUpperCase();
+    const b = {name, type: x.type, url, priority: 100, ...(x.extra || {})};
+    if (keyVal) {
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(keyName)) throw new Error("name the key in UPPER_SNAKE_CASE, e.g. OPENROUTER_API_KEY");
+      await api(`provider-keys/${keyName}`, {method: "PUT", body: {value: keyVal}});
+      b.api_key = "${" + keyName + "}";
+    } else if (x.key && W.steps.backends.provider_keys.some(k => k.name === x.key && k.set)) {
+      b.api_key = "${" + x.key + "}";
+    }
+    const mg = x.mgmt ? $("#bk-mgmt", m).value.trim() : "";
+    if (mg) { await api(`provider-keys/${x.mgmt}`, {method: "PUT", body: {value: mg}}); b.management_key = "${" + x.mgmt + "}"; }
+    $("#bk-key", m).value = ""; if ($("#bk-mgmt", m)) $("#bk-mgmt", m).value = "";
+    const list = (await backends()).filter(o => o.name !== name);
+    list.push(b);
+    await api("config/backends", {method: "POST", body: list});
+    toast(`${name} added: testing…`);
+    try {
+      const r = await api("health/probe", {method: "POST", body: {backend: name}});
+      toast(r.ok === false || r.status === "fail" ? `${name}: ${r.error || r.detail || "the test failed"}` : `${name} answered`, r.ok === false);
+    } catch (e2) { toast(`${name}: ${e2.message}`, true); }
+    await load();
+  });
+  if ($("#bk-noex", m)) $("#bk-noex", m).onclick = e => busy(e.target, async () => {
+    const ex = new Set(W.steps.backends.backends.filter(b => b.example).map(b => b.name));
+    await api("config/backends", {method: "POST", body: (await backends()).filter(o => !ex.has(o.name))});
+    toast(`Removed ${ex.size} example server(s)`); await load();
+  });
+  m.querySelectorAll("[data-test]").forEach(b => b.onclick = () => busy(b, async () => {
+    const r = await api("health/probe", {method: "POST", body: {backend: b.dataset.test}});
+    toast(r.ok === false ? `${b.dataset.test}: ${r.error || r.detail || "the test failed"}` : `${b.dataset.test} answered`, r.ok === false);
+    await load();
+  }));
+  m.querySelectorAll("[data-del]").forEach(b => b.onclick = () => busy(b, async () => {
+    if (!confirm(`Remove ${b.dataset.del}?`)) return;
+    const list = (await backends()).filter(o => o.name !== b.dataset.del);
+    await api("config/backends", {method: "POST", body: list});
+    await load();
+  }));
+  m.querySelectorAll("[data-pk]").forEach(b => b.onclick = () => busy(b, async () => {
+    const v = prompt(`Value for ${b.dataset.pk} (kept in provider-keys.env, never shown again):`);
+    if (!v) return;
+    await api(`provider-keys/${b.dataset.pk}`, {method: "PUT", body: {value: v}});
+    toast(`${b.dataset.pk} set`); await load();
+  }));
+  m.querySelectorAll("[data-pkc]").forEach(b => b.onclick = () => busy(b, async () => {
+    if (!confirm(`Clear ${b.dataset.pkc}? Backends using it lose their key.`)) return;
+    await api(`provider-keys/${b.dataset.pkc}`, {method: "DELETE"}); await load();
+  }));
+};
+
+VIEWS.personas = () => {
+  const s = W.steps.personas;
+  const rows = s.profiles.map(p => `<div class="card"><h3>${esc(p.title)} ${p.installed ? '<span class="pill ok">installed</span>' : ""}</h3>
+    <p class="hint">${esc(p.description)}</p>
+    <div class="row"><button class="act ${p.installed ? "" : "primary"}" data-apply="${esc(p.id)}">${p.installed ? "Update" : "Install"}</button>
+      <button class="act" data-val="${esc(p.id)}" ${p.installed ? "" : "disabled"}>Validate (${p.personas.length})</button></div>
+    <div class="hint" id="val-${esc(p.id)}"></div></div>`).join("");
+  return `<h2>Personas</h2>
+    <p class="hint">Personas are the model names clients ask for (for example the Kilo roles). Install the default sets, then validate them:
+      each persona gets a few real round trips through its backend (text, streaming, a tool call). Backends must be reachable first.</p>
+    ${rows || '<p class="hint">No default sets in this version.</p>'}
+    ${navButtons({optional: true})}`;
+};
+BIND.personas = m => {
+  m.querySelectorAll("[data-apply]").forEach(b => b.onclick = () => busy(b, async () => {
+    await api(`profiles/${encodeURIComponent(b.dataset.apply)}/apply`, {method: "POST"});
+    toast("Installed"); await load();
+  }));
+  m.querySelectorAll("[data-val]").forEach(b => b.onclick = () => busy(b, async () => {
+    const p = W.steps.personas.profiles.find(x => x.id === b.dataset.val);
+    const out = $(`#val-${CSS.escape(p.id)}`, m);
+    const res = [];
+    for (const name of p.personas) {
+      out.innerHTML = res.join(" ") + ` <span class="pill info">${esc(name)}…</span>`;
+      try {
+        const r = await api("personas/validate", {method: "POST", body: {virtual_name: name}});
+        res.push(`<span class="pill ${r.status === "passed" ? "ok" : r.status === "warnings" ? "warn" : "bad"}">${esc(name)}: ${esc(r.status)}</span>`);
+      } catch (e) { res.push(`<span class="pill bad">${esc(name)}: ${esc(e.message)}</span>`); }
+    }
+    out.innerHTML = res.join(" ") + '<div>Details: Routing → Personas in the full UI.</div>';
+  }));
+};
+
+VIEWS.budgets = () => {
+  const s = W.steps.budgets;
+  const rows = s.rules.map((r, i) => `<tr><td><input type="checkbox" data-rule="${i}" ${r.enabled ? "checked" : ""}></td>
+    <td class="mono">${esc(r.name)}</td><td>${esc(r.mode)}</td></tr>`).join("");
+  return `<h2>Budgets</h2>
+    <p class="hint">Budgets cap how much the subscription backends are used (calls, tokens, helpers at once), so one runaway session cannot use up a plan.
+      Rules and limits are edited on Routing → Guardrails.</p>
+    <div class="card"><div class="row"><label><input type="checkbox" id="bg-on" ${s.enabled ? "checked" : ""}> budgets on</label></div>
+      ${rows ? `<table><tr><th>on</th><th>rule</th><th>mode</th></tr>${rows}</table>` : '<p class="hint">No rules yet: add them on Routing → Guardrails.</p>'}
+      <button class="act primary" id="bg-save">Save</button></div>
+    ${navButtons({optional: true})}`;
+};
+BIND.budgets = m => {
+  $("#bg-save", m).onclick = e => busy(e.target, async () => {
+    const full = ((await api("config")).budgets || {}).rules || [];
+    m.querySelectorAll("[data-rule]").forEach(c => { const r = full[+c.dataset.rule]; if (r) r.enabled = c.checked; });
+    await api("config/budgets", {method: "POST", body: {enabled: $("#bg-on", m).checked, rules: full}});
+    toast("Saved"); await load();
+  });
+};
+
+VIEWS.game = () => {
+  const s = W.steps.game;
+  return `<h2>Game</h2>
+    <p class="hint">The game Foundry works on. Its automation settings (roles, routes, Studio slots) live in the router; the full editor is Automation in the full UI.
+      A restored router already has its games.</p>
+    <div class="card">${s.projects.length ? `Games: ${s.projects.map(p => `<span class="pill ok">${esc(p)}</span>`).join(" ")}` : '<span class="pill warn">no game yet</span>'}</div>
+    <div class="card"><h3>Add a game</h3>
+      <div class="row"><label>id</label><input id="gm-id" placeholder="animaluprising" style="width:220px"><span class="hint">lower case, digits, . _ -</span></div>
+      <div class="row"><label>name</label><input id="gm-name" placeholder="Animal Uprising" style="width:260px"></div>
+      <div class="row"><label>work branch</label><input id="gm-branch" value="main" style="width:160px"></div>
+      <div class="row"><label>implementer persona</label><input id="gm-impl" list="gm-personas" value="Foundry-Kilo-Local" style="width:240px">
+        <datalist id="gm-personas"></datalist><span class="hint">the persona that writes the code (install personas first)</span></div>
+      <button class="act primary" id="gm-add">Add the game</button></div>
+    ${navButtons({optional: true})}`;
+};
+BIND.game = m => {
+  api("personas").then(d => { $("#gm-personas", m).innerHTML = (d.personas || d || [])
+    .map(p => `<option value="${esc(p.virtual_name)}">`).join(""); }).catch(() => {});
+  $("#gm-add", m).onclick = e => busy(e.target, async () => {
+    const id = $("#gm-id", m).value.trim(), name = $("#gm-name", m).value.trim(), branch = $("#gm-branch", m).value.trim() || "main";
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error("id: lower-case letters, digits, . _ -");
+    const q = s => JSON.stringify(s);
+    const impl = $("#gm-impl", m).value.trim();
+    if (!impl) throw new Error("name the implementer persona");
+    const toml = `schema_version = 1\nid = ${q(id)}\nname = ${q(name || id)}\n\n[workspace]\nbranch = ${q(branch)}\n\n[roles]\nimplementer = ${q(impl)}\n`;
+    const H = {"X-Foundry-Automation": "1"};
+    await api(`automation/projects/${id}/import`, {method: "POST", body: {toml}, headers: H});
+    const d = await api(`automation/projects/${id}/draft`);
+    const v = await api(`automation/projects/${id}/validate`, {method: "POST", body: {doc: d.doc}, headers: H});
+    if (!v.ok) throw new Error((v.errors || []).map(x => `${x.path}: ${x.message}`).join("; ") || "the game settings do not validate");
+    await api(`automation/projects/${id}/deploy`, {method: "POST", body: {etag: d.etag, note: "added by the setup wizard"}, headers: H});
+    toast(`${id} added`); await load();
+  });
+};
+
+VIEWS.machines = () => {
+  const s = W.steps.machines;
+  return `<h2>Machines</h2>
+    <p class="hint">Every machine that works for Foundry joins with a one-time <b>enrollment code</b> from Access → Machines: you never copy a key by hand.</p>
+    <div class="card">${s.count ? `<span class="pill ok">${s.count} machine(s)</span>` : '<span class="pill">none yet</span>'}
+      ${s.ssh_keys ? `<span class="pill ok">workstation ssh key set</span>` : '<span class="pill warn">no workstation ssh key</span>'}</div>
+    <div class="card"><h3>Studio slots</h3>
+      <p class="hint">Add a slot on Access → Machines (its id, IP and place), then run the one command it shows on your Proxmox host. Guide: docs/INSTALL_SLOTS.md.</p>
+      <a class="act" href="/ui#Machines">Open Access → Machines</a></div>
+    <div class="card"><h3>Workstation</h3>
+      <p class="hint">The workstation app (coordinator, Kilo, Studio) is installed with the Foundry Client installer from the Client tab, and its keys are made on Access → Clients &amp; Keys.</p>
+      <a class="act" href="/ui#Client">Open the Client tab</a></div>
+    ${navButtons({optional: true})}`;
+};
+
+VIEWS.finish = () => {
+  const left = STEPS.filter(([id]) => !["start", "finish"].includes(id) && !done(id)).map(([id, t]) => `<li><a href="#${id}" data-go2="${id}">${esc(t)}</a>${skipped.has(id) ? " (skipped)" : ""}</li>`).join("");
+  return `<h2>Finish</h2>
+    ${left ? `<div class="card"><p>Not done yet (you can finish anyway and do these in the full UI):</p><ul>${left}</ul></div>` :
+      '<div class="card"><span class="pill ok">all steps done</span></div>'}
+    <div class="card"><h3>Make a backup</h3>
+      <p class="hint">One encrypted file with everything (Logs → Data → Backup &amp; restore). Keep it, and its passphrase, off this machine.</p>
+      <a class="act" href="/ui#Data">Open Logs → Data</a></div>
+    <div class="nav"><button class="act" data-nav="back">Back</button><span class="sp"></span>
+      ${W.completed ? '<a class="act" href="/ui">Open the full UI</a>' : '<button class="act primary" id="fin">Finish setup</button>'}</div>`;
+};
+BIND.finish = m => {
+  m.querySelectorAll("[data-go2]").forEach(a => a.onclick = ev => { ev.preventDefault(); go(a.dataset.go2); });
+  if ($("#fin", m)) $("#fin", m).onclick = e => busy(e.target, async () => {
+    await api("setup/wizard", {method: "POST", body: {completed: true}});
+    location.href = "/ui";
+  });
+};
+
+window.addEventListener("hashchange", () => {
+  const h = location.hash.slice(1);
+  if (W && h !== cur && STEPS.some(s => s[0] === h)) go(h);
+});
+load().catch(e => { $("#main").innerHTML = `<div class="card"><span class="pill bad">error</span> ${esc(e.message)}</div>`; });
+</script>
+</body>
+</html>

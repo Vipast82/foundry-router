@@ -2,6 +2,59 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.161.0 — Router installer, first-run setup wizard, backup and restore
+
+2026-11-01. Phase 2 of the fresh-install plan (docs/plans/FRESH_INSTALL_PLAN.md; Victor: "Yes,
+start phase 2"). Guide: docs/INSTALL_ROUTER.md.
+
+- **install/router.sh** (new): one command on a Linux machine.
+  - It asks for the folder (`/opt/foundry-router`), the port, the HTTPS listener and a backup to
+    restore.
+  - It installs Docker and git if missing, downloads the newest release (or `--version`), builds,
+    starts and prints the address.
+  - `--upgrade` moves an installed router to a newer release.
+  - Config and data live outside the checkout. docker-compose.yml takes `FOUNDRY_CONFIG_DIR` /
+    `FOUNDRY_DATA_DIR_HOST`, and the defaults are unchanged, so existing installs are untouched.
+- **router — first-run setup wizard** (`/ui/setup`, `ui/setup_wizard.py`): restore or start fresh,
+  protect the web UI, secret store passphrase, backends (example servers removed in one click,
+  templates for Meridian / CLIProxyAPI / llama.cpp / Ollama / OpenAI-compatible, tested when
+  added), personas (install + validate with progress), budgets, game, machines, finish.
+  - Every step calls the same admin API as its tab.
+  - A config.yaml made from the example gets `setup.completed: false`, and the full UI opens the
+    wizard while it is false. Existing configs have no `setup` section and count as set up.
+  - The header has a **Setup** button.
+- **router — provider keys** (`provider_keys.py`): `${NAME}` in config.yaml falls back to
+  `config/provider-keys.env` (mode 600) when the environment has no value.
+  - The wizard and Access → Secrets → Provider keys write it. Values are never returned, are
+    scrubbed from diagnostics, and backends pick up a change at once.
+  - A value in the host `.env` still wins, so the live router behaves exactly as before (fresh-install
+    plan D4a: model keys stay out of the secret store, so a restart never stops model calls).
+- **router — backup and restore** (`backup.py`, Logs → Data → Backup & restore).
+  - **What a backup holds:** one `.fbak` file with consistent online copies of every SQLite DB
+    (main DB, secret store), `tls/`, config.yaml and provider-keys.env. Media and training files
+    are included on request.
+  - **Encryption:** AES-256-GCM in 1 MiB chunks, with a key derived by scrypt from a backup
+    passphrase typed at backup time and never stored. The header, the chunk order and the last
+    chunk are all authenticated. A wrong passphrase is told apart from a damaged file.
+  - **Download:** a one-time link, valid 10 min.
+  - **Restore (API):** upload, check every file against the manifest's sha256 plus a SQLite
+    quick_check, stage under `data/restore/pending`, then apply at the next start before anything
+    opens. It is all or nothing: a failure puts the current files back and marks the restore
+    FAILED. The replaced files are kept in `data/restore/previous`.
+  - **Version check:** a backup from a newer router is refused.
+  - **CLI:** `python -m foundry_router.backup info|create|restore FILE` (passphrase on stdin),
+    which `router.sh --restore` uses.
+- Tests: test_backup (8), test_provider_keys (4), router suite 1973 passed.
+- Installer dry runs:
+  - Debian 13: the apt step installs Docker, compose v2 and git.
+  - Docker-in-Docker: a fresh install opens the wizard, and `--upgrade` works.
+  - `--restore`: a wrong passphrase is refused; the right one brings router 2 back with router 1's
+    state.
+  - Fixed on the way: a real terminal check (`curl | bash` and no-terminal runs), the
+    `--restore` passphrase from stdin when there is no terminal, `hostname -I` missing, and a
+    re-fetched tag on upgrade.
+- Router rebuild needed. Nothing changes on the live router until you use the new pages.
+
 ## v0.160.2 — a lead case's short retry wait keeps the main checkout; the lead's wait is shown
 
 2026-10-31 21:05-21:45: MV2-V1's lead session died on infrastructure, so its case was DEFERRED for the

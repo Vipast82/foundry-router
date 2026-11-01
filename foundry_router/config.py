@@ -28,11 +28,18 @@ from pydantic import BaseModel, Field
 log = logging.getLogger(__name__)
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# provider-keys.env beside config.yaml (provider_keys.py): the fallback for ${NAME}
+# when the environment has no value. ConfigStore refreshes it before each expansion.
+_FILE_ENV: dict[str, str] = {}
+
+
+def _env_value(name: str) -> str:
+    return os.environ.get(name) or _FILE_ENV.get(name, "")
 
 
 def _expand_env(value: Any) -> Any:
     if isinstance(value, str):
-        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+        return _ENV_RE.sub(lambda m: _env_value(m.group(1)), value)
     if isinstance(value, list):
         return [_expand_env(v) for v in value]
     if isinstance(value, dict):
@@ -779,6 +786,14 @@ class MachinesConfig(BaseModel):
     code_minutes: int = Field(default=30, ge=5, le=1440)
 
 
+class SetupConfig(BaseModel):
+    """The first-run wizard (/ui/setup). A config.yaml made from the example on a fresh
+    install gets `completed: false`, so the web UI opens the wizard until it is finished
+    or skipped. A config without this section (every install before v0.161.0) counts as
+    set up."""
+    completed: bool = True
+
+
 class ClientAuthConfig(BaseModel):
     # optional: keyless requests pass as "anonymous" (wrong keys are refused);
     # required: inference/media need a valid client key.
@@ -1059,6 +1074,7 @@ class AppConfig(BaseModel):
     client_auth: ClientAuthConfig = Field(default_factory=ClientAuthConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     machines: MachinesConfig = Field(default_factory=MachinesConfig)
+    setup: SetupConfig = Field(default_factory=SetupConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     # Default persona sets (profiles.py) applied at startup: missing personas
     # are created, untouched ones updated to the profile's newer version, edited
@@ -1201,10 +1217,17 @@ class ConfigStore:
         self.raw: dict = {}
         self.config: AppConfig = AppConfig()
 
+    def _refresh_file_env(self) -> None:
+        from .provider_keys import read
+        _FILE_ENV.clear()
+        _FILE_ENV.update(read(self.path.parent))
+
     def load(self) -> AppConfig:
+        self.fresh = False
         if not self.path.exists():
             example = _example_path()
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.fresh = True
             if example.exists():
                 shutil.copy(example, self.path)
                 log.warning(
@@ -1216,6 +1239,13 @@ class ConfigStore:
                 self.path.write_text("{}\n", encoding="utf-8")
         with open(self.path, "r", encoding="utf-8") as f:
             self.raw = yaml.safe_load(f) or {}
+        if self.fresh:
+            # a fresh install: the web UI opens the first-run wizard (/ui/setup)
+            self.raw["setup"] = {"completed": False}
+            try:
+                self._write_raw()
+            except OSError as e:
+                log.warning("could not mark the fresh config for the setup wizard: %s", e)
         before = int(self.raw.get("config_version") or 1)
         self.raw, notes = migrate_raw(self.raw)
         if notes:
@@ -1229,6 +1259,13 @@ class ConfigStore:
             except OSError as e:
                 log.warning("config upgraded in memory only (could not write: %s)", e)
         self.migration_notes = notes
+        self._refresh_file_env()
+        self.config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
+        return self.config
+
+    def reexpand(self) -> AppConfig:
+        """Expand ${NAME} again after provider-keys.env changed (no file write)."""
+        self._refresh_file_env()
         self.config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
         return self.config
 
@@ -1240,6 +1277,7 @@ class ConfigStore:
         """
         before = copy.deepcopy(self.raw)
         mutate(self.raw)
+        self._refresh_file_env()
         try:
             config = AppConfig.model_validate(_expand_env(copy.deepcopy(self.raw)))
         except Exception:

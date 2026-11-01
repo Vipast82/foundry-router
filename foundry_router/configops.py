@@ -113,6 +113,8 @@ def secret_values(svc) -> set[str]:
     for k, v in os.environ.items():
         if _SECRET_ENV_RE.search(k) and v and len(v) >= 6:
             vals.add(v)
+    from .config import _FILE_ENV                       # provider-keys.env (provider_keys.py)
+    vals |= {v for v in _FILE_ENV.values() if v and len(v) >= 6}
     store = getattr(svc, "secret_store", None)          # the central store, while unlocked
     if store is not None:
         vals |= store.known_values()

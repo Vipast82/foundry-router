@@ -383,6 +383,7 @@
   </div>
   <div class="hdr-tools">
     <a class="act cc-link" href="/ui/control" title="Open the coordinator control center: live sprint progress, sessions and operator actions">Control center</a>
+    <a class="act" href="/ui/setup" title="The setup wizard: restore a backup, admin key, secret store, backends, personas, budgets, game, machines">Setup</a>
     <button class="act" id="logo-btn" title="Upload or change the header logo (PNG/SVG, under 512 KB)">Logo…</button>
     <button class="act" id="logo-clear" title="Remove the custom logo" hidden>✕</button>
     <button class="act" id="theme-btn" title="Toggle light / dark theme">🌙 Dark</button>
@@ -1047,10 +1048,10 @@ const TABS = {
   "Usage Log":      tabUsage,
   "Events":         tabEvents,
   "Dev Log":        tabDevLog,
-  "Data":           tabData,
+  "Data":           async () => { await tabData(); await backupCard(); },
   "Training":       tabTraining,
   "Clients & Keys": tabClients,
-  "Secrets":        tabSecrets,
+  "Secrets":        async () => { await tabSecrets(); await providerKeysCard(); },
   "Machines":       tabMachines,
   "Helpers & Limits": tabLimits,
   "Alerts & digest": tabAlerts,
@@ -7056,6 +7057,100 @@ async function tabEvents() {
     <table><tr><th>time (UTC)</th><th>level</th><th>source</th><th>message</th><th></th></tr>${rows}</table>`;
 }
 
+/* ------------------------------------------- backup & restore (backup.py) -- */
+// Logs -> Data: one encrypted .fbak file with the whole router. Restore is also in
+// the setup wizard (/ui/setup), which a new machine opens first.
+async function backupCard() {
+  const d = await api("backup").catch(() => null);
+  if (!d || current !== "Data") return;
+  const card = document.createElement("div");
+  card.className = "card";
+  const st = d.staged;
+  card.innerHTML = `<h3 style="margin-top:0">Backup &amp; restore</h3>
+    <p class="hint">One encrypted file with the whole router: config.yaml, provider keys, the main database (personas, clients, machines,
+      automation settings, history), the secret store (its values stay locked under its own passphrase) and the HTTPS certificate.
+      It is encrypted with the backup passphrase you type here (${d.min_passphrase}+ characters), which Foundry never stores. To move the router,
+      install a new one and choose "Restore from a backup" in its setup wizard (or <code>router.sh --restore FILE</code>).</p>
+    ${st ? `<p><span class="pill warn">restore waiting</span> the backup made ${esc(st.created)} on ${esc(st.host)} is applied when the router restarts.
+      <button class="act" id="bk-restart">Restart now</button> <button class="act" id="bk-cancel">Cancel it</button></p>` : ""}
+    ${d.restored ? `<p><span class="pill ok">restored</span> from the backup made ${esc(d.restored.created)} on ${esc(d.restored.host)}.</p>` : ""}
+    <div class="row"><input type="password" id="bk-pass" autocomplete="new-password" placeholder="backup passphrase" style="min-width:240px">
+      <label title="Media artifacts and training captures: can be large"><input type="checkbox" id="bk-files"> also media and training files</label>
+      <input id="bk-note" placeholder="note (optional)" style="width:200px">
+      <button class="act primary" id="bk-make">Make a backup</button></div>
+    <div class="row"><input type="file" id="bk-file" accept=".fbak">
+      <input type="password" id="bk-rpass" autocomplete="off" placeholder="its backup passphrase" style="min-width:200px">
+      <button class="act danger" id="bk-restore">Restore this backup…</button></div>`;
+  $("#main").insertBefore(card, $("#main").children[2] || null);
+  $("#bk-make").onclick = async () => {
+    try {
+      const r = await api("backup", {method: "POST", body: {passphrase: $("#bk-pass").value,
+        include_files: $("#bk-files").checked, note: $("#bk-note").value}});
+      $("#bk-pass").value = "";
+      toast(`Backup ready: ${r.name} (${(r.bytes / 1048576).toFixed(1)} MB)`);
+      location.href = r.download;
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#bk-restore").onclick = async () => {
+    const f = $("#bk-file").files[0];
+    if (!f) return toast("Pick the .fbak file first", true);
+    try {
+      const up = await fetch("/admin/api/backup/restore/upload", {method: "POST", body: f,
+        headers: {"Content-Type": "application/octet-stream", ...(_adminKey() ? {Authorization: "Bearer " + _adminKey()} : {})}});
+      const u = await up.json().catch(() => ({}));
+      if (!up.ok) throw new Error((u.error || {}).message || u.error || `HTTP ${up.status}`);
+      if (!confirm(`Replace EVERYTHING on this router with the backup made ${u.backup.created} on ${u.backup.host} (router v${u.backup.router_version})?\n\nThe current files are kept in data/restore/previous. The router restarts.`)) {
+        await api("backup/restore", {method: "DELETE"}); return;
+      }
+      await api("backup/restore", {method: "POST", body: {passphrase: $("#bk-rpass").value}});
+      $("#bk-rpass").value = "";
+      await api("restart", {method: "POST"});
+      toast("Restoring: the router restarts and this page reloads");
+      setTimeout(function wait() { fetch("/health").then(r => r.ok ? location.reload() : setTimeout(wait, 2000), () => setTimeout(wait, 2000)); }, 3000);
+    } catch (e) { toast(e.message, true); }
+  };
+  if ($("#bk-restart")) $("#bk-restart").onclick = () => api("restart", {method: "POST"}).then(() => {
+    toast("Restarting"); setTimeout(() => location.reload(), 8000); }).catch(e => toast(e.message, true));
+  if ($("#bk-cancel")) $("#bk-cancel").onclick = () => api("backup/restore", {method: "DELETE"}).then(render).catch(e => toast(e.message, true));
+}
+
+// Access -> Secrets: the router's own provider keys (provider_keys.py), write-only.
+async function providerKeysCard() {
+  const d = await api("provider-keys").catch(() => null);
+  if (!d || current !== "Secrets") return;
+  const rows = d.keys.map(k => `<tr><td class="mono">${esc(k.name)}</td>
+    <td class="hint">${esc(k.label)}${k.used_by.length ? `<div>used by ${k.used_by.map(esc).join(", ")}</div>` : ""}</td>
+    <td>${k.source === "environment" ? '<span class="pill">host .env</span>' : k.set ? '<span class="pill ok">set</span>' : '<span class="pill">not set</span>'}</td>
+    <td class="nw">${k.source === "environment" ? '<span class="hint">change it in the .env</span>' :
+      `<input type="password" class="pk-v" data-n="${esc(k.name)}" autocomplete="new-password" placeholder="${k.set ? "new value" : "value"}" style="width:220px">
+       <button class="act" data-pk-set="${esc(k.name)}">${k.set ? "Replace" : "Set"}</button>
+       ${k.set ? `<button class="act danger" data-pk-clr="${esc(k.name)}">Clear</button>` : ""}`}</td></tr>`).join("");
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<h3 style="margin-top:0">Provider keys (the router's own)</h3>
+    <p class="hint">Keys the router uses to reach its backends, referred to in config.yaml as <code>\${NAME}</code>. Kept in
+      <code>${esc(d.file)}</code> (never shown again; in backups, encrypted). A key set in the host's <code>.env</code> wins. Backends use a new key at once.</p>
+    <div class="row"><input id="pk-new" placeholder="ANOTHER_KEY_NAME" style="width:220px"><button class="act" id="pk-add">Add a name</button></div>
+    <table><tr><th>name</th><th>for</th><th>state</th><th></th></tr>${rows}</table>`;
+  $("#main").appendChild(card);
+  const put = (n, v) => api(`provider-keys/${encodeURIComponent(n)}`, {method: "PUT", body: {value: v}})
+    .then(() => { toast(`${n} set`); render(); }).catch(e => toast(e.message, true));
+  card.querySelectorAll("[data-pk-set]").forEach(b => b.onclick = () => {
+    const i = card.querySelector(`.pk-v[data-n="${b.dataset.pkSet}"]`);
+    if (!i.value.trim()) return toast("Type the value first", true);
+    put(b.dataset.pkSet, i.value); i.value = "";
+  });
+  card.querySelectorAll("[data-pk-clr]").forEach(b => b.onclick = () => {
+    if (confirm(`Clear ${b.dataset.pkClr}? Backends that use it lose their key.`))
+      api(`provider-keys/${encodeURIComponent(b.dataset.pkClr)}`, {method: "DELETE"}).then(render).catch(e => toast(e.message, true));
+  });
+  $("#pk-add").onclick = () => {
+    const n = $("#pk-new").value.trim().toUpperCase();
+    const v = n && prompt(`Value for ${n}:`);
+    if (v) put(n, v);
+  };
+}
+
 /* ------------------------------------------------------- theme + branding -- */
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;          // "light" | "dark"
@@ -7186,7 +7281,14 @@ initTheme();
 initBranding();
 render();
 fetch("/admin/api/status", {headers: _adminKey() ? {Authorization: "Bearer " + _adminKey()} : {}})
-  .then(r => r.ok ? r.json() : null).then(st => { if (st) renderHeaderInfo(st); }).catch(() => {});
+  .then(r => r.ok ? r.json() : null).then(st => {
+    if (!st) return;
+    // a fresh install opens the setup wizard until it is finished (setup.completed)
+    if (st.setup_completed === false && !sessionStorage.getItem("fr-setup-later")) {
+      sessionStorage.setItem("fr-setup-later", "1"); location.href = "/ui/setup"; return;
+    }
+    renderHeaderInfo(st);
+  }).catch(() => {});
 </script>
 </body>
 </html>
