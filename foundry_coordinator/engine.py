@@ -7057,6 +7057,15 @@ class Coordinator:
                 # no lead call. A short backoff keeps the place; a long wait (a quota reset,
                 # up to MAX_DEFER_SECONDS) still gives the checkout to the next sprint.
                 if case.get("state") == "DEFERRED":
+                    # 2026-11-01 15:21: the lead chose to WAIT for AS-P8 to settle a test
+                    # ("lead: environment wait (...)"); MV2-CL1's case, due in minutes, kept
+                    # the checkout and AS-P8 waited for MV2-CL1: each waited on the other. A
+                    # lead's own wait is for something outside this sprint, so it gives the
+                    # checkout away; only an infrastructure backoff keeps it.
+                    v = case.get("validation") or {}
+                    why = str((v.get("deferred_reason") if isinstance(v, dict) else "") or "")
+                    if why.startswith("lead: ") and " wait (" in why[:80]:
+                        return False
                     due = float(case.get("next_check_ts") or 0)
                     return bool(due) and due - self.clock() <= self.LEAD_SHORT_DEFER_SECONDS
         return False

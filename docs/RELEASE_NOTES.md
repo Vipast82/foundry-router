@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.169.2 — a Lead's own decision to wait gives the main checkout away
+
+2026-11-01. MV2-CL1's work was green apart from AS-P8's unsettled test. Its Lead decided to wait
+for AS-P8, which recorded a deferral ("lead: environment wait (...)"). From v0.160.2 a deferral
+due within 15 minutes keeps the main checkout, so MV2-CL1 held it. When AS-P8's session handed
+off at 15:21, AS-P8 queued behind MV2-CL1, and each sprint waited on the other.
+
+- **`Coordinator._main_pause_is_automatic`:** a DEFERRED Lead case whose `deferred_reason` is the
+  Lead's own wait (`lead: <class> wait (...)`) no longer keeps the main checkout, however soon
+  it rechecks. An infrastructure backoff (Kilo admission, context wrap-up, quota) still keeps it
+  as before.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_a_sprint_with_a_working_lead_case_keeps_the_main_checkout`, extended). 272 engine and
+  Lead tests pass.
+
 ## v0.169.1 — Settings: a saved draft no longer reports a page error as a deploy problem
 
 2026-11-01. Victor switched on `blender.journal` and the deploy dialog said "Fix before

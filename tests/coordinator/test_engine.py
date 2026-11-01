@@ -1147,6 +1147,14 @@ def test_a_sprint_with_a_working_lead_case_keeps_the_main_checkout(game, monkeyp
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
     cases["rc-1"].update(next_check_ts=c.clock() + 300, paused=1)
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    # 2026-11-01 MV2-CL1/AS-P8: the lead's own decision to wait for another sprint gives the
+    # checkout away even when the recheck is minutes off (each sprint waited on the other)
+    cases["rc-1"].update(paused=0, next_check_ts=c.clock() + 300, validation={
+        "deferred_reason": "lead: environment wait (the only red row is AS-P8's A12)"})
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    cases["rc-1"].update(validation={"deferred_reason": "Kilo did not admit the prompt (503)"})
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    cases["rc-1"].update(validation={})
     # the blocker names what the lead waits on
     text = c._lead_blocker_text({"case_id": "rc-1", "state": "DIAGNOSING",
                                  "validation": {"lead_waiting": "workspace lock held by game/T2"},
