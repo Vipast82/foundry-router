@@ -196,3 +196,29 @@ def test_default_lead_and_implementer_shape():
     assert RR.decide(impl, "question", "*")[0] == "deny"                  # W1: no human path
     errs, warns = RR.validate(RR.all_defaults())
     assert errs == [] and warns == []
+
+
+def test_game_code_named_secret_is_readable_while_secret_files_stay_denied():
+    """2026-11-01 GF-SM1: the bare '*secret*' deny hid the sprint's own
+    src/server/Services/SecretMarketService.lua and Config/SecretMarket.lua."""
+    wide = {"permissions": {c: "allow" for c in RR.CATEGORIES},
+            "bash": {"allow": ["*"], "deny": []},
+            "extra": [{"permission": "*", "pattern": "*", "action": "allow"}]}
+    code = ("C:/Roblox/AnimalUprising/src/server/Services/SecretMarketService.lua",
+            "src/shared/Config/SecretMarket.lua", "tests/GF_SM1_check.lua",
+            "tests/lune/specs/SecretMarket.spec.luau")
+    secret = ("C:/Roblox/_secrets/roblox_open_cloud_key.txt", "config/client_secret.json",
+              "deploy/secret.key", "app/db.secret", "ops/secrets/token", "secrets/api",
+              r"C:\Users\x\secrets\k", "keys/secret_token.yaml", "a/secret",
+              "media-credential.xml", ".env", "x/.env.local")
+    for role in RR.RULE_ROLES:
+        lst = RR.agent_block_rules(role, wide, WS)
+        for perm in ("read", "edit"):
+            for p in code:
+                assert RR.decide(lst, perm, p)[0] == "allow", (role, perm, p)
+            for p in secret:
+                assert RR.decide(lst, perm, p)[0] == "deny", (role, perm, p)
+    from foundry_coordinator import scope
+    assert scope.never_grant("src/server/Services/SecretMarketService.lua") == ""
+    assert scope.never_grant("config/client_secret.json")
+    assert scope.never_grant("C:/Roblox/_secrets/k.txt")

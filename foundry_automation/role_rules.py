@@ -78,7 +78,17 @@ WEB_PERMS = ("webfetch", "websearch")
 UNATTENDED = ("implementer", "reviewer", "deep_reviewer", "visual_reviewer", "planner",
               "researcher", "helper", "coordinator", "lead")
 
-_SECRET_FILES = (".env", ".env.*", "*.env", "*.env.*", "*_secrets*", "*secret*", "*credential*")
+# 2026-11-01 (Victor: "narrow the secret"): a bare "*secret*" also denied game code such as
+# src/server/Services/SecretMarketService.lua, so GF-SM1 could not read its own files.
+# Secret FILES are named by these forms; code (.lua/.luau/.py ...) with "secret" in its
+# name is readable. The secret store folder (*_secrets*) and credential files stay denied.
+SECRET_NAME_GLOBS = ("*secret*.txt", "*secret*.json", "*secret*.key", "*secret*.pem",
+                     "*secret*.yml", "*secret*.yaml", "*secret*.toml", "*secret*.ini",
+                     "*secret*.cfg", "*secret*.conf", "*secret*.env", "*secret*.kdbx",
+                     "*secret", "*.secret", "*.secrets", "secrets/*", "*/secrets/*",
+                     "*\\secrets\\*")
+_SECRET_FILES = (".env", ".env.*", "*.env", "*.env.*", "*_secrets*", *SECRET_NAME_GLOBS,
+                 "*credential*")
 # shell: secret stores, .env files, credential files and the environment
 # itself (FOUNDRY_COORDINATOR_KEY, KILO_SERVER_PASSWORD live there)
 _SECRET_BASH = ("*_secrets*", "*credential*", "*.foundry-coordinator*",
@@ -111,7 +121,7 @@ def _hard() -> list[dict]:
             out.append({"permission": perm, "pattern": pat, "action": "deny",
                         "why": "secret and credential files are never readable or editable"})
     for perm in ("grep", "glob", "external_directory"):
-        for pat in ("*_secrets*", "*secret*", "*credential*"):
+        for pat in ("*_secrets*", *SECRET_NAME_GLOBS, "*credential*"):
             out.append({"permission": perm, "pattern": pat, "action": "deny",
                         "why": "secret store"})
     for pat in _GIT_HARD:

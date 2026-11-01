@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.165.2 — game code with "secret" in its name is readable; secret files stay denied
+
+2026-11-01 (Victor: "You can narrow the secret"). GF-SM1 (the Back-Fence Bazaar) stopped at once.
+The hard Kilo deny `*secret*` hid its own `src/server/Services/SecretMarketService.lua` and
+`src/shared/Config/SecretMarket.lua`.
+
+- **`foundry_automation.role_rules.SECRET_NAME_GLOBS`:** the bare `*secret*` is replaced by the
+  forms secret files take: `*secret*` with a data or key extension (`.txt .json .key .pem .yml
+  .yaml .toml .ini .cfg .conf .env .kdbx`), a bare `*secret` name, `*.secret`, `*.secrets`, and
+  any `secrets/` folder. `*_secrets*` (the key store `C:\Roblox\_secrets`), `*credential*` and
+  the `.env` forms are unchanged. Source files such as `.lua`, `.luau` and `.py` are readable.
+- The same list now feeds every place that had its own `*secret*`: the hard denies (read, edit,
+  write, grep, glob, external_directory), the Lead's read and write denies (`lead.py`), the scope
+  grants that are never allowed (`scope.NEVER_GRANT`), and the artifact snapshot deny list
+  (`artifacts.DENY`).
+- After deploying, regenerate the projects' `kilo.jsonc` (`kilo-config --apply`) so sessions get
+  the new rules.
+- Test: `tests/test_role_rules_w2.py`
+  (`test_game_code_named_secret_is_readable_while_secret_files_stay_denied`). 370 role-rule,
+  automation, Lead, scope, artifact and Kilo tests pass.
+
 ## v0.165.1 — A GPU slot gives Blender its cores (slot Blender plan B3)
 
 2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md B3 (D-B3: "all cores but 2 on a GPU slot").

@@ -774,7 +774,8 @@ def lead_write_permissions(P, spec=None) -> list[dict]:
     for pat in LEAD_WRITE_BASH_DENY:
         rules.append({"permission": "bash", "pattern": pat, "action": "deny"})
     for perm in _READ_TOOLS + ("edit", "write", "patch", "multiedit", "apply_patch"):
-        for pat in (_SECRET_PATTERN, "*.env", "*.env.*", "*secret*"):
+        from foundry_automation.role_rules import SECRET_NAME_GLOBS
+        for pat in (_SECRET_PATTERN, "*.env", "*.env.*", *SECRET_NAME_GLOBS):
             rules.append({"permission": perm, "pattern": pat, "action": "deny"})
     rules.append({"permission": "question", "pattern": "*", "action": "deny"})
     rules += _hard_denies()

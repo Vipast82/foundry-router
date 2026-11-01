@@ -72,8 +72,10 @@ CREATE TABLE IF NOT EXISTS fs_watch (
 """
 
 # never snapshotted, whatever a glob says
+from foundry_automation.role_rules import SECRET_NAME_GLOBS as _SECRET_NAMES  # noqa: E402
+
 DENY = ["_secrets/*", "*/_secrets/*", ".git/*", "*/.git/*", ".env", "*.env", "*.key", "*.pem",
-        "*credential*", "*secret*", "*.kdbx"]
+        "*credential*", *_SECRET_NAMES, "*.kdbx"]
 IMAGE_EXT = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
