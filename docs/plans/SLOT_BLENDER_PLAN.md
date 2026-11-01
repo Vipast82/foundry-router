@@ -2,8 +2,8 @@
 
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-B1 to D-B5 as recommended
 below). **B1 (v0.163.0), B2 (v0.164.0) and B2b (v0.165.0) are done.** With B2b all 50 of AU's
-Blender tools pass on slot-1 through foundry-blender. B3 (CPU for Blender on a GPU slot) is
-next. Victor: "I thought we were going to add blender in
+Blender tools pass on slot-1 through foundry-blender. **B3 is done (v0.165.1)**: a GPU slot's
+automatic CPU limit is all cores but 2. B4 (blender-mcp on the slot) stays deferred (D-B5). Victor: "I thought we were going to add blender in
 the container so it would use the CPU on the mini PCS to do blender actions / creations"; "do the
 container plan first so I can implement this, then when its complete, work on the workstation".
 It comes before docs/plans/LINUX_WORKSTATION_PLAN.md W2.

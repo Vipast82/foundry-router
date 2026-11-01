@@ -546,8 +546,8 @@ SLOT_FIELDS = [
      "(Access → Secrets). Applies when the slot's installer runs again (New code).", None, None),
     ("vnc_port", "int", 6080, "The slot host's port for noVNC. Applies when the slot's installer "
      "runs again.", None, 1),
-    ("cpu_limit", "int", 0, "Cores the slot's container may use (0 = a third of the host's, at "
-     "least 4). Without a GPU, Studio redraws its view in software on every core it gets, even "
+    ("cpu_limit", "int", 0, "Cores the slot's container may use (0 = automatic: all but 2 with "
+     "the GPU in use, else a third of the host's; at least 4). Without a GPU, Studio redraws its view in software on every core it gets, even "
      "when idle. Applied within 5 minutes by the slot host's timer; its renderer threads "
      "follow at the next container start.", None, 0),
     ("gpu", "bool", True, "Draw Studio's view on the slot host's GPU (an Intel/AMD iGPU at "

@@ -305,6 +305,11 @@ elif [ -e /dev/dri/renderD128 ]; then
         GPU_TXT="software drawing (the GPU's mode is not 0666)"
     fi
 fi
+# B3 (SLOT_BLENDER_PLAN): with the GPU drawing, Studio needs ~1.5 cores, so the automatic CPU
+# limit is all cores but 2 (at least 4) and Blender gets the rest; foundry-slot-keys keeps it so
+if [ "$CPU_SET" -eq 0 ] && [ "$COMPOSE_FILES" != docker-compose.yml ]; then
+    CPUS=$(( NPROC - 2 )); [ "$CPUS" -ge 4 ] || CPUS=4; [ "$CPUS" -le "$NPROC" ] || CPUS=$NPROC
+fi
 # a trial override from 2026-11-01 (it also added /dev/dri) would add the device twice
 OVR="$COMPOSE_DIR/docker-compose.override.yml"
 [ -f "$OVR" ] && head -1 "$OVR" | grep -q '^# TRIAL' && rm -f "$OVR"

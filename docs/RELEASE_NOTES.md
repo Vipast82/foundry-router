@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.165.1 — A GPU slot gives Blender its cores (slot Blender plan B3)
+
+2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md B3 (D-B3: "all cores but 2 on a GPU slot").
+- **The automatic CPU limit** (`cpu_limit` 0) now depends on the GPU:
+  - while the GPU draws Studio, all cores but 2 (at least 4). Studio needs ~1.5 cores then
+    (slot-1 on its UHD 630), so Blender through foundry-blender gets the rest. Its `-t` threads
+    follow the container's limit;
+  - in software drawing, a third of the cores as before (v0.162.1).
+
+  A limit set in Settings is used as set.
+- **Where it applies:**
+  - `setup-host.sh` applies the rule after it finds the GPU;
+  - `foundry-slot-keys` (every 5 minutes) passes whether the container uses the GPU into
+    `effective_cpus`, so a slot that gains or loses its GPU follows by itself.
+- The help texts on Access → Machines, the schema and INSTALL_SLOTS describe both cases.
+- **slot-1:** the new rule arrives with its next installer run (New code), which installs the
+  new `foundry-slot-keys`. With its 16 cores and the GPU it then gets 14.
+- Tests: test_slot_ssh (B3 rules).
+
 ## v0.165.0 — The game's asset library on the slots: every AU Blender tool runs on a mini PC (B2b)
 
 2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md B2b (Victor: "Yes, start B2b").

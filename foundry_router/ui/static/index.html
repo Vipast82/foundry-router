@@ -3395,12 +3395,12 @@ async function tabMachines() {
         Give the LXC the GPU in Proxmox: the LXC → Resources → Add → <b>Device Passthrough</b>, path <code>/dev/dri/renderD128</code>,
         mode <code>0666</code>, then restart it and run the slot's installer again (<b>New code</b>).</p>
       <h4>Resources</h4>
-      <div class="row"><label title="0 = a third of the host's cores (at least 4)">CPU limit (cores)</label>
+      <div class="row"><label title="0 = automatic: all cores but 2 with the GPU in use (Blender gets them), else a third of the host's cores (at least 4)">CPU limit (cores)</label>
         <input type="number" id="mv-cpu" min="0" max="256" value="${esc(h.cpu_limit)}" style="width:90px">
         <label title="WIDTHxHEIGHT; smaller = less software drawing">desktop size</label>
         <input id="mv-size" value="${esc(h.desktop_size)}" placeholder="2560x1440" style="width:120px"></div>
       <p class="hint">Without a GPU, Studio redraws its view in software on every core it gets, even when idle. The CPU limit
-        reaches the slot within 5 minutes (0 = a third of the host's cores, at least 4); its renderer then uses that many threads
+        reaches the slot within 5 minutes (0 = automatic: all cores but 2 when the GPU draws Studio, so Blender gets them; a third of the host's cores in software drawing; at least 4); its renderer then uses that many threads
         from the next container start. A smaller desktop draws less; gate screenshots get that size. The desktop size applies
         when the slot's installer runs again.</p>
       <h4>VNC</h4>

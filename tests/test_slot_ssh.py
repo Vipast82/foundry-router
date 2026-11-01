@@ -316,6 +316,9 @@ def test_cpu_rules_on_the_slot_host():
     import pytest
     sk = _slot_keys()
     assert sk.effective_cpus(0, 16) == 5 and sk.effective_cpus(0, 8) == 4
+    # B3: with the GPU drawing Studio, the automatic limit is all cores but 2 (Blender gets them)
+    assert sk.effective_cpus(0, 16, gpu=True) == 14 and sk.effective_cpus(0, 4, gpu=True) == 4
+    assert sk.effective_cpus(6, 16, gpu=True) == 6                 # a set limit stays as set
     assert sk.effective_cpus(0, 2) == 2 and sk.effective_cpus(6, 16) == 6
     assert sk.effective_cpus(64, 16) == 16
     env = "FOUNDRY_URL=http://r\nSLOT_CPUS=16\n"
@@ -331,6 +334,9 @@ def test_cpu_rules_on_the_slot_host():
     assert 'GEOMETRY: "${SLOT_GEOMETRY:-2560x1440}"' in compose
     setup = (root / "setup-host.sh").read_text(encoding="utf-8")
     assert "SLOT_RENDER_THREADS=$CPUS" in setup and "CPUS=$(( NPROC / 3 ))" in setup
+    # B3: the GPU rule comes after the GPU is found, and only for the automatic limit
+    assert setup.index("COMPOSE_FILES=docker-compose.yml:docker-compose.gpu.yml")         < setup.index("CPUS=$(( NPROC - 2 ))")
+    assert '[ "$CPU_SET" -eq 0 ] && [ "$COMPOSE_FILES" != docker-compose.yml ]' in setup
 
 
 def test_installer_switches_to_the_routers_release_before_the_code():

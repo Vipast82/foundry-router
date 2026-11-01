@@ -163,12 +163,16 @@ def write_authorized(keys: list, user: str) -> bool:
     return True
 
 
-def effective_cpus(limit: int, nproc: int) -> int:
-    """The slot's CPU limit: its setting, or 0 = a third of the host's cores (at least 4);
-    never more than the host has (setup-host.sh uses the same rule)."""
+def effective_cpus(limit: int, nproc: int, gpu: bool = False) -> int:
+    """The slot's CPU limit: its setting, or 0 = automatic; never more than the host has
+    (setup-host.sh uses the same rule).
+      * automatic, no GPU: a third of the cores (at least 4). Studio redraws in software on
+        every core it gets, so it must not have them all (v0.162.1);
+      * automatic, with the GPU in use: all cores but 2 (at least 4). Studio needs ~1.5 cores
+        then, and Blender gets the rest (SLOT_BLENDER_PLAN B3, D-B3)."""
     n = int(limit or 0)
     if n <= 0:
-        n = max(4, nproc // 3)
+        n = max(4, nproc - 2) if gpu else max(4, nproc // 3)
     return max(1, min(n, nproc))
 
 
@@ -183,12 +187,13 @@ def set_env_line(text: str, key: str, value: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def apply_cpu_limit(host: dict) -> str:
+def apply_cpu_limit(host: dict, gpu: bool = False) -> str:
     """Keep the running container's CPU limit (docker update, live) and slot.env (for the
     next container start: SLOT_CPUS, and the renderer's SLOT_RENDER_THREADS) at the router's
-    setting. Returns what changed ('' = nothing)."""
+    setting; `gpu` = the container draws on the host's GPU (B3: a higher automatic limit).
+    Returns what changed ('' = nothing)."""
     import subprocess
-    want = effective_cpus(int(host.get("cpu_limit") or 0), os.cpu_count() or 4)
+    want = effective_cpus(int(host.get("cpu_limit") or 0), os.cpu_count() or 4, gpu)
     name = str(host.get("container") or "studio-slot")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
         return ""
@@ -243,8 +248,8 @@ def main(argv=None) -> int:
     try:
         c = connect(router, fp)
         hk = host_keys()
+        gpu = gpu_report(conf.get("SLOT_CONTAINER") or "studio-slot")
         if hk:
-            gpu = gpu_report(conf.get("SLOT_CONTAINER") or "studio-slot")
             st, data = call(c, "POST", "/v1/foundry/secrets/host-keys", key,
                             {"keys": hk, "gpu": gpu})
             if st != 200:
@@ -264,7 +269,7 @@ def main(argv=None) -> int:
         + (" (updated)" if changed else ""))
     if isinstance(data.get("host"), dict):            # v0.162.1: the slot's CPU limit, live
         try:
-            done = apply_cpu_limit(data["host"])
+            done = apply_cpu_limit(data["host"], bool(gpu.get("in_use")))
         except (OSError, ValueError) as e:
             done = f"CPU limit not applied: {e}"
         if done:
