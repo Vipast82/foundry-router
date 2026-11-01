@@ -9,9 +9,10 @@ services:
     build: ..
     container_name: ${SLOT_CONTAINER:-studio-slot}
     ports:
-      # noVNC stays on the LXC's localhost: reach it through an ssh tunnel
-      #   ssh -L 6080:localhost:6080 studio@<lxc>   then http://localhost:6080/vnc.html
-      - "127.0.0.1:${SLOT_NOVNC_PORT:-6080}:6080"
+      # noVNC: SLOT_NOVNC_BIND=0.0.0.0 (setup-host.sh, from the slot's "VNC on the LAN" setting
+      # on Access → Machines) opens http://<lxc>:6080/ from the LAN; 127.0.0.1 keeps it on the
+      # LXC's localhost: ssh -L 6080:localhost:6080 studio@<lxc>, then http://localhost:6080/
+      - "${SLOT_NOVNC_BIND:-127.0.0.1}:${SLOT_NOVNC_PORT:-6080}:6080"
     environment:
       GEOMETRY: "2560x1440"
       # this slot's OWN place (one edit session per place per account: never the workstation's

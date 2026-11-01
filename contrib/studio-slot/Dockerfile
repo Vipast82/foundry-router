@@ -106,6 +106,9 @@ COPY rojo-seed.sh /usr/local/bin/rojo-seed
 COPY slot-secrets.py /usr/local/bin/slot-secrets
 COPY studio-auth.desktop /usr/share/applications/studio-auth.desktop
 COPY openbox-studio.xml /etc/studio-slot/openbox-studio.xml
+# http://<slot>:6080/ opens the desktop connected and scaled (vnc.html?autoconnect=1&resize=scale)
+RUN rm -f /usr/share/novnc/index.html
+COPY novnc-index.html /usr/share/novnc/index.html
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/studio-auth-handler \
         /usr/local/bin/studio-mcp-official /usr/local/bin/studio-reopen /usr/local/bin/slot-checkout \
         /usr/local/bin/rojo-seed /usr/local/bin/slot-secrets \
@@ -118,6 +121,7 @@ USER studio
 RUN xdg-mime default studio-auth.desktop x-scheme-handler/roblox-studio-auth \
     && xdg-mime default org.vinegarhq.Vinegar.desktop x-scheme-handler/roblox-studio
 WORKDIR /home/studio
-# noVNC (browser desktop). Bind it to localhost when you run the container.
+# noVNC (browser desktop). Publish it on localhost, or on the LAN with a VNC password
+# (proxmox/docker-compose.yml, SLOT_NOVNC_BIND).
 EXPOSE 6080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -3284,15 +3284,24 @@ async function tabMachines() {
     if (m.settings && m.settings.enabled === false) return pill("installed, not ready yet", "warn");
     return pill("connected", "ok");
   };
+  // noVNC: a link when it is on the LAN, and whether the optional VNC password is on
+  const vncCell = v => {
+    if (!v) return "";
+    if (!v.lan) return `<span class="hint" title="Reach it with: ssh -L ${esc(v.port)}:localhost:${esc(v.port)} studio@&lt;slot IP&gt;">ssh tunnel only</span>`;
+    return `${v.url ? `<a href="${esc(v.url)}" target="_blank" rel="noopener">Studio desktop</a>` : `LAN :${esc(v.port)}`}
+      <div class="hint" title="Optional: add a secret named SLOT_VNC_PASSWORD (file slot_vnc_password.txt) in the game&#39;s group on Access → Secrets, then restart the slot's container; noVNC then asks for it.">${v.password ? "password on" : "no password"}</div>`;
+  };
   const rows = d.machines.map(m => {
     const s = m.settings || {}, lp = m.last_pull;
     return `<tr><td class="nw"><b>${esc(m.name)}</b><div class="hint">${esc(m.kind)} · ${esc(m.project)}${m.note ? " · " + esc(m.note) : ""}</div></td>
       <td class="nw">${state(m)}${m.code_pending ? `<div class="hint">code valid until ${when(m.code_expires)}</div>` : ""}</td>
       <td class="nw"><code>${esc(m.host || "")}</code><div class="hint">${esc(s.container || "")}${m.enrolled_hostname ? " · " + esc(m.enrolled_hostname) : ""}</div></td>
       <td class="nw">${s.place_id ? `place ${esc(s.place_id)}` : '<span class="hint">no place</span>'}</td>
+      <td class="nw">${vncCell(m.vnc)}</td>
       <td class="hint" style="white-space:normal">${m.enrolled_ts ? `enrolled ${when(m.enrolled_ts)} from ${esc(m.enrolled_addr || "")}` : ""}
         ${lp ? `<div>last secrets pull ${when(lp.ts)} · ${esc(lp.outcome)}</div>` : ""}</td>
       <td class="nw"><button class="act" data-mc-code="${esc(m.name)}">New code</button>
+        ${m.kind === "slot" ? `<button class="act" data-mc-vnc="${esc(m.name)}">VNC</button>` : ""}
         ${m.key === "enabled" ? `<button class="act" data-mc-revoke="${esc(m.name)}">Revoke</button>` : ""}
         <button class="act danger" data-mc-del="${esc(m.name)}">Delete</button></td></tr>`;
   }).join("");
@@ -3307,7 +3316,7 @@ async function tabMachines() {
     ${keys ? "" : `<div class="card"><span class="pill warn">no workstation ssh key</span> Add your workstation's <b>public</b> ssh key below
       before installing a slot: Foundry reaches slots over ssh, and the slot installer authorizes the keys listed here.</div>`}
     <div class="card"><h3>Machines</h3>
-      ${rows ? `<div class="tscroll"><table><tr><th>machine</th><th>state</th><th>host</th><th>place</th><th>activity</th><th></th></tr>${rows}</table></div>` : '<p class="hint">None yet.</p>'}</div>
+      ${rows ? `<div class="tscroll"><table><tr><th>machine</th><th>state</th><th>host</th><th>place</th><th>VNC</th><th>activity</th><th></th></tr>${rows}</table></div>` : '<p class="hint">None yet.</p>'}</div>
     <div class="card"><h3>Add a Studio slot</h3>
       <div class="row"><label>game</label><select id="mc-project">${d.projects.map(p => `<option>${esc(p)}</option>`).join("")}</select>
         <label title="The slot's id, e.g. slot-2. Tracks are bound to it (tracks start ... --slot slot-2).">slot id</label><input id="mc-slot" placeholder="slot-2" style="width:110px">
@@ -3316,7 +3325,10 @@ async function tabMachines() {
         <input id="mc-place" placeholder="roblox-studio:… link, https://www.roblox.com/games/<id>/…, or the place id" style="min-width:380px">
         <label title="Only needed when the link has no universe id">universe id</label><input id="mc-universe" placeholder="optional" style="width:140px"></div>
       <div class="row"><label title="Places Rojo never auto-syncs in this slot (your LIVE places), space-separated">never-sync places</label><input id="mc-never" placeholder="138024886323256" style="width:220px">
-        <label>note</label><input id="mc-note" placeholder="e.g. mini PC 2" style="width:200px">
+        <label>note</label><input id="mc-note" placeholder="e.g. mini PC 2" style="width:200px"></div>
+      <div class="row"><label title="Studio's desktop (noVNC) opens from your LAN at http://<IP>:<port>/. Off: only through an ssh tunnel. A VNC password is optional: the SLOT_VNC_PASSWORD secret on Access → Secrets.">VNC on the LAN</label>
+        <label class="sw"><input type="checkbox" id="mc-vnc-lan" checked>On</label>
+        <label title="The slot host's port for noVNC">VNC port</label><input type="number" id="mc-vnc-port" min="1" max="65535" value="6080" style="width:90px">
         <button class="act primary" id="mc-add">Add slot and make a code</button></div>
       <p class="hint">The slot starts switched off and its installer switches it on when its container is ready, so no gate goes to a half-built slot.
         Moving a slot from another machine? Stop the old container first: one place can be open in one Studio at a time.</p></div>
@@ -3343,7 +3355,8 @@ async function tabMachines() {
   $("#mc-add").onclick = () => {
     const place = $("#mc-place").value.trim();
     const body = {kind: "slot", project: $("#mc-project").value, slot: $("#mc-slot").value.trim(), ip: $("#mc-ip").value.trim(),
-                  note: $("#mc-note").value, rojo_never_place_ids: $("#mc-never").value.trim()};
+                  note: $("#mc-note").value, rojo_never_place_ids: $("#mc-never").value.trim(),
+                  vnc_lan: $("#mc-vnc-lan").checked, vnc_port: Number($("#mc-vnc-port").value || 6080)};
     if (/^\d+$/.test(place)) body.place_id = place; else if (place) body.place_link = place;
     if ($("#mc-universe").value.trim()) body.universe_id = $("#mc-universe").value.trim();
     api("machines", {method: "POST", body}).then(r => { render(); showCode(`Slot ${r.machine.name} added`, r); }).catch(e => toast(e.message, true));
@@ -3354,6 +3367,22 @@ async function tabMachines() {
     const n = b.dataset.mcCode;
     if (!confirm(`Make a new enrollment code for ${n}? Installing with it gives ${n} a new key (the old one stops working).`)) return;
     api(`machines/${encodeURIComponent(n)}/code`, {method: "POST"}).then(r => { render(); showCode(`New code for ${n}`, r); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-mc-vnc]").forEach(b => b.onclick = () => {
+    const n = b.dataset.mcVnc, m = d.machines.find(x => x.name === n) || {}, v = m.vnc || {lan: true, port: 6080};
+    const body = openModal(`VNC for ${n}`, `
+      <div class="row"><label>VNC on the LAN</label><label class="sw"><input type="checkbox" id="mv-lan" ${v.lan ? "checked" : ""}>On</label>
+        <label>port</label><input type="number" id="mv-port" min="1" max="65535" value="${esc(v.port)}" style="width:90px"></div>
+      <p class="hint">On: open <code>http://&lt;slot IP&gt;:&lt;port&gt;/</code> from your LAN (it goes straight to the Studio desktop). Off: only
+        <code>ssh -L &lt;port&gt;:localhost:&lt;port&gt; studio@&lt;slot IP&gt;</code>. The slot host applies a change when its installer runs again:
+        <b>New code</b>, then <code>bash setup-host.sh</code> in the slot.</p>
+      <p class="hint">Password (optional): ${v.password ? "on" : "none"}. It is the secret
+        <code>SLOT_VNC_PASSWORD</code> (file <code>slot_vnc_password.txt</code>) in the game's group on Access → Secrets; the slot uses it after its
+        container restarts. VNC uses only its first 8 characters.</p>
+      <div class="row"><button class="act primary" id="mv-save">Save</button></div>`);
+    $("#mv-save", body).onclick = () => api(`machines/${encodeURIComponent(n)}/vnc`, {method: "POST",
+      body: {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080)}})
+      .then(() => { toast("Saved: re-run the slot's installer to apply it"); closeModal(); render(); }).catch(e => toast(e.message, true));
   });
   document.querySelectorAll("[data-mc-revoke]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcRevoke;

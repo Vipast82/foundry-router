@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.161.1 — A Studio slot's desktop opens from the LAN, with an optional VNC password
+
+2026-11-01. Victor: "the install should open VNC port so it can be accessed from the LAN, not just
+local host"; "I want NPM to automatically goto /vnc.html?autoconnect=1&resize=scale".
+
+- **Slot settings:** `vnc_lan` (default on) and `vnc_port` (default 6080), in the settings schema
+  (`foundry_automation/schema.py` SLOT_FIELDS; the port is checked to be 1-65535).
+  - They are on Automation → Settings → Studio slots, the Machines **Add a Studio slot** form,
+    and a new **VNC** button per slot (`POST /admin/api/machines/{name}/vnc`).
+  - The Machines list has a VNC column with a link to the desktop, plus "password on" or "no
+    password".
+- **Installer:** setup-host.sh writes `SLOT_NOVNC_BIND` (0.0.0.0, or 127.0.0.1 when off) and the
+  port into slot.env, and prints `http://<slot IP>:<port>/` instead of the ssh tunnel. The
+  enrollment answer now has `vnc` {lan, port, password, url}.
+  - proxmox/docker-compose.yml publishes `${SLOT_NOVNC_BIND:-127.0.0.1}`, so a slot.env from
+    before stays on localhost until its installer runs again.
+- **VNC password, optional (none by default; Victor: "I want it optional"):** the
+  `SLOT_VNC_PASSWORD` secret (default file `slot_vnc_password.txt`, in the game's group) is
+  pulled like any secret.
+  - entrypoint.sh turns it into TigerVNC's password file on the tmpfs (`vncpasswd -f` from a
+    file, never a command line or a log) and starts Xvnc with VncAuth. Without it, Xvnc stays
+    `-SecurityTypes None`.
+  - It applies when the container restarts. VNC uses its first 8 characters.
+- **Start page:** the image's `/usr/share/novnc/index.html` goes to
+  `vnc.html?autoconnect=1&resize=scale`, so the slot address, or a proxy such as Nginx Proxy
+  Manager (Websockets on), opens the desktop with nothing else configured.
+- Docs: docs/INSTALL_SLOTS.md "The slot's desktop (VNC)".
+- Tests: test_machines (+5: the default on the LAN, the add form and VNC button, the password only
+  when readable, the schema port check, the slot files).
+- **To apply:**
+  - rebuild the router and deploy the coordinator, which knows the new slot fields;
+  - then for slot-1, **New code** and `bash setup-host.sh` in the LXC. The image is rebuilt from
+    its last layers only.
+
 ## v0.161.0 — Router installer, first-run setup wizard, backup and restore
 
 2026-11-01. Phase 2 of the fresh-install plan (docs/plans/FRESH_INSTALL_PLAN.md; Victor: "Yes,

@@ -182,6 +182,10 @@ SLOT="$(py get slot)"; PROJECT="$(py get project)"; VERSION="$(py get router_ver
 CONTAINER="$(py get settings.container)"; CONTAINER="${CONTAINER:-studio-slot}"
 PLACE="$(py get settings.place_id)"; UNIVERSE="$(py get settings.universe_id)"
 NEVER="$(py get settings.rojo_never_place_ids)"
+# noVNC: on the LAN unless the slot's "VNC on the LAN" setting is off (Access → Machines → VNC)
+VNC_LAN="$(py get vnc.lan)"; VNC_PORT="$(py get vnc.port)"; VNC_PW="$(py get vnc.password)"
+case "$VNC_PORT" in ''|*[!0-9]*) VNC_PORT=6080 ;; esac
+if [ "$VNC_LAN" = False ]; then VNC_BIND=127.0.0.1; else VNC_BIND=0.0.0.0; fi
 install -d -m 700 -o "$SLOT_UID" -g "$SLOT_UID" "$ROOT/slot-key"
 py write-key "$ROOT/slot-key/slot-key.txt"
 chown "$SLOT_UID:$SLOT_UID" "$ROOT/slot-key/slot-key.txt"
@@ -240,7 +244,8 @@ cat > "$ROOT/slot.env" <<EOF
 # written by setup-host.sh for $SLOT ($PROJECT) on $(date -u +%FT%TZ); re-run the installer to change it
 STUDIO_OPEN=$STUDIO_OPEN
 SLOT_CONTAINER=$CONTAINER
-SLOT_NOVNC_PORT=6080
+SLOT_NOVNC_BIND=$VNC_BIND
+SLOT_NOVNC_PORT=$VNC_PORT
 SLOT_CPUS=$CPUS
 SLOT_MEM=${MEM_G}g
 SLOT_MULTIPLAYER=$([ "$MEM_G" -ge 14 ] && echo 1 || echo 0)
@@ -285,15 +290,22 @@ else
 fi
 rm -f "$ENROLL" "$API"
 
-IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+if [ "$VNC_BIND" = 0.0.0.0 ]; then
+    OPEN="Open from any PC on your LAN:  http://$IP:$VNC_PORT/"
+    if [ "$VNC_PW" = True ]; then OPEN="$OPEN   (it asks for the VNC password)"
+    else OPEN="$OPEN   (no password; optional: the SLOT_VNC_PASSWORD secret on Access → Secrets)"; fi
+else
+    OPEN="On your PC:  ssh -L $VNC_PORT:localhost:$VNC_PORT $USER_NAME@$IP
+     then open:  http://localhost:$VNC_PORT/"
+fi
 cat <<EOF
 
 $(printf '\033[1m')Done: $SLOT is installed and connected.$(printf '\033[0m')
 
 One step left, once: sign Studio in.
-  1. On your PC:  ssh -L 6080:localhost:6080 $USER_NAME@$IP
-  2. Open:        http://localhost:6080/vnc.html?autoconnect=1&resize=scale
-  3. Sign in to Roblox in the Studio window; it stays signed in across restarts and rebuilds.
+  1. $OPEN
+  2. Sign in to Roblox in the Studio window; it stays signed in across restarts and rebuilds.
 
 Useful later:
   status      docker exec $CONTAINER slot-secrets --status

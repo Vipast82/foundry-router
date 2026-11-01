@@ -541,6 +541,11 @@ SLOT_FIELDS = [
      "int", None),
     ("secrets", "list", [], "Secret names this slot needs (Setup → Secrets); documentation for "
      "the slot key's secret names. Empty = what its key may read.", "str", None),
+    ("vnc_lan", "bool", True, "Studio's desktop (noVNC) opens from the LAN at http://<slot IP>:"
+     "<vnc_port>/; off = only through an ssh tunnel. Password: the SLOT_VNC_PASSWORD secret "
+     "(Access → Secrets). Applies when the slot's installer runs again (New code).", None, None),
+    ("vnc_port", "int", 6080, "The slot host's port for noVNC. Applies when the slot's installer "
+     "runs again.", None, 1),
 ]
 SLOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 
@@ -560,6 +565,9 @@ def slots_table(path: str, raw) -> dict:
         bad = sorted(set(s) - known)
         if bad:
             raise SettingsError(f"{path}: {where}: unknown keys {bad}", where)
+        if "vnc_port" in s and not (isinstance(s["vnc_port"], int) and 1 <= s["vnc_port"] <= 65535):
+            raise SettingsError(f"{path}: {where}.vnc_port: a port number (1-65535)",
+                                where + ".vnc_port")
         if s.get("enabled", True) is not False and not str(s.get("container") or "").strip():
             raise SettingsError(f"{path}: {where}.container is required for an enabled slot",
                                 where + ".container")

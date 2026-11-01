@@ -84,12 +84,37 @@ It asks for the router address and the code.
    container. This takes **20-40 min the first time**: `tail -f /srv/studio-slot/build.log`.
 6. Waits until the container has pulled its secrets, then switches the slot on in the router.
 
-**3. Sign Studio in once.** The installer prints the exact commands:
+**3. Sign Studio in once.** Open the slot's desktop from any PC on your LAN:
 
-    ssh -L 6080:localhost:6080 studio@<slot IP>          (on your PC)
-    http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+    http://<slot IP>:6080/
 
-Sign in to Roblox in the Studio window. It stays signed in across restarts and rebuilds.
+It goes straight to the Studio desktop, connected and scaled to the window. Sign in to Roblox in
+the Studio window. It stays signed in across restarts and rebuilds.
+
+## The slot's desktop (VNC)
+
+Since v0.161.1, the desktop (noVNC) is on the LAN by default, at `http://<slot IP>:6080/`.
+
+- **A VNC password is optional** (none by default). Without one, anyone on your LAN can use the
+  Studio, which is signed in to your Roblox account. To add one:
+  - on Access → Secrets, add `SLOT_VNC_PASSWORD` to the game's group (e.g. `animaluprising`),
+    keeping its default file name `slot_vnc_password.txt`;
+  - restart the slot's container (`docker restart studio-slot` in the slot); noVNC then asks for
+    it.
+
+  VNC uses only the first 8 characters. Access → Machines shows "password on" or "no password".
+- **Change it:** Access → Machines → **VNC**, which sets "VNC on the LAN" and the port. Off means
+  only an ssh tunnel reaches it:
+
+      ssh -L 6080:localhost:6080 studio@<slot IP>    then http://localhost:6080/
+
+  The slot host applies a change when its installer runs again: **New code**, then
+  `bash setup-host.sh` in the slot.
+- **Behind Nginx Proxy Manager:** add a proxy host to `http://<slot IP>:6080`.
+  - Turn **Websockets Support** on.
+  - For LAN only, add an Access List that allows your LAN and denies all others.
+  - The root page already opens `vnc.html?autoconnect=1&resize=scale`, so it needs no custom
+    location.
 
 The slot is ready. On the first gate, Foundry:
 - accepts the slot's ssh host key;
@@ -102,6 +127,7 @@ The slot is ready. On the first gate, Foundry:
 |---|---|
 | see a slot | Access → Machines: state (waiting for its installer, not ready yet, connected), last secrets pull, events |
 | change its place, never-sync places, or switch it off | Automation → Settings → Studio slots, then deploy |
+| change its VNC (on the LAN, port) | Access → Machines → **VNC**, then reinstall (New code) |
 | reinstall or rebuild | **New code**, then run `setup-host.sh` again in the slot (keeps what exists, gives it a fresh key) |
 | revoke a slot (stolen, retired) | **Revoke**: its key stops working now, and the slot deletes its secret files at its next pull |
 | remove a slot | **Delete**: removes its key and its settings; the LXC itself is untouched (`pct destroy <id>` on Proxmox) |

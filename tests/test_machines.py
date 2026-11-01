@@ -119,3 +119,74 @@ def test_refusals(app, client):
                        json={"slot_ssh_keys": "-----BEGIN OPENSSH PRIVATE KEY-----"}).status_code == 400
     r = client.post("/v1/foundry/secrets/ready")
     assert r.status_code == 401
+
+
+# ----------------------------------------------------------------------------- noVNC (v0.161.1)
+
+def test_vnc_is_on_the_lan_by_default_with_a_password_warning(app, client):
+    _deployed(app)
+    out = _add(client).json()
+    v = out["machine"]["vnc"]
+    assert v == {"lan": True, "port": 6080, "password": False, "url": "http://192.168.0.52:6080/"}
+    code = out["code"]
+    e = client.post("/v1/foundry/enroll", json={"code": code}).json()
+    assert e["vnc"]["lan"] is True and e["vnc"]["port"] == 6080      # setup-host.sh reads these
+
+
+def test_vnc_settings_from_the_add_form_and_the_vnc_button(app, client):
+    _deployed(app)
+    svc = _svc(app)
+    out = _add(client, vnc_lan=False, vnc_port="6090").json()
+    s = svc.automation.deployed("animaluprising")["doc"]["settings"]["slots"]["slot-2"]
+    assert s["vnc_lan"] is False and s["vnc_port"] == 6090
+    assert out["machine"]["vnc"] == {"lan": False, "port": 6090, "password": False, "url": ""}
+    r = client.post("/admin/api/machines/slot-2/vnc", json={"vnc_lan": True, "vnc_port": 6081})
+    assert r.status_code == 200, r.text
+    assert r.json()["vnc"]["url"] == "http://192.168.0.52:6081/"
+    assert client.post("/admin/api/machines/slot-2/vnc", json={"vnc_port": 70000}).status_code == 400
+    assert client.post("/admin/api/machines/slot-2/vnc", json={}).status_code == 400
+    assert client.post("/admin/api/machines/nope/vnc", json={"vnc_lan": True}).status_code == 404
+    ev = [x["event"] for x in svc.machines.events(5)]
+    assert "vnc_changed" in ev
+
+
+def test_vnc_password_counts_only_when_the_slot_can_read_it(app, client):
+    _deployed(app)
+    svc = _svc(app)
+    code = _add(client).json()["code"]
+    client.post("/v1/foundry/enroll", json={"code": code})          # makes the slot-2 key
+    st = svc.secret_store
+    st.initialize("a test passphrase only")
+    st.set_value("othergame", "SLOT_VNC_PASSWORD", "x" * 10)        # another game: not readable
+    m = client.get("/admin/api/machines").json()["machines"][0]
+    assert m["vnc"]["password"] is False
+    st.set_value("animaluprising", "SLOT_VNC_PASSWORD", "x" * 10)
+    m = client.get("/admin/api/machines").json()["machines"][0]
+    assert m["vnc"]["password"] is True
+    assert "x" * 10 not in json.dumps(m)
+
+
+def test_vnc_port_is_checked_in_the_settings_schema():
+    import pytest
+    from foundry_automation.schema import SettingsError, slots_table
+    ok = slots_table("t", {"slot-1": {"container": "c", "vnc_lan": False, "vnc_port": 6081}})
+    assert ok["slot-1"]["vnc_port"] == 6081
+    with pytest.raises(SettingsError):
+        slots_table("t", {"slot-1": {"container": "c", "vnc_port": 0}})
+
+
+def test_slot_files_open_vnc_on_the_lan_with_its_password():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "contrib" / "studio-slot"
+    compose = (root / "proxmox" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert '"${SLOT_NOVNC_BIND:-127.0.0.1}:${SLOT_NOVNC_PORT:-6080}:6080"' in compose
+    setup = (root / "proxmox" / "setup-host.sh").read_text(encoding="utf-8")
+    assert "SLOT_NOVNC_BIND=$VNC_BIND" in setup and 'py get vnc.lan' in setup
+    entry = (root / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "slot_vnc_password.txt" in entry and "-SecurityTypes VncAuth -PasswordFile" in entry
+    # the password goes through a file redirect, never a command line
+    assert 'vncpasswd -f <"$PW_IN"' in entry
+    docker = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY novnc-index.html /usr/share/novnc/index.html" in docker
+    index = (root / "novnc-index.html").read_text(encoding="utf-8")
+    assert "vnc.html?autoconnect=1&resize=scale" in index

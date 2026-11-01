@@ -12,9 +12,23 @@ mkdir -p "$HOME/.vnc" "$XDG_RUNTIME_DIR"
 slot-secrets >>"$HOME/slot-secrets.log" 2>&1 && [ -f "$HOME/.config/foundry-slot/slot.env" ] && \
     . "$HOME/.config/foundry-slot/slot.env"
 
-# VNC itself only listens inside the container (localhost); noVNC is the way in.
-Xvnc :1 -geometry "$GEOM" -depth 24 -SecurityTypes None -localhost yes \
-     -AlwaysShared -AcceptSetDesktopSize >"$HOME/xvnc.log" 2>&1 &
+# VNC itself only listens inside the container (localhost); noVNC is the way in. A VNC password
+# comes from the router like any secret (SLOT_VNC_PASSWORD, file slot_vnc_password.txt, Access →
+# Secrets): turned into TigerVNC's password file on the tmpfs, never on a command line or in a
+# log. VNC uses its first 8 characters. The password is optional: without it the desktop has
+# none.
+VNC_SEC=(-SecurityTypes None)
+PW_IN=/run/secrets/slot_vnc_password.txt PW_OUT=/run/secrets/.vncpasswd
+rm -f "$PW_OUT"
+if [ -s "$PW_IN" ] && (umask 077; vncpasswd -f <"$PW_IN" >"$PW_OUT") 2>/dev/null && [ -s "$PW_OUT" ]; then
+    VNC_SEC=(-SecurityTypes VncAuth -PasswordFile "$PW_OUT")
+    echo "VNC password: on" >"$HOME/xvnc.log"
+else
+    rm -f "$PW_OUT"
+    echo "VNC password: none (optional: SLOT_VNC_PASSWORD on Access → Secrets)" >"$HOME/xvnc.log"
+fi
+Xvnc :1 -geometry "$GEOM" -depth 24 "${VNC_SEC[@]}" -localhost yes \
+     -AlwaysShared -AcceptSetDesktopSize >>"$HOME/xvnc.log" 2>&1 &
 for _ in $(seq 1 50); do [ -e /tmp/.X11-unix/X1 ] && break; sleep 0.2; done
 
 eval "$(dbus-launch --sh-syntax)"

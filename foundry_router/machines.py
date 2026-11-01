@@ -257,6 +257,7 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
     except Exception:                                            # noqa: BLE001
         pass
     seen = act_seen.get(m["name"]) or {}
+    settings = slot_settings(svc, m["project"], m["slot"]) if m["kind"] == "slot" else {}
     return {**{k: m.get(k) for k in ("name", "kind", "project", "slot", "host", "note",
                                      "created_ts", "created_by", "enrolled_ts", "enrolled_addr",
                                      "enrolled_hostname")},
@@ -265,7 +266,32 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
             "key": ("none" if c is None else "enabled" if c.enabled else "disabled"),
             "last_seen": seen.get("last_ts"), "last_addr": seen.get("addr"),
             "last_pull": pulls[0] if pulls else None,
-            "settings": slot_settings(svc, m["project"], m["slot"]) if m["kind"] == "slot" else {}}
+            "settings": settings,
+            "vnc": _vnc_view(svc, m, settings) if m["kind"] == "slot" else None}
+
+
+VNC_SECRET = "SLOT_VNC_PASSWORD"          # entrypoint.sh reads its default file name
+VNC_FILE = "slot_vnc_password.txt"
+
+
+def _vnc_view(svc, m: dict, settings: dict) -> dict:
+    """The slot's noVNC: on the LAN or not, its port and URL, and whether a VNC password is set
+    for it (the SLOT_VNC_PASSWORD secret, readable by this slot's key, default file name)."""
+    from .secrets_api import _keys_view, readers
+    lan = settings.get("vnc_lan", True) is not False
+    port = int(settings.get("vnc_port") or 6080)
+    ip = (m.get("host") or "").split("@")[-1]
+    password = False
+    try:
+        keys = _keys_view(svc.config_store.config)
+        for s in svc.secret_store.list():
+            if (s["name"] == VNC_SECRET and s.get("set") and s.get("file") == VNC_FILE
+                    and m["name"] in readers(keys, s["group"], s["name"])):
+                password = True
+    except Exception:                                            # noqa: BLE001
+        pass
+    return {"lan": lan, "port": port, "password": password,
+            "url": f"http://{ip}:{port}/" if lan and ip else ""}
 
 
 # ----------------------------------------------------------------------------- admin API
@@ -286,15 +312,19 @@ async def list_machines(request: Request):
 def _slot_settings_from(b: dict) -> dict:
     out = {}
     for k in ("container", "place_id", "universe_id", "rojo_never_place_ids", "enabled",
-              "checkout_timeout_s"):
+              "checkout_timeout_s", "vnc_lan", "vnc_port"):
         if k in b and b[k] not in (None, ""):
             out[k] = b[k]
-    for k in ("place_id", "universe_id", "checkout_timeout_s"):
+    for k in ("place_id", "universe_id", "checkout_timeout_s", "vnc_port"):
         if k in out:
             try:
                 out[k] = int(out[k])
             except (TypeError, ValueError):
                 raise MachineError(f"{k}: a whole number")
+    if "vnc_port" in out and not 1 <= out["vnc_port"] <= 65535:
+        raise MachineError("vnc_port: a port number (1-65535)")
+    if "vnc_lan" in out:
+        out["vnc_lan"] = out["vnc_lan"] is True or str(out["vnc_lan"]).lower() in ("1", "true", "on")
     if "rojo_never_place_ids" in out:
         v = out["rojo_never_place_ids"]
         v = re.split(r"[\s,]+", v) if isinstance(v, str) else v
@@ -371,6 +401,28 @@ async def new_machine_code(request: Request, name: str):
     return JSONResponse({"code": code, "code_expires": exp,
                          "install": _install_commands(request, m, code)},
                         headers={"Cache-Control": "no-store"})
+
+
+@router.post(A + "/{name}/vnc")
+@_guard
+async def machine_vnc(request: Request, name: str):
+    """{vnc_lan, vnc_port}: the slot's noVNC settings (a new deployed settings revision).
+    The slot host applies them when its installer runs again (New code)."""
+    svc = _svc(request)
+    m = svc.machines.get(name)
+    if not m or m["kind"] != "slot":
+        raise MachineError(f"no slot {name!r}", "not_found", 404)
+    b = await _body(request)
+    s = {k: v for k, v in _slot_settings_from(b).items() if k in ("vnc_lan", "vnc_port")}
+    if not s:
+        raise MachineError("vnc_lan and/or vnc_port")
+    rev = svc.automation.put_slot(m["project"], m["slot"], s, _actor(),
+                                  note=f"Access → Machines: {name} VNC")
+    svc.machines.event(name, "vnc_changed", _addr(),
+                       ", ".join(f"{k}={v}" for k, v in s.items()))
+    from .secrets_api import slot_settings
+    return {"ok": True, "settings_rev": rev.get("rev"),
+            "vnc": _vnc_view(svc, m, slot_settings(svc, m["project"], m["slot"]))}
 
 
 @router.post(A + "/{name}/revoke")
@@ -496,6 +548,7 @@ async def enroll(request: Request):
     body = {"machine": name, "kind": m["kind"], "project": m["project"], "slot": m["slot"],
             "key": key, "router_version": __version__,
             "settings": slot_settings(svc, m["project"], m["slot"]),
+            "vnc": _vnc_view(svc, m, slot_settings(svc, m["project"], m["slot"])),
             "ssh_authorized_keys": list(cfg.machines.slot_ssh_keys or []),
             "tls": _tls(request)}
     return JSONResponse(body, headers={"Cache-Control": "no-store"})
