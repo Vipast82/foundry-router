@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.160.1 — New Kilo tasks no longer wait 60 s for Strata
+
+2026-10-31. Victor's report: every new Kilo task waited about 60 s before Strata started
+reading it (33 requests in 14 h, about 26 min). Follow-up turns were not affected.
+
+- **Cause:** Strata has `helpers_allowed: 0` (one session at a time). A session counted as
+  active until 60 s after its last call, even when that call was a final answer. A new task is a
+  new session, so it waited in `reserve_wait` until the finished task had been quiet for 60 s.
+  The gap was a flat 60.1-60.5 s whatever the prompt size.
+- **router — a final answer frees the stream at once:** each ledger row records whether the call
+  ended in a final answer (`usage_events.final`). A session whose latest call was a final answer,
+  with no call in flight, holds no stream. A reply with no tool calls, or only
+  `attempt_completion`, counts as final. A session whose last call was a tool call (coming back
+  with the result, or waiting on its own sub-agent) keeps the hold as before.
+- **router — `session_hold_seconds` per backend** (default 60): how long that hold lasts. It is
+  in Setup → Helpers & limits next to helpers allowed, and in the backend JSON; 0 turns the hold
+  off.
+- **router — timing:** `sent_at` was stamped before Foundry's wait for a stream or queue slot, so
+  the perf CSV booked that wait as server wait (`wait_ms` = ttft - prefill). The pool now
+  measures the slot wait. `sent_at`, ttft and wall start at the real send, the wait is added to
+  `router_ms`, and it is recorded as a new `queue_ms` column (perf samples and the CSV).
+- Router rebuild needed (all changes are router-side).
+
 ## v0.160.0 — Machines and enrollment codes: a Studio slot in one code and one command
 
 2026-10-31 (Victor: "easy to use, one shot, ask for any config it needs"; the fresh-install plan

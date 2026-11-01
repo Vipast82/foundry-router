@@ -112,7 +112,8 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
                   arrived_at: Optional[str] = None, sent_at: Optional[str] = None,
                   first_token_at: Optional[str] = None,
                   prev_reply_at: Optional[str] = None,
-                  clock_diff_ms: Optional[float] = None) -> None:
+                  clock_diff_ms: Optional[float] = None,
+                  queue_ms: Optional[float] = None) -> None:
     """Write one completed model call's metrics as a time-series point. Derived
     rates/percentages are computed here so every reader gets them consistently.
     Best-effort: a logging failure must never break the request that produced it.
@@ -145,8 +146,8 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
             "run_label, timing_src, prefill_tokens, reasoning_tokens, load_ms, "
             "headers_ms, start_ms, tcp_retrans, tcp_rwnd_ms, client_gap_ms, client_tool, "
             "router_ms, arrived_at, sent_at, first_token_at, prev_reply_at, clock_diff_ms, "
-            "request_id, client_id, project_id, work_task_id, run_id, role) "
-            "VALUES (" + ",".join("?" * 43) + ")",
+            "queue_ms, request_id, client_id, project_id, work_task_id, run_id, role) "
+            "VALUES (" + ",".join("?" * 44) + ")",
             (utcnow(), model, backend, persona, mode,
              int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0),
              int(draft_n or 0), int(draft_n_accepted or 0),
@@ -167,6 +168,7 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
              (round(router_ms, 1) if router_ms is not None else None),
              arrived_at, sent_at, first_token_at, prev_reply_at,
              (round(clock_diff_ms, 1) if clock_diff_ms is not None else None),
+             (round(queue_ms, 1) if queue_ms is not None else None),
              *_correlation()))
     except Exception:
         return
@@ -188,7 +190,7 @@ SERIES_COLUMNS = ("ts", "model", "backend", "persona", "mode", "run_label",
                   "eff_tps", "wall_ms", "load_ms", "cache_hit_pct", "spec_accept_pct",
                   "finish_reason", "timing_src", "headers_ms", "start_ms",
                   "tcp_retrans", "tcp_rwnd_ms", "client_gap_ms", "client_tool",
-                  "router_ms", "prev_reply_at", "arrived_at", "sent_at",
+                  "router_ms", "queue_ms", "prev_reply_at", "arrived_at", "sent_at",
                   "first_token_at", "clock_diff_ms")
 
 

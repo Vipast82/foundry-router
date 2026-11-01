@@ -455,6 +455,9 @@ class Database:
             ("perf_samples", "first_token_at", "TEXT"),
             ("perf_samples", "prev_reply_at", "TEXT"),
             ("perf_samples", "clock_diff_ms", "REAL"),
+            # time the call waited in Foundry for a backend stream / queue
+            # slot before it was sent (router time, not server wait)
+            ("perf_samples", "queue_ms", "REAL"),
             ("models", "adequacy_ok", "INTEGER DEFAULT 0"),
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),
@@ -580,6 +583,9 @@ class Database:
             # Helper policy (quota_gate.py): the purpose a coordinator bound a
             # session with, recorded on every ledger row for the audit.
             ("usage_events", "purpose", "TEXT"),
+            # 1 = the call ended in a final answer (no tool call to come back
+            # from): the session frees its backend stream at once (budget.py).
+            ("usage_events", "final", "INTEGER"),
             ("work_sessions", "purpose", "TEXT"),
             ("work_sessions", "assignment", "TEXT"),
             ("work_sessions", "worker_client", "TEXT"),

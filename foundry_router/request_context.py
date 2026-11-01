@@ -23,6 +23,27 @@ _client_headers: contextvars.ContextVar[dict] = contextvars.ContextVar(
     "foundry_client_headers", default={})
 _request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "foundry_request_id", default="")
+# How long the current backend call waited in Foundry for a stream / queue slot
+# (pool -> facade, so sent_at and ttft are measured from the real send).
+_slot_wait: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "foundry_slot_wait", default=None)
+
+
+def slot_wait_begin() -> list:
+    box = [0.0]
+    _slot_wait.set(box)
+    return box
+
+
+def slot_wait_note(ms: float) -> None:
+    box = _slot_wait.get()
+    if box is not None:
+        box[0] = float(ms)
+
+
+def slot_wait_ms() -> float:
+    box = _slot_wait.get()
+    return box[0] if box else 0.0
 
 
 def capture(headers) -> None:

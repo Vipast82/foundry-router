@@ -36,6 +36,12 @@ async def _router(req: httpx.Request):
         return httpx.Response(500, text="boom")
     if backend in STATE.get("refuse", ()):
         raise httpx.ConnectError("refused", request=req)
+    if STATE.get("tool_reply"):          # the session is coming back with the tool result
+        return httpx.Response(200, json={"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function", "function": {
+                    "name": STATE["tool_reply"], "arguments": "{}"}}]}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 30}})
     return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
         "role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 120, "completion_tokens": 30}})
 
@@ -288,12 +294,13 @@ def test_monitor_and_config_endpoints(ledgered, client):
 
 @pytest.fixture()
 def streams(ledgered, monkeypatch):
-    """No budget rules; strata limited by helpers_allowed, short idle/timeout."""
-    from foundry_router import budget
+    """No budget rules; strata limited by helpers_allowed, short hold/timeout.
+    Replies end in a tool call (the session is coming back), so it holds."""
     ledgered.config_store.config.budgets = BudgetsConfig(rules=[])
-    monkeypatch.setattr(budget, "STREAM_IDLE_SECONDS", 1)
     strata = ledgered.pool.backends["strata"].config
     strata.queue_timeout_seconds = 0.3
+    strata.session_hold_seconds = 1
+    STATE["tool_reply"] = "read_file"
     return strata
 
 
@@ -347,3 +354,80 @@ def test_streams_shown_in_health_and_route_gates(streams, client):
     g = client.get("/admin/api/routes?hours=24&all=1").json()
     nodes = {n["id"]: n for n in g["nodes"]}
     assert "strata: main + 2 helpers" in nodes["persona:Foundry-Kilo-Local"]["gates"]
+
+
+# -- 2026-10-31: a finished session frees its stream at once --------------------------
+# Strata (helpers_allowed 0) held every new Kilo task ~60 s: the previous task's
+# session counted as active until 60 s after its last call, although its last
+# reply was a final answer.
+
+def test_a_final_answer_frees_the_stream_at_once(streams, client):
+    streams.helpers_allowed = 0
+    streams.queue_timeout_seconds = 5
+    streams.session_hold_seconds = 60
+    STATE.pop("tool_reply")
+    assert _chat(client, "Foundry-Kilo-Local", session="task-1").status_code == 200
+    t = time.monotonic()
+    assert _chat(client, "Foundry-Kilo-Local", session="task-2").status_code == 200
+    assert time.monotonic() - t < 1.0                     # no 60 s hold for a finished task
+    [row] = [r for r in _events(client.app.state.services, "settled")
+             if r["session_id"] == "task-1"]
+    assert row["final"] == 1
+
+
+def test_a_completion_tool_call_is_a_final_answer(streams, client):
+    streams.helpers_allowed = 0
+    STATE["tool_reply"] = "attempt_completion"
+    assert _chat(client, "Foundry-Kilo-Local", session="task-1").status_code == 200
+    assert _chat(client, "Foundry-Kilo-Local", session="task-2").status_code == 200
+
+
+def test_a_tool_call_keeps_the_hold_for_session_hold_seconds(streams, client):
+    streams.helpers_allowed = 0
+    streams.session_hold_seconds = 60
+    assert _chat(client, "Foundry-Kilo-Local", session="main").status_code == 200
+    r = _chat(client, "Foundry-Kilo-Local", session="other")
+    assert r.status_code == 429 and "Free in about" in r.json()["error"]["message"]
+    streams.session_hold_seconds = 0                      # the operator turns the hold off
+    assert _chat(client, "Foundry-Kilo-Local", session="other").status_code == 200
+
+
+def test_a_call_in_flight_always_holds_and_its_latest_call_decides():
+    from foundry_router.budget import ended_final
+    assert ended_final([]) and ended_final(None)
+    assert ended_final([{"name": "attempt_completion"}])
+    assert ended_final([{"function": {"name": "attempt_completion"}}])
+    assert not ended_final([{"name": "read_file"}])
+    assert not ended_final([{"name": "attempt_completion"}, {"name": "task"}])
+
+
+def test_in_flight_call_holds_even_after_a_final_answer(streams, client):
+    svc = client.app.state.services
+    streams.helpers_allowed = 0
+    STATE.pop("tool_reply")
+    assert _chat(client, "Foundry-Kilo-Local", session="task-1").status_code == 200
+    assert svc.ledger.sessions("strata") == {}
+    ctx = CallCtx(model="qwen-local", backend="strata", client_id="kilo", session_id="task-1")
+    eid = svc.ledger.reserve(ctx)
+    try:
+        assert set(svc.ledger.sessions("strata")) == {"task-1"}
+    finally:
+        svc.ledger.settle(eid, "settled", final=False)
+    assert set(svc.ledger.sessions("strata")) == {"task-1"}    # latest call: a tool call
+
+
+def test_session_hold_is_set_in_the_limits_ui(streams, client):
+    svc = client.app.state.services
+    raw_names = [b.name for b in svc.config_store.config.backend_pool.internal.backends or []]
+    d = client.get("/admin/api/setup/limits").json()
+    for b in d["backends"]:
+        assert "session_hold_seconds" in b
+    if raw_names:
+        name = raw_names[0]
+        r = client.post("/admin/api/setup/limits", json={"name": name, "session_hold_seconds": 5})
+        assert r.status_code == 200, r.text
+        r = client.post("/admin/api/setup/limits", json={"name": name, "session_hold_seconds": -1})
+        assert r.status_code == 400
+    html = open(__import__("foundry_router").__path__[0] + "/ui/static/index.html",
+                encoding="utf-8").read()
+    assert 'data-f="session_hold_seconds"' in html

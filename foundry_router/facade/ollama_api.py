@@ -1176,6 +1176,18 @@ def _log_summary_outcome(svc, model_id, text_chars, think_chars, res, elapsed_ms
         pass
 
 
+def _slot_shift(box, sent) -> float:
+    """Move `sent` past the time the call waited in Foundry for a backend
+    stream / queue slot (the pool notes it in `box`); returns that wait in ms."""
+    from datetime import timedelta
+    q = float((box or [0.0])[0] or 0.0)
+    if q < 1.0:
+        return 0.0
+    sent.wall = sent.wall + timedelta(milliseconds=q)
+    sent.mono = sent.mono + q / 1000.0
+    return q
+
+
 def _timeline(svc, gap: dict, arrived, sent, first_tok_wall, ttft_ms, t_round,
               router_ms, model_id: str) -> dict:
     """System-clock timestamps for one backend call + a cross-check of the
@@ -2843,6 +2855,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         # arrival at Foundry -> sent to the backend (first call only)
                         router_ms = logger.elapsed_ms if (rnd == 0 and attempt == 0) else None
                         sent = walltime.Stamp()
+                        _slot = request_context.slot_wait_begin()
                         first_tok_wall = None
                         # status clock = this backend call's start — the same
                         # clock Live's "Models generating now" shows for it
@@ -2923,14 +2936,24 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         cost = 0.0 if _flat_rate(binfo0) else estimate_cost_usd(
                             svc.registry.get(model_id), pt, ct)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
+                        # The wait for a backend stream / queue slot is Foundry's
+                        # time: sent_at, ttft and wall start at the real send.
+                        queue_ms = _slot_shift(_slot, sent)
+                        if queue_ms:
+                            t_round += int(queue_ms * 1e6)
+                            if ttft_ms is not None:
+                                ttft_ms = max(0.0, ttft_ms - queue_ms)
+                            if router_ms is not None:
+                                router_ms += queue_ms
                         # Perf + truncation telemetry, per model call.
+                        _tl = _timeline(svc, gap, arrived, sent, first_tok_wall,
+                                        ttft_ms, t_round, router_ms, model_id)
+                        _tl["queue_ms"] = round(queue_ms, 1)
                         telemetry.record_call(
                             svc.db, svc.registry, model=model_id, backend=backend_name,
                             result=res, persona=logger.persona, mode=logger.mode,
                             ttft_ms=ttft_ms, wall_ms=(time.monotonic_ns() - t_round) / 1e6,
-                            max_tokens=out_cap,
-                            extra=_timeline(svc, gap, arrived, sent, first_tok_wall,
-                                            ttft_ms, t_round, router_ms, model_id))
+                            max_tokens=out_cap, extra=_tl)
                         own, rest = _split_calls(res)
                         if assist_on:
                             iv.note_call(turn_stats, res)

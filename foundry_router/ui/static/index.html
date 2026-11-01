@@ -3523,6 +3523,7 @@ async function tabLimits() {
       <td class="nw"><input type="number" min="0" max="64" style="width:80px" data-f="helpers_allowed" data-b="${esc(b.name)}" ${num(b.helpers_allowed, "no limit")}></td>
       <td class="nw"><input type="number" min="1" max="256" style="width:80px" data-f="max_concurrent" data-b="${esc(b.name)}" ${num(b.max_concurrent, "no limit")}></td>
       <td class="nw"><input type="number" min="1" max="3600" style="width:90px" data-f="queue_timeout_seconds" data-b="${esc(b.name)}" ${num(b.queue_timeout_seconds, "300")}></td>
+      <td class="nw"><input type="number" min="0" max="3600" style="width:90px" data-f="session_hold_seconds" data-b="${esc(b.name)}" ${num(b.session_hold_seconds, "60")}></td>
       <td class="hint" style="white-space:normal">${s ? `${(s.active || []).length}${s.streams_allowed != null ? "/" + s.streams_allowed : ""} ${esc(active)}` : "—"}</td>
       <td class="nw"><button class="act primary" data-save="${esc(b.name)}">Save</button></td></tr>`;
   }).join("");
@@ -3531,14 +3532,17 @@ async function tabLimits() {
     <p class="hint">Per backend. <b>Helpers allowed</b>: how many helper streams (sub-agents, e.g. Kilo's task tool or
       parallel coordinator sessions) the backend serves next to your main one: <code>0</code> = main stream only,
       <code>1</code> = main + one helper, empty = no limit. A session over the limit waits up to the queue timeout for a slot,
-      then is refused; a session holds its slot until 60 s after its last call.
+      then is refused. <b>Session hold s</b>: after a call that ended in a tool call (the session is coming back with
+      the tool result, or waiting on its own sub-agent) the session keeps its slot this long; a call that ended in a
+      final answer frees the slot at once, so a new task never waits for a finished one.
       <b>Max concurrent</b>: calls running at once (e.g. llama.cpp <code>-np</code> slots); more wait in a fair queue.
       Call/token caps per account, client or task are budget rules (Logs → Usage Log).</p>
-    <div class="card">${rows ? `<div class="tscroll"><table><tr><th>backend</th><th>helpers allowed</th><th>max concurrent</th><th>queue timeout s</th><th>sessions now</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>`;
+    <div class="card">${rows ? `<div class="tscroll"><table><tr><th>backend</th><th>helpers allowed</th><th>max concurrent</th><th>queue timeout s</th><th>session hold s</th><th>sessions now</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>`;
   document.querySelectorAll("[data-save]").forEach(b => b.onclick = () => {
     const name = b.dataset.save, body = {name};
     document.querySelectorAll(`input[data-b="${CSS.escape(name)}"]`).forEach(i => { body[i.dataset.f] = i.value; });
     if (body.queue_timeout_seconds === "") delete body.queue_timeout_seconds;
+    if (body.session_hold_seconds === "") delete body.session_hold_seconds;
     run(api("setup/limits", {method: "POST", body}));
   });
 }
@@ -3965,8 +3969,9 @@ async function tabBackends() {
       <p class="hint"><code>helpers_allowed</code>: how many helper streams (sub-agents) a backend serves next to
       your main one, counted as client sessions active on it: <code>0</code> = main stream only, <code>1</code> = main + one
       helper, … <code>null</code> = no limit. Each backend has its own. A session over the limit waits up to
-      <code>queue_timeout_seconds</code> for a slot, then is refused. A session holds its slot until 60 s after its last
-      call. Dashboard → <i>Can it serve?</i> shows who holds each one.</p>
+      <code>queue_timeout_seconds</code> for a slot, then is refused. After a call that ended in a tool call a
+      session holds its slot for <code>session_hold_seconds</code> (default 60); a final answer frees it at once.
+      Dashboard → <i>Can it serve?</i> shows who holds each one.</p>
       <textarea id="backends-json" rows="12"></textarea>
       <div class="row"><button class="act primary" id="save-backends">Save backends</button>
       <select id="pool-mode">

@@ -508,7 +508,9 @@ class InternalPool(BackendPool):
                                                    options=options, max_tokens=max_tokens,
                                                    keep_alive=keep_alive, think=think, fmt=fmt)
                     s.consecutive_failures = 0
-                    self._settle(eid, "settled", result.prompt_tokens, result.completion_tokens)
+                    from ..budget import ended_final
+                    self._settle(eid, "settled", result.prompt_tokens, result.completion_tokens,
+                                 final=ended_final(result.tool_calls))
                     settled = True
                     if ctok is not None:
                         cap.finish_call(ctok, model=model, backend=s.config.name,
@@ -636,9 +638,9 @@ class InternalPool(BackendPool):
             self.ledger.record(ctx, "denied", denial.rule, denial.message)
             raise denial
 
-    def _settle(self, eid, status, pt=0, ct=0, detail=""):
+    def _settle(self, eid, status, pt=0, ct=0, detail="", final=False):
         if self.ledger is not None and eid:
-            self.ledger.settle(eid, status, pt, ct, detail)
+            self.ledger.settle(eid, status, pt, ct, detail, final=final)
 
     async def chat_stream(self, model: str, messages: list[dict],
                           tools: Optional[list] = None,
@@ -653,6 +655,9 @@ class InternalPool(BackendPool):
         if not candidates:
             raise AllBackendsFailed(f"no backend serves model {model!r}")
         s = candidates[0]
+        from .. import request_context
+        from ..budget import ended_final
+        t_wait = time.monotonic()
         eid = await self._reserve(model, s, _estimate(messages) if self.ledger else 0)
         try:
             await self._acquire(s)
@@ -663,7 +668,9 @@ class InternalPool(BackendPool):
             self._settle(eid, "released", detail="cancelled while queued")
             raise
         await self._recheck_optional(s, eid)
+        request_context.slot_wait_note((time.monotonic() - t_wait) * 1000.0)
         usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
+        tools_seen: list = []
         cap = getattr(self, "capture", None)
         ctok = cap.begin_call(s.config.name) if cap is not None else None
         if ctok is not None:
@@ -684,6 +691,8 @@ class InternalPool(BackendPool):
                 elif (chunk.get("content") or chunk.get("thinking")) and call_id in calls:
                     calls[call_id].pop("progress", None)
                     calls[call_id]["generating"] = True
+                if chunk.get("tool_calls"):
+                    tools_seen.extend(chunk["tool_calls"])
                 if chunk.get("done"):
                     usage.update(pt=chunk.get("prompt_tokens") or 0,
                                  ct=chunk.get("completion_tokens") or 0)
@@ -703,7 +712,8 @@ class InternalPool(BackendPool):
             s.busy = max(0, s.busy - 1)
             self._release(s)
             self._inflight_exit(model, call_id)
-            self._settle(eid, usage["status"], usage["pt"], usage["ct"], usage["detail"])
+            self._settle(eid, usage["status"], usage["pt"], usage["ct"], usage["detail"],
+                         final=ended_final(tools_seen))
             if ctok is not None:
                 ok = usage["status"] == "settled" and cacc["done"]
                 cap.finish_call(

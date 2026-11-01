@@ -234,11 +234,16 @@ class BackendConfig(BaseModel):
     max_concurrent: Optional[int] = None
     queue_timeout_seconds: float = 300.0
     # Helper streams this backend serves next to your main one, counted as
-    # distinct client sessions active on it (a session stays active until 60s
-    # after its last call): 0 = the main stream only, 1 = main + one sub-agent,
-    # ... None = no limit. A session over the limit waits up to
-    # queue_timeout_seconds for a slot, then is refused (budget.py).
+    # distinct client sessions active on it (a session stays active until
+    # session_hold_seconds after its last call): 0 = the main stream only,
+    # 1 = main + one sub-agent, ... None = no limit. A session over the limit
+    # waits up to queue_timeout_seconds for a slot, then is refused (budget.py).
     helpers_allowed: Optional[int] = Field(default=None, ge=0)
+    # How long a session keeps its stream after a call that ended in a tool
+    # call (it is coming back: a tool result, or its sub-agent's answer). A call
+    # that ended in a final answer frees the stream at once, so a new task
+    # never waits for a finished one.
+    session_hold_seconds: float = Field(default=60.0, ge=0, le=3600)
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").

@@ -310,7 +310,8 @@ async def clear_rejected(request: Request, fingerprint: str = ""):
 
 # -- backend limits -----------------------------------------------------------------
 
-LIMIT_FIELDS = ("max_concurrent", "helpers_allowed", "queue_timeout_seconds")
+LIMIT_FIELDS = ("max_concurrent", "helpers_allowed", "queue_timeout_seconds",
+                "session_hold_seconds")
 
 
 @router.get("/admin/api/setup/limits")
@@ -346,7 +347,7 @@ def _opt_int(v, lo, hi, field):
 
 @router.post("/admin/api/setup/limits")
 async def set_limits(request: Request):
-    """{name, max_concurrent?, helpers_allowed?, queue_timeout_seconds?}
+    """{name, max_concurrent?, helpers_allowed?, queue_timeout_seconds?, session_hold_seconds?}
     Empty / null = no limit (for max_concurrent and helpers_allowed)."""
     svc = _svc(request)
     body = await request.json()
@@ -364,6 +365,11 @@ async def set_limits(request: Request):
             if not 1 <= q <= 3600:
                 raise ValueError("queue_timeout_seconds must be between 1 and 3600")
             upd["queue_timeout_seconds"] = q
+        if "session_hold_seconds" in body:
+            h = float(body["session_hold_seconds"])
+            if not 0 <= h <= 3600:
+                raise ValueError("session_hold_seconds must be between 0 and 3600")
+            upd["session_hold_seconds"] = h
     except (ValueError, TypeError) as e:
         return _err(str(e))
 

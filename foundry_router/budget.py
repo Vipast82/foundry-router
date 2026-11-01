@@ -48,8 +48,18 @@ log = logging.getLogger(__name__)
 COUNTED = ("reserved", "settled", "error")
 PAUSE_SCOPES = ("account", "backend", "persona", "client")
 # A session holds its backend stream until this long after its last call, so a
-# main stream waiting on its own sub-agent keeps its slot.
+# main stream waiting on its own sub-agent keeps its slot. Per backend:
+# session_hold_seconds; a call that ended in a final answer frees it at once.
 STREAM_IDLE_SECONDS = 60
+# A tool call that ends the client's turn the way a final answer does.
+ENDING_TOOLS = frozenset({"attempt_completion"})
+
+
+def ended_final(tool_calls) -> bool:
+    """True when a reply has no tool call the client will come back from."""
+    names = {(t.get("name") or (t.get("function") or {}).get("name") or "")
+             for t in (tool_calls or []) if isinstance(t, dict)}
+    return names <= ENDING_TOOLS
 SLOT_EXEMPT_CLIENTS = ("foundry:health",)     # health probes never take a stream
 
 
@@ -342,25 +352,39 @@ class Ledger:
         c = (self.get_backends() or {}).get(backend) if self.get_backends else None
         return getattr(c, "helpers_allowed", None) if c is not None else None
 
+    def _hold_seconds(self, backend: str) -> float:
+        c = (self.get_backends() or {}).get(backend) if self.get_backends else None
+        v = getattr(c, "session_hold_seconds", None) if c is not None else None
+        return STREAM_IDLE_SECONDS if v is None else max(0.0, float(v))
+
     def sessions(self, backend: str, now: Optional[float] = None) -> dict:
-        """Sessions active on a backend: {session key: {last, client, persona}}."""
+        """Sessions holding a stream on a backend: {session key: {last, client,
+        persona}}. A session whose latest call ended in a final answer (and has
+        none in flight) holds nothing: its turn is over."""
         now = now or time.time()
         out: dict = {}
 
-        def note(c: CallCtx, t: float):
+        def note(c: CallCtx, t: float, final: bool = False, live: bool = False):
             if c.client_id in SLOT_EXEMPT_CLIENTS:
                 return
             k = c.key("session")
-            if k not in out or t > out[k]["last"]:
-                out[k] = {"last": t, "client": c.client_id, "persona": c.persona}
+            o = out.setdefault(k, {"last": t, "client": c.client_id, "persona": c.persona,
+                                   "final": final, "live": False})
+            if t >= o["last"]:          # the latest call decides whether the turn ended
+                o.update(last=t, client=c.client_id, persona=c.persona, final=final)
+            o["live"] = o["live"] or live          # a call in flight always holds
         for r in self.db.query(
                 "SELECT * FROM usage_events WHERE backend=? AND status IN ('reserved','settled','error') "
-                "AND COALESCE(settled_ts, ts) >= ?", (backend, now - STREAM_IDLE_SECONDS)):
-            note(_row_ctx(r), r.get("settled_ts") or r["ts"])
+                "AND COALESCE(settled_ts, ts) >= ? ORDER BY id",
+                (backend, now - self._hold_seconds(backend))):
+            note(_row_ctx(r), r.get("settled_ts") or r["ts"],
+                 final=r.get("status") == "settled" and bool(r.get("final")),
+                 live=r.get("status") == "reserved")
         for c in self._active.values():
             if c.backend == backend:
-                note(c, now)
-        return out
+                note(c, now, live=True)
+        return {k: {"last": v["last"], "client": v["client"], "persona": v["persona"]}
+                for k, v in out.items() if v["live"] or not v["final"]}
 
     def _stream_denial(self, ctx: CallCtx, now: float) -> Optional[BudgetDenied]:
         n = self._helpers_allowed(ctx.backend)
@@ -370,7 +394,8 @@ class Ledger:
                   if k != ctx.key("session")}
         if len(others) < n + 1:
             return None
-        wait = max(0, min(v["last"] for v in others.values()) + STREAM_IDLE_SECONDS - now)
+        wait = max(0, min(v["last"] for v in others.values())
+                   + self._hold_seconds(ctx.backend) - now)
         who = ", ".join(sorted({v["persona"] or v["client"] for v in others.values()}))
         streams = "the main stream only" if n == 0 else f"the main stream plus {n} helper{'s' if n > 1 else ''}"
         return BudgetDenied(
@@ -442,14 +467,17 @@ class Ledger:
             await asyncio.sleep(0.5)
 
     def settle(self, eid: Optional[int], status: str, input_tokens: int = 0,
-               output_tokens: int = 0, detail: str = "") -> None:
+               output_tokens: int = 0, detail: str = "", final: bool = False) -> None:
+        """final: the call ended in a final answer, so its session frees its
+        backend stream now instead of session_hold_seconds later."""
         if not eid:
             return
         self._active.pop(eid, None)
         self.db.execute("UPDATE usage_events SET status=?, input_tokens=?, output_tokens=?, "
-                        "detail=?, settled_ts=? WHERE id=? AND status='reserved'",
+                        "detail=?, settled_ts=?, final=? WHERE id=? AND status='reserved'",
                         (status, int(input_tokens or 0), int(output_tokens or 0),
-                         (detail or "")[:300], time.time(), eid))
+                         (detail or "")[:300], time.time(),
+                         1 if (final and status == "settled") else 0, eid))
 
     def record(self, ctx: CallCtx, status: str, rule: str, detail: str) -> None:
         """Log a denial / observation once per request, model and rule (a
