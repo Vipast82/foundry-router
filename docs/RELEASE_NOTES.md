@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.162.3 — A slot's desktop starts again after its host reboots
+
+2026-11-01. Victor: "I restarted but VNC didn't come on". On slot-1, the LXC restart stopped the
+container hard. Docker restarted the same container, whose /tmp still held display :1's lock,
+so Xvnc refused to start ("remove /tmp/.X1-lock"): no desktop, so no Studio, while noVNC's page
+still loaded.
+- entrypoint.sh removes `/tmp/.X1-lock` and `/tmp/.X11-unix/X1` before starting Xvnc. It is the
+  container's start, so no Xvnc runs yet.
+- **Fixed by hand on slot-1** (the lock removed, the container restarted). The fix is in the
+  image from its next installer run.
+- Tests: test_slot_ssh (+1).
+
 ## v0.162.2 — Linux workstation W1 (portable paths), and the slot installer always matches the router
 
 2026-11-01. W1 of docs/plans/LINUX_WORKSTATION_PLAN.md (approved: "Yes, recommended").

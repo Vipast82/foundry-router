@@ -12,6 +12,11 @@ mkdir -p "$HOME/.vnc" "$XDG_RUNTIME_DIR"
 slot-secrets >>"$HOME/slot-secrets.log" 2>&1 && [ -f "$HOME/.config/foundry-slot/slot.env" ] && \
     . "$HOME/.config/foundry-slot/slot.env"
 
+# A container that was stopped hard (the host rebooted) keeps display :1's lock in /tmp, and
+# Xvnc then refuses to start ("remove /tmp/.X1-lock"): no desktop, no Studio (2026-11-01,
+# slot-1). This is the container's start, so no Xvnc runs yet: clear them.
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+
 # VNC itself only listens inside the container (localhost); noVNC is the way in. A VNC password
 # comes from the router like any secret (SLOT_VNC_PASSWORD, file slot_vnc_password.txt, Access →
 # Secrets): turned into TigerVNC's password file on the tmpfs, never on a command line or in a

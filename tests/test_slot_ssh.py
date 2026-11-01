@@ -342,3 +342,10 @@ def test_installer_switches_to_the_routers_release_before_the_code():
     assert check < setup.index('read -r -s -p "Enrollment code')
     assert 'FOUNDRY_SETUP_MATCHED=1 exec bash "$NEW" "${ORIG_ARGS[@]}" --router "$ROUTER"' in setup
     assert "/v$RV/contrib/studio-slot/proxmox/setup-host.sh" in setup
+
+
+def test_slot_start_clears_a_stale_display_lock():
+    """2026-11-01: after an LXC reboot Xvnc refused to start on the old /tmp/.X1-lock."""
+    entry = (Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "entrypoint.sh"
+             ).read_text(encoding="utf-8")
+    assert entry.index("rm -f /tmp/.X1-lock /tmp/.X11-unix/X1") < entry.index("Xvnc :1 ")
