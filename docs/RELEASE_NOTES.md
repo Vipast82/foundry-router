@@ -2,6 +2,44 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.163.0 — foundry-blender: run Blender on a Studio slot (slot Blender plan B1)
+
+2026-11-01. docs/plans/SLOT_BLENDER_PLAN.md (Victor: "do the container plan first"; D-B1 to
+D-B5 approved). B1, the command; sprints do not use it yet (B2).
+
+- **`python -m foundry_coordinator.slots blender [--host H --container C | --config
+  .foundry/blender.json] -- <blender args>`** (`foundry_coordinator/slot_blender.py`), run from a
+  sprint's worktree:
+  1. It pushes the worktree's commit to the slot's game mirror as `blender/<worktree>`. The
+     branch is kept, so later pushes send only what is new.
+  2. One `docker exec` holds the slot's Blender lock (`flock`; a busy slot is waited for
+     `--wait` s, default 600, then exit **75** with the reason). Inside it:
+     - it checks the commit out in the slot's own `~/work/blender` (never Studio's checkout);
+     - it unpacks the uncommitted and new files sent on stdin (deletions included);
+     - it runs `blender -t <the slot's CPU limit> <args>`, with the output streamed live;
+     - it sends back every file newer than a marker made at Blender's start (no `.git` or
+       `__pycache__`), as a tar on stdout.
+  3. The files land in the same paths in the worktree: repo-relative only, nothing outside it,
+     capped at 4 GB back and 512 MB sent.
+
+  The exit code is Blender's. Nothing ever falls back to a local Blender.
+- **Proven on slot-1** (a scratch sparse clone of AU at 3dff8c63; the live checkout untouched):
+  - `build_bs_king.py --selftest`: `BUILD_BS_KING SELFTEST PASS`;
+  - `build_bs_king.py --phase P1 --save …` gave the same report as this PC
+    (`2872 tris, dims [6.947, 6.62, 9.765]`) and a `.blend` of the same size (673,263 bytes);
+  - an uncommitted new script ran there, and its two output files came back (2 s);
+  - a second job with `--wait 2` exited 75 while the first held the slot;
+  - threads followed the slot's 5-core limit.
+- **Timing:** after the first push of the 2.5 GB history, a small build takes ~3 s through the
+  slot (1 s locally). The overhead is the transfer, so heavy builds and renders gain.
+- **Fixed during the proof:**
+  - deleting the run's branch after each run left the mirror branchless, so every push re-sent
+    the 2.5 GB history (52 s instead of 3 s);
+  - not reading tar's trailing padding left ssh waiting forever.
+- **Note:** AU's `--preview*` modes are for plain Python (Pillow), not Blender. They fail inside
+  any Blender, this PC's included.
+- Tests: test_slot_blender (6).
+
 ## v0.162.4 — Studio slots draw on the host's GPU
 
 2026-11-01. Victor: "proxmox has an onboard intel IGPU, can that pass through to the container…

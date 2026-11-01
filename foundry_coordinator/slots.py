@@ -403,10 +403,20 @@ def main(argv=None) -> int:
     r.add_argument("--foundry-push-url", default="")
     r.add_argument("--foundry-host-dir", default="")
     r.add_argument("pipeline", nargs=argparse.REMAINDER)
+    from . import slot_blender
+    slot_blender.add_parser(sub)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `blender ... -- <blender args>`: everything after the first `--` is Blender's, untouched
+    if argv[:1] == ["blender"] and "--" in argv:
+        i = argv.index("--")
+        a = ap.parse_args(argv[:i])
+        return slot_blender.run(a, argv[i + 1:])
     a = ap.parse_args(argv)
     if a.cmd == "run":
         a.pipeline = [x for x in a.pipeline if x != "--"] if a.pipeline[:1] == ["--"] else a.pipeline
         return run(a)
+    if a.cmd == "blender":
+        return slot_blender.run(a, list(a.blender))
     return 2
 
 
