@@ -1457,6 +1457,29 @@ def is_local_key(path: str) -> bool:
     return bool(t is not None and t.scope == "local" and "." in path)
 
 
+_POOL_ITEM = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?::(\d+))?$")
+
+
+def _pool_problem(value: list) -> Optional[str]:
+    """blender.pool: one worker per line as worker:jobs (jobs 1-8); 2026-11-01 a pool typed as
+    one line `slot-1:2,Slot-2:22,local:1,` was read as slot-1 with 1 job."""
+    seen = set()
+    for raw in value:
+        for item in [x for x in re.split(r"[,\s]+", str(raw)) if x]:
+            m = _POOL_ITEM.match(item)
+            if not m:
+                return (f"{item!r}: write worker:jobs, one per line (e.g. slot-1:2, slot-2:2, "
+                        "local:1)")
+            jobs = int(m.group(2) or 1)
+            if not 1 <= jobs <= 8:
+                return f"{item!r}: jobs must be 1 to 8 (2 per mini PC is the plan's choice)"
+            wid = m.group(1).lower()
+            if wid in seen:
+                return f"{item!r}: {m.group(1)} is listed twice"
+            seen.add(wid)
+    return None
+
+
 def check_value(f: Field, value: Any) -> Optional[str]:
     """Why `value` doesn't fit field `f` (None when it fits)."""
     t = f.type
@@ -1484,6 +1507,8 @@ def check_value(f: Field, value: Any) -> Optional[str]:
             return "must be a list of non-empty strings"
         if want is int and any(not num_ok(x, int) for x in value):
             return "must be a list of integers"
+        if f.key == "blender.pool":
+            return _pool_problem(value)
         return None
     elif t == "map":
         if not isinstance(value, dict):

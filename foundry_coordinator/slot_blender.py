@@ -691,15 +691,23 @@ def pool(profile) -> list:
     `blender.pool` ("slot-1:2", "slot-2:2", "local:1"; a dict {id, jobs} works too). `local`
     (or "this-pc") is this PC. A track bound to a slot gets that slot first (D-B1). [] = no pool
     (`blender.slot` or this PC, as before)."""
-    raw = ((getattr(profile, "raw", None) or {}).get("blender") or {}).get("pool") or []
-    out, seen = [], set()
+    praw = getattr(profile, "raw", None) or {}
+    raw = (praw.get("blender") or {}).get("pool") or []
+    # slot ids as configured, matched without case (`Slot-2` is slot-2)
+    known = {str(k).lower(): str(k) for k in (praw.get("slots") or {})}
+    items = []
     for item in raw if isinstance(raw, list) else []:
+        # one worker per entry, but `slot-1:2,slot-2:2` typed on one line works too
+        items += [item] if isinstance(item, dict) else [
+            x for x in re.split(r"[,\s]+", str(item)) if x]
+    out, seen = [], set()
+    for item in items:
         if isinstance(item, dict):
             wid, jobs = str(item.get("id") or "").strip(), item.get("jobs", 1)
         else:
             wid, _, jobs = str(item).strip().partition(":")
             jobs = jobs.strip() or 1
-        wid = LOCAL if wid.lower() in ("local", "this-pc", "this pc", "pc") else wid
+        wid = LOCAL if wid.lower() in ("local", "this-pc", "this pc", "pc") else             known.get(wid.lower(), wid)
         try:
             jobs = max(1, min(8, int(jobs)))
         except (TypeError, ValueError):

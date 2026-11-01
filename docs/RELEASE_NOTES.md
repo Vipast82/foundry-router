@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.170.1 — `blender.pool` typed on one line still works; Settings refuse a bad pool
+
+2026-11-01. The pool went live as one entry, `slot-1:2,Slot-2:22,local:1,`. The coordinator read
+it as slot-1 with 1 job, which is slower than no pool.
+
+- **Coordinator (`slot_blender.pool`):** each entry is split on commas and spaces, and slot ids
+  match the configured slots without case (`Slot-2` is slot-2).
+- **Settings (`schema.check_value`):** `blender.pool` must be `worker:jobs` with 1–8 jobs and no
+  worker twice; otherwise Review & deploy shows the problem.
+- Test: `tests/test_blender_pool.py`
+  (`test_a_pool_typed_on_one_line_still_reads_and_settings_refuse_bad_jobs`). The pool, slot and
+  automation tests pass (76).
+- **Fix the deployed value:** one worker per line, `slot-1:2`, `slot-2:2`, `local:1`. The check
+  takes effect after a router rebuild; the parsing after a coordinator restart.
+
 ## v0.170.0 — the Blender pool: slot-1, slot-2 and this PC, several jobs each
 
 2026-11-01. docs/plans/BLENDER_POOL_PLAN.md P1–P4 (Victor: D-P1 to D-P7 as recommended):

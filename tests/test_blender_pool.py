@@ -269,3 +269,17 @@ def test_machines_lists_the_pool_with_the_last_day_of_runs():
     html = open(os.path.join(os.path.dirname(M.__file__), "ui", "static", "index.html"),
                 encoding="utf-8").read()
     assert "<h3>Blender pool</h3>" in html and "d.blender_pool" in html
+
+
+def test_a_pool_typed_on_one_line_still_reads_and_settings_refuse_bad_jobs():
+    """2026-11-01: `slot-1:2,Slot-2:22,local:1,` deployed as one entry was read as slot-1 x1."""
+    from foundry_automation import schema as S
+    raw = _raw(["slot-1:2,Slot-2:2, local:1,"])
+    assert SB.pool(_Prof("w", raw)) == [{"id": "slot-1", "jobs": 2}, {"id": "slot-2", "jobs": 2},
+                                        {"id": "local", "jobs": 1}]
+    f = next(x for x in S.FIELDS if x.key == "blender.pool")
+    assert S.check_value(f, ["slot-1:2", "slot-2:2", "local:1"]) is None
+    assert S.check_value(f, ["slot-1:2,slot-2:2,local:1"]) is None
+    assert "jobs must be 1 to 8" in S.check_value(f, ["slot-1:2,Slot-2:22,local:1,"])
+    assert "worker:jobs" in S.check_value(f, ["slot-1=2"])
+    assert "listed twice" in S.check_value(f, ["slot-1:2", "SLOT-1:1"])
