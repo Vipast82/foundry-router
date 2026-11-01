@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.161.2 — A slot hides Studio's leftover splash window
+
+2026-11-01. On slot-1, Studio's splash (a 600x300 window titled "RobloxStudio") stayed on top of the
+loaded editor under Wine. Victor: "logged in, but the studio screen still sits on top".
+- entrypoint.sh's 5-second window loop (the one that makes the editor full-screen) now hides any
+  visible "RobloxStudio" window once the slot's editor window exists.
+  - It is unmapped, not closed: closing a window of Studio's process could close Studio.
+  - This covers a start, a watchdog reopen and `studio-reopen`.
+- Applies with the slot image, through the installer again (New code). Until then:
+  `docker exec studio-slot bash -c 'DISPLAY=:1 xdotool windowunmap <window id>'`.
+- Tests: test_machines slot files check.
+
 ## v0.161.1 — A Studio slot's desktop opens from the LAN, with an optional VNC password
 
 2026-11-01. Victor: "the install should open VNC port so it can be accessed from the LAN, not just

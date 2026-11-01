@@ -118,15 +118,24 @@ rm -f "$RBX"/RobloxStudio/AutoSaves/*_AutoRecovery_*.rbxl 2>/dev/null
 # The slot's editor window fills the screen (screenshots capture its viewport): any
 # window whose title contains STUDIO_FULLSCREEN_TITLE, checked every few seconds so a
 # reopened Studio gets it too. Test server/client windows ("Place1 ...") are left alone.
+# Under Wine, Studio's splash (a 600x300 window titled "RobloxStudio") can stay on top of the
+# editor after it loads (2026-11-01, slot-1): once the editor window is there, it is hidden
+# (unmapped, not closed: closing a window of Studio's process could close Studio).
 FS_TITLE="${STUDIO_FULLSCREEN_TITLE:-\[SLOT-}"   # a regex (xdotool --name)
 SCREEN_W="${GEOM%x*}"; SCREEN_H="${GEOM#*x}"
 (
     while sleep 5; do
+        editor=0
         for w in $(xdotool search --name "$FS_TITLE" 2>/dev/null); do
             case "$(xdotool getwindowname "$w" 2>/dev/null)" in *"- Roblox Studio") ;; *) continue ;; esac
+            editor=1
             g=$(xdotool getwindowgeometry "$w" 2>/dev/null | awk '/Geometry/{print $2}')
             [ "$g" = "${SCREEN_W}x${SCREEN_H}" ] && continue
             xdotool windowmove "$w" 0 0 windowsize "$w" "$SCREEN_W" "$SCREEN_H" 2>/dev/null
+        done
+        [ "$editor" = 1 ] || continue
+        for s in $(xdotool search --onlyvisible --name '^RobloxStudio$' 2>/dev/null); do
+            xdotool windowunmap "$s" 2>/dev/null
         done
     done
 ) &

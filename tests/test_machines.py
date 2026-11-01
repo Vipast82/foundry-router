@@ -186,6 +186,8 @@ def test_slot_files_open_vnc_on_the_lan_with_its_password():
     assert "slot_vnc_password.txt" in entry and "-SecurityTypes VncAuth -PasswordFile" in entry
     # the password goes through a file redirect, never a command line
     assert 'vncpasswd -f <"$PW_IN"' in entry
+    # Studio's leftover splash is hidden (unmapped) once the editor window is up
+    assert "--name '^RobloxStudio$'" in entry and 'xdotool windowunmap "$s"' in entry
     docker = (root / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY novnc-index.html /usr/share/novnc/index.html" in docker
     index = (root / "novnc-index.html").read_text(encoding="utf-8")
