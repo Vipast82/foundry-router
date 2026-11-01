@@ -715,6 +715,12 @@ class CoordReader:
     def artifacts(self) -> list[dict]:
         return self._q("SELECT * FROM artifacts ORDER BY created_ts")
 
+    def build_runs(self, since_ts: float, limit: int = 2000) -> list[dict]:
+        """Build replay rows (build_journal.py) newer than `since_ts`, oldest first; a
+        coordinator without the table reads as nothing."""
+        return self._q("SELECT run_id, project_id, task_id, ts, data FROM build_runs WHERE ts > ? "
+                       "ORDER BY ts DESC LIMIT ?", (since_ts, limit))[::-1]
+
     def meta_like(self, prefix: str) -> list[dict]:
         return self._q("SELECT key, value FROM meta WHERE key LIKE ?", (prefix + "%",))
 
@@ -1678,6 +1684,7 @@ class TelemetryBridge:
             if posts:
                 commits.append(lambda ps=posts: self._send_outcomes(ps))
         self._lane_facts(obs, commits)
+        self._build_facts(obs, commits, now)
         self._project_pause_facts(obs, commits, now)
         # direct Foundry calls (visual observer) are not Kilo sessions: never poll Kilo for them
         sessions = [s for s in self.reader.sessions() if s.get("client") != "foundry-direct"]
@@ -1706,6 +1713,53 @@ class TelemetryBridge:
                 **project_pause_status(self.reader._q, pid, now)})
 
     THUMB_MAX_BYTES = 400_000
+    BUILD_DAYS = 30                 # build replay rows sent (the router keeps its own retention)
+    BUILD_THUMBS = 24
+    BUILD_THUMB_BYTES = 60_000
+    BUILD_FIRST_SENDS = 40          # runs sent with their thumbnails per step (a restarted bridge
+                                    # catches up over a few steps, not in one huge batch)
+
+    def _build_facts(self, obs: list, commits: list, now: float) -> None:
+        """Build replay (BLENDER_BUILD_REPLAY_PLAN R2): one `build_run` observation per journal
+        row, re-sent only when it changed; its thumbnails ride along on the first send only."""
+        state = os.path.dirname(os.path.abspath(self.reader.path))
+        first = 0
+        for r in self.reader.build_runs(now - self.BUILD_DAYS * 86400):
+            if r["project_id"] not in self.projects:
+                continue
+            entry = _j(r.get("data"))
+            o = {"type": "build_run", "project_id": r["project_id"], "task_id": r["task_id"],
+                 "run_id": r["run_id"], "ts": r["ts"], "entry": entry}
+            key = f"build:{r['run_id']}"
+            h = _h(o)
+            if self.fp.get(key) == h:
+                continue
+            if self.fp.get(key) is None:
+                if first >= self.BUILD_FIRST_SENDS:
+                    continue                         # next step
+                first += 1
+                o = {**o, "thumbs": self._build_thumbs(state, r, entry)}
+            obs.append(o)
+            commits.append(lambda k=key, v=h: self.fp.__setitem__(k, v))
+
+    def _build_thumbs(self, state: str, r: dict, entry: dict) -> list:
+        from .build_journal import run_dir
+        d = run_dir(state, r["project_id"], r["task_id"], r["run_id"])
+        out = []
+        for x in (entry.get("renders") or [])[:self.BUILD_THUMBS]:
+            name = str((x or {}).get("thumb") or "")
+            if not re.fullmatch(r"thumbs/\d{2}\.png", name):
+                continue
+            try:
+                with open(os.path.join(d, *name.split("/")), "rb") as f:
+                    raw = f.read(self.BUILD_THUMB_BYTES + 1)
+            except OSError:
+                continue
+            if len(raw) > self.BUILD_THUMB_BYTES:
+                continue
+            mime = "image/png" if raw[1:4] == b"PNG" else "image/jpeg"
+            out.append({"name": name, "mime": mime, "b64": base64.b64encode(raw).decode()})
+        return out
 
     def _lane_facts(self, obs: list, commits: list) -> None:
         """Lane units, artifacts and the per-project kill switch. Each is

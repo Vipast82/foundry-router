@@ -468,12 +468,12 @@ class AnimalUprisingAdapter(GenericAdapter):
         from ...slots import main_slot_id
         return main_slot_id(self.p)
 
-    def _blender_notice(self) -> str:
+    def _blender_notice(self, task_id: str = "", run_id: str = "") -> str:
         """SLOT_BLENDER_PLAN B2: when this project's Blender runs on a slot, how to run it ('' =
         Blender runs on this PC, as ENVIRONMENT.md says). Writes the worktree's drop-in."""
         from ...slot_blender import prepare
         try:
-            b = prepare(self.p, self.state_dir)
+            b = prepare(self.p, self.state_dir, task_id, run_id)
         except Exception as e:                                    # noqa: BLE001
             b = {"slot": "?", "error": f"foundry-blender could not be prepared: {e}"}
         if not b:
@@ -666,7 +666,7 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                       "playtest or a boot check, never take or wait for studio.lock, never touch "
                       "the main checkout. The coordinator runs the Studio gate on the merge "
                       "result when this track merges.\n")
-        notice += self._blender_notice()
+        notice += self._blender_notice(spec.task_id, str(ctx.get("run_id") or ""))
         a = ctx.get("assignment") if isinstance(ctx.get("assignment"), dict) else {}
         rerun = [str(x) for x in (a.get("affected_checks_to_rerun") or [])][:20]
         rerun_txt = (", ".join(rerun) if rerun else "the checks the findings below name")

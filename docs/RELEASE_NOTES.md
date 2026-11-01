@@ -2,6 +2,59 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.168.0 — build replay: a journal of every Blender run, on the task page
+
+2026-11-01. Gap 8 of reports/ASSET_PIPELINE_REVIEW_2026-11.md: R1 + R2 of
+docs/plans/BLENDER_BUILD_REPLAY_PLAN.md (Victor: D-R1 to D-R6 as recommended). **Ships off:**
+switch on `blender.journal` in Automation → Settings → Fast lane, gate & vision.
+
+- **The journal (`foundry_coordinator/build_journal.py`):** one entry per Blender run:
+  - where it ran: task, slot, host, commit, uncommitted files;
+  - the arguments, and the builder script (`-P`) with its sha256, a stored copy and a diff
+    from the previous run of the same script on the task;
+  - timings (push, library, prepare, Blender, copy back), the exit code, the files back;
+  - a 200-line log tail plus the lines that matter (`mesh_report`, `REF_IOU`, PASS/FAIL,
+    ERROR, Saved);
+  - up to 12 render thumbnails at 256 px, render views first (Pillow).
+  - Files go under `state_dir/build_journal/<project>/<task>/<run>/`, plus a new `build_runs`
+    table. The big outputs are never copied. A journal that can't be written is one log line;
+    Blender's exit code is never changed.
+- **foundry-blender (`slot_blender.py`):** with the journal on, the run's output is copied as
+  it streams; the remote script marks Blender's end (`foundry-blender: blender exit N`). A busy
+  slot (75) is an entry with a note and no renders. `prepare()` writes the task, run and journal
+  settings into the drop-in's settings when the sprint's prompt is made.
+- **Pruning (D-R3):** hourly, FINISHED tasks only. A task finished more than `journal_keep_days`
+  (30) ago loses its journal; other finished tasks keep their newest `journal_max_runs` (200).
+- **Bridge → router:** the bridge sends a `build_run` observation per run, with its thumbnails on
+  the first send (at most 40 such runs per step, so a restarted bridge catches up in steps). The
+  router stores them in `cc_build_runs` (router retention applies).
+  - `GET /control/api/tasks/{p}/{t}/builds`
+  - `GET /control/api/builds/{run}/thumb/{name}`
+- **Task page: "Build replay"** (Inspector, after Lead recovery): step through the runs with ← / →
+  (arrow keys work too). The chosen view angle stays selected, so you watch the model change.
+  Each run shows its exit, where it ran, timings, the script and its hash (changed / first run /
+  edited after the run), the result lines, the thumbnails with a big preview, and boxes for the
+  script diff, the log tail and the files back.
+- **Settings (UI fields):**
+  - `blender.journal` (off)
+  - `blender.journal_renders` (12)
+  - `blender.journal_thumb_px` (256)
+  - `blender.journal_keep_days` (30)
+  - `blender.journal_max_runs` (200)
+- **Scope:** only runs through foundry-blender (Blender on a slot) are journaled in this
+  release. Blender on this PC comes with R3. The asset judge does not see the replay (D-R5).
+- **Proof:** on slot-1, from a scratch AU clone, three runs went through foundry-blender:
+  1. `build_bs_king.py --pose rest`: BUILD_BS_KING PASS, 2,416 tris;
+  2. `render_views.py`: 8 views, 8 thumbnails;
+  3. the same builder with a one-line edit: the diff against run 1.
+
+  They showed on the task page of the control-center fixture in the in-app browser (stepping,
+  angle selection, thumbnails, diff).
+- **Tests:** `tests/coordinator/test_build_journal.py` (20) and
+  `tests/test_build_replay_router.py` (10, including the bridge → router round trip).
+- **Router rebuild needed:** the router side (table, endpoints, task page) takes effect when the
+  router is rebuilt and restarted. The coordinator side takes effect on a coordinator restart.
+
 ## v0.167.2 — a sprint's scripted gate tests only its own files
 
 2026-11-01. AS-P8 worked in the main checkout between MV2-CL1's sessions. MV2-CL1's gate takes

@@ -125,6 +125,12 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS cc_artifacts (
       artifact_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, rel_path TEXT, generation INTEGER,
       sha256 TEXT, status TEXT, data TEXT, thumb TEXT, mime TEXT, received_ts REAL, seq INTEGER)""",
+    # build replay (coordinator v0.168.0, docs/plans/BLENDER_BUILD_REPLAY_PLAN.md R2): one
+    # row per Blender run, the journal entry plus its small render thumbnails
+    """CREATE TABLE IF NOT EXISTS cc_build_runs (
+      run_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, ts REAL, data TEXT, thumbs TEXT,
+      received_ts REAL, seq INTEGER)""",
+    "CREATE INDEX IF NOT EXISTS idx_cc_build_task ON cc_build_runs(project_id, task_id, ts)",
     """CREATE TABLE IF NOT EXISTS cc_lane_state (
       project_id TEXT PRIMARY KEY, paused INTEGER, data TEXT, received_ts REAL)""",
     # batch ids a source already delivered (v0.122): a retried batch the server
@@ -346,7 +352,8 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
-                        "lane_state", "transition", "pending", "project", "project_pause", "memory")
+                        "lane_state", "transition", "pending", "project", "project_pause", "memory",
+                        "build_run")
 BATCH_MEMORY = 200                                # batch ids kept per source
 # readiness classes that are not a product defect (the AU adapter's: scope,
 # tooling, environment, runtime_sync, capability, credentials, model, tests,
@@ -1397,6 +1404,88 @@ class ControlCenter:
                    _s(o.get("sha256"), 64), _s(o.get("status"), 20), _j(data), thumb,
                    _s(o.get("mime"), 40), now, seq))
         return []
+
+    _BUILD_THUMB = re.compile(r"^thumbs/\d{2}\.(png|jpg)$")
+    BUILD_THUMBS_MAX = 24
+    BUILD_LOG_CAP = 40000
+    BUILD_DIFF_CAP = 60000
+
+    def _in_build_run(self, c, o, st, now, src):
+        """One Blender run's journal entry (build replay, v0.168.0). Thumbnails come only on
+        the first send; a later send without them keeps the stored ones."""
+        rid = _s(o.get("run_id"), 200)
+        if not rid or len(rid) > 120:
+            raise ValueError("run id")
+        entry = o.get("entry")
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        if isinstance(entry.get("log_tail"), str):
+            entry["log_tail"] = entry["log_tail"][-self.BUILD_LOG_CAP:]
+        if isinstance(entry.get("script"), dict):
+            sc = dict(entry["script"])
+            if isinstance(sc.get("diff"), str):
+                sc["diff"] = sc["diff"][:self.BUILD_DIFF_CAP]
+            entry["script"] = sc
+        thumbs = {}
+        raw = o.get("thumbs")
+        for t in (raw if isinstance(raw, list) else [])[:self.BUILD_THUMBS_MAX]:
+            if not isinstance(t, dict):
+                continue
+            name, mime, b64 = t.get("name"), t.get("mime"), t.get("b64")
+            if not (isinstance(name, str) and self._BUILD_THUMB.match(name)):
+                continue
+            if mime not in ("image/png", "image/jpeg"):
+                continue
+            if not isinstance(b64, str) or not b64 or len(b64) > MAX_THUMB_B64:
+                continue
+            thumbs[name] = {"mime": mime, "b64": b64}
+        pid, tid = _s(o.get("project_id"), 120), _s(o.get("task_id"), 120)
+        data = _j(entry)
+        prev = self._rows(c, "SELECT data, seq, thumbs FROM cc_build_runs WHERE run_id=?", (rid,))
+        same = bool(prev) and prev[0]["data"] == data and not (thumbs and not prev[0]["thumbs"])
+        seq = prev[0]["seq"] if same else self._feed(c, "build_run", pid, "", rid)
+        c.execute("INSERT INTO cc_build_runs (run_id, project_id, task_id, ts, data, thumbs, "
+                  "received_ts, seq) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET "
+                  "project_id=excluded.project_id, task_id=excluded.task_id, ts=excluded.ts, "
+                  "data=excluded.data, thumbs=COALESCE(excluded.thumbs, cc_build_runs.thumbs), "
+                  "received_ts=excluded.received_ts, seq=excluded.seq",
+                  (rid, pid, tid, _f(o.get("ts")) or _f(entry.get("started_ts")) or now, data,
+                   _j(thumbs) if thumbs else None, now, seq))
+        return []
+
+    def build_runs(self, project: str, task: str, projects: list) -> dict:
+        """A task's Blender runs, oldest first: each journal entry plus its thumbnail names."""
+        if projects and project not in projects:
+            raise ControlError("unknown task", "not_found", 404)
+        runs = []
+        for r in self.db.query("SELECT run_id, ts, data, thumbs FROM cc_build_runs WHERE "
+                               "project_id=? AND task_id=? ORDER BY ts, run_id", (project, task)):
+            e = _uj(r["data"], {}) or {}
+            e["run_id"] = r["run_id"]
+            e.setdefault("started_ts", r["ts"])
+            e["thumbs"] = sorted((_uj(r["thumbs"], {}) or {}).keys())
+            runs.append(e)
+        return {"project_id": project, "task_id": task, "runs": runs, "server_ts": self.clock()}
+
+    def build_thumb(self, run_id: str, name: str, projects: list) -> tuple:
+        r = self.db.query_one("SELECT project_id, thumbs FROM cc_build_runs WHERE run_id=?",
+                              (run_id,))
+        if not r or (projects and r["project_id"] not in projects):
+            raise ControlError("unknown build run", "not_found", 404)
+        t = (_uj(r["thumbs"], {}) or {}).get(name)
+        if not isinstance(t, dict):
+            raise ControlError("no such thumbnail", "no_thumbnail", 404)
+        import base64
+        import binascii
+        try:
+            raw = base64.b64decode("".join(str(t.get("b64") or "").split()), validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            raw = b""
+        if not raw:
+            raise ControlError("thumbnail unreadable", "no_thumbnail", 404)
+        mime = t.get("mime")
+        if mime not in ("image/png", "image/jpeg"):
+            mime = "application/octet-stream"
+        return raw, mime
 
     def _in_lane_state(self, c, o, st, now, src):
         pid = _s(o.get("project_id"), 120)
@@ -2692,6 +2781,10 @@ class ControlCenter:
                                   "sha256, status, data, mime FROM cc_artifacts WHERE artifact_id=?",
                                   (eid,))
             return {**_uj(r.pop("data"), {}), **r} if r else None
+        if kind == "build_run":
+            r = self.db.query_one("SELECT run_id, project_id, task_id, ts FROM cc_build_runs "
+                                  "WHERE run_id=?", (eid,))
+            return dict(r) if r else None
         if kind == "lane_state":
             r = self.db.query_one("SELECT * FROM cc_lane_state WHERE project_id=?", (eid,))
             return {"project_id": eid, "paused": bool(r["paused"]), **_uj(r["data"], {})} \
@@ -4111,6 +4204,7 @@ class ControlCenter:
                          ("DELETE FROM cc_drafts WHERE updated_ts < ?", cut),
                          ("DELETE FROM cc_lane_units WHERE received_ts < ?", cut),
                          ("DELETE FROM cc_artifacts WHERE received_ts < ?", cut),
+                         ("DELETE FROM cc_build_runs WHERE received_ts < ?", cut),
                          ("DELETE FROM cc_batches WHERE ts < ?", cut),
                          ("DELETE FROM cc_coord_events WHERE received_ts < ?", cut)):
             n += self.db.execute_count(sql, (arg,))

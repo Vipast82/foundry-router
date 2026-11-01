@@ -89,6 +89,12 @@ CREATE TABLE IF NOT EXISTS resource_journal (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, resource TEXT, project_id TEXT,
   owner TEXT, event TEXT, purpose TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS idx_rj_res ON resource_journal(resource, ts);
+-- one row per Blender run (build_journal.py, BLENDER_BUILD_REPLAY_PLAN R1); the files
+-- (thumbnails, script copy, log tail) live under state_dir/build_journal/
+CREATE TABLE IF NOT EXISTS build_runs (
+  run_id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, session_id TEXT, source TEXT,
+  ts REAL, data TEXT);
+CREATE INDEX IF NOT EXISTS idx_build_runs_task ON build_runs(project_id, task_id, ts);
 """
 # columns added after the first schema version (ALTER TABLE on open; idempotent)
 MIGRATIONS = (

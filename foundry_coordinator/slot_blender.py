@@ -23,6 +23,7 @@ to a local Blender (outputs from two machines could differ).
 
 from __future__ import annotations
 
+import collections
 import io
 import json
 import os
@@ -212,6 +213,7 @@ cd "$W"
 echo "foundry-blender: running on $(hostname) with $T threads: blender {quoted}" >&2
 blender {quoted} 1>&2
 rc=$?
+echo "foundry-blender: blender exit $rc" >&2
 find . \\( -path ./.git -o -name __pycache__ \\) -prune -o -type f -newer "$M" -print0 \\
     | tar --null -T - -cf -
 exit $rc
@@ -335,6 +337,8 @@ def run(a, blender_args: list) -> int:
     head = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
     files, deleted = local_changes(repo)
     t0 = time.time()
+    journal = bool(cfg.get("journal"))              # build replay R1 (BLENDER_BUILD_REPLAY_PLAN)
+    marks: dict = {}
     log(f"{cfg.get('slot') or host}: {head[:12]} + {len(files)} changed, {len(deleted)} deleted "
         f"file(s) -> the slot")
     r = _git(repo, "push", "-q", "--force", url, f"{head}:refs/heads/blender/{run_id}",
@@ -343,6 +347,7 @@ def run(a, blender_args: list) -> int:
         log("cannot reach the slot's game mirror: "
             + (r.stderr or r.stdout).decode("utf-8", "replace").strip()[-300:])
         return 3
+    marks["pushed"] = time.time()
     # B2b: the game's asset library, copied into the slot (only what changed) before the run
     library = "" if a.no_library else (a.library or str(cfg.get("library") or ""))
     if library and os.path.isdir(library):
@@ -353,10 +358,18 @@ def run(a, blender_args: list) -> int:
     elif library:
         log(f"no asset library at {library} on this PC: running without it")
         library = ""
+    marks["library"] = time.time()
     script = remote_script(run_id, a.wait, a.threads, blender_args, library=bool(library))
     p = subprocess.Popen(slots.exec_argv(slot, ["bash", "-c", script], interactive=True),
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE if journal else None,
                          creationflags=_NO_WINDOW)
+    tail, keys = collections.deque(maxlen=400), []
+    teer = None
+    if journal:
+        # Blender's output still streams live; a copy is kept for the journal's log tail
+        teer = threading.Thread(target=_tee, args=(p.stderr, tail, keys, marks), daemon=True)
+        teer.start()
     sender = threading.Thread(target=_send_tar, args=(p.stdin, repo, files, deleted),
                               daemon=True)
     sender.start()
@@ -379,6 +392,13 @@ def run(a, blender_args: list) -> int:
         log("the slot's session did not end; stopped it")
         rc = p.wait()
     sender.join(timeout=30)
+    if teer is not None:
+        teer.join(timeout=10)
+    if journal:
+        _journal(cfg, repo, blender_args, rc, t0, marks, list(tail), keys, back,
+                 {"slot": cfg.get("slot") or "", "host": host, "commit": head,
+                  "uncommitted": len(files), "deleted": len(deleted), "worktree": repo,
+                  "branch": f"blender/{run_id}"})
     if rc == BUSY_EXIT:
         return rc
     log(f"Blender exit {rc} after {time.time() - t0:.0f} s; {len(back)} file(s) back"
@@ -388,6 +408,58 @@ def run(a, blender_args: list) -> int:
     if len(back) > 200:
         print(f"  ... and {len(back) - 200} more", file=sys.stderr)
     return rc
+
+
+def _tee(stream, tail, keys: list, marks: dict) -> None:
+    """Copy the slot session's stderr to ours as it arrives, keeping the last lines, the lines
+    that matter and when Blender started and ended (the remote script's own markers)."""
+    from .build_journal import _KEY
+    out = getattr(sys.stderr, "buffer", None)
+    try:
+        for raw in iter(stream.readline, b""):
+            try:
+                if out is not None:
+                    out.write(raw)
+                else:
+                    sys.stderr.write(raw.decode("utf-8", "replace"))
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            tail.append(line)
+            if _KEY.search(line) and len(keys) < 500:
+                keys.append(line[:300])
+            if "foundry-blender: running on" in line:
+                marks.setdefault("blender_start", time.time())
+            elif "foundry-blender: blender exit" in line:
+                marks["blender_end"] = time.time()
+    except (OSError, ValueError):
+        pass
+
+
+def _journal(cfg: dict, repo: str, args: list, rc: int, t0: float, marks: dict, tail: list,
+             keys: list, back: list, where: dict) -> None:
+    """One build-journal entry for this run; a failure is one log line, never a changed exit."""
+    from . import build_journal as BJ
+    end = time.time()
+    m = {"start": t0, **marks, "end": end}
+
+    def span(a, b):
+        return round(m[b] - m[a], 1) if a in m and b in m else None
+    timings = {"push": span("start", "pushed"), "library": span("pushed", "library"),
+               "prepare": span("library", "blender_start"),
+               "blender": span("blender_start", "blender_end"),
+               "copy_back": span("blender_end", "end")}
+    state = os.environ.get("FOUNDRY_COORD_STATE") or \
+        os.path.join(os.path.expanduser("~"), ".foundry-coordinator")
+    notes = ["the slot stayed busy: Blender did not run"] if rc == BUSY_EXIT else []
+    e = BJ.record(state, project_id=str(cfg.get("project") or ""),
+                  task_id=str(cfg.get("task") or ""), source="slot", repo=repo, args=args,
+                  exit_code=rc, started_ts=t0, ended_ts=end, log_lines=tail, keys=keys,
+                  files_back=[] if rc == BUSY_EXIT else back,
+                  timings={k: v for k, v in timings.items() if v is not None}, where=where,
+                  opts={k: cfg[k] for k in BJ.DEFAULTS if k in cfg}, notes=notes)
+    log(f"build journal: {e['run_id']}" if e else "build journal: could not be written")
 
 
 # ----------------------------------------------------------------------------- B2: sprints
@@ -430,7 +502,7 @@ def wrapper_paths(profile, state_dir: str = "") -> tuple[str, str]:
     return base + ".json", base + (".cmd" if os.name == "nt" else ".sh")
 
 
-def prepare(profile, state_dir: str) -> Optional[dict]:
+def prepare(profile, state_dir: str, task_id: str = "", run_id: str = "") -> Optional[dict]:
     """When this project's Blender runs on a slot: write its settings and a drop-in for the
     `blender` command (same arguments) for this worktree; return {slot, command} or
     {slot, error}. None when Blender runs on this PC."""
@@ -453,6 +525,10 @@ def prepare(profile, state_dir: str) -> Optional[dict]:
            "library": str(((getattr(profile, "raw", None) or {}).get("blender") or {})
                           .get("library", "C:/Roblox/AssetLibrary") or ""),
            **{k: s.get(k) for k in ("host", "container", "au_push_url")}}
+    # build replay (docs/plans/BLENDER_BUILD_REPLAY_PLAN.md R1): the task the prompt is for and
+    # the journal settings, read again by every run of the drop-in
+    from .build_journal import settings as journal_settings
+    cfg.update(task=str(task_id or ""), run_id=str(run_id or ""), **journal_settings(profile))
     if [str(x) for x in (s.get("ssh") or [])] not in ([], slots.SSH_DEFAULT):
         cfg["ssh"] = s["ssh"]
     _write(cfg_path, json.dumps(cfg, indent=1))

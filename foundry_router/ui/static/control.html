@@ -332,6 +332,14 @@ body.narrow-ui #floatLayer { display:none; }
 .gedge.deferred { stroke:var(--warn); stroke-dasharray:2 5; } .gedge.waiting { stroke:var(--info); stroke-dasharray:1 3; }
 .gnode.k-artifact rect { stroke:var(--syn-str); } .gnode.k-lane_unit rect { stroke:var(--syn-fn); }
 .diff .dadd { color:var(--ok); } .diff .ddel { color:var(--bad); } .diff .dhunk { color:var(--info); } .diff .dfile { color:var(--syn-kw); font-weight:600; }
+.bld-strip { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+.bld-strip img { max-width:72px; max-height:72px; border:1px solid var(--line); border-radius:3px; cursor:pointer; }
+.bld-strip img.sel { outline:2px solid var(--accent); outline-offset:1px; }
+.bld-big { max-width:100%; max-height:320px; border:1px solid var(--line); border-radius:3px; display:block; margin:4px 0; }
+.bld pre { max-height:220px; overflow:auto; background:var(--code-bg); padding:4px 6px; border-radius:3px; white-space:pre-wrap; word-break:break-all; margin:4px 0; }
+.bld:focus { outline:1px dashed var(--focus); outline-offset:2px; }
+.bld-runs tr.sel td { background:var(--sel); }
+.bld-runs tr { cursor:pointer; }
 .lane-thumb { max-width:120px; max-height:80px; border:1px solid var(--line); border-radius:3px; image-rendering:auto; }
 .gedge.active { stroke:var(--ok); stroke-width:2.6; stroke-dasharray:6 4; }
 body.anim .gedge.active { animation:flow 0.9s linear infinite; }
@@ -500,7 +508,7 @@ const PREF_VERSION = 4;
 const SECTIONS_V3 = ["readiness", "checklist", "decisions", "budgets", "evidence", "recovered", "findings"];
 // v4 (coordinator 0.123): the lead recovery case, right after the sprint sections
 const SECTIONS_V4 = ["lead"];
-const SECTIONS = ["identity", ...SECTIONS_V3, ...SECTIONS_V4, "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
+const SECTIONS = ["identity", ...SECTIONS_V3, ...SECTIONS_V4, "builds", "context", "tokens", "speed", "routes", "mcp", "todo", "helpers",
   "capacity", "lanes", "verification", "capabilities", "sessions", "search", "actions"];
 const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens: "Tokens", speed: "Speed & latency",
   routes: "Models & routes", mcp: "MCP servers", todo: "To-do", helpers: "Helpers",
@@ -508,7 +516,7 @@ const SECTION_TITLES = {identity: "Identity & state", context: "Context", tokens
   capabilities: "Other capabilities", sessions: "Sessions & history", search: "Search", actions: "Operator actions",
   readiness: "Readiness", checklist: "Required work", decisions: "Decisions", budgets: "Budgets",
   evidence: "Evidence", recovered: "Recovered results", findings: "Repeated findings & approach",
-  lead: "Lead recovery"};
+  lead: "Lead recovery", builds: "Build replay"};
 // One plain-language line per Inspector section (hover the section title).
 const SECTION_HELP = {identity: "Which task and session this is, and the coordinator's state for it.",
   readiness: "Checks run before a session starts (tools, environment). A failing blocking check stops the task.",
@@ -518,6 +526,7 @@ const SECTION_HELP = {identity: "Which task and session this is, and the coordin
   evidence: "Proof recorded for each check: reusable, stale or missing.",
   recovered: "Results from earlier sessions that the coordinator could reuse.",
   findings: "Problems that keep coming back, and whether the approach changed.",
+  builds: "Every Blender run of this task: the builder script and its diff, the result lines and the renders. Step through the runs to watch the model change.",
   lead: "The Lead manager's recovery case when the task got stuck.",
   context: "How full the model's context window is.", tokens: "Tokens read, written and cached by this session.",
   speed: "Generation speed and response latency for this session.", routes: "Which models and backends served this session.",
@@ -611,6 +620,12 @@ function migratePrefs(raw) {
     const o = out.sidebar.order;
     const last = Math.max(o.indexOf("identity"), ...SECTIONS_V3.map(x => o.indexOf(x)));
     o.splice(last + 1, 0, ...SECTIONS_V4.filter(x => !o.includes(x)));
+  }
+  if (!out.sidebar.order.includes("builds")) {
+    // v0.168.0: Build replay follows the sprint sections and Lead recovery, not the bottom
+    const o = out.sidebar.order;
+    const last = Math.max(o.indexOf("identity"), ...SECTIONS_V3.map(x => o.indexOf(x)), ...SECTIONS_V4.map(x => o.indexOf(x)));
+    o.splice(last + 1, 0, "builds");
   }
   for (const s of SECTIONS) if (!out.sidebar.order.includes(s)) out.sidebar.order.push(s);
   out.v = PREF_VERSION;
@@ -902,6 +917,7 @@ function onBatch(b) {
       case "snapshot": S.snapshots.set(`${e.kind}|${e.project_id}|${e.session_id}`, e); touched.add("*snap"); break;
       case "source": S.sources = [...(S.sources || []).filter(s => s.source_id !== e.source_id), e]; renderConn(); break;
       case "lane_unit": case "artifact": case "lane_state": S.lanesAt = 0; touched.add("*lanes"); break;
+      case "build_run": if (S.builds && S.builds.key === taskKey(e.project_id, e.task_id)) S.builds.at = 0; break;
       case "project_status": S.projectStatus[e.project_id] = e; pauseChanged = true; break;
     }
   }
@@ -1965,6 +1981,48 @@ const SECTION_RENDER = {
       <span class="dim">${esc(tsText(r.ts, "datetime"))}</span><div>${esc(r.detail || "")}</div>${provRefs("rec:" + (r.check_id || r.kind) + ":" + i, r.refs || (r.session_id ? {session_id: r.session_id} : null))}</li>`).join("")}</ul>
       <div class="src">Results credited from earlier sessions of this task (not repeated), and reconciled operations.</div>`;
   },
+  builds(s) {
+    const p = (s && s.project_id) || S.project, tid = (s && s.task_id) || S.task;
+    if (!p || !tid) return `<p class="dim">No task selected.</p>`;
+    const k = taskKey(p, tid), b = S.builds;
+    if (!b || b.key !== k || nowS() - (b.at || 0) > 15) loadBuilds(p, tid);
+    if (!b || b.key !== k) return `<p class="dim">Loading…</p>`;
+    if (b.error) return `<div class="errbox">${esc(b.error)}</div>`;
+    const runs = ((b.data || {}).runs || []).filter(r => r && typeof r === "object");
+    if (!runs.length) return `<p class="dim">No Blender runs recorded for this task. Switch on Settings → Fast lane, gate &amp; vision → blender.journal; runs through foundry-blender are recorded.</p>`;
+    S.buildSel = S.buildSel || {};
+    let i = S.buildSel[k]; if (i == null || i < 0 || i >= runs.length) i = runs.length - 1;
+    const r = runs[i], w = r.where || {}, sc = r.script || {};
+    const thumbs = Array.isArray(r.thumbs) ? r.thumbs : [];
+    const vi = thumbs.length ? clamp(+S.buildView || 0, 0, thumbs.length - 1) : 0;
+    const pathOf = n => ((r.renders || []).find(x => x && x.thumb === n) || {}).path || n;
+    const src = n => `/control/api/builds/${encodeURIComponent(r.run_id)}/thumb/${String(n).split("/").map(encodeURIComponent).join("/")}`;
+    const exitPill = x => x === 0 ? sprintPill("exit 0", "ok") : x === 75 ? sprintPill("slot busy (75)", "warn") : x == null ? sprintPill("exit ?", "warn") : sprintPill("exit " + x, "bad");
+    const where = w.slot ? `slot ${w.slot}${w.host ? " (" + w.host + ")" : ""}` : "this PC";
+    const tm = r.timings || {};
+    const tline = ["push", "library", "prepare", "blender", "copy_back"].filter(x => tm[x] != null).map(x => `${x.replace("_", " ")} ${(+tm[x]).toFixed(0)} s`).join(" · ");
+    const open = key => (S.openProv || new Set()).has(key) ? " open" : "";
+    const files = Array.isArray(r.files_back) ? r.files_back : [];
+    const keyl = (Array.isArray(r.key_lines) ? r.key_lines : []).slice(-12);
+    return `<div class="bld" tabindex="0" title="← / → step through the runs">
+      <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap"><button class="ghost" data-bstep="-1" ${i === 0 ? "disabled" : ""} aria-label="Previous run">←</button>
+        <b>run ${esc(i + 1)} of ${esc(runs.length)}</b>
+        <button class="ghost" data-bstep="1" ${i === runs.length - 1 ? "disabled" : ""} aria-label="Next run">→</button>
+        ${exitPill(r.exit)} <span class="dim">${esc(tsText(r.started_ts, "datetime"))} · ${esc(r.source || "?")} · ${esc(where)}${r.seconds != null ? " · " + esc(r.seconds) + " s" : ""}</span></div>
+      ${sc.path ? `<div><code>${esc(sc.path)}</code>${sc.sha256 ? ` <code class="dim" title="${esc(sc.sha256)}">${esc(short(sc.sha256, 10))}</code>` : ""}
+        ${sc.changed ? sprintPill("changed", "info") : sc.changed === false ? sprintPill("unchanged", "") : ""}${sc.first ? sprintPill("first run", "info") : ""}${sc.edited_after_run ? sprintPill("edited after the run", "warn") : ""}${sc.error ? sprintPill(sc.error, "warn") : ""}</div>` : `<div class="dim">no builder script (-P) in this command</div>`}
+      ${tline ? `<div class="dim">${esc(tline)}</div>` : ""}
+      ${(Array.isArray(r.notes) ? r.notes : []).map(n => `<div class="dim">${esc(n)}</div>`).join("")}
+      ${keyl.length ? `<pre>${esc(keyl.join("\n"))}</pre>` : ""}
+      ${thumbs.length ? `<div class="bld-strip">${thumbs.map((n, j) => `<img data-bview="${j}" class="${j === vi ? "sel" : ""}" alt="${esc(pathOf(n))}" title="${esc(pathOf(n))}" src="${esc(src(n))}">`).join("")}</div>
+        <img class="bld-big" alt="${esc(pathOf(thumbs[vi]))}" src="${esc(src(thumbs[vi]))}"><div class="dim">${esc(pathOf(thumbs[vi]))}</div>`
+        : `<div class="dim">${(r.renders || []).length ? "renders recorded without thumbnails" : "no renders in this run"}</div>`}
+      ${sc.diff ? `<details data-prov="bld-diff"${open("bld-diff")}><summary class="dim">Script diff${sc.previous_run ? " from the previous run" : ""} (${esc(sc.diff_lines || 0)} lines)</summary><pre>${esc(sc.diff)}</pre></details>` : ""}
+      ${r.log_tail ? `<details data-prov="bld-log"${open("bld-log")}><summary class="dim">Log tail</summary><pre>${esc(r.log_tail)}</pre></details>` : ""}
+      <details data-prov="bld-files"${open("bld-files")}><summary class="dim">Files back (${esc(r.files_back_total ?? files.length)})</summary><div class="dim">${files.map(f => `<div><code>${esc(Array.isArray(f) ? f[0] : f)}</code>${Array.isArray(f) && f[1] != null ? " " + esc(fmtN(f[1])) + " B" : ""}</div>`).join("") || "none"}</div></details>
+      <table class="t bld-runs" style="margin-top:6px"><tr><th>#</th><th>time</th><th>exit</th><th>script</th><th></th></tr>${runs.map((x, j) => `<tr data-bsel="${j}" class="${j === i ? "sel" : ""}"><td>${esc(j + 1)}</td><td>${esc(tsText(x.started_ts, "time"))}</td><td>${esc(x.exit ?? "?")}</td><td><code class="dim">${esc(short(((x.script || {}).sha256) || "", 8))}</code></td><td>${(x.script || {}).changed ? "changed" : ""}</td></tr>`).join("")}</table>
+      <div class="src">Recorded by the coordinator's build journal (thumbnails only; the full renders stay in the worktree).</div></div>`;
+  },
   findings(s) {
     const {v} = sprintView(s);
     const nr = notReported(v, "finding_history", "Finding history"); if (nr) return nr;
@@ -2428,6 +2486,7 @@ const SECTION_WIRE = {
   budgets(sec) { wireSprint(sec); },
   decisions(sec) { wireSprint(sec); wireDecisionForms(sec); },
   lead(sec) { wireSprint(sec); wireLead(sec); },
+  builds(sec) { wireSprint(sec); wireBuilds(sec); },
   capacity(sec) {
     sec.querySelectorAll("[data-recheck]").forEach(b => b.onclick = async () => {
       const [backend, model] = b.dataset.recheck.split("|");
@@ -2496,6 +2555,30 @@ function tokRows(i, o, r, cr, cw, src, cost) {
   return kv([["Input", fmtN(i)], ["Output", fmtN(o)], ["Reasoning", r ? fmtN(r) : NA("not reported")], ["Cache read", fmtN(cr)], ["Cache write", fmtN(cw)],
     ["Cache hit", hit ? `${hit} <span class="src">cache read ÷ (input + cache read + cache write)</span>` : NA()],
     ["Kilo cost", cost ? "$" + (+cost).toFixed(4) : '<span class="dim" title="Kilo reported $0. That does not prove the service is free (subscription or unpriced).">$0 reported</span>']]) + `<div class="src">${esc(src)}</div>`;
+}
+async function loadBuilds(p, t) {
+  const k = taskKey(p, t);
+  if (S.buildsLoading === k) return; S.buildsLoading = k;
+  try { S.builds = {key: k, data: await api(`tasks/${encodeURIComponent(p)}/${encodeURIComponent(t)}/builds`), at: nowS()}; }
+  catch (e) { S.builds = {key: k, data: null, error: e.message, at: nowS()}; }
+  S.buildsLoading = ""; scheduleInspector();
+}
+function wireBuilds(sec) {
+  const b = S.builds; if (!b || !b.data) return;
+  const n = (b.data.runs || []).length; if (!n) return;
+  S.buildSel = S.buildSel || {};
+  const cur = () => { const i = S.buildSel[b.key]; return i == null || i < 0 || i >= n ? n - 1 : i; };
+  const step = (d, kb) => { S.buildSel[b.key] = clamp(cur() + d, 0, n - 1); S.buildFocus = !!kb; renderInspector(); };
+  sec.querySelectorAll("[data-bstep]").forEach(x => x.onclick = () => step(+x.dataset.bstep));
+  sec.querySelectorAll("[data-bsel]").forEach(x => x.onclick = () => { S.buildSel[b.key] = +x.dataset.bsel; renderInspector(); });
+  sec.querySelectorAll("[data-bview]").forEach(x => x.onclick = () => { S.buildView = +x.dataset.bview; renderInspector(); });
+  const body = sec.querySelector(".bld"); if (!body) return;
+  body.onkeydown = e => {
+    if (e.target !== body && e.target.closest("details, button")) return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); step(-1, true); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); step(1, true); }
+  };
+  if (S.buildFocus) { S.buildFocus = false; body.focus({preventScroll: true}); }
 }
 async function loadTaskTotals(s) {
   const k = taskKey(s.project_id, s.task_id);

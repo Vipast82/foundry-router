@@ -1117,6 +1117,22 @@ FIELDS: list[Field] = [
       "that Studio slot's Blender, through foundry-blender (the sprint's files go there, the "
       "outputs come back; the local blender.exe is denied). A track bound to a slot uses its "
       "own slot.", "fast_lane", "coordinator.slot_blender"),
+    # build replay (docs/plans/BLENDER_BUILD_REPLAY_PLAN.md R1/R2) ----------------------
+    F("blender.journal", "bool", False, "Build replay: keep a journal of every Blender run (the "
+      "builder script with its diff from the last run, the arguments, timings, exit code, files "
+      "back, the result lines and small render thumbnails), shown on the task page as Build "
+      "replay. Runs through foundry-blender are recorded; the big outputs are never copied.",
+      "fast_lane", "coordinator.slot_blender", "next_session"),
+    F("blender.journal_renders", "int", 12, "Build replay: render thumbnails kept per run (render "
+      "views first). 0 = none.", "fast_lane", "coordinator.slot_blender", "next_session",
+      min=0, max=24),
+    F("blender.journal_thumb_px", "int", 256, "Build replay: thumbnail size in pixels (longest "
+      "side).", "fast_lane", "coordinator.slot_blender", "next_session", min=64, max=512),
+    F("blender.journal_keep_days", "int", 30, "Build replay: days a FINISHED task's journal is "
+      "kept. A task that is not finished is never pruned.", "fast_lane",
+      "coordinator.slot_blender", min=1),
+    F("blender.journal_max_runs", "int", 200, "Build replay: runs kept per finished task (the "
+      "newest).", "fast_lane", "coordinator.slot_blender", min=1),
     # the main checkout's Studio on a slot (docs/plans/LINUX_WORKSTATION_PLAN.md W2) ---------
     F("studio.main_slot", "str", "", "The MAIN sprints' Studio: empty = this PC's Studio (today); "
       "a slot id = that Studio slot, like a slot-bound track: the scripted gate runs there (its "

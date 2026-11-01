@@ -318,6 +318,27 @@ async def artifact_thumbnail(request: Request, artifact_id: str):
                              "Content-Security-Policy": "default-src 'none'"})
 
 
+@router.get("/control/api/tasks/{project_id}/{task_id}/builds")
+@_guard
+async def task_builds(request: Request, project_id: str, task_id: str):
+    """Build replay (v0.168.0): the task's Blender runs, oldest first, each journal entry
+    with the names of its render thumbnails."""
+    s = _op(request)
+    return _cc(request).build_runs(project_id, task_id, s["projects"])
+
+
+@router.get("/control/api/builds/{run_id}/thumb/{name:path}")
+@_guard
+async def build_thumbnail(request: Request, run_id: str, name: str):
+    from fastapi.responses import Response
+    s = _op(request)
+    data, mime = _cc(request).build_thumb(run_id, name, s["projects"])
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": "private, max-age=3600",
+                             "X-Content-Type-Options": "nosniff",
+                             "Content-Security-Policy": "default-src 'none'"})
+
+
 @router.get("/control/api/capabilities")
 @_guard
 async def capabilities(request: Request):
