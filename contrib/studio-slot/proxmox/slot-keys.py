@@ -5,6 +5,8 @@ Runs as root on the slot host: once from setup-host.sh, then every 5 minutes fro
 foundry-slot-keys systemd timer. With the slot's own key (secrets scope) it
   * reports this host's ssh HOST public keys (POST /v1/foundry/secrets/host-keys), so the
     coordinator checks this slot strictly and a reinstall or a reused IP is picked up by itself;
+  * keeps the container's CPU limit at the slot's setting (v0.162.1: `docker update --cpus`,
+    live; slot.env for the next start, where the software renderer's threads follow it);
   * fetches the workstation keys to allow (GET /v1/foundry/secrets/authorized-keys: every main PC
     that registered itself, plus the extra keys on Access → Machines) and writes them into a
     Foundry-managed block of /home/studio/.ssh/authorized_keys. Lines outside the block are left
@@ -138,6 +140,64 @@ def write_authorized(keys: list, user: str) -> bool:
     return True
 
 
+def effective_cpus(limit: int, nproc: int) -> int:
+    """The slot's CPU limit: its setting, or 0 = a third of the host's cores (at least 4);
+    never more than the host has (setup-host.sh uses the same rule)."""
+    n = int(limit or 0)
+    if n <= 0:
+        n = max(4, nproc // 3)
+    return max(1, min(n, nproc))
+
+
+def set_env_line(text: str, key: str, value: str) -> str:
+    """slot.env with KEY=value set (added when missing)."""
+    lines, done = text.splitlines(), False
+    for i, line in enumerate(lines):
+        if line.startswith(key + "="):
+            lines[i], done = f"{key}={value}", True
+    if not done:
+        lines.append(f"{key}={value}")
+    return "\n".join(lines) + "\n"
+
+
+def apply_cpu_limit(host: dict) -> str:
+    """Keep the running container's CPU limit (docker update, live) and slot.env (for the
+    next container start: SLOT_CPUS, and the renderer's SLOT_RENDER_THREADS) at the router's
+    setting. Returns what changed ('' = nothing)."""
+    import subprocess
+    want = effective_cpus(int(host.get("cpu_limit") or 0), os.cpu_count() or 4)
+    name = str(host.get("container") or "studio-slot")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
+        return ""
+    out = []
+    r = subprocess.run(["docker", "inspect", "-f", "{{.HostConfig.NanoCpus}}", name],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode == 0 and r.stdout.strip().isdigit() and \
+            int(r.stdout.strip()) != want * 1_000_000_000:
+        u = subprocess.run(["docker", "update", "--cpus", str(want), name],
+                           capture_output=True, text=True, timeout=60)
+        out.append(f"container CPU limit {want}" if u.returncode == 0
+                   else f"docker update failed: {(u.stderr or u.stdout).strip()[-150:]}")
+    p = f"{ROOT}/slot.env"
+    try:
+        with open(p, encoding="utf-8") as f:
+            old = f.read()
+    except OSError:
+        return "; ".join(out)
+    new = set_env_line(set_env_line(old, "SLOT_CPUS", str(want)), "SLOT_RENDER_THREADS", str(want))
+    if new != old:
+        st = os.stat(p)
+        tmp = p + ".foundry-tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new)
+        os.chown(tmp, st.st_uid, st.st_gid)
+        os.replace(tmp, p)
+        out.append(f"slot.env SLOT_CPUS/SLOT_RENDER_THREADS={want} (renderer threads at the next "
+                   "container start)")
+    return "; ".join(out)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--router", default="")
@@ -177,6 +237,13 @@ def main(argv=None) -> int:
     changed = write_authorized(keys, a.user)
     log(f"{len(hk)} host key(s) reported; {len(keys)} workstation key(s) allowed"
         + (" (updated)" if changed else ""))
+    if isinstance(data.get("host"), dict):            # v0.162.1: the slot's CPU limit, live
+        try:
+            done = apply_cpu_limit(data["host"])
+        except (OSError, ValueError) as e:
+            done = f"CPU limit not applied: {e}"
+        if done:
+            log(done)
     return 0
 
 

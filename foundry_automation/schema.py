@@ -546,6 +546,13 @@ SLOT_FIELDS = [
      "(Access → Secrets). Applies when the slot's installer runs again (New code).", None, None),
     ("vnc_port", "int", 6080, "The slot host's port for noVNC. Applies when the slot's installer "
      "runs again.", None, 1),
+    ("cpu_limit", "int", 0, "Cores the slot's container may use (0 = a third of the host's, at "
+     "least 4). Without a GPU, Studio redraws its view in software on every core it gets, even "
+     "when idle. Applied within 5 minutes by the slot host's timer; its renderer threads "
+     "follow at the next container start.", None, 0),
+    ("desktop_size", "str", "", "The slot desktop's size, e.g. 1920x1080 (empty = 2560x1440). "
+     "Smaller means less software drawing; gate screenshots get this size. Applies when the "
+     "slot's installer runs again.", None, None),
 ]
 SLOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 
@@ -565,6 +572,12 @@ def slots_table(path: str, raw) -> dict:
         bad = sorted(set(s) - known)
         if bad:
             raise SettingsError(f"{path}: {where}: unknown keys {bad}", where)
+        if "cpu_limit" in s and not (isinstance(s["cpu_limit"], int) and 0 <= s["cpu_limit"] <= 256):
+            raise SettingsError(f"{path}: {where}.cpu_limit: 0 (auto) or a number of cores",
+                                where + ".cpu_limit")
+        if s.get("desktop_size") and not re.fullmatch(r"\d{3,4}x\d{3,4}", str(s["desktop_size"])):
+            raise SettingsError(f"{path}: {where}.desktop_size: WIDTHxHEIGHT, e.g. 1920x1080",
+                                where + ".desktop_size")
         if "vnc_port" in s and not (isinstance(s["vnc_port"], int) and 1 <= s["vnc_port"] <= 65535):
             raise SettingsError(f"{path}: {where}.vnc_port: a port number (1-65535)",
                                 where + ".vnc_port")

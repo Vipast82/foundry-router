@@ -3303,7 +3303,7 @@ async function tabMachines() {
       <td class="hint" style="white-space:normal">${m.enrolled_ts ? `enrolled ${when(m.enrolled_ts)} from ${esc(m.enrolled_addr || "")}` : ""}
         ${lp ? `<div>last secrets pull ${when(lp.ts)} · ${esc(lp.outcome)}</div>` : ""}</td>
       <td class="nw"><button class="act" data-mc-code="${esc(m.name)}">New code</button>
-        ${m.kind === "slot" ? `<button class="act" data-mc-vnc="${esc(m.name)}">VNC</button>` : ""}
+        ${m.kind === "slot" ? `<button class="act" data-mc-vnc="${esc(m.name)}" title="VNC, CPU limit, desktop size">Settings</button>` : ""}
         ${m.key === "enabled" ? `<button class="act" data-mc-revoke="${esc(m.name)}">Revoke</button>` : ""}
         <button class="act danger" data-mc-del="${esc(m.name)}">Delete</button></td></tr>`;
   }).join("");
@@ -3382,7 +3382,18 @@ async function tabMachines() {
   });
   document.querySelectorAll("[data-mc-vnc]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcVnc, m = d.machines.find(x => x.name === n) || {}, v = m.vnc || {lan: true, port: 6080};
-    const body = openModal(`VNC for ${n}`, `
+    const h = m.host_settings || {cpu_limit: 0, desktop_size: "2560x1440"};
+    const body = openModal(`Settings for ${n}`, `
+      <h4>Resources</h4>
+      <div class="row"><label title="0 = a third of the host's cores (at least 4)">CPU limit (cores)</label>
+        <input type="number" id="mv-cpu" min="0" max="256" value="${esc(h.cpu_limit)}" style="width:90px">
+        <label title="WIDTHxHEIGHT; smaller = less software drawing">desktop size</label>
+        <input id="mv-size" value="${esc(h.desktop_size)}" placeholder="2560x1440" style="width:120px"></div>
+      <p class="hint">Without a GPU, Studio redraws its view in software on every core it gets, even when idle. The CPU limit
+        reaches the slot within 5 minutes (0 = a third of the host's cores, at least 4); its renderer then uses that many threads
+        from the next container start. A smaller desktop draws less; gate screenshots get that size. The desktop size applies
+        when the slot's installer runs again.</p>
+      <h4>VNC</h4>
       <div class="row"><label>VNC on the LAN</label><label class="sw"><input type="checkbox" id="mv-lan" ${v.lan ? "checked" : ""}>On</label>
         <label>port</label><input type="number" id="mv-port" min="1" max="65535" value="${esc(v.port)}" style="width:90px"></div>
       <p class="hint">On: open <code>http://&lt;slot IP&gt;:&lt;port&gt;/</code> from your LAN (it goes straight to the Studio desktop). Off: only
@@ -3392,9 +3403,14 @@ async function tabMachines() {
         <code>SLOT_VNC_PASSWORD</code> (file <code>slot_vnc_password.txt</code>) in the game's group on Access → Secrets; the slot uses it after its
         container restarts. VNC uses only its first 8 characters.</p>
       <div class="row"><button class="act primary" id="mv-save">Save</button></div>`);
-    $("#mv-save", body).onclick = () => api(`machines/${encodeURIComponent(n)}/vnc`, {method: "POST",
-      body: {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080)}})
-      .then(() => { toast("Saved: re-run the slot's installer to apply it"); closeModal(); render(); }).catch(e => toast(e.message, true));
+    $("#mv-save", body).onclick = () => {
+      const size = $("#mv-size", body).value.trim();
+      api(`machines/${encodeURIComponent(n)}/host`, {method: "POST",
+        body: {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080),
+               cpu_limit: Number($("#mv-cpu", body).value || 0), desktop_size: size === "2560x1440" ? "" : size}})
+        .then(() => { toast("Saved: the CPU limit applies within 5 minutes; VNC and the desktop size when the installer runs again"); closeModal(); render(); })
+        .catch(e => toast(e.message, true));
+    };
   });
   document.querySelectorAll("[data-ws-del]").forEach(b => b.onclick = () => {
     const n = b.dataset.wsDel;

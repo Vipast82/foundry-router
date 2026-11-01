@@ -135,7 +135,9 @@ The slot is ready. On the first gate, Foundry:
 |---|---|
 | see a slot | Access → Machines: state (waiting for its installer, not ready yet, connected), last secrets pull, events |
 | change its place, never-sync places, or switch it off | Automation → Settings → Studio slots, then deploy |
-| change its VNC (on the LAN, port) | Access → Machines → **VNC**, then reinstall (New code) |
+| change its VNC (on the LAN, port) | Access → Machines → **Settings**, then reinstall (New code) |
+| limit its CPU | Access → Machines → **Settings** → CPU limit. With no GPU, Studio redraws in software on every core it gets, even when idle. The default (0) is a third of the host's cores, at least 4. It applies within 5 minutes; the renderer's threads follow at the next container start |
+| a smaller desktop (less drawing) | Access → Machines → **Settings** → desktop size, e.g. `1920x1080`, then reinstall. Gate screenshots get that size |
 | reinstall or rebuild | **New code**, then run `setup-host.sh` again in the slot (keeps what exists, gives it a fresh key) |
 | revoke a slot (stolen, retired) | **Revoke**: its key stops working now, and the slot deletes its secret files at its next pull |
 | remove a slot | **Delete**: removes its key and its settings; the LXC itself is untouched (`pct destroy <id>` on Proxmox) |

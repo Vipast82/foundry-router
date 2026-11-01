@@ -338,6 +338,7 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
             "last_pull": pulls[0] if pulls else None,
             "settings": settings,
             "vnc": _vnc_view(svc, m, settings) if m["kind"] == "slot" else None,
+            "host_settings": _host_view(settings) if m["kind"] == "slot" else None,
             "host_keys": [{"type": k.split()[0], "fingerprint": fingerprint(k)}
                           for k in svc.machines.host_keys(m["name"])]}
 
@@ -386,10 +387,14 @@ async def list_machines(request: Request):
 def _slot_settings_from(b: dict) -> dict:
     out = {}
     for k in ("container", "place_id", "universe_id", "rojo_never_place_ids", "enabled",
-              "checkout_timeout_s", "vnc_lan", "vnc_port"):
-        if k in b and b[k] not in (None, ""):
+              "checkout_timeout_s", "vnc_lan", "vnc_port", "cpu_limit", "desktop_size"):
+        if k in b and b[k] is not None and (b[k] != "" or k == "desktop_size"):
             out[k] = b[k]
-    for k in ("place_id", "universe_id", "checkout_timeout_s", "vnc_port"):
+    if "desktop_size" in out:
+        out["desktop_size"] = str(out["desktop_size"]).strip().lower().replace(" ", "")
+        if out["desktop_size"] and not re.fullmatch(r"\d{3,4}x\d{3,4}", out["desktop_size"]):
+            raise MachineError("desktop_size: WIDTHxHEIGHT, e.g. 1920x1080 (empty = 2560x1440)")
+    for k in ("place_id", "universe_id", "checkout_timeout_s", "vnc_port", "cpu_limit"):
         if k in out:
             try:
                 out[k] = int(out[k])
@@ -397,6 +402,8 @@ def _slot_settings_from(b: dict) -> dict:
                 raise MachineError(f"{k}: a whole number")
     if "vnc_port" in out and not 1 <= out["vnc_port"] <= 65535:
         raise MachineError("vnc_port: a port number (1-65535)")
+    if "cpu_limit" in out and not 0 <= out["cpu_limit"] <= 256:
+        raise MachineError("cpu_limit: 0 (a third of the host's cores) or a number of cores")
     if "vnc_lan" in out:
         out["vnc_lan"] = out["vnc_lan"] is True or str(out["vnc_lan"]).lower() in ("1", "true", "on")
     if "rojo_never_place_ids" in out:
@@ -477,26 +484,39 @@ async def new_machine_code(request: Request, name: str):
                         headers={"Cache-Control": "no-store"})
 
 
+HOST_KEYS = ("vnc_lan", "vnc_port", "cpu_limit", "desktop_size")
+
+
 @router.post(A + "/{name}/vnc")
+@router.post(A + "/{name}/host")
 @_guard
-async def machine_vnc(request: Request, name: str):
-    """{vnc_lan, vnc_port}: the slot's noVNC settings (a new deployed settings revision).
-    The slot host applies them when its installer runs again (New code)."""
+async def machine_host_settings(request: Request, name: str):
+    """{vnc_lan?, vnc_port?, cpu_limit?, desktop_size?}: the slot host's settings (a new
+    deployed settings revision). cpu_limit reaches the slot within 5 minutes (its key-refresh
+    timer, docker update); the others when its installer runs again (New code)."""
     svc = _svc(request)
     m = svc.machines.get(name)
     if not m or m["kind"] != "slot":
         raise MachineError(f"no slot {name!r}", "not_found", 404)
     b = await _body(request)
-    s = {k: v for k, v in _slot_settings_from(b).items() if k in ("vnc_lan", "vnc_port")}
+    s = {k: v for k, v in _slot_settings_from(b).items() if k in HOST_KEYS}
     if not s:
-        raise MachineError("vnc_lan and/or vnc_port")
+        raise MachineError("one of " + ", ".join(HOST_KEYS))
     rev = svc.automation.put_slot(m["project"], m["slot"], s, _actor(),
-                                  note=f"Access → Machines: {name} VNC")
-    svc.machines.event(name, "vnc_changed", _addr(),
+                                  note=f"Access → Machines: {name} host settings")
+    svc.machines.event(name, "vnc_changed" if set(s) <= {"vnc_lan", "vnc_port"}
+                       else "host_settings", _addr(),
                        ", ".join(f"{k}={v}" for k, v in s.items()))
     from .secrets_api import slot_settings
-    return {"ok": True, "settings_rev": rev.get("rev"),
-            "vnc": _vnc_view(svc, m, slot_settings(svc, m["project"], m["slot"]))}
+    cur = slot_settings(svc, m["project"], m["slot"])
+    return {"ok": True, "settings_rev": rev.get("rev"), "vnc": _vnc_view(svc, m, cur),
+            "host": _host_view(cur)}
+
+
+def _host_view(settings: dict) -> dict:
+    """The slot host's resources: cpu_limit 0 = auto (a third of its cores, at least 4)."""
+    return {"cpu_limit": int(settings.get("cpu_limit") or 0),
+            "desktop_size": str(settings.get("desktop_size") or "") or "2560x1440"}
 
 
 @router.post(A + "/{name}/revoke")
@@ -724,7 +744,13 @@ async def slot_authorized_keys(request: Request):
         m = _slot_caller(svc)
     except MachineError as e:
         return _err(e)
-    return JSONResponse({"keys": authorized_keys(svc)}, headers={"Cache-Control": "no-store"})
+    from .secrets_api import slot_settings
+    s = slot_settings(svc, m["project"], m["slot"])
+    # the host settings the timer applies live (docker update): never anything secret
+    return JSONResponse({"keys": authorized_keys(svc),
+                         "host": {"cpu_limit": int(s.get("cpu_limit") or 0),
+                                  "container": str(s.get("container") or "studio-slot")}},
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.post("/v1/foundry/secrets/host-keys")

@@ -2,6 +2,28 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.162.1 — A slot's CPU limit: an idle Studio no longer takes every core
+
+2026-11-01. Victor: "why is the container using 80% CPU when nothing is going on?"
+- **Cause:** on slot-1 (16 cores, no GPU), Studio itself used ~1300%. Its 3D view is drawn by
+  Mesa's software renderers (`libgallium` llvmpipe and lavapipe, seen in the process), which
+  redraw continuously on every core, even when idle. The installer had given the container all
+  16 cores.
+- **Slot settings** `cpu_limit` (0 = a third of the host's cores, at least 4) and `desktop_size`
+  (empty = 2560x1440), in the schema and validated.
+  - The per-slot **Settings** button on Access → Machines (was **VNC**) holds VNC, CPU limit and
+    desktop size: `POST /admin/api/machines/{name}/host`, with `/vnc` kept.
+- **Slot host:**
+  - setup-host.sh writes `SLOT_CPUS`, `SLOT_RENDER_THREADS` (same number) and `SLOT_GEOMETRY`;
+  - the compose file passes `LP_NUM_THREADS` and `GEOMETRY` from them;
+  - foundry-slot-keys (every 5 minutes) gets the limit with its keys
+    (`/v1/foundry/secrets/authorized-keys` → `host`, nothing secret). It applies a change live
+    with `docker update --cpus` and records it in slot.env, so the renderer's threads follow at
+    the next start.
+- **Right now, by hand** (until slot-1 runs this installer):
+  `docker update --cpus 4 studio-slot` in the LXC.
+- Tests: test_slot_ssh (+2).
+
 ## v0.162.0 — Slot ssh without pasting keys: the main PC registers itself, slots report their host key
 
 2026-11-01. Victor: "can there be a place in Foundry-Router to add the SSH key, so it does the

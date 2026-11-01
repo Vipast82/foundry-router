@@ -1,6 +1,7 @@
 # Plan: the main workstation on Linux (bare metal or a Proxmox LXC)
 
-Status: **plan, nothing built** (2026-11-01). Victor: "If I want to have a LXC container to RUN a
+Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-L1 to D-L6 as recommended
+below). W1 is in progress. Victor: "If I want to have a LXC container to RUN a
 FULL Coding Suite location to take the place of my PC as the main implementor, can we make that?
 or have like a Script Installer for everything I need on a current Linux Install". This replaces
 phase 3 of docs/plans/FRESH_INSTALL_PLAN.md (workstation enrollment) with a Linux-first version,

@@ -14,7 +14,10 @@ services:
       # LXC's localhost: ssh -L 6080:localhost:6080 studio@<lxc>, then http://localhost:6080/
       - "${SLOT_NOVNC_BIND:-127.0.0.1}:${SLOT_NOVNC_PORT:-6080}:6080"
     environment:
-      GEOMETRY: "2560x1440"
+      GEOMETRY: "${SLOT_GEOMETRY:-2560x1440}"
+      # Mesa's software renderer (llvmpipe / lavapipe: no GPU) uses this many threads; it
+      # follows the slot's CPU limit, so an idle Studio cannot take every core of the host
+      LP_NUM_THREADS: "${SLOT_RENDER_THREADS:-4}"
       # this slot's OWN place (one edit session per place per account: never the workstation's
       # TEST place, never another slot's place)
       STUDIO_OPEN: "${STUDIO_OPEN:-}"

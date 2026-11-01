@@ -283,3 +283,51 @@ def test_personal_keys_stay_usable_after_foundrys_own(tmp_path, monkeypatch):
         assert ids[1].endswith(".ssh/id_ed25519") and "state" not in ids[1]
     finally:
         slot_ssh._dir = None
+
+
+# ----------------------------------------------------------------------------- CPU (v0.162.1)
+
+def test_slot_cpu_limit_and_desktop_size_settings(app, client):
+    slot_key = _slot(app, client)
+    m = client.get("/admin/api/machines").json()["machines"][0]
+    assert m["host_settings"] == {"cpu_limit": 0, "desktop_size": "2560x1440"}
+    r = client.post("/admin/api/machines/slot-2/host",
+                    json={"cpu_limit": 6, "desktop_size": "1920x1080"})
+    assert r.status_code == 200, r.text
+    assert r.json()["host"] == {"cpu_limit": 6, "desktop_size": "1920x1080"}
+    s = _svc(app).automation.deployed("animaluprising")["doc"]["settings"]["slots"]["slot-2"]
+    assert s["cpu_limit"] == 6 and s["desktop_size"] == "1920x1080"
+    # the slot host's timer gets the CPU limit with its keys (nothing secret)
+    h = client.get("/v1/foundry/secrets/authorized-keys",
+                   headers={"Authorization": "Bearer " + slot_key}).json()["host"]
+    assert h == {"cpu_limit": 6, "container": "studio-slot"}
+    # back to the defaults; bad values refused
+    r = client.post("/admin/api/machines/slot-2/host", json={"cpu_limit": 0, "desktop_size": ""})
+    assert r.json()["host"] == {"cpu_limit": 0, "desktop_size": "2560x1440"}
+    assert client.post("/admin/api/machines/slot-2/host", json={"cpu_limit": -1}).status_code == 400
+    assert client.post("/admin/api/machines/slot-2/host",
+                       json={"desktop_size": "big"}).status_code == 400
+    # the v0.161.1 path still works
+    assert client.post("/admin/api/machines/slot-2/vnc", json={"vnc_lan": False}).status_code == 200
+
+
+def test_cpu_rules_on_the_slot_host():
+    from foundry_automation.schema import SettingsError, slots_table
+    import pytest
+    sk = _slot_keys()
+    assert sk.effective_cpus(0, 16) == 5 and sk.effective_cpus(0, 8) == 4
+    assert sk.effective_cpus(0, 2) == 2 and sk.effective_cpus(6, 16) == 6
+    assert sk.effective_cpus(64, 16) == 16
+    env = "FOUNDRY_URL=http://r\nSLOT_CPUS=16\n"
+    out = sk.set_env_line(sk.set_env_line(env, "SLOT_CPUS", "5"), "SLOT_RENDER_THREADS", "5")
+    assert out == "FOUNDRY_URL=http://r\nSLOT_CPUS=5\nSLOT_RENDER_THREADS=5\n"
+    with pytest.raises(SettingsError):
+        slots_table("t", {"slot-1": {"container": "c", "desktop_size": "huge"}})
+    with pytest.raises(SettingsError):
+        slots_table("t", {"slot-1": {"container": "c", "cpu_limit": -2}})
+    root = Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "proxmox"
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    assert 'LP_NUM_THREADS: "${SLOT_RENDER_THREADS:-4}"' in compose
+    assert 'GEOMETRY: "${SLOT_GEOMETRY:-2560x1440}"' in compose
+    setup = (root / "setup-host.sh").read_text(encoding="utf-8")
+    assert "SLOT_RENDER_THREADS=$CPUS" in setup and "CPUS=$(( NPROC / 3 ))" in setup
