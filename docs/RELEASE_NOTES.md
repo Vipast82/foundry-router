@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.163.2 — a sprint waiting on a soon-answered decision keeps the main checkout
+
+2026-11-01. At 05:28 MV2-V1 blocked on a decision with a 3-minute default. GF-AFK1 took the main
+checkout in those 3 minutes. When the default resumed MV2-V1, which was earlier in line,
+GF-AFK1 sat mid-review behind MV2-V1's 195-minute regression.
+
+- **`Coordinator._main_pause_is_automatic`:** a BLOCKED sprint whose `decision_wait` names an open
+  decision with a deadline within `LEAD_SHORT_DEFER_SECONDS` (15 min) keeps its place, as a
+  short Lead backoff already does (v0.160.2). A decision with no deadline or a far one still
+  waits for a person, and the checkout goes to the next sprint.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_a_sprint_waiting_on_a_decision_that_answers_itself_soon_keeps_the_main_checkout`). 323
+  engine, Lead and decision tests pass.
+
 ## v0.163.1 — a deploy no longer aborts a running lead call
 
 2026-11-01. The v0.163.0 deploy moved `foundry-deploy` while GF-RT3's lead diagnosis ran. The

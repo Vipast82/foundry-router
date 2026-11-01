@@ -1154,3 +1154,33 @@ def test_a_sprint_with_a_working_lead_case_keeps_the_main_checkout(game, monkeyp
     assert "[lead waits: workspace lock held by game/T2]" in text and "rc-1" in text
     c.store.update_task("game", "T1", data={"recovery_case": "rc-gone"})
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+
+
+def test_a_sprint_waiting_on_a_decision_that_answers_itself_soon_keeps_the_main_checkout(game):
+    """2026-11-01 05:28: MV2-V1 blocked on a 3-minute-default decision, GF-AFK1 took the
+    checkout, and when MV2-V1 resumed (earlier in line) GF-AFK1 sat mid-review behind it."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    for tid in ("T1", "T2"):
+        c.approve("game", tid, [], "victor")
+    from foundry_coordinator import obligations
+    obligations.migrate(c.store)
+    c.store.x("INSERT INTO decisions (decision_id, project_id, task_id, kind, question, status, "
+              "opened_ts, deadline_ts) VALUES ('dec-1', 'game', 'T1', 'implementer_blocked', "
+              "'q', 'open', ?, ?)", (c.clock(), c.clock() + 180))
+    c.store.update_task("game", "T1", state=S.BLOCKED, started_ts=100.0,
+                        blocker="waiting for operator decision dec-1",
+                        data={"decision_wait": {"ids": ["dec-1"], "resume": "READY"}})
+    c.store.update_task("game", "T2", state=S.READY, started_ts=None)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    # no deadline: it waits for a person, so the next sprint goes
+    c.store.x("UPDATE decisions SET deadline_ts=NULL WHERE decision_id='dec-1'")
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    # a far deadline: the same
+    c.store.x("UPDATE decisions SET deadline_ts=? WHERE decision_id='dec-1'", (c.clock() + 7200,))
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    # answered: nothing left to wait for here
+    c.store.x("UPDATE decisions SET deadline_ts=?, status='answered' WHERE decision_id='dec-1'",
+              (c.clock() + 60,))
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""

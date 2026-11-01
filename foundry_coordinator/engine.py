@@ -6969,6 +6969,24 @@ class Coordinator:
             ah = data.get("auto_heal") or {}
             if ah.get("retry_at") and str(o.get("blocker") or "").startswith("auto-heal"):
                 return True
+            # 2026-11-01 05:28-05:31: MV2-V1 blocked on a decision with a 3-minute default;
+            # GF-AFK1 took the checkout in those 3 minutes, and when the default resumed
+            # MV2-V1 (earlier in line) GF-AFK1 sat mid-review behind its 195-min regression.
+            # A decision that answers itself soon keeps the place; one with no deadline, or
+            # a far one, waits for a person and gives the checkout to the next sprint.
+            dw_ids = [str(i) for i in ((data.get("decision_wait") or {}).get("ids") or []) if i]
+            if dw_ids:
+                try:
+                    rows = self.store.q(
+                        "SELECT status, deadline_ts FROM decisions WHERE decision_id IN (%s)"
+                        % ",".join("?" * len(dw_ids)), tuple(dw_ids))
+                except Exception:                                     # noqa: BLE001
+                    rows = []
+                now = self.clock()
+                if any(r["status"] == "open" and r["deadline_ts"] and
+                       float(r["deadline_ts"]) - now <= self.LEAD_SHORT_DEFER_SECONDS
+                       for r in rows):
+                    return True
             # 2026-10-30 20:55-21:12: MV2-11 and GF-RT1 blocked into lead cases and the next
             # main sprint took the checkout in the same tick. The lead (write access) waits
             # for the workspace lock, so no lead call ran for 2 h; the 3-min decision timeout
