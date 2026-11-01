@@ -7081,6 +7081,11 @@ class Coordinator:
         (local, holding `gpu`) ran at once; the local server serves one stream, refused
         AS-D11 three times and each refusal cost it an attempt."""
         out = list(P.profile.resources)
+        if "blender" in out:
+            # BLENDER_POOL_PLAN D-P5: one unit per pool job; the task keeps the unit it holds
+            from .tracks.resources import pick_unit
+            unit = pick_unit(self.store, P, t["task_id"] if t else "", "blender")
+            out = [unit if r == "blender" else r for r in out]
         if t is not None and "gpu" not in out:
             from .fast_lane import is_local_primary
             if is_local_primary(P, t["task_id"]):

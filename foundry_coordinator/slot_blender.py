@@ -123,7 +123,8 @@ def _slot_out(slot, script: str, timeout: float = 120) -> tuple[int, bytes]:
 def lib_sync(slot: dict, root: str, wait: int = 600) -> tuple[bool, str]:
     """Bring the slot's copy of the library up to date: only new or changed files are sent (a
     tar on stdin), files gone here are removed there, and the slot's manifest is written last
-    (an interrupted sync is simply redone). Holds the slot's Blender lock while it writes."""
+    (an interrupted sync is simply redone). Holds the slot's library lock exclusive while it
+    writes, so it waits for the slot's running Blender jobs (they hold it shared)."""
     from . import slots
     if not root or not os.path.isdir(root):
         return True, f"no asset library at {root or '(none set)'}: skipped"
@@ -146,8 +147,8 @@ def lib_sync(slot: dict, root: str, wait: int = 600) -> tuple[bool, str]:
         f"{len(gone)} (first copy is the whole library)")
     script = f"""set -u
 mkdir -p "$HOME/locks" "{LIB_DIR}"
-exec 9>"$HOME/locks/blender.lock"
-flock -w {int(wait)} 9 || {{ echo "foundry-blender: the slot stayed busy" >&2; exit {BUSY_EXIT}; }}
+exec 9>"$HOME/locks/library.lock"
+flock -x -w {int(wait)} 9 || {{ echo "foundry-blender: the slot stayed busy" >&2; exit {BUSY_EXIT}; }}
 tar -xf - -C "{LIB_DIR}" || exit 70
 if [ -f "{LIB_DIR}/{_LIB_DELETE}" ]; then
     (cd "{LIB_DIR}" && xargs -0 -r rm -f -- < "{_LIB_DELETE}"); rm -f "{LIB_DIR}/{_LIB_DELETE}"
@@ -180,20 +181,44 @@ fi
 
 
 def remote_script(run_id: str, wait: int, threads: int, blender_args: list,
-                  library: bool = False) -> str:
-    """The one script the slot runs (bash, in the container). `run_id` is [A-Za-z0-9._-]."""
+                  library: bool = False, job: int = 1, jobs: int = 1) -> str:
+    """The one script the slot runs (bash, in the container). `run_id` is [A-Za-z0-9._-].
+    BLENDER_POOL_PLAN P1: job N of a slot's `jobs` has its own lock, checkout and marker, and
+    Blender gets the slot's CPU divided by the jobs; every job holds the library lock shared
+    (lib_sync takes it exclusive while it writes the library)."""
+    job, jobs = max(1, int(job)), max(1, int(jobs))
+    job = min(job, jobs)
+    # the preferred job first, then any other free one (two runs that probed the slot at the
+    # same moment take two jobs instead of queueing on one); all busy: wait on the preferred
+    order = " ".join(str(n) for n in [job] + [n for n in range(1, jobs + 1) if n != job])
     args = list(blender_args)
     if not any(a in ("-t", "--threads") for a in args):
         args = ["-t", "$T"] + args
     quoted = " ".join('"$T"' if a == "$T" else shlex.quote(a) for a in args)
     return f"""set -u
 mkdir -p "$HOME/locks"
-exec 9>"$HOME/locks/blender.lock"
-if ! flock -w {int(wait)} 9; then
-    echo "foundry-blender: this slot's Blender stayed busy for {int(wait)} s (another job)" >&2
+lockf() {{ if [ "$1" = 1 ]; then echo "$HOME/locks/blender.lock"; else echo "$HOME/locks/blender-$1.lock"; fi; }}
+J=""
+for n in {order}; do
+    exec 9>"$(lockf "$n")"
+    if flock -n 9; then J=$n; break; fi
+    exec 9>&-
+done
+if [ -z "$J" ]; then
+    J={job}
+    exec 9>"$(lockf "$J")"
+    if ! flock -w {int(wait)} 9; then
+        echo "foundry-blender: this slot's Blender stayed busy for {int(wait)} s (another job)" >&2
+        exit {BUSY_EXIT}
+    fi
+fi
+exec 8>"$HOME/locks/library.lock"
+if ! flock -s -w {int(wait)} 8; then
+    echo "foundry-blender: the slot's asset library stayed busy for {int(wait)} s" >&2
     exit {BUSY_EXIT}
 fi
-W="$HOME/work/blender"
+SFX=""; [ "$J" = 1 ] || SFX="-$J"
+W="$HOME/work/blender$SFX"
 if [ ! -d "$W/.git" ]; then git clone -q /work/AnimalUprising "$W" >&2 || exit 70; fi
 git -C "$W" fetch -q origin "refs/heads/blender/{run_id}" >&2 || exit 70
 git -C "$W" -c advice.detachedHead=false checkout -q --force --detach FETCH_HEAD >&2 || exit 70
@@ -206,11 +231,12 @@ T={int(threads)}
 if [ "$T" -le 0 ]; then
     T=$(awk '{{if ($1 == "max") print 0; else print int($1 / $2)}}' /sys/fs/cgroup/cpu.max 2>/dev/null)
     [ -n "$T" ] && [ "$T" -gt 0 ] || T=$(nproc)
+    T=$(( T / {jobs} )); [ "$T" -gt 0 ] || T=1
 fi
-{_lib_shim_script() if library else ""}M="$HOME/locks/blender.marker"
+{_lib_shim_script() if library else ""}M="$HOME/locks/blender$SFX.marker"
 touch "$M"; sleep 1
 cd "$W"
-echo "foundry-blender: running on $(hostname) with $T threads: blender {quoted}" >&2
+echo "foundry-blender: running on $(hostname) job $J of {jobs} with $T threads: blender {quoted}" >&2
 blender {quoted} 1>&2
 rc=$?
 echo "foundry-blender: blender exit $rc" >&2
@@ -315,12 +341,185 @@ def run(a, blender_args: list) -> int:
         log(why)
         return 2
     cfg = load_config(repo, a.config)
+    if cfg.get("pool"):
+        # BLENDER_POOL_PLAN P1: the run goes to a free worker of the pool
+        cfg_path = a.config or os.path.join(repo, CONFIG)
+        wait = int(cfg.get("pool_wait_seconds") or a.wait)
+        got = choose_worker(cfg, cfg_path, wait)
+        if got is None:
+            log(f"every Blender worker of the pool stayed busy for {wait} s")
+            return BUSY_EXIT
+        kind, w, job = got
+        try:
+            if kind == "local":
+                return _run_local(a, cfg, repo, blender_args, w, job)
+            slot = {**slots.DEFAULTS, **{k: v for k, v in w.items() if k in slots.DEFAULTS}}
+            return _run_slot(a, {**cfg, "slot": w["id"]}, repo, blender_args, slot, job[0],
+                             int(w.get("jobs") or 1))
+        finally:
+            try:
+                job[1].close()                       # the job's reservation ends with the run
+            except (AttributeError, OSError):
+                pass
     slot = {**slots.DEFAULTS, **{k: v for k, v in cfg.items() if k in slots.DEFAULTS}}
     for k in ("host", "container", "au_push_url"):
         if getattr(a, k, ""):
             slot[k] = getattr(a, k)
     if a.ssh:
         slot["ssh"] = shlex.split(a.ssh)
+    return _run_slot(a, cfg, repo, blender_args, slot, 1, 1)
+
+
+# ----------------------------------------------------------------------------- the pool
+
+LOCAL = "local"                        # the pool's name for this PC
+LOCAL_EXE = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+POOL_POLL_S = 5
+
+
+def job_lock(job: int) -> str:
+    """A slot job's lock file name (job 1 keeps the pre-pool name)."""
+    return "blender.lock" if job <= 1 else f"blender-{job}.lock"
+
+
+def free_job_script(jobs: int) -> str:
+    """bash: print the first free job number of a slot (0 = all busy). The lock is only tried,
+    never kept: the run takes it again (flock -w), so a lost race only waits."""
+    return (f'mkdir -p "$HOME/locks"\nfor n in $(seq 1 {max(1, int(jobs))}); do\n'
+            '  if [ "$n" = 1 ]; then f="$HOME/locks/blender.lock"; '
+            'else f="$HOME/locks/blender-$n.lock"; fi\n'
+            '  if flock -n "$f" true; then echo "$n"; exit 0; fi\ndone\necho 0\n')
+
+
+def slot_free_job(w: dict) -> int:
+    from . import slots
+    slot = {**slots.DEFAULTS, **{k: v for k, v in w.items() if k in slots.DEFAULTS}}
+    try:
+        rc, out = _slot_out(slot, free_job_script(int(w.get("jobs") or 1)), timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    try:
+        return int(out.decode("utf-8", "replace").strip().splitlines()[-1]) if rc == 0 else 0
+    except (ValueError, IndexError):
+        return 0
+
+
+def local_lock_dir() -> str:
+    return os.path.join(wrapper_dir(), "locks")
+
+
+def local_try(jobs: int, worker: str = LOCAL):
+    """(job number, open lock file) for a free job of `worker`, or None. Every foundry-blender
+    run starts on this PC, so a job is reserved here, race-free, the moment it is chosen
+    (<wrapper_dir>/locks/<worker>-<n>.lock, locked while the file is open: the run's lifetime);
+    a slot's own flock stays as a second guard. 2026-11-01 proof: probing the slot's lock let
+    six runs started together all pick slot-1, which took its lock only after the push."""
+    os.makedirs(local_lock_dir(), exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", worker) or "w"
+    for n in range(1, max(1, int(jobs)) + 1):
+        f = open(os.path.join(local_lock_dir(), f"{safe}-{n}.lock"), "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return n, f
+        except OSError:
+            f.close()
+    return None
+
+
+def _last_path(cfg_path: str) -> str:
+    return cfg_path + ".last"
+
+
+def choose_worker(cfg: dict, cfg_path: str, wait: int, clock=time.time, sleep=time.sleep,
+                  slot_probe=None, local_probe=None):
+    """D-P4: the worker this worktree used last when it is free, else the pool's order (slots
+    first, this PC last), else wait for the first to free up. Returns (kind, worker, job) with
+    job = (job number, the reservation's open lock file); None after `wait` seconds."""
+    slot_probe = slot_probe or (lambda w: local_try(int(w.get("jobs") or 1), w["id"]))
+    local_probe = local_probe or local_try
+    pool = [w for w in cfg.get("pool") or [] if isinstance(w, dict) and w.get("id")]
+    try:
+        with open(_last_path(cfg_path), encoding="utf-8") as f:
+            last = f.read().strip()
+    except OSError:
+        last = ""
+    order = sorted(pool, key=lambda w: 0 if w["id"] == last else 1)
+    t_end, noted = clock() + max(0, int(wait)), False
+    while True:
+        for w in order:
+            if w["id"] == LOCAL:
+                got = local_probe(int(w.get("jobs") or 1))
+                if got:
+                    _remember(cfg_path, w["id"])
+                    log(f"pool: this PC (job {got[0]})")
+                    return "local", w, got
+            else:
+                got = slot_probe(w)
+                if got:
+                    _remember(cfg_path, w["id"])
+                    log(f"pool: {w['id']} (job {got[0]} of {w.get('jobs') or 1})")
+                    return "slot", w, got
+        if clock() >= t_end:
+            return None
+        if not noted:
+            log("pool: every Blender worker is busy; waiting for the first to free up")
+            noted = True
+        sleep(POOL_POLL_S)
+
+
+def _remember(cfg_path: str, wid: str) -> None:
+    try:
+        _write(_last_path(cfg_path), wid)
+    except OSError:
+        pass
+
+
+def _run_local(a, cfg: dict, repo: str, args: list, w: dict, job) -> int:
+    """This PC as a pool worker: the local Blender, in the worktree itself (the outputs are
+    already where they belong), with the same journal as a slot run."""
+    exe = str(w.get("exe") or cfg.get("local_exe") or LOCAL_EXE)
+    if not os.path.isfile(exe):
+        log(f"this PC's Blender is not at {exe} (setting blender.local_exe)")
+        return 2
+    journal = bool(cfg.get("journal"))
+    t0 = time.time()
+    marks: dict = {"pushed": t0, "library": t0}
+    log(f"running on this PC (job {job[0]}): blender {' '.join(args)}")
+    marker = time.time()
+    p = subprocess.Popen([exe] + list(args), cwd=repo, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         creationflags=_NO_WINDOW)
+    tail, keys = collections.deque(maxlen=400), []
+    marks["blender_start"] = time.time()
+    _tee(p.stdout, tail, keys, marks)
+    rc = p.wait()
+    marks["blender_end"] = time.time()
+    back = _written_since(repo, args, marker) if journal else []
+    if journal:
+        head = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+        _journal({**cfg, "slot": ""}, repo, args, rc, t0, marks, list(tail), keys, back,
+                 {"machine": "this PC", "worker": LOCAL, "job": job[0], "commit": head,
+                  "worktree": repo})
+    log(f"Blender exit {rc} after {time.time() - t0:.0f} s on this PC")
+    return rc
+
+
+def _written_since(repo: str, args: list, since: float) -> list:
+    """Repo-relative files written during a local run: in the folders the arguments name
+    (the journal's render pick needs them; the outputs themselves stay where they are)."""
+    from .build_journal import renders_in_window
+    return renders_in_window(repo, args, "", since, time.time())
+
+
+def _run_slot(a, cfg: dict, repo: str, blender_args: list, slot: dict, job: int,
+              jobs: int) -> int:
+    from . import slots
     host = str(slot.get("host") or "").strip()
     if not (host and slot.get("container")):
         log("no slot to run on: give --host and --container, or a "
@@ -341,8 +540,14 @@ def run(a, blender_args: list) -> int:
     marks: dict = {}
     log(f"{cfg.get('slot') or host}: {head[:12]} + {len(files)} changed, {len(deleted)} deleted "
         f"file(s) -> the slot")
-    r = _git(repo, "push", "-q", "--force", url, f"{head}:refs/heads/blender/{run_id}",
-             timeout=300, env=slots.git_ssh_env(slot))
+    for attempt in range(3):
+        r = _git(repo, "push", "-q", "--force", url, f"{head}:refs/heads/blender/{run_id}",
+                 timeout=300, env=slots.git_ssh_env(slot))
+        if r.returncode == 0:
+            break
+        # builds started together from one worktree push the same branch at once; the loser
+        # of git's ref lock simply tries again (the branch is already at this commit)
+        time.sleep(1 + attempt * 2)
     if r.returncode != 0:
         log("cannot reach the slot's game mirror: "
             + (r.stderr or r.stdout).decode("utf-8", "replace").strip()[-300:])
@@ -359,7 +564,8 @@ def run(a, blender_args: list) -> int:
         log(f"no asset library at {library} on this PC: running without it")
         library = ""
     marks["library"] = time.time()
-    script = remote_script(run_id, a.wait, a.threads, blender_args, library=bool(library))
+    script = remote_script(run_id, a.wait, a.threads, blender_args, library=bool(library),
+                           job=job, jobs=jobs)
     p = subprocess.Popen(slots.exec_argv(slot, ["bash", "-c", script], interactive=True),
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE if journal else None,
@@ -398,7 +604,7 @@ def run(a, blender_args: list) -> int:
         _journal(cfg, repo, blender_args, rc, t0, marks, list(tail), keys, back,
                  {"slot": cfg.get("slot") or "", "host": host, "commit": head,
                   "uncommitted": len(files), "deleted": len(deleted), "worktree": repo,
-                  "branch": f"blender/{run_id}"})
+                  "branch": f"blender/{run_id}", "job": job})
     if rc == BUSY_EXIT:
         return rc
     log(f"Blender exit {rc} after {time.time() - t0:.0f} s; {len(back)} file(s) back"
@@ -454,7 +660,9 @@ def _journal(cfg: dict, repo: str, args: list, rc: int, t0: float, marks: dict, 
         os.path.join(os.path.expanduser("~"), ".foundry-coordinator")
     notes = ["the slot stayed busy: Blender did not run"] if rc == BUSY_EXIT else []
     e = BJ.record(state, project_id=str(cfg.get("project") or ""),
-                  task_id=str(cfg.get("task") or ""), source="slot", repo=repo, args=args,
+                  task_id=str(cfg.get("task") or ""),
+                  source="local" if where.get("machine") == "this PC" else "slot",
+                  repo=repo, args=args,
                   exit_code=rc, started_ts=t0, ended_ts=end, log_lines=tail, keys=keys,
                   files_back=[] if rc == BUSY_EXIT else back,
                   timings={k: v for k, v in timings.items() if v is not None}, where=where,
@@ -478,9 +686,53 @@ def blender_slot(profile) -> str:
     return str((raw.get("blender") or {}).get("slot") or "").strip()
 
 
+def pool(profile) -> list:
+    """BLENDER_POOL_PLAN P1: the project's Blender workers in order, [{id, jobs}], from
+    `blender.pool` ("slot-1:2", "slot-2:2", "local:1"; a dict {id, jobs} works too). `local`
+    (or "this-pc") is this PC. A track bound to a slot gets that slot first (D-B1). [] = no pool
+    (`blender.slot` or this PC, as before)."""
+    raw = ((getattr(profile, "raw", None) or {}).get("blender") or {}).get("pool") or []
+    out, seen = [], set()
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict):
+            wid, jobs = str(item.get("id") or "").strip(), item.get("jobs", 1)
+        else:
+            wid, _, jobs = str(item).strip().partition(":")
+            jobs = jobs.strip() or 1
+        wid = LOCAL if wid.lower() in ("local", "this-pc", "this pc", "pc") else wid
+        try:
+            jobs = max(1, min(8, int(jobs)))
+        except (TypeError, ValueError):
+            jobs = 1
+        if wid and wid not in seen:
+            seen.add(wid)
+            out.append({"id": wid, "jobs": jobs})
+    if not out:
+        return []
+    tslot = str((getattr(profile, "__dict__", {}) or {}).get("slot") or "")
+    if tslot:
+        mine = [w for w in out if w["id"] == tslot] or [{"id": tslot, "jobs": 1}]
+        out = mine + [w for w in out if w["id"] != tslot]
+    # this PC is always the last choice (D-P1)
+    return [w for w in out if w["id"] != LOCAL] + [w for w in out if w["id"] == LOCAL]
+
+
+def blender_capacity(profile) -> int:
+    """How many sprints may hold the coordinator's `blender` resource at once (D-P5): the
+    pool's total jobs, else 1."""
+    return sum(w["jobs"] for w in pool(profile)) or 1
+
+
+def pooled(profile) -> bool:
+    """Sprint Blender goes through the drop-in (a pool or a slot): the local blender.exe is
+    denied in Kilo, the drop-in runs it when this PC is a pool worker."""
+    return bool(pool(profile)) or bool(blender_slot(profile))
+
+
 def deny_rules(profile) -> list:
-    """Kilo rules that keep a sprint off the local Blender while its Blender is on a slot."""
-    if not blender_slot(profile):
+    """Kilo rules that keep a sprint off the local Blender while its Blender is on a slot or a
+    pool (the drop-in runs it then)."""
+    if not pooled(profile):
         return []
     return [{"permission": "bash", "pattern": p, "action": "deny"} for p in LOCAL_BLENDER]
 
@@ -507,6 +759,8 @@ def prepare(profile, state_dir: str, task_id: str = "", run_id: str = "") -> Opt
     `blender` command (same arguments) for this worktree; return {slot, command} or
     {slot, error}. None when Blender runs on this PC."""
     from . import slots
+    if pool(profile):
+        return _prepare_pool(profile, state_dir, task_id, run_id)
     slot_id = blender_slot(profile)
     if not slot_id:
         return None
@@ -532,7 +786,55 @@ def prepare(profile, state_dir: str, task_id: str = "", run_id: str = "") -> Opt
     if [str(x) for x in (s.get("ssh") or [])] not in ([], slots.SSH_DEFAULT):
         cfg["ssh"] = s["ssh"]
     _write(cfg_path, json.dumps(cfg, indent=1))
+    _write_dropin(cmd_path, cfg_path, cfg["workspace"], state_dir)
+    return {"slot": slot_id, "command": cmd_path, "config": cfg_path}
+
+
+def _prepare_pool(profile, state_dir: str, task_id: str, run_id: str) -> dict:
+    """The drop-in's settings for a pool: each worker with what a run needs (a slot's host,
+    container, push url; this PC's Blender), plus the journal settings."""
+    from . import slots
+    from .build_journal import settings as journal_settings
+    bl = (getattr(profile, "raw", None) or {}).get("blender") or {}
+    conf = slots.configured(profile)
+    workers, notes = [], []
+    for w in pool(profile):
+        if w["id"] == LOCAL:
+            workers.append({**w, "exe": str(bl.get("local_exe") or LOCAL_EXE)})
+            continue
+        s = conf.get(w["id"])
+        if not s:
+            notes.append(f"{w['id']}: no enabled slot with that name")
+            continue
+        if not str(s.get("host") or "").strip():
+            notes.append(f"{w['id']}: a local container slot (the pool needs a mini PC)")
+            continue
+        x = {**w, **{k: s.get(k) for k in ("host", "container", "au_push_url")}}
+        if [str(v) for v in (s.get("ssh") or [])] not in ([], slots.SSH_DEFAULT):
+            x["ssh"] = s["ssh"]
+        workers.append(x)
+    label = ", ".join(f"{'this PC' if w['id'] == LOCAL else w['id']} x{w['jobs']}"
+                      for w in workers)
+    if not workers:
+        return {"slot": "pool", "error": "the Blender pool has no usable worker ("
+                                         + "; ".join(notes) + ")"}
+    cfg_path, cmd_path = wrapper_paths(profile, state_dir)
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    cfg = {"project": getattr(profile, "id", ""), "workspace": os.path.realpath(
+               str(profile.workspace)),
+           "library": str(bl.get("library", "C:/Roblox/AssetLibrary") or ""),
+           "pool": workers, "pool_wait_seconds": int(bl.get("pool_wait_seconds") or 600),
+           "local_exe": str(bl.get("local_exe") or LOCAL_EXE),
+           "task": str(task_id or ""), "run_id": str(run_id or ""), **journal_settings(profile)}
+    _write(cfg_path, json.dumps(cfg, indent=1))
+    _write_dropin(cmd_path, cfg_path, cfg["workspace"], state_dir)
+    return {"slot": f"pool ({label})", "pool": [w["id"] for w in workers], "command": cmd_path,
+            "config": cfg_path, "notes": notes}
+
+
+def _write_dropin(cmd_path: str, cfg_path: str, workspace: str, state_dir: str) -> None:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = {"workspace": workspace}
     if os.name == "nt":
         text = ("@echo off\r\n"
                 "rem foundry-blender for this worktree (SLOT_BLENDER_PLAN B2): use it wherever you\r\n"
@@ -550,7 +852,6 @@ def prepare(profile, state_dir: str, task_id: str = "", run_id: str = "") -> Opt
     _write(cmd_path, text)
     if os.name != "nt":
         os.chmod(cmd_path, 0o755)
-    return {"slot": slot_id, "command": cmd_path, "config": cfg_path}
 
 
 def _write(path: str, text: str) -> None:

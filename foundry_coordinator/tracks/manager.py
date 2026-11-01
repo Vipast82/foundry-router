@@ -674,7 +674,9 @@ class TrackManager:
         running = [t["task_id"] for t in self.store.tasks(P.id) if t["state"] not in S.TERMINAL]
         existing = {s for r in self.store.tracks(P.id) if r["state"] in LIVE_STATES
                     for s in r["sprints"]}
-        prop = AN.propose(an, n, running=list(set(running) | existing))
+        from ..slot_blender import blender_capacity
+        prop = AN.propose(an, n, running=list(set(running) | existing),
+                          capacity={"blender": blender_capacity(P.profile)})
         plan_id = "trp-" + uuid.uuid4().hex[:12]
         plan = {"plan_id": plan_id, "project": P.id, "ts": self.clock(), "actor": actor,
                 "max_agents": n, "current_max_agents": self.max_agents(),

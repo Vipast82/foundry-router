@@ -1,6 +1,9 @@
 # Plan: a Blender pool (slot-1, slot-2 and this PC)
 
-Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-P1 to D-P7 as recommended). Victor: "I want to run multiple blenders in
+Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-P1 to D-P7 as recommended).
+**P1–P4 are done (v0.170.0).** Proof: 6 jobs at once went 2 / 2 / 1 over slot-1, slot-2 and this
+PC, all done in 45 s. P3's engine half (one builder session per model, gap 9) waits for its own
+plan. Victor: "I want to run multiple blenders in
 multiple containers / slots and even the main pc to increase speed of asset creation". Nothing
 is built. It builds on docs/plans/SLOT_BLENDER_PLAN.md (foundry-blender, B1–B3) and
 docs/plans/BLENDER_BUILD_REPLAY_PLAN.md (the journal).

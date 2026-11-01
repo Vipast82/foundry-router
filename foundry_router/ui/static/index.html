@@ -3325,6 +3325,16 @@ async function tabMachines() {
       it registers its own ssh key here (Workstations below), and slots allow it. Foundry reaches slots over ssh.</div>`}
     <div class="card"><h3>Machines</h3>
       ${rows ? `<div class="tscroll"><table><tr><th>machine</th><th>state</th><th>host</th><th>place</th><th>VNC</th><th>activity</th><th></th></tr>${rows}</table></div>` : '<p class="hint">None yet.</p>'}</div>
+    <div class="card"><h3>Blender pool</h3>
+      <p class="hint">Where sprints' Blender runs go (Automation → Settings → <code>blender.pool</code>, e.g.
+        <code>slot-1:2</code>, <code>slot-2:2</code>, <code>local:1</code>; <code>local</code> = this PC, always last).
+        Runs of the last 24 hours come from the build replay (<code>blender.journal</code> on).</p>
+      ${(d.blender_pool || []).length ? `<div class="tscroll"><table><tr><th>game</th><th>worker</th><th>jobs at once</th><th>runs (24 h)</th><th>Blender time</th><th>last run</th></tr>${
+        d.blender_pool.flatMap(p => (p.workers.length ? p.workers : [{id: "", jobs: null}]).map(w => `<tr><td class="nw">${esc(p.project)}${p.pool ? "" : ' <span class="hint">(no pool set)</span>'}</td>
+          <td class="nw"><b>${esc(w.id === "local" ? "this PC" : w.id)}</b></td><td class="nw">${w.jobs == null ? '<span class="hint">not in the pool</span>' : esc(w.jobs)}</td>
+          <td class="nw">${esc(w.runs_24h || 0)}</td><td class="nw">${w.blender_s ? esc(Math.round(w.blender_s / 60)) + " min" : ""}</td>
+          <td class="nw">${w.last_ts ? when(w.last_ts) + (w.last_exit != null ? ` · exit ${esc(w.last_exit)}` : "") : ""}</td></tr>`)).join("")}</table></div>`
+        : '<p class="hint">No pool set: Blender runs on <code>blender.slot</code> or this PC.</p>'}</div>
     <div class="card"><h3>Add a Studio slot</h3>
       <div class="row"><label>game</label><select id="mc-project">${d.projects.map(p => `<option>${esc(p)}</option>`).join("")}</select>
         <label title="The slot's id, e.g. slot-2. Tracks are bound to it (tracks start ... --slot slot-2).">slot id</label><input id="mc-slot" placeholder="slot-2" style="width:110px">

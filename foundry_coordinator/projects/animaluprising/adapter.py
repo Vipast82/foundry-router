@@ -483,6 +483,20 @@ class AnimalUprisingAdapter(GenericAdapter):
                     "to run on a slot); if this sprint needs Blender, stop and report BLOCKED "
                     "with this line.\n")
         cmd = b["command"]
+        if b.get("pool"):
+            # BLENDER_POOL_PLAN P1/P3: a pool of workers; several builds may run at once
+            return (f"\nBLENDER RUNS ON A POOL: {b['slot']}. Use `{cmd}` wherever "
+                    "docs/ENVIRONMENT.md says blender.exe: the same arguments (e.g. `py -3 "
+                    f"tools\\guard\\run.py --name blender --shell none -- \"{cmd}\" -b "
+                    "--factory-startup -P tools\\blender\\<tool>.py -- <args>`, or "
+                    f"`selftest_all.py --blender \"{cmd}\"`). Each run goes to a free worker (a "
+                    "mini PC or this PC); the files the run writes come back into the same "
+                    "paths. Paths must be inside this worktree. The plain blender.exe is denied. "
+                    "SEVERAL MODELS: build them at the same time - start one guard run per model "
+                    "with `--bg` (each its own --name and its own output paths), then "
+                    "`py -3 tools\\guard\\run.py --wait <log>` for each; the pool spreads them "
+                    "over the workers. Exit 75 = every worker stayed busy: retry once, then "
+                    "report it.\n")
         return (f"\nBLENDER RUNS ON STUDIO SLOT `{b['slot']}` (a mini PC), not on this PC. Use "
                 f"`{cmd}` wherever docs/ENVIRONMENT.md says blender.exe: the same arguments "
                 f"(e.g. `py -3 tools\\guard\\run.py --name blender --shell none -- \"{cmd}\" -b --factory-startup "

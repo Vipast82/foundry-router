@@ -35,6 +35,36 @@ from typing import Callable, Optional
 from .. import states as S
 
 CAPACITY = {"studio": 1, "gpu": 1, "blender": 1}
+
+
+def capacity(P, res: str) -> int:
+    """Units of a capacity resource: the Blender pool's total jobs for `blender`
+    (BLENDER_POOL_PLAN D-P5), else CAPACITY."""
+    if res == "blender" and P is not None:
+        from ..slot_blender import blender_capacity
+        return blender_capacity(P.profile)
+    return CAPACITY.get(res, 1)
+
+
+def unit_names(res: str, n: int) -> list:
+    """Lock rows of a resource with n units: `blender`, `blender#2`, ..."""
+    return [res] + [f"{res}#{i}" for i in range(2, max(1, int(n)) + 1)]
+
+
+def base(res: str) -> str:
+    return res.split("#", 1)[0]
+
+
+def pick_unit(store, P, task_id: str, res: str) -> str:
+    """The unit row a task takes: the one it already holds, else the first free one, else the
+    first (it waits there and picks again on its next try)."""
+    names = unit_names(res, capacity(P, res))
+    mine = set(store.holds(P.id, task_id)) if task_id else set()
+    for n in names:
+        if n in mine:
+            return n
+    taken = {l["resource"] for l in store.locks()}
+    return next((n for n in names if n not in taken), names[0])
 STUDIO_TOOL_GLOBS = ("Roblox_Studio_*", "robloxstudio-mcp_*", "robloxstudio_mcp_*")
 # needs (analysis.py) -> capacity resources a track sprint holds while it runs
 NEED_RESOURCES = {"blender": ("blender",), "gpu": ("gpu",), "audio": ("gpu",),
@@ -269,7 +299,7 @@ class ResourceManager:
     def acquire_for_track(self, P, track: str, needs) -> Optional[dict]:
         """Capacity resources a track's sprint needs (gpu, blender); None on
         success, else the held row."""
-        res = needs_locks(needs)
+        res = [pick_unit(self.store, P, self.owner_id(track), r) for r in needs_locks(needs)]
         if not res:
             return None
         owner = self.owner_id(track)
@@ -286,7 +316,7 @@ class ResourceManager:
 
     def release_for_track(self, P, track: str) -> None:
         owner = self.owner_id(track)
-        held = [r for r in self.store.holds(P.id, owner) if r in CAPACITY]
+        held = [r for r in self.store.holds(P.id, owner) if base(r) in CAPACITY]
         for r in held:
             self.store.journal(r, P.id, owner, "release", "sprint")
         self.store.release(P.id, owner, held)
@@ -297,7 +327,7 @@ class ResourceManager:
         """The engine's own Studio locks (session start / gate / release), journaled
         under the task so the timeline shows the main sprint's holds too."""
         for r in resources:
-            if r.split(":")[0] in ("studio", "rojo") or r in CAPACITY:
+            if r.split(":")[0] in ("studio", "rojo") or base(r) in CAPACITY:
                 self.store.journal(r, P.id, f"{P.id}/{t['task_id']}", event,
                                    str(t.get("phase") or t.get("state") or ""))
 
@@ -333,5 +363,6 @@ class ResourceManager:
                 "lease": self.lease(P),
                 "runner_lock": runner_lock(P.profile.workspace),
                 "journal": self.store.journal_rows(None, P.id, limit=limit),
-                "capacity": dict(CAPACITY),
-                "held": {r: self.holder(P, r) for r in CAPACITY}}
+                "capacity": {r: capacity(P, r) for r in CAPACITY},
+                "held": {u: self.holder(P, u) for r in CAPACITY
+                         for u in unit_names(r, capacity(P, r))}}

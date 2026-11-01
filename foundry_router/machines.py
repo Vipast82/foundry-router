@@ -397,7 +397,65 @@ async def list_machines(request: Request):
                                             "last_ts")} for w in svc.machines.workstations()],
         "settings": svc.config_store.config.machines.model_dump(),
         "projects": _projects(svc), "kinds": list(KINDS), "tls": _tls(request),
-        "events": svc.machines.events(30)}, headers={"Cache-Control": "no-store"})
+        "events": svc.machines.events(30), "blender_pool": blender_pool(svc)},
+        headers={"Cache-Control": "no-store"})
+
+
+def blender_pool(svc, now: Optional[float] = None) -> list:
+    """BLENDER_POOL_PLAN P4: per project, each Blender pool worker (deployed `blender.pool`)
+    with its jobs and the last 24 h of runs from the build replay (cc_build_runs; only runs the
+    journal recorded). Workers that ran Blender but are not in the pool are listed too."""
+    now = now or time.time()
+    out = []
+    for p in _project_ids(svc):
+        try:
+            dep = svc.automation.deployed(p) or {}
+        except Exception:                                            # noqa: BLE001
+            dep = {}
+        bl = (((dep.get("doc") or {}).get("settings") or {}).get("blender") or {})
+        workers = {}
+        for item in bl.get("pool") or []:
+            wid, _, jobs = str(item).partition(":")
+            wid = "local" if wid.strip().lower() in ("local", "this-pc", "this pc", "pc")                 else wid.strip()
+            if wid:
+                try:
+                    n = max(1, min(8, int(jobs or 1)))
+                except ValueError:
+                    n = 1
+                workers.setdefault(wid, {"id": wid, "jobs": n, "runs_24h": 0, "blender_s": 0.0,
+                                         "last_ts": None, "last_exit": None})
+        try:
+            rows = svc.control.db.query("SELECT ts, data FROM cc_build_runs WHERE project_id=? "
+                                        "AND ts > ? ORDER BY ts", (p, now - 86400))
+        except Exception:                                            # noqa: BLE001
+            rows = []
+        for r in rows:
+            try:
+                e = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            w = e.get("where") or {}
+            wid = w.get("slot") or ("local" if w.get("machine") == "this PC" else "")
+            if not wid:
+                continue
+            x = workers.setdefault(wid, {"id": wid, "jobs": None, "runs_24h": 0,
+                                         "blender_s": 0.0, "last_ts": None, "last_exit": None})
+            x["runs_24h"] += 1
+            x["blender_s"] += float((e.get("timings") or {}).get("blender") or 0)
+            x["last_ts"], x["last_exit"] = r["ts"], e.get("exit")
+        if workers or bl.get("pool"):
+            out.append({"project": p, "pool": bool(bl.get("pool")),
+                        "workers": [{**w, "blender_s": round(w["blender_s"])}
+                                    for w in workers.values()]})
+    return out
+
+
+def _project_ids(svc) -> list:
+    try:
+        return [str(x.get("project") or x.get("id") or "") for x in svc.automation.projects()
+                if x.get("project") or x.get("id")]
+    except Exception:                                                # noqa: BLE001
+        return []
 
 
 def _slot_settings_from(b: dict) -> dict:

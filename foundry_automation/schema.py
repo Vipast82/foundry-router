@@ -1117,6 +1117,20 @@ FIELDS: list[Field] = [
       "that Studio slot's Blender, through foundry-blender (the sprint's files go there, the "
       "outputs come back; the local blender.exe is denied). A track bound to a slot uses its "
       "own slot.", "fast_lane", "coordinator.slot_blender"),
+    # Blender pool (docs/plans/BLENDER_POOL_PLAN.md P1) ------------------------------------
+    F("blender.pool", "list", [], "Blender pool: the workers every sprint's Blender run goes to, "
+      "in order, as worker:jobs, e.g. slot-1:2, slot-2:2, local:1 (local = this PC, always the "
+      "last choice). A run takes the worker its worktree used last when free, else the first "
+      "free one, else waits (blender.pool_wait_seconds). Up to the total jobs of Blender sprints "
+      "run at once. The local blender.exe is denied in sprints (the drop-in runs it). Empty = "
+      "blender.slot or this PC, as before.", "fast_lane", "coordinator.slot_blender",
+      "next_session", item_type="str"),
+    F("blender.pool_wait_seconds", "int", 600, "Blender pool: how long a run waits when every "
+      "worker is busy, then exits 75 (busy).", "fast_lane", "coordinator.slot_blender",
+      "next_session", min=10, max=7200),
+    F("blender.local_exe", "str", "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe",
+      "Blender pool: this PC's Blender, used when `local` is a pool worker (keep it the same "
+      "build as the slots').", "fast_lane", "coordinator.slot_blender", "next_session"),
     # build replay (docs/plans/BLENDER_BUILD_REPLAY_PLAN.md R1/R2) ----------------------
     F("blender.journal", "bool", False, "Build replay: keep a journal of every Blender run (the "
       "builder script with its diff from the last run, the arguments, timings, exit code, files "

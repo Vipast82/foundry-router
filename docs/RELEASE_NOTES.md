@@ -2,6 +2,54 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.170.0 — the Blender pool: slot-1, slot-2 and this PC, several jobs each
+
+2026-11-01. docs/plans/BLENDER_POOL_PLAN.md P1–P4 (Victor: D-P1 to D-P7 as recommended):
+"run multiple blenders in multiple containers / slots and even the main pc".
+
+- **The pool (`blender.pool`, e.g. `slot-1:2`, `slot-2:2`, `local:1`):** every Blender run of a
+  sprint goes through the drop-in to a free worker.
+  - **Which worker (D-P4):** the one this worktree used last when it's free, else the pool's
+    order (slots first, this PC always last), else it waits (`blender.pool_wait_seconds`, 600)
+    and exits 75.
+  - **Reservation:** a job is reserved on this PC the moment it is chosen
+    (`~/.foundry-blender/locks/<worker>-<n>.lock`, held for the run), so runs started together
+    spread instead of piling onto one slot.
+  - **On a slot:** each job has its own lock, checkout (`~/work/blender-N`; job 1 keeps
+    `~/work/blender`) and marker, and Blender gets the slot's CPU divided by its jobs. A slot
+    takes the first free job lock itself, too. Jobs hold the library lock shared; the library
+    copy holds it exclusive. Pushes of the same branch from runs started together retry.
+  - **This PC (`local`):** the drop-in runs `blender.local_exe` in the worktree, with the same
+    reservation, timings and build-replay entry.
+- **Coordinator (D-P5):** the `blender` resource has one unit per pool job (`blender`,
+  `blender#2`, …); a task keeps its unit and otherwise takes the first free one. The track
+  planner proposes as many Blender tracks as there are jobs. With no pool, it's 1 as before.
+- **Sprints (D-P3, P3):** with a pool, Kilo denies the plain `blender.exe` (the drop-in runs it).
+  The prompt names the pool and tells a sprint with several models to start one guard `--bg`
+  run per model, then `--wait` each.
+- **Access → Machines (P4):** a "Blender pool" card: each worker's jobs, and its runs, Blender
+  time and last run over 24 h, from the build replay.
+- **Settings (UI fields):**
+  - `blender.pool`
+  - `blender.pool_wait_seconds`
+  - `blender.local_exe`
+
+  `blender.slot` still works when the pool is empty (D-P7: leave it empty).
+- **P2, slot-2 ready:** the asset library was copied (30,904 files, 4,177 MB, about 8 min) and
+  `build_env_cave --selftest` passed. `selftest_all --blender` through slot-2: every Blender
+  tool passes except `build_bs_king_turret`, which fails the same way on this PC (AU's current
+  KingCoonService has no turret hitbox: a game issue). `export_clip_json` failed once inside the
+  full run and passed alone.
+- **Proof on the machines** (a scratch AU clone, the worktree's code):
+  - 6 Blender jobs of 20 s started together went 2 to slot-1, 2 to slot-2 and 1 to this PC; the
+    sixth waited and took the first free worker. All done in 45 s, against 116 s before the
+    reservation fix and 120 s one after another.
+  - 5 real `build_bs_king.py` builds at once on all three machines: all PASS, 2,416 tris, the
+    same dimensions and the same file size.
+  - Every run had its build-replay entry with its worker and job.
+- **Tests:** `tests/test_blender_pool.py` (14) plus the updated `test_slot_blender`.
+- **Router rebuild needed** for the settings fields and the Machines card; the coordinator side
+  takes effect on a coordinator restart.
 ## v0.169.2 — a Lead's own decision to wait gives the main checkout away
 
 2026-11-01. MV2-CL1's work was green apart from AS-P8's unsettled test. Its Lead decided to wait

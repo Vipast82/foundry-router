@@ -50,7 +50,8 @@ def test_remote_script_locks_uses_its_own_checkout_and_quotes_arguments():
     s = SB.remote_script("wt-1", 600, 0, ["-b", "--factory-startup", "-P", "tools/x.py", "--",
                                             "--name", "a b; rm -rf /"])
     assert 'flock -w 600 9' in s and f"exit {SB.BUSY_EXIT}" in s
-    assert 'W="$HOME/work/blender"' in s and "refs/heads/blender/wt-1" in s
+    assert 'W="$HOME/work/blender$SFX"' in s and 'SFX=""; [ "$J" = 1 ] || SFX="-$J"' in s
+    assert "refs/heads/blender/wt-1" in s
     assert "blender -t \"$T\" -b --factory-startup -P tools/x.py -- --name 'a b; rm -rf /' 1>&2" in s
     assert "-newer \"$M\"" in s and "-path ./.git" in s and "__pycache__" in s
     # threads given by the sprint are kept; a fixed --threads is used as given

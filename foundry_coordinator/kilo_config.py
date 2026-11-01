@@ -341,7 +341,7 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
     from . import slot_blender
     data = _attr(track, "data")
     tslot = str(_attr(track, "slot") or (data.get("slot") if isinstance(data, dict) else "") or "")
-    if tslot or (profile is not None and slot_blender.blender_slot(profile)):
+    if tslot or (profile is not None and slot_blender.pooled(profile)):
         role_rules = with_extra(role_rules, [{"permission": "bash", "pattern": p, "action": "deny"}
                                              for p in slot_blender.LOCAL_BLENDER])
     try:

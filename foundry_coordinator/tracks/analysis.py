@@ -477,10 +477,14 @@ def _track_name(first_sprint: str) -> str:
     return re.sub(r"[^a-z0-9._-]+", "-", first_sprint.lower()).strip("-") or "track"
 
 
-def propose(analysis: dict, max_agents: int, running: Optional[Iterable[str]] = None) -> dict:
+def propose(analysis: dict, max_agents: int, running: Optional[Iterable[str]] = None,
+            capacity: Optional[dict] = None) -> dict:
     """Cut the analysis to `max_agents`: the main track always counts first; up
-    to max_agents-1 parallel tracks, never two that share a capacity-one
-    resource (blender, gpu), longest chains first. Deterministic."""
+    to max_agents-1 parallel tracks, never more of them on a capacity resource
+    (blender, gpu) than it has units (`capacity`, default 1 each; the Blender pool's
+    total jobs for blender, BLENDER_POOL_PLAN D-P5), longest chains first. Deterministic."""
+    cap = {n: 1 for n in CAPACITY_ONE}
+    cap.update({k: max(1, int(v)) for k, v in (capacity or {}).items() if k in cap})
     max_agents = max(1, int(max_agents or 1))
     tracks = list(analysis.get("tracks") or [])
     running = set(running or [])
@@ -489,7 +493,7 @@ def propose(analysis: dict, max_agents: int, running: Optional[Iterable[str]] = 
     main, rest = tracks[0], tracks[1:]
     chosen: list[dict] = []
     notes: list[str] = []
-    taken: set = set()
+    used: dict = {}
     cands = sorted(rest, key=lambda t: (-len(t["sprints"]), t["name"]))
     for t in cands:
         if any(s in running for s in t["sprints"]):
@@ -498,15 +502,19 @@ def propose(analysis: dict, max_agents: int, running: Optional[Iterable[str]] = 
         if len(chosen) >= max_agents - 1:
             notes.append(f"{t['name']}: over max_agents ({max_agents})")
             continue
-        clash = [n for n in t["needs"] if n in CAPACITY_ONE and n in taken]
+        clash = [n for n in t["needs"] if n in cap and used.get(n, 0) >= cap[n]]
         if clash:
             notes.append(f"{t['name']}: would share {', '.join(clash)} with a chosen track")
             continue
-        taken.update(n for n in t["needs"] if n in CAPACITY_ONE)
+        for n in t["needs"]:
+            if n in cap:
+                used[n] = used.get(n, 0) + 1
         chosen.append(t)
     chosen.sort(key=lambda t: tracks.index(t))
     if len(chosen) < max_agents - 1:
-        for t in ready_tracks(analysis, running, chosen, max_agents - 1 - len(chosen)):
+        free = {n: cap[n] - used.get(n, 0) for n in cap}
+        for t in ready_tracks(analysis, running, chosen, max_agents - 1 - len(chosen),
+                              free=free):
             chosen.append(t)
             notes.append(f"{t['name']}: ready now and shares no file with a running sprint "
                          f"({' -> '.join(t['sprints'])})")
@@ -519,7 +527,7 @@ def propose(analysis: dict, max_agents: int, running: Optional[Iterable[str]] = 
 
 
 def ready_tracks(analysis: dict, running: Iterable[str], chosen: list, limit: int,
-                 max_chain: int = 6) -> list[dict]:
+                 max_chain: int = 6, free: Optional[dict] = None) -> list[dict]:
     """Parallel tracks cut from the open sprints when grouping by shared files leaves too few
     (2026-10-30: across ~40 open AU sprints a handful of shared files linked everything into
     one chain, and the planner offered nothing; the hand-picked rt, shop1, ux and pt tracks
@@ -559,7 +567,8 @@ def ready_tracks(analysis: dict, running: Iterable[str], chosen: list, limit: in
             break
         if i in running or i in taken or not deps_ok(i):
             continue
-        if any(n in CAPACITY_ONE or n == "blender" for n in sp[i].needs) or not clear(i):
+        # a capacity resource with units left (the Blender pool) may start one more chain
+        if any(n in CAPACITY_ONE and (free or {}).get(n, 0) <= 0 for n in sp[i].needs)                 or not clear(i):
             continue
         chain = [i]
         for j in open_ids:
@@ -573,6 +582,9 @@ def ready_tracks(analysis: dict, running: Iterable[str], chosen: list, limit: in
             if clear(j, extra=chain):
                 chain.append(j)
         needs = _normalize(n for t in chain for n in sp[t].needs)
+        for n in needs:
+            if free is not None and n in free:
+                free[n] -= 1
         out.append({"name": _track_name(chain[0]), "sprints": chain, "needs": needs or ["none"],
                     "studio_at_merge": "studio" in needs, "kind": "parallel", "ready": True})
         taken.update(chain)
