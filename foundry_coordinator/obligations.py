@@ -809,9 +809,9 @@ class Obligations:
                                   if a["revision"] == revision]
                     approved = False
                     if candidates:
-                        rule = next((r for r in P.profile.approvals
-                                     if r.kind == "visual"), None)
-                        spec = P.adapter.describe(task) if rule else None
+                        from .asset_judge import rule_for
+                        spec = P.adapter.describe(task)
+                        rule = rule_for(P, spec, "visual")
                         arts = (P.adapter.approval_artifacts(spec, rule.artifacts)
                                 if rule else {})
                         required = {e["ref"] for e in ob["required_evidence"]

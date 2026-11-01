@@ -1807,7 +1807,8 @@ class TelemetryBridge:
             try:
                 spec = P.adapter.describe(t["task_id"])
                 for k in kinds:
-                    rule = next((r for r in P.profile.approvals if r.kind == k), None)
+                    from .asset_judge import rule_for
+                    rule = rule_for(P, spec, k)
                     arts[k] = (P.adapter.approval_artifacts(spec, rule.artifacts)
                                if rule and rule.artifacts else {})
             except Exception as e:                               # noqa: BLE001

@@ -324,6 +324,9 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
     """One fail-closed approval attempt; the caller rechecks artifact hashes."""
     if not enabled(P) or rule.kind != "visual" or P.foundry is None:
         return
+    if str(getattr(rule, "rubric", "") or "").lower() == "asset":
+        from . import asset_judge                    # v0.167.0: 3D model sprints
+        return asset_judge.step(c, P, t, spec, rule, revision)
     pid, tid = P.id, t["task_id"]
     dirty = {path for _, path in P.ws.status()}
     if P.ws.head() != revision and not _frames_unchanged_since(P, spec, rule, revision):

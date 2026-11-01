@@ -116,6 +116,10 @@ deps_accept_pending = ["visual"]
 # Opt in after granting the coordinator key a strict, vision-capable persona.
 # Reviews current committed frames and records a revision-bound visual verdict.
 visual_model = false
+# v0.167.0 asset judge (reports/ASSET_PIPELINE_REVIEW_2026-11.md gap 4): 3D model sprints
+# get an independent vision check against their reference images (the rubric "asset" rule
+# below). Off = that rule is ignored. Switch: Automation -> Settings -> approval.asset_judge.
+asset_judge = false
 
 # OPTIONAL (v0.122): evidence memory, obligations and targeted recovery.
 # Off by default; see docs/SPRINT_LIFECYCLE.md for the pilot procedure.
@@ -127,6 +131,28 @@ match = "visual"
 kind = "visual"
 stage = "after_close"
 artifacts = ["docs/evidence/{task}/*.png", "docs/evidence/{task}/*.jpg", "docs/evidence/{task}/*.jpeg"]
+
+# Asset judge rule (read only when [approval] asset_judge = true). It applies to a sprint whose
+# plan lists a model file (.blend under assets/source or .fbx under assets/exports) and has a
+# reference image; it then replaces the screenshot rule above for that sprint. First the judge
+# writes its own checklist from the references (the AS-P9 aligned views when they exist, else
+# the approved concept sheet) and the asset's checklist.md; then it scores the sprint's
+# evidence images under shuffled letters.
+[[approval.rules]]
+match = "tier:*"
+kind = "visual"
+stage = "after_close"
+rubric = "asset"
+artifacts = ["docs/evidence/{task}/**/*.png"]
+scope_any = ["assets/source/*.blend", "assets/exports/*.fbx"]
+asset_from = ['^assets/source/[^/]+/([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)/',
+              '^assets/exports/(?:[^/]+/)?([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)(?:/|_|\*|\.fbx$)']
+references = ["assets/source/*/{asset}/ref/{asset}_views_v*.png",
+              "assets/source/*/{asset}/ref/{asset}_final-boss_v*.png",
+              "assets/source/*/{asset}/ref/{asset}_ref_v*.png",
+              "assets/source/*/{asset}/ref/{asset}_concept_v*.png"]
+notes = ["assets/source/*/{asset}/checklist.md"]
+max_frames = 12
 
 [publish]
 # 2026-10-27 (Victor): the coordinator pushes master after closeout verification,

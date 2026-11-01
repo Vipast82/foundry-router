@@ -618,7 +618,8 @@ class ControlChannel:
             return f"{tid} is not waiting for a {kind!r} approval"
         P = self.c.projects[pid]
         spec = P.adapter.describe(tid)
-        rule = next((r for r in P.profile.approvals if r.kind == kind), None)
+        from .asset_judge import rule_for
+        rule = rule_for(P, spec, kind)
         if rule is None:
             return f"no approval rule {kind!r} in the profile"
         revision = t["reviewed_sha"] if data.get("stage") == "before_close" else t["head_sha"]

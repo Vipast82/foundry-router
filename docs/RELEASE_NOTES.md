@@ -2,6 +2,69 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.167.0 — Asset judge: an independent, blind vision check for 3D model sprints
+
+2026-11-01. Phase B of `reports/ASSET_PIPELINE_REVIEW_2026-11.md` (gap 4; Victor: "Yes,
+recommended", then "Phase B (asset judge)").
+
+**Why:**
+- AU's 3D sprints were judged only by the builder itself (the "look gate").
+- The coordinator's vision approval is a UI-screen check that never saw the concept. It also
+  never ran on asset sprints: their plans list `docs/evidence/<ID>/**`, not named PNGs.
+- An outside test of AI Blender builds found that a fresh judge works best. It writes its own
+  checklist from the design, then scores the models under shuffled letters.
+
+**What it does (`foundry_coordinator/asset_judge.py`):**
+- **It runs** when `[approval] asset_judge` is on and an approval rule with `rubric = "asset"`
+  applies to the task. A rule applies when:
+  - its tag matches;
+  - its `scope_any` globs name a file in the plan (a model sprint lists its `.blend` / `.fbx`);
+  - a reference image is found for an asset id that `asset_from` takes from the plan scope.
+- **When it applies,** it replaces the screenshot rule for that task. A rule with no reference
+  does not apply, and the task's other rules decide, as before.
+- **Call 1, checklist:** a fresh vision session gets only the reference images (per asset, the
+  first `references` glob with a hit; aligned views before the concept sheet), the asset's
+  `notes` (e.g. its `checklist.md`) and the sprint criteria. It writes its own 6-30 item
+  checklist: parts, position, side (+X / −X under the house axes), colours, proportions,
+  details. It is keyed by the references' bytes, so a rework pass reuses it (paid once).
+- **Call 2, score:** another fresh session gets the checklist, the references and up to
+  `max_frames` (default 12) model images. The images come in view order and are labelled with
+  letters shuffled by a hash of the revision; file names are hidden. The judge scores every item
+  pass / fail / unclear and gives a verdict for every image.
+- **The coordinator computes the verdict itself:**
+  - a failed item or a defect → CHANGES, with file paths mapped back from the letters;
+  - too many unclear items → uncertain;
+  - else approve. The approval note carries the score (e.g. `score 11/12`).
+- **Same safety as the screenshot approval:**
+  - it is bound to the revision and the image bytes, and a paid call is never repeated;
+  - the serving model must be one of the persona's vision routes;
+  - one structured retry of an inconclusive answer, then accepted with notes (W1.3);
+  - CHANGES rounds follow `[fast_lane] max_vision_rounds`;
+  - the event `asset_judge_review` records the letters, score, references and findings.
+- **Tracks:** an asset rule also runs on a track sprint, because it judges committed renders.
+- **One rule per task everywhere:** the engine, the control center's approval card, telemetry
+  and the obligations now pick the rule that applies to the task (`asset_judge.rule_for`), not
+  "the first rule of that kind".
+
+**Settings (UI):**
+- **Automation → Settings → Review:** `approval.asset_judge` (on/off, default off).
+- **The rule** goes in `approval.rules`; its new fields are `rubric`, `references`, `notes`,
+  `scope_any`, `asset_from` and `max_frames`, and the profile loader validates them.
+- **AU's rule** is in `projects/animaluprising/project.example.toml`.
+
+**Checked against the live AU repo** (read only):
+- **Judged:** AS-E08 (BS-KING), AS-D19 (Baroness final-boss sheet), AS-H06, AS-E10, AS-J03,
+  AS-G02 and AS-T06 apply, each with its asset ids and reference sheets.
+- **Skipped:** AS-P8, AS-C23, AS-E11 and AS-BDG4 (no model file in the plan).
+- **AS-J08:** its turret has no reference sheet, so the old rule decides.
+
+**Not in this release:** grouping a second candidate (gap 9) and the AS-P9 overlays as judge
+input. The judge reads the AS-P9 aligned views (`<ID>_views_v*.png`) automatically once they
+exist.
+
+Tests: test_asset_judge (new, 13); the visual approval, engine, control, obligations and
+automation-schema suites pass unchanged.
+
 ## v0.166.2 — A slot rebuilds a half-set-up Wine prefix by itself
 
 2026-11-01. Victor: "slot2 seems to be having issues", then "Yes, add the check".

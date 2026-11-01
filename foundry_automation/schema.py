@@ -1068,7 +1068,13 @@ FIELDS: list[Field] = [
       "still have.", "review", "coordinator.engine", item_type="str"),
     F("approval.visual_model", "bool", False, "Model-judged visual approval (vision persona).",
       "review", "coordinator.visual_approval"),
-    F("approval.rules", "table", [], "Approval rules [{match, kind, stage, artifacts}].",
+    F("approval.asset_judge", "bool", False, "Asset judge for 3D model sprints: a fresh "
+      "vision session writes its own checklist from the reference images, then scores the "
+      "model's renders shown under shuffled letters. Uses the approval rules with rubric "
+      "\"asset\"; off = those rules are ignored.", "review", "coordinator.asset_judge"),
+    F("approval.rules", "table", [], "Approval rules [{match, kind, stage, artifacts}]; an "
+      "asset rule adds rubric = \"asset\", references / notes (globs with {asset}), scope_any "
+      "(the plan must list one), asset_from (regexes, group 1 = asset id) and max_frames.",
       "review", "coordinator.engine"),
     F("verify.checks", "table", [], "Verification checks [{name, command, phase, ...}].",
       "review", "coordinator.engine"),

@@ -3434,10 +3434,10 @@ class Coordinator:
 
     def _approvals_needed(self, P: Project, t: dict, spec, stage: str, revision: str) -> list[str]:
         need = []
-        for rule in P.profile.approvals:
-            if rule.stage != stage or not any(matches_any(tag, [rule.match]) for tag in spec.tags):
-                continue
-            if rule.kind == "visual" and self.tracks.studio_less(P):
+        for rule in self._approval_rules(P, spec, stage):
+            # v0.167.0: an asset-judge rule judges committed renders, which a track has too
+            if rule.kind == "visual" and self.tracks.studio_less(P) and \
+                    getattr(rule, "rubric", "") != "asset":
                 # 2026-10-29 S52: a track has no Studio, so it has no frames to approve; the
                 # visual sign-off belongs to the merge's Studio batch (Victor's batch approval)
                 if not (t.get("data") or {}).get("visual_owed_at_merge"):
@@ -3449,6 +3449,15 @@ class Coordinator:
             if not self._valid_approval(P, t, spec, rule, revision):
                 need.append(rule.kind)
         return need
+
+    def _approval_rules(self, P: Project, spec, stage: str) -> list:
+        """The approval rules of `stage` whose tag fits the task; an asset-judge rule
+        (rubric "asset") only when it applies, and then it replaces the plain visual rules
+        (asset_judge.select_rules)."""
+        from . import asset_judge
+        rules = [r for r in P.profile.approvals if r.stage == stage and
+                 any(matches_any(tag, [r.match]) for tag in spec.tags)]
+        return asset_judge.select_rules(P, spec, rules)
 
     def _valid_approval(self, P: Project, t: dict, spec, rule, revision: str) -> Optional[dict]:
         arts = P.adapter.approval_artifacts(spec, rule.artifacts) if rule.artifacts else {}
@@ -3480,8 +3489,8 @@ class Coordinator:
             if "visual" in (t["data"].get("awaiting_kinds") or []):
                 from . import visual_approval
                 if visual_approval.enabled(P):
-                    rule = next((r for r in P.profile.approvals
-                                 if r.kind == "visual" and r.stage == "after_close"), None)
+                    from . import asset_judge
+                    rule = asset_judge.rule_for(P, spec, "visual", "after_close")
                     if rule and not self._valid_approval(P, t, spec, rule, t["head_sha"]):
                         visual_approval.step(self, P, t, spec, rule, t["head_sha"])
                         t = self.store.task(pid, tid)
@@ -3767,7 +3776,10 @@ class Coordinator:
         if t["state"] != S.AWAITING_HUMAN or kind not in (t["data"].get("awaiting_kinds") or []):
             raise ValueError(f"{project_id}/{task_id} is not waiting for a {kind!r} approval")
         spec = P.adapter.describe(task_id)
-        rule = next(r for r in P.profile.approvals if r.kind == kind)
+        from . import asset_judge
+        rule = asset_judge.rule_for(P, spec, kind)
+        if rule is None:
+            raise ValueError(f"no approval rule {kind!r} in the profile")
         revision = t["reviewed_sha"] if t["data"].get("stage") == "before_close" else t["head_sha"]
         arts = P.adapter.approval_artifacts(spec, rule.artifacts) if rule.artifacts else {}
         return self.store.add_approval(project_id, task_id, kind, revision, arts, approver, note)

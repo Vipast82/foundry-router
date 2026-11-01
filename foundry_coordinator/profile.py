@@ -82,6 +82,14 @@ class ApprovalRule:
     kind: str                             # e.g. "visual", "publish"
     stage: str = "after_close"            # before_close | after_close
     artifacts: list[str] = field(default_factory=list)   # globs hashed into the approval
+    # v0.167.0 asset judge (asset_judge.py): rubric "asset" = a 3D model checked against its
+    # reference images; the fields below are only read for that rubric
+    rubric: str = ""                      # "" / "screen" = screenshots; "asset" = 3D model
+    references: list[str] = field(default_factory=list)  # globs with {asset}; first hit wins
+    notes: list[str] = field(default_factory=list)       # text globs with {asset} (checklists)
+    scope_any: list[str] = field(default_factory=list)   # the plan scope must name one
+    asset_from: list[str] = field(default_factory=list)  # regexes (group 1 = asset id) on scope
+    max_frames: int = 0                   # 0 = the judge's default
 
 
 @dataclass
@@ -309,9 +317,33 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
     for r in appr.get("rules") or []:
         if r.get("stage", "after_close") not in ("before_close", "after_close"):
             raise ProfileError(f"{path}: approval stage must be before_close or after_close")
+        rubric = str(r.get("rubric") or "").strip().lower()
+        if rubric not in ("", "screen", "asset"):
+            raise ProfileError(f"{path}: approval rubric must be screen or asset")
+        lists = {}
+        for k in ("references", "notes", "scope_any", "asset_from"):
+            v = r.get(k) or []
+            if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                raise ProfileError(f"{path}: approval {k} must be a list of strings")
+            lists[k] = list(v)
+        for rx in lists["asset_from"]:
+            try:
+                groups = re.compile(rx).groups
+            except re.error as e:
+                raise ProfileError(f"{path}: approval asset_from {rx!r}: {e}") from None
+            if groups < 1:
+                raise ProfileError(f"{path}: approval asset_from {rx!r} needs a (group)")
+        mf = r.get("max_frames", 0)
+        if not isinstance(mf, int) or isinstance(mf, bool) or mf < 0:
+            raise ProfileError(f"{path}: approval max_frames must be a whole number >= 0")
         rules.append(ApprovalRule(match=str(r["match"]), kind=str(r["kind"]),
                                   stage=r.get("stage", "after_close"),
-                                  artifacts=_frame_globs(list(r.get("artifacts") or []))))
+                                  artifacts=_frame_globs(list(r.get("artifacts") or [])),
+                                  rubric=rubric, references=lists["references"],
+                                  notes=lists["notes"], scope_any=lists["scope_any"],
+                                  asset_from=lists["asset_from"], max_frames=mf))
+    if "asset_judge" in appr and not isinstance(appr["asset_judge"], bool):
+        raise ProfileError(f"{path}: approval.asset_judge must be true or false")
     tasks = dict(raw.get("tasks") or {})
     adapter = str((raw.get("adapter") or {}).get("module") or "")
     if not adapter and tasks.get("source") not in ("json", "toml"):
