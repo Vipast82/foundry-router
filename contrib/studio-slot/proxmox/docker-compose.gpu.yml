@@ -1,0 +1,9 @@
+# The slot host's GPU for Studio's drawing (v0.162.4). setup-host.sh adds this file
+# (COMPOSE_FILE in .env) when the host has /dev/dri/renderD128 and the slot's "Use the GPU"
+# setting is on (Access → Machines → Settings). Inside, Mesa draws on it: iris (OpenGL) or
+# ANV (Vulkan) on an Intel iGPU, and Xvnc renders through it (DRI3).
+# Measured on slot-1 (Intel UHD 630, 2026-11-01): ~145% CPU instead of ~1300% in software.
+services:
+  studio-slot:
+    devices:
+      - /dev/dri:/dev/dri

@@ -291,6 +291,23 @@ if [ "$CPU_SET" -gt 0 ]; then CPUS=$CPU_SET; else CPUS=$(( NPROC / 3 )); [ "$CPU
 [ "$CPUS" -le "$NPROC" ] || CPUS=$NPROC
 SIZE="$(py get settings.desktop_size)"
 case "$SIZE" in [0-9]*x[0-9]*) ;; *) SIZE=2560x1440 ;; esac
+# GPU (v0.162.4): the host's iGPU draws Studio's view when the LXC has one (Proxmox → the LXC →
+# Resources → Device Passthrough /dev/dri/renderD128, mode 0666) and "Use the GPU" is on.
+COMPOSE_FILES=docker-compose.yml; GPU_TXT="software drawing (no GPU in this machine)"
+if [ "$(py get settings.gpu)" = False ]; then
+    GPU_TXT="software drawing (Use the GPU is off on Access → Machines)"
+elif [ -e /dev/dri/renderD128 ]; then
+    if [ "$(stat -c %a /dev/dri/renderD128 | cut -c3)" -ge 6 ] 2>/dev/null; then
+        COMPOSE_FILES=docker-compose.yml:docker-compose.gpu.yml; GPU_TXT="the GPU (/dev/dri)"
+    else
+        warn "/dev/dri/renderD128 is here, but the slot (uid $SLOT_UID) cannot open it: set mode 0666 in"
+        warn "Proxmox → the LXC → Resources → Device Passthrough, restart the LXC, run this again"
+        GPU_TXT="software drawing (the GPU's mode is not 0666)"
+    fi
+fi
+# a trial override from 2026-11-01 (it also added /dev/dri) would add the device twice
+OVR="$COMPOSE_DIR/docker-compose.override.yml"
+[ -f "$OVR" ] && head -1 "$OVR" | grep -q '^# TRIAL' && rm -f "$OVR"
 umask 077
 cat > "$ROOT/slot.env" <<EOF
 # written by setup-host.sh for $SLOT ($PROJECT) on $(date -u +%FT%TZ); re-run the installer to change it
@@ -301,6 +318,7 @@ SLOT_NOVNC_PORT=$VNC_PORT
 SLOT_CPUS=$CPUS
 SLOT_RENDER_THREADS=$CPUS
 SLOT_GEOMETRY=$SIZE
+COMPOSE_FILE=$COMPOSE_FILES
 SLOT_MEM=${MEM_G}g
 SLOT_MULTIPLAYER=$([ "$MEM_G" -ge 14 ] && echo 1 || echo 0)
 FOUNDRY_URL=$(py get router)
@@ -313,6 +331,7 @@ umask 022
 chown "$USER_NAME:$USER_NAME" "$ROOT/slot.env"; chmod 600 "$ROOT/slot.env"
 ln -sf "$ROOT/slot.env" "$COMPOSE_DIR/.env"
 ok "$ROOT/slot.env: $CPUS of $NPROC CPUs, ${MEM_G} GB, desktop $SIZE, place ${PLACE:-none}"
+ok "Studio draws with $GPU_TXT"
 if [ "$BUILD" = 0 ]; then
     rm -f "$ENROLL" "$API"
     echo; echo "--no-build: stopped before the build. Build and start later with:"

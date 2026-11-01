@@ -3299,7 +3299,8 @@ async function tabMachines() {
         ${(m.host_keys || []).length ? `<div class="hint" title="ssh host key reported by the slot; the coordinator checks the slot against it">host key ${esc((m.host_keys.find(k => k.type === "ssh-ed25519") || m.host_keys[0]).fingerprint)}</div>`
           : (m.kind === "slot" && m.enrolled_ts ? `<div class="hint" title="Installed before v0.162.0: reinstall it (New code) so it reports its ssh host key">host key not reported</div>` : "")}</td>
       <td class="nw">${s.place_id ? `place ${esc(s.place_id)}` : '<span class="hint">no place</span>'}</td>
-      <td class="nw">${vncCell(m.vnc)}</td>
+      <td class="nw">${vncCell(m.vnc)}${m.host_settings ? `<div class="hint" title="Studio's drawing: on the host's GPU, or in software on the CPU">${
+        (m.host_settings.gpu_state || {}).in_use ? "GPU in use" : (m.host_settings.gpu_state || {}).device ? "GPU present, not used" : "software drawing"}</div>` : ""}</td>
       <td class="hint" style="white-space:normal">${m.enrolled_ts ? `enrolled ${when(m.enrolled_ts)} from ${esc(m.enrolled_addr || "")}` : ""}
         ${lp ? `<div>last secrets pull ${when(lp.ts)} · ${esc(lp.outcome)}</div>` : ""}</td>
       <td class="nw"><button class="act" data-mc-code="${esc(m.name)}">New code</button>
@@ -3382,8 +3383,17 @@ async function tabMachines() {
   });
   document.querySelectorAll("[data-mc-vnc]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcVnc, m = d.machines.find(x => x.name === n) || {}, v = m.vnc || {lan: true, port: 6080};
-    const h = m.host_settings || {cpu_limit: 0, desktop_size: "2560x1440"};
+    const h = m.host_settings || {cpu_limit: 0, desktop_size: "2560x1440", gpu: true, gpu_state: {}};
+    const gs = h.gpu_state || {};
+    const gpuNow = gs.in_use ? `in use${gs.name ? " (" + esc(gs.name) + ")" : ""}` : gs.device ? "present on the host, not used yet (run the installer again)" : "no GPU reported by the host";
     const body = openModal(`Settings for ${n}`, `
+      <h4>GPU</h4>
+      <div class="row"><label title="Draw Studio's view on the host's iGPU (/dev/dri) when it has one">Use the GPU</label>
+        <label class="sw"><input type="checkbox" id="mv-gpu" ${h.gpu !== false ? "checked" : ""}>On</label>
+        <span class="hint">now: ${gpuNow}</span></div>
+      <p class="hint">With a GPU, Studio draws on it instead of on every CPU core (slot-1 on an Intel UHD 630: ~145% CPU instead of ~1300%).
+        Give the LXC the GPU in Proxmox: the LXC → Resources → Add → <b>Device Passthrough</b>, path <code>/dev/dri/renderD128</code>,
+        mode <code>0666</code>, then restart it and run the slot's installer again (<b>New code</b>).</p>
       <h4>Resources</h4>
       <div class="row"><label title="0 = a third of the host's cores (at least 4)">CPU limit (cores)</label>
         <input type="number" id="mv-cpu" min="0" max="256" value="${esc(h.cpu_limit)}" style="width:90px">
@@ -3407,8 +3417,9 @@ async function tabMachines() {
       const size = $("#mv-size", body).value.trim();
       api(`machines/${encodeURIComponent(n)}/host`, {method: "POST",
         body: {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080),
-               cpu_limit: Number($("#mv-cpu", body).value || 0), desktop_size: size === "2560x1440" ? "" : size}})
-        .then(() => { toast("Saved: the CPU limit applies within 5 minutes; VNC and the desktop size when the installer runs again"); closeModal(); render(); })
+               cpu_limit: Number($("#mv-cpu", body).value || 0), desktop_size: size === "2560x1440" ? "" : size,
+               gpu: $("#mv-gpu", body).checked}})
+        .then(() => { toast("Saved: the CPU limit applies within 5 minutes; the GPU, VNC and the desktop size when the installer runs again"); closeModal(); render(); })
         .catch(e => toast(e.message, true));
     };
   });

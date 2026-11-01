@@ -110,8 +110,11 @@ back.
 - **D-L3. Blender on the workstation:** a virtual desktop (Xvfb + noVNC, like the slot) with
   Blender software-rendering. *Recommended* for an LXC.
   - On a Linux PC with a GPU, Blender can use your real desktop instead; the installer asks.
-  - Asset renders are CPU-only in an LXC unless you pass a GPU into it (possible on Proxmox; a
-    later step).
+  - Asset renders are CPU-only in an LXC unless you pass a GPU into it.
+  - Proxmox → the LXC → Resources → Device Passthrough `/dev/dri/renderD128` (mode 0666) works:
+    slot-1 got its Intel UHD 630 that way on 2026-11-01 (v0.162.4).
+  - For Blender that speeds up the viewport and Eevee (OpenGL). Cycles stays on the CPU: Cycles
+    uses Intel GPUs only from Arc/Xe on, not a UHD 630.
 - **D-L4. LXC size:** 8 cores, 32 GB memory (Studio + Wine is the heavy part; 2-player playtests
   need ~14 GB on their own), 120 GB disk. *Recommended.* With 16 GB, multiplayer rows stay MANUAL
   (as on slot-1 today).

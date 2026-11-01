@@ -2,6 +2,32 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.162.4 — Studio slots draw on the host's GPU
+
+2026-11-01. Victor: "proxmox has an onboard intel IGPU, can that pass through to the container…
+would that help?", then "Yes, build and trial".
+
+- **Trial on slot-1** (Proxmox → the LXC → Resources → Device Passthrough
+  `/dev/dri/renderD128`, mode 0666; then /dev/dri into the container):
+  - Vulkan sees an Intel UHD Graphics 630 (CML GT2), and Studio holds 5 handles to the GPU;
+  - the container went from ~1300% CPU (software, ~500% at its 5-core cap) to **~145%**;
+  - a screenshot showed Studio's viewport drawn correctly.
+- **Slot setting** `gpu` (default on): Access → Machines → Settings → **Use the GPU**, which also
+  shows what the host reports. The Machines list shows "GPU in use", "GPU present, not used" or
+  "software drawing".
+- **Installer:**
+  - When the LXC has `/dev/dri/renderD128` that uid 1000 can open, and the setting is on, it
+    adds `docker-compose.gpu.yml` (devices /dev/dri) through `COMPOSE_FILE` in slot.env.
+  - A device without mode 0666 gets a warning that says what to set.
+  - It removes the trial's `docker-compose.override.yml` (marked `# TRIAL`).
+- **foundry-slot-keys** reports the GPU every 5 minutes (present, used by the container, and the
+  name from `vulkaninfo`); the router keeps it in `machines.host_info`.
+- Docs: INSTALL_SLOTS (a GPU row), LINUX_WORKSTATION_PLAN D-L3 (Blender: the viewport and Eevee
+  gain; Cycles does not, on a UHD 630).
+- Tests: test_slot_ssh (+2).
+- **slot-1:** it runs the trial setup now. Its next installer run (New code) moves it to the
+  proper GPU file.
+
 ## v0.162.3 — A slot's desktop starts again after its host reboots
 
 2026-11-01. Victor: "I restarted but VNC didn't come on". On slot-1, the LXC restart stopped the

@@ -290,11 +290,11 @@ def test_personal_keys_stay_usable_after_foundrys_own(tmp_path, monkeypatch):
 def test_slot_cpu_limit_and_desktop_size_settings(app, client):
     slot_key = _slot(app, client)
     m = client.get("/admin/api/machines").json()["machines"][0]
-    assert m["host_settings"] == {"cpu_limit": 0, "desktop_size": "2560x1440"}
+    assert {k: m["host_settings"][k] for k in ("cpu_limit", "desktop_size")} == {"cpu_limit": 0, "desktop_size": "2560x1440"}
     r = client.post("/admin/api/machines/slot-2/host",
                     json={"cpu_limit": 6, "desktop_size": "1920x1080"})
     assert r.status_code == 200, r.text
-    assert r.json()["host"] == {"cpu_limit": 6, "desktop_size": "1920x1080"}
+    assert {k: r.json()["host"][k] for k in ("cpu_limit", "desktop_size")} == {"cpu_limit": 6, "desktop_size": "1920x1080"}
     s = _svc(app).automation.deployed("animaluprising")["doc"]["settings"]["slots"]["slot-2"]
     assert s["cpu_limit"] == 6 and s["desktop_size"] == "1920x1080"
     # the slot host's timer gets the CPU limit with its keys (nothing secret)
@@ -303,7 +303,7 @@ def test_slot_cpu_limit_and_desktop_size_settings(app, client):
     assert h == {"cpu_limit": 6, "container": "studio-slot"}
     # back to the defaults; bad values refused
     r = client.post("/admin/api/machines/slot-2/host", json={"cpu_limit": 0, "desktop_size": ""})
-    assert r.json()["host"] == {"cpu_limit": 0, "desktop_size": "2560x1440"}
+    assert {k: r.json()["host"][k] for k in ("cpu_limit", "desktop_size")} == {"cpu_limit": 0, "desktop_size": "2560x1440"}
     assert client.post("/admin/api/machines/slot-2/host", json={"cpu_limit": -1}).status_code == 400
     assert client.post("/admin/api/machines/slot-2/host",
                        json={"desktop_size": "big"}).status_code == 400
@@ -349,3 +349,40 @@ def test_slot_start_clears_a_stale_display_lock():
     entry = (Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "entrypoint.sh"
              ).read_text(encoding="utf-8")
     assert entry.index("rm -f /tmp/.X1-lock /tmp/.X11-unix/X1") < entry.index("Xvnc :1 ")
+
+
+# ----------------------------------------------------------------------------- GPU (v0.162.4)
+
+def test_slot_gpu_setting_and_the_hosts_report(app, client):
+    slot_key = _slot(app, client)
+    m = client.get("/admin/api/machines").json()["machines"][0]
+    assert m["host_settings"]["gpu"] is True and m["host_settings"]["gpu_state"] == {}
+    s = {"Authorization": "Bearer " + slot_key}
+    gpu = {"device": True, "in_use": True, "name": "Intel(R) UHD Graphics 630 (CML GT2)"}
+    r = client.post("/v1/foundry/secrets/host-keys", json={"keys": [_pub(5)], "gpu": gpu},
+                    headers=s)
+    assert r.status_code == 200, r.text
+    m = client.get("/admin/api/machines").json()["machines"][0]
+    assert m["host_settings"]["gpu_state"] == gpu
+    assert any(e["event"] == "gpu" and "in use" in e["detail"]
+               for e in _svc(app).machines.events(10))
+    # a strange name is cleaned, not stored as is
+    client.post("/v1/foundry/secrets/host-keys",
+                json={"keys": [_pub(5)], "gpu": {"device": True, "name": "<script>x"}}, headers=s)
+    st = client.get("/admin/api/machines").json()["machines"][0]["host_settings"]["gpu_state"]
+    assert "<" not in st["name"] and st["in_use"] is False
+    r = client.post("/admin/api/machines/slot-2/host", json={"gpu": False})
+    assert r.status_code == 200 and r.json()["host"]["gpu"] is False
+    d = _svc(app).automation.deployed("animaluprising")["doc"]["settings"]["slots"]["slot-2"]
+    assert d["gpu"] is False
+
+
+def test_installer_adds_the_gpu_compose_file_when_the_host_has_one():
+    root = Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "proxmox"
+    setup = (root / "setup-host.sh").read_text(encoding="utf-8")
+    assert "COMPOSE_FILES=docker-compose.yml:docker-compose.gpu.yml" in setup
+    assert "COMPOSE_FILE=$COMPOSE_FILES" in setup and '[ "$(py get settings.gpu)" = False ]' in setup
+    gpu = (root / "docker-compose.gpu.yml").read_text(encoding="utf-8")
+    assert "- /dev/dri:/dev/dri" in gpu
+    sk = _slot_keys()
+    assert sk.gpu_report("bad name!")["in_use"] is False

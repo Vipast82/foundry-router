@@ -550,6 +550,10 @@ SLOT_FIELDS = [
      "least 4). Without a GPU, Studio redraws its view in software on every core it gets, even "
      "when idle. Applied within 5 minutes by the slot host's timer; its renderer threads "
      "follow at the next container start.", None, 0),
+    ("gpu", "bool", True, "Draw Studio's view on the slot host's GPU (an Intel/AMD iGPU at "
+     "/dev/dri, e.g. Proxmox → the LXC → Resources → Device Passthrough /dev/dri/renderD128, "
+     "mode 0666) when it has one. slot-1 on a UHD 630: ~145% CPU instead of ~1300%. Off = "
+     "software drawing. Applies when the slot's installer runs again.", None, None),
     ("desktop_size", "str", "", "The slot desktop's size, e.g. 1920x1080 (empty = 2560x1440). "
      "Smaller means less software drawing; gate screenshots get this size. Applies when the "
      "slot's installer runs again.", None, None),

@@ -5,6 +5,8 @@ Runs as root on the slot host: once from setup-host.sh, then every 5 minutes fro
 foundry-slot-keys systemd timer. With the slot's own key (secrets scope) it
   * reports this host's ssh HOST public keys (POST /v1/foundry/secrets/host-keys), so the
     coordinator checks this slot strictly and a reinstall or a reused IP is picked up by itself;
+  * reports the host's GPU (v0.162.4: present, used by the container, its name), shown on
+    Access → Machines;
   * keeps the container's CPU limit at the slot's setting (v0.162.1: `docker update --cpus`,
     live; slot.env for the next start, where the software renderer's threads follow it);
   * fetches the workstation keys to allow (GET /v1/foundry/secrets/authorized-keys: every main PC
@@ -94,6 +96,27 @@ def host_keys() -> list:
             continue
         if len(parts) >= 2:
             out.append(f"{parts[0]} {parts[1]}")
+    return out
+
+
+def gpu_report(container: str) -> dict:
+    """{device, in_use, name}: does this host have a GPU render node, does the slot's container
+    have it (docker-compose.gpu.yml), and the GPU's name as Vulkan sees it inside (v0.162.4)."""
+    import subprocess
+    out = {"device": os.path.exists("/dev/dri/renderD128"), "in_use": False, "name": ""}
+    if not out["device"] or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", container):
+        return out
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{json .HostConfig.Devices}}", container],
+                           capture_output=True, text=True, timeout=30)
+        out["in_use"] = r.returncode == 0 and "/dev/dri" in r.stdout
+        if out["in_use"]:
+            r = subprocess.run(["docker", "exec", container, "vulkaninfo", "--summary"],
+                               capture_output=True, text=True, timeout=30)
+            names = re.findall(r"deviceName\s*=\s*(.+)", r.stdout or "")
+            out["name"] = next((n.strip() for n in names if "llvmpipe" not in n), "")[:80]
+    except (OSError, subprocess.SubprocessError):
+        pass
     return out
 
 
@@ -221,7 +244,9 @@ def main(argv=None) -> int:
         c = connect(router, fp)
         hk = host_keys()
         if hk:
-            st, data = call(c, "POST", "/v1/foundry/secrets/host-keys", key, {"keys": hk})
+            gpu = gpu_report(conf.get("SLOT_CONTAINER") or "studio-slot")
+            st, data = call(c, "POST", "/v1/foundry/secrets/host-keys", key,
+                            {"keys": hk, "gpu": gpu})
             if st != 200:
                 log(f"host keys not taken: HTTP {st} {json.dumps(data)[:200]}")
         st, data = call(c, "GET", "/v1/foundry/secrets/authorized-keys", key)

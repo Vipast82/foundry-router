@@ -130,6 +130,10 @@ class Machines:
             db.execute("ALTER TABLE machines ADD COLUMN host_keys TEXT NOT NULL DEFAULT '[]'")
         except Exception:                                        # noqa: BLE001 (already there)
             pass
+        try:                       # v0.162.4: what the slot host reports (its GPU)
+            db.execute("ALTER TABLE machines ADD COLUMN host_info TEXT NOT NULL DEFAULT '{}'")
+        except Exception:                                        # noqa: BLE001 (already there)
+            pass
 
     def event(self, machine: str, event: str, addr: str = "", detail: str = "") -> None:
         self.db.execute("INSERT INTO machine_events (ts, machine, event, addr, detail) VALUES "
@@ -214,6 +218,17 @@ class Machines:
             return False
         self.db.execute("UPDATE machines SET host_keys=? WHERE name=?", (json.dumps(keys), name))
         return True
+
+    def host_info(self, name: str) -> dict:
+        try:
+            v = json.loads((self.get(name) or {}).get("host_info") or "{}")
+        except ValueError:
+            v = {}
+        return v if isinstance(v, dict) else {}
+
+    def set_host_info(self, name: str, info: dict) -> None:
+        self.db.execute("UPDATE machines SET host_info=? WHERE name=?",
+                        (json.dumps(info, sort_keys=True)[:2000], name))
 
     def workstations(self) -> list[dict]:
         return self.db.query("SELECT * FROM workstation_keys ORDER BY last_ts DESC")
@@ -338,7 +353,8 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
             "last_pull": pulls[0] if pulls else None,
             "settings": settings,
             "vnc": _vnc_view(svc, m, settings) if m["kind"] == "slot" else None,
-            "host_settings": _host_view(settings) if m["kind"] == "slot" else None,
+            "host_settings": _host_view(settings, svc.machines.host_info(m["name"]))
+            if m["kind"] == "slot" else None,
             "host_keys": [{"type": k.split()[0], "fingerprint": fingerprint(k)}
                           for k in svc.machines.host_keys(m["name"])]}
 
@@ -387,7 +403,7 @@ async def list_machines(request: Request):
 def _slot_settings_from(b: dict) -> dict:
     out = {}
     for k in ("container", "place_id", "universe_id", "rojo_never_place_ids", "enabled",
-              "checkout_timeout_s", "vnc_lan", "vnc_port", "cpu_limit", "desktop_size"):
+              "checkout_timeout_s", "vnc_lan", "vnc_port", "cpu_limit", "desktop_size", "gpu"):
         if k in b and b[k] is not None and (b[k] != "" or k == "desktop_size"):
             out[k] = b[k]
     if "desktop_size" in out:
@@ -404,8 +420,9 @@ def _slot_settings_from(b: dict) -> dict:
         raise MachineError("vnc_port: a port number (1-65535)")
     if "cpu_limit" in out and not 0 <= out["cpu_limit"] <= 256:
         raise MachineError("cpu_limit: 0 (a third of the host's cores) or a number of cores")
-    if "vnc_lan" in out:
-        out["vnc_lan"] = out["vnc_lan"] is True or str(out["vnc_lan"]).lower() in ("1", "true", "on")
+    for k in ("vnc_lan", "gpu"):
+        if k in out:
+            out[k] = out[k] is True or str(out[k]).lower() in ("1", "true", "on")
     if "rojo_never_place_ids" in out:
         v = out["rojo_never_place_ids"]
         v = re.split(r"[\s,]+", v) if isinstance(v, str) else v
@@ -484,7 +501,7 @@ async def new_machine_code(request: Request, name: str):
                         headers={"Cache-Control": "no-store"})
 
 
-HOST_KEYS = ("vnc_lan", "vnc_port", "cpu_limit", "desktop_size")
+HOST_KEYS = ("vnc_lan", "vnc_port", "cpu_limit", "desktop_size", "gpu")
 
 
 @router.post(A + "/{name}/vnc")
@@ -510,13 +527,16 @@ async def machine_host_settings(request: Request, name: str):
     from .secrets_api import slot_settings
     cur = slot_settings(svc, m["project"], m["slot"])
     return {"ok": True, "settings_rev": rev.get("rev"), "vnc": _vnc_view(svc, m, cur),
-            "host": _host_view(cur)}
+            "host": _host_view(cur, svc.machines.host_info(name))}
 
 
-def _host_view(settings: dict) -> dict:
-    """The slot host's resources: cpu_limit 0 = auto (a third of its cores, at least 4)."""
+def _host_view(settings: dict, reported: Optional[dict] = None) -> dict:
+    """The slot host's resources: cpu_limit 0 = auto (a third of its cores, at least 4); gpu =
+    the setting, gpu_state = what the slot host last reported (its timer)."""
     return {"cpu_limit": int(settings.get("cpu_limit") or 0),
-            "desktop_size": str(settings.get("desktop_size") or "") or "2560x1440"}
+            "desktop_size": str(settings.get("desktop_size") or "") or "2560x1440",
+            "gpu": settings.get("gpu", True) is not False,
+            "gpu_state": (reported or {}).get("gpu") or {}}
 
 
 @router.post(A + "/{name}/revoke")
@@ -770,6 +790,16 @@ async def slot_host_keys(request: Request):
     if svc.machines.set_host_keys(m["name"], keys):
         svc.machines.event(m["name"], "host_keys", _addr(),
                            ", ".join(fingerprint(k) for k in sorted(set(keys))))
+    g = b.get("gpu")                    # v0.162.4: {device, in_use, name} from the slot host
+    if isinstance(g, dict):
+        gpu = {"device": bool(g.get("device")), "in_use": bool(g.get("in_use")),
+               "name": re.sub(r"[^\w ()./+-]", "", str(g.get("name") or ""))[:80]}
+        old = svc.machines.host_info(m["name"])
+        if old.get("gpu") != gpu:
+            svc.machines.set_host_info(m["name"], {**old, "gpu": gpu, "ts": time.time()})
+            svc.machines.event(m["name"], "gpu", _addr(),
+                               ("in use: " if gpu["in_use"] else "present, not used: "
+                                if gpu["device"] else "none") + gpu["name"])
     return {"ok": True, "count": len(set(keys))}
 
 
