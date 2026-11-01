@@ -761,6 +761,7 @@ const saveSoon = debounce(async () => {
     for (const box of $$(".sf[data-sf]")) {
       const t = $("[data-act=set]", box), err = $(".err", box);
       if (t && t.getAttribute("aria-invalid") === "true") continue;      // the field's own check wins
+      if (!err) continue;          // a row without an error slot: never a failed save (v0.169.1)
       const m = storeErr(box.dataset.sf); err.hidden = !m; err.textContent = m;
     }
   } catch (e) { S.draftErrors = [{path: "", message: e.message}]; toast("Draft not saved: " + e.message, true); }
@@ -1316,7 +1317,7 @@ function slotsHtml(f) {
     ${rows || `<p class="hint">No slots in the router's settings yet (the coordinator may still have some in its project.toml: Import brings them in).</p>`}
     <div class="row"><input type="text" id="slot-new" placeholder="new slot id, e.g. slot-2" aria-label="New slot id">
       <button class="act" type="button" data-act="slot-add">Add slot</button></div>
-    ${storeErr("slots") ? `<div class="err" role="alert">${esc(storeErr("slots"))}</div>` : ""}</div>`;
+    ${storeErr("slots") ? `<div class="err" role="alert">${esc(storeErr("slots"))}</div>` : `<div class="err" role="alert" hidden></div>`}</div>`;
 }
 function slotSet(t) {
   const sf = slotFields().find(x => x.key === "slots.*." + t.dataset.k); if (!sf) return;

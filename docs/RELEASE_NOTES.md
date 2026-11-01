@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.169.1 — Settings: a saved draft no longer reports a page error as a deploy problem
+
+2026-11-01. Victor switched on `blender.journal` and the deploy dialog said "Fix before
+deploying: Cannot set properties of null (setting 'hidden')". It has been there since v0.159.0:
+the slots table's settings row had an error slot only while it had an error. After each draft
+save, the page paints the store's verdict on every row; on that row it threw, and the error
+became the draft's "problem". The draft itself was saved, and reloading the page cleared the
+false problem until the next edit.
+
+- `automation.html`: the slots row always has its (hidden) error slot, and the painter skips a
+  row without one.
+- Test: `tests/test_automation_ui.py`
+  (`test_every_settings_row_has_an_error_slot_so_a_saved_draft_never_reports_a_page_error`).
+  The automation UI, view and prep-queue tests pass (30).
+- **Router only:** it takes effect after a router rebuild. Until then, reload the Settings page
+  before Review & deploy.
+
 ## v0.169.0 — build replay for Blender on this PC
 
 2026-11-01. R3 of docs/plans/BLENDER_BUILD_REPLAY_PLAN.md. Sprints run Blender on this PC today,

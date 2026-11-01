@@ -200,3 +200,15 @@ def test_queue_page_has_the_board_the_toggle_and_no_complete_requeue():
     assert 'st === "CANCELLED"' in s and '["CANCELLED", "COMPLETE"].includes(st)' not in s
     # the PM inbox pieces (A3)
     assert "Resolved by the Lead this week" in s and "escalation_reason" in s
+
+
+def test_every_settings_row_has_an_error_slot_so_a_saved_draft_never_reports_a_page_error():
+    """v0.169.1: the slots row had an `.err` element only while it had an error, so painting the
+    store's verdict after a save threw "Cannot set properties of null (setting 'hidden')" and the
+    deploy dialog showed it as a problem to fix (blender.journal could not be deployed)."""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1] / "foundry_router" / "ui" / "static" /
+           "automation.html").read_text(encoding="utf-8")
+    assert '`<div class="err" role="alert" hidden></div>`}</div>`;\n' in src.split('data-sf="slots"')[1][:3000]
+    loop = src.split("const saveSoon = debounce(")[1].split("}, 500);")[0]
+    assert "if (!err) continue;" in loop
