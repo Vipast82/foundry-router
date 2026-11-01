@@ -68,6 +68,25 @@ DEFAULT_FILES = ["tests/RegressionIndex.lua", "tests/GateRunner.lua"]
 MAX_GATE_FILES = 200
 
 
+def _task_scope(P, task_id: str) -> list:
+    """The task's own file scope (its plan's file list, grants included); [] = unknown."""
+    adapter = getattr(P, "adapter", None)
+    if adapter is None or not task_id:
+        return []
+    try:
+        return [str(s).replace("\\", "/").strip() for s in (adapter.describe(task_id).scope or [])
+                if str(s).strip()]
+    except Exception:                                             # noqa: BLE001
+        return []
+
+
+def _in_scope(path: str, scope: list) -> bool:
+    import fnmatch
+    p = path.replace("\\", "/")
+    return any(p == e or fnmatch.fnmatch(p, e) or p.startswith(e.rstrip("/") + "/")
+               for e in scope)
+
+
 def _studio_rank(path: str) -> int:
     """Order for the gate's -Files cap: Luau sources (what PRE-PLAY verifies in Studio)
     first, then the rest of src/ and tests/ and the project file, then everything else
@@ -508,6 +527,13 @@ class StudioCalls:
         except Exception:                                         # noqa: BLE001
             files = []
         files = [f.replace("\\", "/") for f in files if PATH_RE.fullmatch(f.replace("\\", "/"))]
+        # 2026-11-01 MV2-CL1: AS-P8 worked in the main checkout between MV2-CL1's sessions;
+        # base..HEAD then held AS-P8's 150 assets/exports paths, the gate tested them and the
+        # sprint stopped ("files another sprint is modifying"). The gate tests this task's own
+        # files: the ones its plan scope covers (scope grants included).
+        scope = _task_scope(P, t.get("task_id") or "")
+        if scope:
+            files = [f for f in files if _in_scope(f, scope)]
         # 2026-10-30 19:08 MV2-11: base..HEAD held 1381 paths (other sprints' merged
         # assets/exports/*.fbx); sorted and capped at 200 they were all exports, so PRE-PLAY
         # had no Studio-loaded file to verify ("no hash map for the files under test") and

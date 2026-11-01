@@ -635,6 +635,26 @@ def test_gate_files_put_studio_loaded_sources_before_asset_exports():
     assert sc._files(P, {"task_id": "X", "data": {}}, "h" * 40) == SC.DEFAULT_FILES
 
 
+def test_gate_files_keep_only_the_tasks_own_scope_when_another_sprint_committed_in_between():
+    """2026-11-01 MV2-CL1: AS-P8 committed 150 assets/exports paths in the main checkout between
+    MV2-CL1's sessions; the gate tested them and MV2-CL1 stopped on another sprint's files."""
+    mine = ["src/server/Services/MapService.lua", "tests/S03_check.lua", "src/shared/Config/Bosses.lua"]
+    theirs = [f"assets/exports/rigs/Bat_{i}.clip.json" for i in range(150)]
+    ws = SimpleNamespace(changed_files=lambda base, head: theirs + mine + ["docs/progress/x.md"])
+    spec = SimpleNamespace(scope=["src/server/Services/MapService.lua", "tests/S*_check.lua",
+                                  "src/shared/Config/"])
+    P = SimpleNamespace(ws=ws, adapter=SimpleNamespace(describe=lambda tid: spec))
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    got = sc._files(P, {"task_id": "MV2-CL1", "data": {"task_base": "b" * 40}}, "h" * 40)
+    assert sorted(got) == sorted(mine)
+    # nothing of the task's own in the range: the default pair, as before
+    spec.scope = ["src/client/Nothing.lua"]
+    assert sc._files(P, {"task_id": "MV2-CL1", "data": {"task_base": "b" * 40}}, "h" * 40)         == SC.DEFAULT_FILES
+    # an adapter that cannot describe the task keeps the old behaviour (every changed file)
+    P.adapter = SimpleNamespace(describe=lambda tid: (_ for _ in ()).throw(KeyError(tid)))
+    assert len(sc._files(P, {"task_id": "MV2-CL1", "data": {"task_base": "b" * 40}}, "h" * 40))         == len(theirs) + len(mine)
+
+
 def test_default_request_drops_suite_ids_the_regression_index_does_not_have(tmp_path):
     """2026-10-31 as-d19: a plan's merge-owed Studio checks were labelled S1-S4; the merge
     batch asked gate.ps1 for those suites and the host half failed '-Suites S1 has no index

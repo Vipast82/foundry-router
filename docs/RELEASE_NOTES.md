@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.167.2 — a sprint's scripted gate tests only its own files
+
+2026-11-01. AS-P8 worked in the main checkout between MV2-CL1's sessions. MV2-CL1's gate takes
+its `-Files` from every path changed in base..HEAD, so it picked up AS-P8's 150
+`assets/exports` paths. MV2-CL1 stopped because it was asked to vouch for another sprint's
+files. The Lead diagnosed this and proposed the fix.
+
+- **`studio_calls._files`:** the changed paths are cut down to the task's own scope: its plan's
+  file list, scope grants included (`adapter.describe(task).scope`), matched as exact path, glob
+  or folder prefix. If none of the task's own files changed, the default pair is used as before.
+  An adapter that cannot describe the task keeps the old behaviour (every changed file).
+- Test: `tests/coordinator/test_studio_calls.py`
+  (`test_gate_files_keep_only_the_tasks_own_scope_when_another_sprint_committed_in_between`).
+  438 studio_calls, studio_gate, engine, lifecycle, tracks, AU and slot tests pass.
+
 ## v0.167.1 — designed-fail legs are not a "session shape" gap
 
 2026-11-01. MV2-CL1 pinned S03's two legs that need a play session as designed FAILs (expectPass 5,
