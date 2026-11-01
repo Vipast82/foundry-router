@@ -1139,5 +1139,18 @@ def test_a_sprint_with_a_working_lead_case_keeps_the_main_checkout(game, monkeyp
     for state, paused in (("DEFERRED", 0), ("NEEDS_VICTOR", 0), ("DIAGNOSING", 1)):
         cases["rc-1"].update(state=state, paused=paused)        # waiting on quota or a person
         assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    # 2026-10-31 MV2-V1: a short infra backoff keeps the place (GF-RT3 took the checkout in a
+    # 5-minute deferral and the lead then waited on its lock); a long wait still gives it up
+    cases["rc-1"].update(state="DEFERRED", paused=0, next_check_ts=c.clock() + 300)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == "T1"
+    cases["rc-1"].update(next_check_ts=c.clock() + 3600)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    cases["rc-1"].update(next_check_ts=c.clock() + 300, paused=1)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    # the blocker names what the lead waits on
+    text = c._lead_blocker_text({"case_id": "rc-1", "state": "DIAGNOSING",
+                                 "validation": {"lead_waiting": "workspace lock held by game/T2"},
+                                 "trigger": {"state": "BLOCKED", "reason": "review budget"}})
+    assert "[lead waits: workspace lock held by game/T2]" in text and "rc-1" in text
     c.store.update_task("game", "T1", data={"recovery_case": "rc-gone"})
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""

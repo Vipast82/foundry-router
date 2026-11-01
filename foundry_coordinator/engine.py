@@ -6181,7 +6181,9 @@ class Coordinator:
         trig = case.get("trigger") or {}
         trigger = trigger or trig.get("state") or ""
         reason = reason or trig.get("reason") or ""
-        return (f"lead recovery: {case['state']} (case {case['case_id']}; would have been "
+        wait = str((case.get("validation") or {}).get("lead_waiting") or "")
+        wait = f" [lead waits: {wait[:200]}]" if wait else ""
+        return (f"lead recovery: {case['state']}{wait} (case {case['case_id']}; would have been "
                 f"{trigger}: {reason})")[:1000]
 
     def _lead_from_wait(self, P: Project, t: dict, decisions: list) -> None:
@@ -6979,9 +6981,21 @@ class Coordinator:
                     case = L.case(cid)
                 except Exception:                                     # noqa: BLE001
                     case = None
-                return bool(case) and case.get("state") in ("DIAGNOSING", "REPAIRING") \
-                    and not case.get("paused")
+                if not case or case.get("paused"):
+                    return False
+                if case.get("state") in ("DIAGNOSING", "REPAIRING"):
+                    return True
+                # 2026-10-31 21:05-21:45: MV2-V1's lead session died on infrastructure; the
+                # case was DEFERRED for its 5-minute backoff, GF-RT3 took the checkout in that
+                # window, and the case (DIAGNOSING again at 21:24) waited on GF-RT3's lock with
+                # no lead call. A short backoff keeps the place; a long wait (a quota reset,
+                # up to MAX_DEFER_SECONDS) still gives the checkout to the next sprint.
+                if case.get("state") == "DEFERRED":
+                    due = float(case.get("next_check_ts") or 0)
+                    return bool(due) and due - self.clock() <= self.LEAD_SHORT_DEFER_SECONDS
         return False
+
+    LEAD_SHORT_DEFER_SECONDS = 900
 
     def _session_locks(self, P: Project, t: Optional[dict] = None) -> list[str]:
         """The profile's exclusive resources, plus `gpu` for a sprint whose implementer is a

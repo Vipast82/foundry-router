@@ -379,3 +379,25 @@ def test_write_access_lead_timeout_defaults_to_90(tmp_path):
         "lead_timeout_minutes"] == 90
     assert lead_manager_table("p", {**base, "write_access": True,
                                     "lead_timeout_minutes": 30})["lead_timeout_minutes"] == 30
+
+
+def test_a_lead_waiting_on_the_workspace_lock_says_so_and_starts_once_free(lead_env):
+    """2026-10-31 21:24-21:45: MV2-V1's lead case sat in DIAGNOSING with no lead call because
+    GF-RT3 held the main workspace lock, and nothing said so. The wait is now recorded on the
+    case (shown in the task's blocker) with one `lead_waiting` event, and cleared at the start."""
+    e = lead_env
+    lm, clk = _lead(e)
+    c, P = e["c"], e["P"]
+    locks = lm._ws_locks(P)
+    assert not c.store.acquire(locks, "game", "OTHER")          # another sprint holds the checkout
+    case = open_case(e)
+    for _ in range(3):
+        case = lm.step(P, task(e), case)
+    assert case["state"] == "DIAGNOSING" and not P.client.starts
+    why = (case.get("validation") or {}).get("lead_waiting") or ""
+    assert "workspace lock held by game/OTHER" in why
+    assert len(events(c, "lead_waiting")) == 1                  # once per reason, not per tick
+    c.store.release("game", "OTHER")
+    case = lm.step(P, task(e), case)
+    assert P.client.starts                                      # the lead call started
+    assert not (case.get("validation") or {}).get("lead_waiting")

@@ -1169,6 +1169,19 @@ class LeadManager:
                 counters[k] = int(counters.get(k, 0)) + int(v)
             return self._save(case_id, counters=counters)
 
+    def _note_wait(self, P, case: dict, why: str) -> dict:
+        """Record (once per reason) why the lead call has not started: the task's blocker
+        shows it and a `lead_waiting` event names it. 2026-10-31: MV2-V1's lead waited 40
+        minutes on GF-RT3's workspace lock with nothing saying so. Cleared once it starts."""
+        v = case.get("validation") or {}
+        if (v.get("lead_waiting") or "") == why:
+            return case
+        case = self._merge_validation(case["case_id"], lead_waiting=why or None)
+        if why:
+            self.store.event(P.id, case["task_id"], "lead_waiting", detail={
+                "case_id": case["case_id"], "why": why[:300]})
+        return case
+
     def _merge_validation(self, case_id: str, **kv) -> dict:
         with self.store.tx():
             v = dict(self.case(case_id)["validation"] or {})
@@ -2819,7 +2832,7 @@ class LeadManager:
             title=f"{P.id} {t['task_id']} lead diagnosis",
             text_fn=lambda: self._lead_prompt(P, t, self.case(case["case_id"])),
             timeout_s=float(s["lead_timeout_minutes"]) * 60, diagnosis=True)
-        case = self.case(case["case_id"])
+        case = self._note_wait(P, self.case(case["case_id"]), r.get("waiting") or "")
         if r["status"] in ("pending", "failed"):
             return case
         if r["status"] == "deferred":
@@ -3687,7 +3700,7 @@ class LeadManager:
                 title=f"{P.id} {t['task_id']} coordinator repair",
                 text_fn=lambda: self._repair_prompt(case, act, path, py),
                 timeout_s=float(s["lead_timeout_minutes"]) * 60, diagnosis=False)
-            case = self.case(case["case_id"])
+            case = self._note_wait(P, self.case(case["case_id"]), r.get("waiting") or "")
             if r["status"] == "pending":
                 return case
             if r["status"] == "deferred" and r.get("infra"):

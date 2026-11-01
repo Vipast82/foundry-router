@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.160.2 — a lead case's short retry wait keeps the main checkout; the lead's wait is shown
+
+2026-10-31 21:05-21:45: MV2-V1's lead session died on infrastructure, so its case was DEFERRED for the
+5-minute backoff. In that window MV2-V1 no longer counted as the main sprint in flight, GF-RT3 started
+a session and took the workspace lock, and when the case was DIAGNOSING again (21:24) its lead call
+waited on GF-RT3's lock with nothing saying so (the case would have escalated at its deadline).
+
+- **engine `_main_pause_is_automatic`:** a BLOCKED sprint whose lead case is DEFERRED with its retry
+  due within 15 minutes (`LEAD_SHORT_DEFER_SECONDS`) keeps its place in the main checkout, like
+  DIAGNOSING / REPAIRING. A long deferral (a quota reset, up to an hour) or a paused case still lets
+  the next sprint in.
+- **lead `_note_wait`:** a lead or repair call that cannot start (`pending`, e.g. "workspace lock held
+  by game/GF-RT3") is recorded once per reason on the case (`validation.lead_waiting`) with one
+  `lead_waiting` event, shown in the task's blocker (`[lead waits: ...]`), and cleared once it starts.
+- Tests: test_engine (short vs long deferral, the blocker text), test_infra_outages (a lead waiting
+  on the lock says so once and starts when it frees); engine + lead suites 227 passed.
+
 ## v0.160.1 — New Kilo tasks no longer wait 60 s for Strata
 
 2026-10-31. Victor's report: every new Kilo task waited about 60 s before Strata started
