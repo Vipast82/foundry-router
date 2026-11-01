@@ -1989,7 +1989,7 @@ const SECTION_RENDER = {
     if (!b || b.key !== k) return `<p class="dim">Loading…</p>`;
     if (b.error) return `<div class="errbox">${esc(b.error)}</div>`;
     const runs = ((b.data || {}).runs || []).filter(r => r && typeof r === "object");
-    if (!runs.length) return `<p class="dim">No Blender runs recorded for this task. Switch on Settings → Fast lane, gate &amp; vision → blender.journal; runs through foundry-blender are recorded.</p>`;
+    if (!runs.length) return `<p class="dim">No Blender runs recorded for this task. Switch on Settings → Fast lane, gate &amp; vision → blender.journal; runs through foundry-blender and (blender.journal_local) Blender runs on this PC are recorded.</p>`;
     S.buildSel = S.buildSel || {};
     let i = S.buildSel[k]; if (i == null || i < 0 || i >= runs.length) i = runs.length - 1;
     const r = runs[i], w = r.where || {}, sc = r.script || {};

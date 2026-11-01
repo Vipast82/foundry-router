@@ -30,7 +30,10 @@ import uuid
 from typing import Optional
 
 DEFAULTS = {"journal": False, "journal_renders": 12, "journal_thumb_px": 256,
-            "journal_keep_days": 30, "journal_max_runs": 200}
+            "journal_keep_days": 30, "journal_max_runs": 200,
+            # R3: Blender on this PC, read from the sprint's transcript
+            "journal_local": True, "journal_watch_seconds": 20,
+            "journal_tools": ["selftest_all.py"]}
 LOG_TAIL = 200                    # log lines kept
 LOG_CAP = 40_000                  # log tail characters kept
 KEY_LINES = 60                    # lines that matter kept
@@ -57,6 +60,9 @@ def settings(profile) -> dict:
     out = dict(DEFAULTS)
     for k, v in DEFAULTS.items():
         x = raw.get(k, v)
+        if isinstance(v, list):
+            out[k] = [str(i) for i in x] if isinstance(x, list) else list(v)
+            continue
         try:
             out[k] = bool(x) if isinstance(v, bool) else max(0, int(x))
         except (TypeError, ValueError):
@@ -192,9 +198,12 @@ def _record(state_dir, pid, tid, source, repo, args, exit_code, started_ts, ende
         # the builder script
         script = script_of(args)
         if script:
-            s = {"path": script.replace("\\", "/")}
-            full = os.path.join(repo, *s["path"].split("/")) if not os.path.isabs(script) \
-                else script
+            full = os.path.join(repo, *script.replace("\\", "/").split("/")) \
+                if not os.path.isabs(script) else script
+            rel = os.path.relpath(os.path.realpath(full), os.path.realpath(repo)) \
+                if repo else full
+            inside = not rel.startswith("..") and not os.path.isabs(rel)
+            s = {"path": (rel if inside else script).replace("\\", "/")}
             try:
                 with open(full, "rb") as f:
                     raw = f.read()
@@ -316,5 +325,228 @@ def sweep(engine, P, force: bool = False) -> int:
     return removed
 
 
+# ----------------------------------------------------------------------------- R3: this PC
+
+# a Blender start on this PC, as sprints write it (2026-11-01, 400 transcript calls):
+#   $b="C:\...\blender.exe"; & $b -b ... -P tools/blender/x.py -- ...
+#   py -3 tools\guard\run.py --name x -- "$b" -b --factory-startup -P ...
+#   & "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" -b ...
+#   blender -b scene.blend -P ...
+_EXE = re.compile(r"""blender\.exe|(?:^|[\s&;'"(])blender["']?\s+-""", re.I)
+# Blender's flags are case-sensitive, and `-Path` / `-Pattern` (PowerShell) are not `-P`
+_RUNFLAG = re.compile(r"(?:^|\s)(?:-b|--background|-P|--python)(?=\s|=|$)")
+_GUARD_LOG = re.compile(r"^LOG (\S+\.log)\s*$", re.M)
+_DROPIN = re.compile(r"\.foundry-blender|slots\s+blender", re.I)
+_VAR = re.compile(r"""^["']?\$\w+["']?$""")
+_STOP = {";", "|", "&&", "||", "2>&1", "|&", ">", ">>", "1>&2"}
+_pending: dict = {}                    # session id -> last observe time
+_final: set = set()                    # sessions observed after they settled
+WALK_CAP = 4000                        # files looked at per run when finding its renders
+
+
+def is_local_blender(cmd: str, tools: list) -> bool:
+    """A command that starts Blender on this PC (not through foundry-blender, which journals
+    its own runs), or runs one of the tools that start Blender themselves."""
+    if not cmd or _DROPIN.search(cmd):
+        return False
+    if _EXE.search(cmd) and _RUNFLAG.search(cmd):
+        return True
+    return any(t and re.search(r"(?:^|[\\/\s])" + re.escape(t) + r"(?:\s|$|\")", cmd)
+               for t in tools)
+
+
+def blender_args(cmd: str) -> list:
+    """The arguments after the Blender executable in a command line (quotes taken off), cut at
+    the first shell separator; [] when no executable token is found."""
+    import shlex
+    try:
+        toks = shlex.split(cmd.replace("\\", "/"), posix=False)
+    except ValueError:
+        toks = cmd.replace("\\", "/").split()
+    for i, tok in enumerate(toks):
+        bare = tok.strip(";").strip("\"'").lower()
+        if not (bare.endswith("blender.exe") or bare == "blender" or _VAR.match(tok.strip(";"))):
+            continue
+        if tok.endswith(";") or (i + 1 < len(toks) and not toks[i + 1].startswith("-")):
+            continue                     # `$b="...blender.exe";` sets a variable, it is no call
+        out = []
+        for nxt in toks[i + 1:]:
+            if nxt in _STOP or nxt.startswith(("|", ";")):
+                break
+            out.append(nxt.strip(";").strip("\"'"))
+            if nxt.endswith(";"):
+                break
+        if out:
+            return out
+    return []
+
+
+def guard_log(ws: str, output: str) -> Optional[dict]:
+    """The game's guard runner (tools/guard/run.py) prints `LOG <path>` and keeps the whole run
+    in that file (CMD/START, the output, EXIT=, END:). None when the output names no log or the
+    log is unreadable; {"exit": None, ...} while the run has no EXIT= line yet."""
+    m = _GUARD_LOG.search(output or "")
+    if not m:
+        return None
+    rel = m.group(1).replace("\\", "/")
+    path = os.path.join(ws, *[x for x in rel.split("/") if x])
+    if not os.path.realpath(path).startswith(os.path.realpath(ws) + os.sep):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()[-2_000_000:]
+    except OSError:
+        return None
+    lines = text.splitlines()
+    out = {"path": rel, "exit": None, "start": None, "end": None, "lines": []}
+    seps = [i for i, ln in enumerate(lines) if ln.strip() == "----"]
+    body = lines[seps[0] + 1:seps[-1]] if len(seps) >= 2 else \
+        lines[seps[0] + 1:] if seps else lines
+    out["lines"] = body
+    for ln in lines:
+        for key, tag in (("start", "START: "), ("end", "END: ")):
+            if ln.startswith(tag):
+                try:
+                    out[key] = time.mktime(time.strptime(ln[len(tag):].strip(),
+                                                         "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    pass
+        if ln.startswith("EXIT="):
+            try:
+                out["exit"] = int(ln[5:].strip())
+            except ValueError:
+                pass
+    return out
+
+
+def _render_dirs(ws: str, args: list, task_id: str) -> list:
+    root = os.path.realpath(ws)
+    dirs = []
+    for a in args:
+        if "/" not in a or a.startswith("-"):
+            continue
+        p = os.path.join(ws, *[x for x in a.split("/") if x])
+        d = p if os.path.isdir(p) else os.path.dirname(p)
+        if os.path.isdir(d) and os.path.realpath(d).startswith(root + os.sep):
+            dirs.append(d)
+    ev = os.path.join(ws, "docs", "evidence", task_id) if task_id else ""
+    if ev and os.path.isdir(ev):
+        dirs.append(ev)
+    out = []
+    for d in dirs:
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def renders_in_window(ws: str, args: list, task_id: str, start: float, end: float) -> list:
+    """Repo-relative PNGs written while the call ran (mtime in start-2..end+2), looked for in the
+    folders the arguments name and the task's evidence folder."""
+    found, seen = [], 0
+    for d in _render_dirs(ws, args, task_id):
+        for root, subdirs, files in os.walk(d):
+            subdirs[:] = [x for x in subdirs if x not in (".git", "__pycache__")]
+            for f in files:
+                seen += 1
+                if seen > WALK_CAP:
+                    return found
+                if not f.lower().endswith(".png"):
+                    continue
+                p = os.path.join(root, f)
+                try:
+                    m = os.path.getmtime(p)
+                except OSError:
+                    continue
+                if start - 2 <= m <= end + 2:
+                    rel = os.path.relpath(p, ws).replace(os.sep, "/")
+                    if rel not in found:
+                        found.append(rel)
+    return found
+
+
+def observe(engine, P, t: dict, sid: str, final: bool = False) -> int:
+    """R3: journal a sprint session's Blender runs on this PC, read from its transcript (every
+    journal_watch_seconds while it is busy, once more when it settles). Each tool call is
+    journaled once (run id `local-<part id>`). Returns the runs added."""
+    o = settings(P.profile)
+    if not (o["journal"] and o["journal_local"]) or not sid:
+        return 0
+    now = time.time()
+    if final:
+        if sid in _final:
+            return 0
+        _final.add(sid)
+    elif now - _pending.get(sid, 0) < max(5, o["journal_watch_seconds"]):
+        return 0
+    _pending[sid] = now
+    ws = str(P.profile.workspace)
+    try:
+        msgs = P.client.transcript(sid, directory=ws) or []
+    except Exception:                                             # noqa: BLE001
+        return 0
+    return journal_transcript(engine.state_dir, P, t["task_id"], sid, msgs, ws, o, now)
+
+
+def journal_transcript(state_dir: str, P, task_id: str, sid: str, msgs: list, ws: str,
+                       o: dict, now: Optional[float] = None) -> int:
+    from .evidence import tool_view
+    now = now or time.time()
+    conn = _db(state_dir)
+    try:
+        known = {r[0] for r in conn.execute(
+            "SELECT run_id FROM build_runs WHERE project_id=? AND session_id=?", (P.id, sid))}
+    finally:
+        conn.close()
+    added, head = 0, None
+    for m in msgs:
+        for part in (m.get("parts") or []):
+            tv = tool_view(part, session_id=sid)
+            if not tv or tv["tool"] not in ("bash", "shell") or \
+                    tv["status"] not in ("completed", "error"):
+                continue
+            key = _SAFE.sub("-", tv["part_id"] or tv["call_id"] or "")[:80]
+            rid = "local-" + key
+            if not key or rid in known:
+                continue
+            cmd = tv["input"]
+            if not is_local_blender(cmd, o.get("journal_tools") or []):
+                continue
+            args = blender_args(cmd) or cmd.replace("\\", "/").split()[:40]
+            start, end = tv["started_ts"] or now, tv["ended_ts"] or now
+            exit_code, lines = tv["exit_code"], (tv["output"] or "").splitlines()
+            notes = []
+            g = guard_log(ws, tv["output"])
+            if g is not None:
+                if g["exit"] is None:
+                    continue                 # still running in the background: read it later
+                exit_code, lines = g["exit"], g["lines"]
+                start, end = g["start"] or start, g["end"] or end
+                notes.append(f"output, exit and times from the guard log {g['path']}")
+            elif "--bg" in cmd.split():
+                notes.append("started in the background (guard --bg) and its log was not found: "
+                             "the exit and times are the start command's")
+            if now - end > 60:
+                notes.append(f"journaled {int(now - end)} s after the run: renders written "
+                             "since then are not caught, and the script may have changed")
+            if head is None:
+                try:
+                    head = P.ws.head()
+                except Exception:                                 # noqa: BLE001
+                    head = ""
+            e = record(state_dir, project_id=P.id, task_id=task_id, source="local", repo=ws,
+                       args=args, exit_code=exit_code, started_ts=start, ended_ts=end,
+                       log_lines=lines, files_back=[],
+                       renders=renders_in_window(ws, args, task_id, start, end),
+                       timings={"blender": round(max(0.0, end - start), 1)},
+                       where={"machine": "this PC", "worktree": ws, "commit": head,
+                              "command": cmd[:600]},
+                       session_id=sid, run_id=rid, opts=o, notes=notes)
+            if e:
+                known.add(rid)
+                added += 1
+    return added
+
+
 __all__ = ["DEFAULTS", "settings", "script_of", "key_lines", "pick_renders", "record", "runs",
-           "sweep", "run_dir"]
+           "sweep", "run_dir", "observe", "journal_transcript", "is_local_blender",
+           "blender_args"]

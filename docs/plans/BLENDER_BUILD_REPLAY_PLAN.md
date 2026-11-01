@@ -1,7 +1,8 @@
 # Plan: a replay of every Blender build
 
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-R1 to D-R6 as recommended).
-**R1 + R2 are done (v0.168.0, ships off: `blender.journal`).** R3 is next; R4 stays deferred.
+**R1 + R2 are done (v0.168.0, ships off: `blender.journal`). R3 is done (v0.169.0): Blender on
+this PC, from the transcript, plus AU's guard logs.** R4 stays deferred.
 Source: reports/ASSET_PIPELINE_REVIEW_2026-11.md gap 8. The video's recipe keeps a replay of
 every build, so you can see how a model got where it is.
 

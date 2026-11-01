@@ -1345,6 +1345,11 @@ class Coordinator:
         """Poll a session. Returns the idle SessionState, or None after
         handling anything else (still busy, question, error, denial)."""
         s = self._poll_inner(P, t, sid, phase)
+        if isinstance(s, SessionState):
+            try:
+                build_journal.observe(self, P, t, sid, final=True)   # R3: once, when it settles
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"{P.id}/{t['task_id']}: build journal failed: {type(e).__name__}: {e}")
         # the handlers below return transition rows (dicts); only an idle
         # session's state may reach the caller
         return s if isinstance(s, SessionState) else None
@@ -1582,6 +1587,11 @@ class Coordinator:
                 self.tracks.observe_session(P, t, sid)
             except Exception:                                     # noqa: BLE001
                 pass
+            try:
+                # build replay R3: this session's Blender runs on this PC (rate limited)
+                build_journal.observe(self, P, t, sid)
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"{pid}/{tid}: build journal failed: {type(e).__name__}: {e}")
             if s.denial:
                 P.client.abort(sid, directory=directory)
                 return self._on_denial(P, t, s.denial, s.error, resume=t["state"], session=sid)

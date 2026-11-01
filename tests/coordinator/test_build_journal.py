@@ -307,3 +307,174 @@ def test_a_restarted_bridge_catches_up_in_steps(ws, monkeypatch):
             c()
         sent.append([o["run_id"] for o in obs])
     assert sent == [["r-0", "r-1"], ["r-2", "r-3"], ["r-4"]]
+
+
+# ----------------------------------------------------------------------------- R3: this PC
+
+B = r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
+FORMS = [
+    (rf'cd C:\Roblox\AU; $b="{B}"; py -3 tools\guard\run.py --name x -- "$b" -b --factory-startup '
+     r'-P tools/blender/export_clip_json.py -- --all', "tools/blender/export_clip_json.py"),
+    (rf'$b="{B}"; & $b -b --factory-startup -P tools/blender/build_bs_owl.py -- --save a.blend '
+     r'2>&1 | Select -Last 4', "tools/blender/build_bs_owl.py"),
+    (rf'& "{B}" -b assets/x.blend -P tools\blender\render_views.py -- --out tmp/r --name X',
+     "tools/blender/render_views.py"),
+    ("blender -b --python tools/blender/a.py", "tools/blender/a.py"),
+]
+NOT_RUNS = ["git add tools/blender/build_bs_owl.py", "py -3 tools/blender/build_bs_king.py -- --plan",
+            r"Select-String -Path docs\ENVIRONMENT.md -Pattern blender",
+            r'"C:\Users\me\.foundry-blender\au-1.cmd" -b -P tools/blender/x.py',
+            "python -m foundry_coordinator.slots blender -- -b -P x.py"]
+
+
+@pytest.mark.parametrize("cmd,script", FORMS)
+def test_the_real_blender_forms_are_runs_with_their_script(cmd, script):
+    assert BJ.is_local_blender(cmd, [])
+    assert BJ.script_of(BJ.blender_args(cmd)) == script
+
+
+@pytest.mark.parametrize("cmd", NOT_RUNS)
+def test_commands_that_only_mention_blender_are_not_runs(cmd):
+    assert not BJ.is_local_blender(cmd, ["selftest_all.py"])
+
+
+def test_a_tool_that_starts_blender_itself_is_a_run():
+    cmd = rf'py -3 tools/blender/selftest_all.py --blender "{B}"'
+    assert BJ.is_local_blender(cmd, ["selftest_all.py"])
+    assert not BJ.is_local_blender(cmd, [])
+
+
+def _part(pid, cmd, start, end, status="completed", out="mesh_report: PASS\n", exit_code=0):
+    return {"type": "tool", "id": pid, "callID": "c" + pid, "tool": "bash",
+            "state": {"status": status, "input": {"command": cmd}, "output": out,
+                      "metadata": {"exit": exit_code},
+                      "time": {"start": int(start * 1000), "end": int(end * 1000)}}}
+
+
+class _WS:
+    def head(self):
+        return "abc123"
+
+
+def _proj(repo, raw=None):
+    return SimpleNamespace(id="game", ws=_WS(), profile=SimpleNamespace(
+        workspace=str(repo), raw=raw if raw is not None else {"blender": {"journal": True}}))
+
+
+def test_a_transcript_gives_one_entry_per_blender_call_with_its_renders(ws):
+    repo, state = ws
+    now = time.time()
+    _png(str(repo / "tmp" / "r" / "X_front.png"))
+    os.utime(repo / "tmp" / "r" / "X_front.png", (now - 30, now - 30))
+    _png(str(repo / "tmp" / "r" / "old_back.png"))
+    os.utime(repo / "tmp" / "r" / "old_back.png", (now - 900, now - 900))
+    run = (rf'$b="{B}"; & $b -b x.blend -P tools/blender/build_x.py -- --out tmp/r --name X')
+    msgs = [{"info": {"role": "assistant"}, "parts": [
+        _part("p1", run, now - 40, now - 29),
+        _part("p2", "git status", now - 20, now - 19),
+        _part("p3", run, now - 10, now, status="running"),
+        _part("p4", r'"C:\Users\me\.foundry-blender\au.cmd" -b -P tools/blender/build_x.py',
+              now - 9, now - 8)]}]
+    P = _proj(repo)
+    o = BJ.settings(P.profile)
+    assert BJ.journal_transcript(str(state), P, "AS-X1", "ses_1", msgs, str(repo), o, now) == 1
+    (e,) = BJ.runs(str(state), "game", "AS-X1")
+    assert e["run_id"] == "local-p1" and e["source"] == "local" and e["session_id"] == "ses_1"
+    assert e["script"]["path"] == "tools/blender/build_x.py"
+    assert [r["path"] for r in e["renders"]] == ["tmp/r/X_front.png"]
+    assert e["renders"][0]["thumb"] == "thumbs/00.png"
+    assert e["where"]["machine"] == "this PC" and e["where"]["commit"] == "abc123"
+    assert e["key_lines"] == ["mesh_report: PASS"] and e["timings"]["blender"] == 11.0
+    # read again: nothing new
+    assert BJ.journal_transcript(str(state), P, "AS-X1", "ses_1", msgs, str(repo), o, now) == 0
+
+
+def test_a_late_read_says_so(ws):
+    repo, state = ws
+    now = time.time()
+    msgs = [{"parts": [_part("p9", "blender -b -P tools/blender/build_x.py", now - 400,
+                             now - 300)]}]
+    P = _proj(repo)
+    BJ.journal_transcript(str(state), P, "AS-X1", "ses_2", msgs, str(repo),
+                          BJ.settings(P.profile), now)
+    (e,) = BJ.runs(str(state), "game", "AS-X1")
+    assert "after the run" in e["notes"][0]
+
+
+class _Client:
+    def __init__(self, msgs):
+        self.msgs, self.calls = msgs, 0
+
+    def transcript(self, sid, directory):
+        self.calls += 1
+        return self.msgs
+
+
+def test_observe_is_off_with_the_switch_and_rate_limited(ws, monkeypatch):
+    repo, state = ws
+    now = time.time()
+    msgs = [{"parts": [_part("q1", "blender -b -P tools/blender/build_x.py", now - 5, now - 4)]}]
+    eng = SimpleNamespace(state_dir=str(state))
+    t = {"task_id": "AS-X1"}
+    monkeypatch.setattr(BJ, "_pending", {})
+    monkeypatch.setattr(BJ, "_final", set())
+    off = _proj(repo, {"blender": {"journal": False}})
+    off.client = _Client(msgs)
+    assert BJ.observe(eng, off, t, "s1") == 0 and off.client.calls == 0
+    local_off = _proj(repo, {"blender": {"journal": True, "journal_local": False}})
+    local_off.client = _Client(msgs)
+    assert BJ.observe(eng, local_off, t, "s1") == 0 and local_off.client.calls == 0
+    P = _proj(repo)
+    P.client = _Client(msgs)
+    assert BJ.observe(eng, P, t, "s1") == 1
+    assert BJ.observe(eng, P, t, "s1") == 0 and P.client.calls == 1      # within 20 s
+    assert BJ.observe(eng, P, t, "s1", final=True) == 0 and P.client.calls == 2
+    assert BJ.observe(eng, P, t, "s1", final=True) == 0 and P.client.calls == 2   # once
+
+
+def test_settings_lists_are_lists():
+    o = BJ.settings(SimpleNamespace(raw={"blender": {"journal_tools": ["a.py", 3]}}))
+    assert o["journal_tools"] == ["a.py", "3"]
+    assert BJ.settings(SimpleNamespace(raw={"blender": {"journal_tools": "x"}}))[
+        "journal_tools"] == ["selftest_all.py"]
+
+
+def test_a_powershell_search_naming_blender_is_not_a_run():
+    assert not BJ.is_local_blender(r"Select-String -Path docs\ENVIRONMENT.md -Pattern 'blender' "
+                                   "-SimpleMatch | Select-Object -First 12", [])
+
+
+def _guard(repo, name, body, exit_line="EXIT=0", end="2026-11-01 10:00:30"):
+    d = repo / "tmp" / "guard" / "cmd"
+    d.mkdir(parents=True, exist_ok=True)
+    text = ("CMD: blender ...\nCWD: x\nSHELL: none\nSTART: 2026-11-01 10:00:00\nSTATUS RUNNING\n"
+            "----\n" + body + "\n")
+    if exit_line:
+        text += f"----\n{exit_line}\nEND: {end}\n"
+    (d / name).write_text(text)
+    return f"LOG tmp/guard/cmd/{name}\nBG started (runner pid 1). Result: ..."
+
+
+def test_a_background_guard_run_is_read_from_its_log_once_it_ended(ws):
+    repo, state = ws
+    now = time.time()
+    full = str(repo / "tools" / "blender" / "build_x.py").replace("/", "\\")
+    cmd = (rf'py -3 tools\guard\run.py --bg --name bx --shell none -- "{B}" -b --factory-startup '
+           rf'-P "{full}" -- --out tmp/r')
+    out = _guard(repo, "a_bx.log", "Blender 4.5\nmesh_report: FAIL budget", exit_line="")
+    msgs = [{"parts": [_part("g1", cmd, now - 5, now - 4.6, out=out)]}]
+    P = _proj(repo)
+    o = BJ.settings(P.profile)
+    assert BJ.journal_transcript(str(state), P, "AS-X1", "s", msgs, str(repo), o, now) == 0
+    _guard(repo, "a_bx.log", "Blender 4.5\nmesh_report: FAIL budget", exit_line="EXIT=1")
+    assert BJ.journal_transcript(str(state), P, "AS-X1", "s", msgs, str(repo), o, now) == 1
+    (e,) = BJ.runs(str(state), "game", "AS-X1")
+    assert e["exit"] == 1 and e["seconds"] == 30.0
+    assert e["key_lines"] == ["mesh_report: FAIL budget"] and "Blender 4.5" in e["log_tail"]
+    assert e["script"]["path"] == "tools/blender/build_x.py"          # made worktree-relative
+    assert "guard log tmp/guard/cmd/a_bx.log" in e["notes"][0]
+
+
+def test_guard_log_parsing():
+    assert BJ.guard_log(".", "no log here") is None
+    assert BJ.guard_log(".", "LOG ../../etc/x.log") is None

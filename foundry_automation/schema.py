@@ -1121,7 +1121,8 @@ FIELDS: list[Field] = [
     F("blender.journal", "bool", False, "Build replay: keep a journal of every Blender run (the "
       "builder script with its diff from the last run, the arguments, timings, exit code, files "
       "back, the result lines and small render thumbnails), shown on the task page as Build "
-      "replay. Runs through foundry-blender are recorded; the big outputs are never copied.",
+      "replay. Runs through foundry-blender and (blender.journal_local) Blender on this PC are "
+      "recorded; the big outputs are never copied.",
       "fast_lane", "coordinator.slot_blender", "next_session"),
     F("blender.journal_renders", "int", 12, "Build replay: render thumbnails kept per run (render "
       "views first). 0 = none.", "fast_lane", "coordinator.slot_blender", "next_session",
@@ -1133,6 +1134,16 @@ FIELDS: list[Field] = [
       "coordinator.slot_blender", min=1),
     F("blender.journal_max_runs", "int", 200, "Build replay: runs kept per finished task (the "
       "newest).", "fast_lane", "coordinator.slot_blender", min=1),
+    F("blender.journal_local", "bool", True, "Build replay: also journal Blender runs on THIS PC, "
+      "read from the sprint's transcript (blender.exe calls). A render overwritten within the "
+      "watch interval of its run can be missed. Needs blender.journal on.", "fast_lane",
+      "coordinator.slot_blender"),
+    F("blender.journal_watch_seconds", "int", 20, "Build replay: how often a busy sprint's "
+      "transcript is read for new Blender runs on this PC (one Kilo request each).", "fast_lane",
+      "coordinator.slot_blender", min=5, max=600),
+    F("blender.journal_tools", "list", ["selftest_all.py"], "Build replay: the game's tools that "
+      "start Blender themselves; a sprint command running one of them is journaled as a Blender "
+      "run on this PC.", "fast_lane", "coordinator.slot_blender", item_type="str"),
     # the main checkout's Studio on a slot (docs/plans/LINUX_WORKSTATION_PLAN.md W2) ---------
     F("studio.main_slot", "str", "", "The MAIN sprints' Studio: empty = this PC's Studio (today); "
       "a slot id = that Studio slot, like a slot-bound track: the scripted gate runs there (its "

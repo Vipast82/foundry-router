@@ -2,6 +2,42 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.169.0 — build replay for Blender on this PC
+
+2026-11-01. R3 of docs/plans/BLENDER_BUILD_REPLAY_PLAN.md. Sprints run Blender on this PC today,
+not on a slot, so v0.168.0 alone recorded nothing for them. Still off until `blender.journal`
+is on; with it on, `blender.journal_local` (on by default) adds these runs.
+
+- **The transcript watcher (`build_journal.observe`):**
+  - **When:** while a sprint session is busy, every `blender.journal_watch_seconds` (20), the
+    engine reads its transcript, and once more when the session settles.
+  - **Which calls:** each completed `bash` call that starts Blender on this PC becomes one journal
+    entry (`local-<part id>`, once per call):
+    - `& $b -b … -P …`, the guard's `-- "$b" -b …`, `& "…lender.exe" …`, `blender -b …`;
+    - or a tool in `blender.journal_tools` (`selftest_all.py`).
+  - **Skipped:** foundry-blender calls (they journal themselves), and commands that only mention
+    Blender (git, plain Python, PowerShell searches: `-Path` is not `-P`).
+- **The entry:**
+  - the args after the executable, the script made relative to the worktree, with hash, copy
+    and diff;
+  - the exit, times and output lines;
+  - the PNGs written during the call, found in the folders the arguments name and in
+    `docs/evidence/<task>`.
+- **AU's guard runner:** when the output names `LOG tmp/guard/cmd/….log`, the output, exit, start
+  and end come from that log. A background run (`--bg`) is read once its log has `EXIT=`. A run
+  read more than a minute late says so on the entry.
+- **Settings (UI fields):**
+  - `blender.journal_local` (on)
+  - `blender.journal_watch_seconds` (20)
+  - `blender.journal_tools` (`["selftest_all.py"]`)
+- **Proof:** a read-only replay of a past session's transcript (AS-D11 implement #4, 730 parts)
+  found its 34 Blender runs in 0.6 s: export_fbx 12 times, the sprint's own probe scripts, with
+  exits and times. That track's guard logs had been cleaned up after the merge, and the entries
+  say so.
+- **Tests:** `tests/coordinator/test_build_journal.py` (37 tests: invocation forms, look-alikes, the
+  transcript, renders by time, the guard log, the switch, the rate limit, the run on settling). 456 engine, AU, tracks,
+  evidence, bridge, control-center, settings and slot tests pass.
+
 ## v0.168.0 — build replay: a journal of every Blender run, on the task page
 
 2026-11-01. Gap 8 of reports/ASSET_PIPELINE_REVIEW_2026-11.md: R1 + R2 of

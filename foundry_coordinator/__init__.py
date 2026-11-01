@@ -18,4 +18,4 @@ Stdlib only (Python 3.11+), so it runs on the workstation next to the
 repository, Kilo and Roblox Studio without installing anything.
 """
 
-__version__ = "0.168.0"
+__version__ = "0.169.0"
