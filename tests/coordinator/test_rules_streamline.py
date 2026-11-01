@@ -567,3 +567,20 @@ def test_a_sprints_own_evidence_folder_is_granted_without_asking():
     r = SC.rule_for(P, "AS-P5", "docs/evidence/AS-P5/proxy_telegraph_20s-20261028-232940-704.png")
     assert r and r["name"] == "sprint_own_evidence"
     assert SC.rule_for(P, "AS-P5", "docs/evidence/UI-SKIN2/hero_desktop.jpg") is None
+
+
+def test_a_main_sprint_on_a_studio_slot_is_told_its_studio_is_the_slots(repo):
+    """LINUX_WORKSTATION_PLAN W2: [studio] main_slot puts the MAIN sprints' Studio on a slot."""
+    a = repo["a"]
+    raw = a.p.raw
+    a.p.raw = {**raw, "studio": {"main_slot": "slot-1"}}
+    try:
+        spec = a.describe(T)
+        build = a.implement_prompt(spec, {"attempt": 1, "run_id": "r1"})
+    finally:
+        a.p.raw = raw
+    assert "MAIN SPRINT, STUDIO ON SLOT `slot-1`" in build
+    assert "studio.lock and this PC's Studio are not used" in build
+    assert "TRACK SPRINT" not in build
+    plain = a.implement_prompt(a.describe(T), {"attempt": 1, "run_id": "r1"})
+    assert "STUDIO ON SLOT" not in plain                                  # off: as before

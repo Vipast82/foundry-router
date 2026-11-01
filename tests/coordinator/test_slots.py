@@ -272,3 +272,78 @@ def test_a_remote_slot_derives_its_push_targets_and_ssh_accepts_a_new_host_once(
     argv = SL.exec_argv(s2, ["true"])
     assert "StrictHostKeyChecking=accept-new" in argv and "BatchMode=yes" in argv
     assert argv[argv.index("studio@10.0.0.6") + 1].startswith("docker exec studio-slot")
+
+
+# ----------------------------------------------------------------------------- W2: main on a slot
+
+def _main_calls(main_slot="slot-1"):
+    """StudioCalls for the MAIN project with [studio] main_slot (LINUX_WORKSTATION_PLAN W2)."""
+    from foundry_coordinator.studio_calls import StudioCalls
+    prof = SimpleNamespace(raw={"slots": {"slot-1": SLOT_CFG}, "studio": {"main_slot": main_slot}},
+                           workspace="C:/Roblox/AnimalUprising")
+    P = SimpleNamespace(id="animaluprising", profile=prof)
+    store = SimpleNamespace(track=lambda pid, name: None)
+    tracks = SimpleNamespace(is_track=lambda X: X is not P, track_name=lambda X: "t1",
+                             main_of=lambda X: P)
+    c = SimpleNamespace(store=store, tracks=tracks,
+                        _workspace_locks=lambda X: ["workspace:c:\roblox\animaluprising"],
+                        _session_locks=lambda X: ["studio:victor-workstation", "writer"])
+    sc = StudioCalls.__new__(StudioCalls)
+    sc.c, sc.store = c, store
+    return sc, P, c
+
+
+def test_main_on_a_slot_takes_the_slot_like_a_slot_track():
+    sc, P, c = _main_calls()
+    assert SL.slot_for(c, P)["id"] == "slot-1"
+    locks = sc._run_locks(P)
+    assert "slot:slot-1" in locks and not any(x.startswith("studio:") for x in locks)
+    # off (empty) = this PC's Studio, as before
+    sc0, P0, c0 = _main_calls("")
+    assert SL.slot_for(c0, P0) is None
+    # a main slot that is not configured (or disabled) is none at all
+    sc9, P9, c9 = _main_calls("slot-9")
+    assert SL.slot_for(c9, P9) is None
+
+
+def test_an_unbound_track_never_takes_the_main_slot():
+    sc, P, c = _main_calls()
+    track = SimpleNamespace(id="animaluprising", profile=P.profile)   # shares main's settings
+    assert SL.slot_for(c, track) is None
+
+
+def test_the_fast_lane_steps_aside_while_main_studio_is_a_slots():
+    from foundry_coordinator import fast_lane as FL
+    prof = SimpleNamespace(raw={"studio": {"main_slot": "slot-1"}}, fast_lane_task=lambda t: True)
+    assert FL.is_task(SimpleNamespace(profile=prof), "UI-1") is False
+    prof.raw = {}
+    assert FL.is_task(SimpleNamespace(profile=prof), "UI-1") is True
+    tp = SimpleNamespace(raw={"studio": {"main_slot": "slot-1"}}, fast_lane_task=lambda t: True)
+    tp.__dict__["track"] = "t1"                     # a track keeps its own fast-lane setting
+    assert FL.is_task(SimpleNamespace(profile=tp), "UI-1") is True
+
+
+def test_main_kilo_studio_mcp_points_at_the_slot_and_comes_back(tmp_path):
+    kc = tmp_path / "kilo.jsonc"
+    orig = {"Roblox_Studio": {"type": "local", "enabled": True,
+                              "command": ["cmd.exe", "/d", "/c", "mcp.bat"]},
+            "robloxstudio-mcp": {"type": "local", "enabled": True,
+                                 "command": ["npx", "-y", "@chrrxs/robloxstudio-mcp@3.4.2"]},
+            "context7": {"enabled": False}}
+    kc.write_text(json.dumps({"mcp": orig}, indent=1), encoding="utf-8")
+    prof = SimpleNamespace(id="animaluprising", raw={
+        "slots": {"slot-1": {"container": "studio-slot", "host": "studio@192.168.0.115"}},
+        "studio": {"main_slot": "slot-1"}})
+    out = SL.sync_main_kilo(prof, str(tmp_path / "state"), path=str(kc))
+    assert out["action"] == "slot" and sorted(out["changed"]) == ["Roblox_Studio", "robloxstudio-mcp"]
+    now = json.loads(kc.read_text(encoding="utf-8"))["mcp"]
+    assert "studio@192.168.0.115" in now["Roblox_Studio"]["command"]
+    assert now["context7"] == {"enabled": False}
+    # again: nothing to change, the saved originals are not overwritten by the slot's blocks
+    assert SL.sync_main_kilo(prof, str(tmp_path / "state"), path=str(kc))["changed"] == []
+    # cleared: the workstation's own blocks come back, the saved copy is gone
+    prof.raw["studio"]["main_slot"] = ""
+    out = SL.sync_main_kilo(prof, str(tmp_path / "state"), path=str(kc))
+    assert out["action"] == "restore"
+    assert json.loads(kc.read_text(encoding="utf-8"))["mcp"] == orig
+    assert SL.sync_main_kilo(prof, str(tmp_path / "state"), path=str(kc))["action"] == "none"

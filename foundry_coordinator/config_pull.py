@@ -254,6 +254,8 @@ class ConfigPuller:
             self._reject(pid, body, f"the merged profile is for {new.id!r}")
             return "rejected"
         rules_changed = role_rules_changed(prev, body["doc"]) or (prev is None)
+        studio_changed = (prev is None) or any(
+            c["path"].startswith(("studio.", "slots.")) for c in D.diff(prev, body["doc"]))
         prof.__dict__.update(new.__dict__)          # in place: every holder sees it
         tracks = getattr(self.c, "tracks", None)
         if tracks is not None and hasattr(tracks, "after_config_apply"):
@@ -297,10 +299,35 @@ class ConfigPuller:
                 store=self.store, clock=self.clock)
         if rules_changed:
             self._regenerate_kilo(pid, body)
+        if studio_changed:
+            self._sync_main_studio(pid, body)
         self.log(f"config: {pid}: applied router revision {body.get('rev')}"
                  + (f" (restart needed for {', '.join(restart)})" if restart else ""))
         self._report(pid, body, "applied", "", restart)
         return "applied"
+
+    def _sync_main_studio(self, pid: str, body: dict) -> Optional[dict]:
+        """LINUX_WORKSTATION_PLAN W2: the main kilo.jsonc's Studio MCP servers follow [studio]
+        main_slot (pointed at the slot, or put back), then Kilo reloads. Never rejects."""
+        if not self.kilo_regen(pid):
+            return None
+        P = self.c.projects[pid]
+        from . import slots
+        try:
+            out = slots.sync_main_kilo(P.profile, self.c.state_dir)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"config: {pid}: main Studio MCP not synced: {type(e).__name__}: {e}")
+            return None
+        if out.get("changed"):
+            what = (f"to slot {slots.main_slot_id(P.profile)}" if out["action"] == "slot"
+                    else "back to this PC's Studio")
+            self.log(f"config: {pid}: main kilo.jsonc Studio MCP {', '.join(out['changed'])} {what}")
+            self.store.event(pid, "", "main_studio_mcp", detail={"rev": body.get("rev"), **out})
+            client_requests.request(
+                self.c.state_dir, "reload_kilo", pid,
+                f"router revision {body.get('rev')}: the main Studio MCP servers point {what}",
+                detail={"rev": body.get("rev"), **out}, store=self.store, clock=self.clock)
+        return out
 
     def _regenerate_kilo(self, pid: str, body: dict) -> Optional[dict]:
         """W2.4 (C1 action): rewrite the kilo.jsonc agent blocks from the

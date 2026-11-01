@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.166.0 — The main sprints' Studio can live on a slot (Linux workstation plan W2)
+
+2026-11-01. docs/plans/LINUX_WORKSTATION_PLAN.md W2 (D-L1: the main Studio in the slot image).
+**Off by default: nothing changes until `studio.main_slot` is set.**
+
+- **Setting** `studio.main_slot` (Automation → Settings): empty = this PC's Studio; a slot id =
+  that slot is the MAIN project's Studio, the way a slot-bound track already uses one.
+- **One routing point:** `slots.slot_for()` now returns the main slot for the main project. The
+  scripted Studio gate (pipeline in the slot; the slot's lock instead of `studio:` and
+  studio.lock), the Studio auto-heal repairs (`slots.resync`) and the Studio reopen all follow,
+  unchanged. A track never takes the main slot: tracks share main's settings, and an unbound
+  track has no Studio.
+- **Main's Kilo config:** its Studio MCP servers follow the setting (`slots.sync_main_kilo`,
+  `config_pull._sync_main_studio`).
+  - When the setting is set, they point at the slot (`docker exec` over ssh), after their
+    original blocks are saved in `<state>/kilo/<project>-studio-mcp.json`.
+  - When it is cleared, those blocks are put back as they were.
+  - Each change sends a `reload_kilo` request. It runs when `studio.*` or `slots.*` change and at
+    start. With nothing set and nothing saved it does nothing, so today's setup is untouched.
+- **Fast lane:** it steps aside while the main Studio is a slot's (`fast_lane.is_task`). It
+  drives this PC's Studio; those tasks take the scripted gate in the slot instead. Tracks keep
+  their own fast-lane setting.
+- **Prompt:** main sprints get "MAIN SPRINT, STUDIO ON SLOT `<id>`". Studio MCP reaches the
+  slot, the slot's Rojo serves committed code (commit before asking for the gate), and
+  studio.lock and this PC's Studio are not used.
+- **Limits:**
+  - `[studio_calls]` must cover the tasks (AU's covers tiers A, B and C). The agent-run
+    `gate.ps1` path would still use this PC's Studio.
+  - The Foundry Client's Studio watchdog stays Windows-only; the slot container's own watchdog
+    reopens Studio there.
+- **Not run live yet:** setting it moves the live main sprints' Studio to slot-1. The first trial
+  is Victor's call, at a quiet moment.
+- Tests: test_slots (+4), test_rules_streamline (+1).
+
 ## v0.165.2 — game code with "secret" in its name is readable; secret files stay denied
 
 2026-11-01 (Victor: "You can narrow the secret"). GF-SM1 (the Back-Fence Bazaar) stopped at once.

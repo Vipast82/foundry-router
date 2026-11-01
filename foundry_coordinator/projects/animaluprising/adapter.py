@@ -458,8 +458,12 @@ class AnimalUprisingAdapter(GenericAdapter):
         return str(getattr(self.p, "__dict__", {}).get("track") or "")
 
     def _slot(self) -> str:
-        """The Studio slot this track is bound to ('' = none): it HAS Studio (2026-10-31)."""
-        return str(getattr(self.p, "__dict__", {}).get("slot") or "")
+        """The Studio slot this track is bound to ('' = none): it HAS Studio (2026-10-31). The
+        main checkout's: [studio] main_slot (LINUX_WORKSTATION_PLAN W2; '' = this PC's Studio)."""
+        if self._track():
+            return str(getattr(self.p, "__dict__", {}).get("slot") or "")
+        from ...slots import main_slot_id
+        return main_slot_id(self.p)
 
     def _blender_notice(self) -> str:
         """SLOT_BLENDER_PLAN B2: when this project's Blender runs on a slot, how to run it ('' =
@@ -639,7 +643,14 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
         repair = findings is not None
         head = ("REPAIR" if repair else "BUILD") + f" session for sprint {t} — {spec.title}"
         notice = ""
-        if slot:
+        if slot and not slot_track:
+            # LINUX_WORKSTATION_PLAN W2: the main checkout's Studio is a slot's ([studio] main_slot)
+            notice = (f"\nMAIN SPRINT, STUDIO ON SLOT `{slot}`: this project's Studio is the "
+                      f"containerised Studio on slot `{slot}`, not one on this PC. Your Studio MCP "
+                      "tools reach the slot. The slot's Rojo serves COMMITTED code only: the "
+                      "coordinator moves the slot to your HEAD for each scripted gate, so commit "
+                      "before asking for it. studio.lock and this PC's Studio are not used.\n")
+        elif slot:
             notice = (f"\nTRACK SPRINT ON STUDIO SLOT `{slot}` (track `{slot_track}`, worktree "
                       f"`{self.p.workspace}`): this track's Studio is a separate containerised "
                       "Studio, not the main one. Your Studio MCP tools reach the slot. The slot's "

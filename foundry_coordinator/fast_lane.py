@@ -103,6 +103,11 @@ def runner_patterns(P, task_id: str) -> tuple[list, list]:
 
 
 def is_task(P, task_id: str) -> bool:
+    # the fast lane drives this PC's Studio: off while the main Studio is a slot's ([studio]
+    # main_slot, LINUX_WORKSTATION_PLAN W2); those tasks take the scripted gate in the slot
+    from .slots import main_slot_id
+    if main_slot_id(P.profile) and not getattr(P.profile, "__dict__", {}).get("track"):
+        return False
     fn = getattr(P.profile, "fast_lane_task", None)
     try:
         return bool(fn(task_id)) if callable(fn) else False

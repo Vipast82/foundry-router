@@ -1,7 +1,9 @@
 # Plan: the main workstation on Linux (bare metal or a Proxmox LXC)
 
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-L1 to D-L6 as recommended
-below). **W1 is done (v0.162.2).** W2 (a main Studio in a container) is next. Victor: "If I want to have a LXC container to RUN a
+below). **W1 is done (v0.162.2). W2 is built (v0.166.0), off by default:** [studio] main_slot puts
+the main sprints' Studio on a slot. Its first live trial is Victor's call (it moves the live main
+sprints' Studio). W3 (the installer) is next. Victor: "If I want to have a LXC container to RUN a
 FULL Coding Suite location to take the place of my PC as the main implementor, can we make that?
 or have like a Script Installer for everything I need on a current Linux Install". This replaces
 phase 3 of docs/plans/FRESH_INSTALL_PLAN.md (workstation enrollment) with a Linux-first version,

@@ -1111,6 +1111,13 @@ FIELDS: list[Field] = [
       "that Studio slot's Blender, through foundry-blender (the sprint's files go there, the "
       "outputs come back; the local blender.exe is denied). A track bound to a slot uses its "
       "own slot.", "fast_lane", "coordinator.slot_blender"),
+    # the main checkout's Studio on a slot (docs/plans/LINUX_WORKSTATION_PLAN.md W2) ---------
+    F("studio.main_slot", "str", "", "The MAIN sprints' Studio: empty = this PC's Studio (today); "
+      "a slot id = that Studio slot, like a slot-bound track: the scripted gate runs there (its "
+      "own lock, not studio.lock), Kilo's Studio MCP servers reach it, Studio repairs and reopens "
+      "go there. The slot's Rojo serves committed code. The fast lane (which drives this PC's "
+      "Studio) is off while it is set. Needs [studio_calls] to cover the tasks. For a main PC "
+      "without Studio (Linux).", "fast_lane", "coordinator.slots"),
     F("blender.library", "str", "C:/Roblox/AssetLibrary", "The asset library's folder on the "
       "main PC (the game's Blender tools read model kits from it). When Blender runs on a slot, "
       "foundry-blender keeps a copy in the slot (only changed files are sent) and points "

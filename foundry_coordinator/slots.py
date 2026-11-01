@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 import re
 import shlex
@@ -108,9 +109,28 @@ def slot_id_of(c, P) -> str:
     return str(((row or {}).get("data") or {}).get("slot") or "")
 
 
+def main_slot_id(profile) -> str:
+    """The slot the MAIN sprints' Studio runs on ([studio] main_slot, LINUX_WORKSTATION_PLAN W2;
+    '' = the workstation's own Studio)."""
+    raw = getattr(profile, "raw", None) or {}
+    return str((raw.get("studio") or {}).get("main_slot") or "").strip()
+
+
+def is_main(c, P) -> bool:
+    tracks = getattr(c, "tracks", None)
+    try:
+        return tracks is None or not tracks.is_track(P)
+    except Exception:                                             # noqa: BLE001
+        return True
+
+
 def slot_for(c, P) -> Optional[dict]:
-    """(slot settings + `id`) for a track bound to an enabled slot, else None."""
+    """(slot settings + `id`) for a track bound to an enabled slot, or for the MAIN project when
+    [studio] main_slot names an enabled slot (W2); else None. A track never takes the main slot
+    (tracks share main's settings): an unbound track has no Studio."""
     sid = slot_id_of(c, P)
+    if not sid and is_main(c, P):
+        sid = main_slot_id(P.profile)
     if not sid:
         return None
     s = configured(c.tracks.main_of(P).profile if getattr(c, "tracks", None) else P.profile).get(sid)
@@ -383,6 +403,46 @@ def patch_kilo_config(path: str, slot: dict) -> list:
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
     return changed
+
+
+def sync_main_kilo(profile, state_dir: str, path: str = "") -> dict:
+    """The MAIN kilo.jsonc's Studio MCP servers follow [studio] main_slot (W2): pointed at the
+    slot while it is set (their original blocks saved first in <state>/kilo/), put back as they
+    were when it is cleared. {"action": "slot"|"restore"|"none", "changed": [names]}."""
+    from foundry_automation import jsonc
+    from .kilo_config import kilo_path
+    path = path or kilo_path(profile)
+    backup = os.path.join(state_dir, "kilo", f"{getattr(profile, 'id', 'project')}-studio-mcp.json")
+    sid = main_slot_id(profile)
+    s = configured(profile).get(sid) if sid else None
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        data = jsonc.parse(text)
+    except (OSError, jsonc.JsoncError):
+        return {"action": "none", "changed": [], "why": f"cannot read {path}"}
+    mcp = data.get("mcp") if isinstance(data, dict) and isinstance(data.get("mcp"), dict) else {}
+    if s:
+        if not os.path.exists(backup):              # the workstation's own blocks, kept once
+            os.makedirs(os.path.dirname(backup), exist_ok=True)
+            with open(backup, "w", encoding="utf-8") as f:
+                json.dump({n: mcp.get(n) for n in STUDIO_MCP if isinstance(mcp.get(n), dict)}, f,
+                          indent=1)
+        return {"action": "slot", "changed": patch_kilo_config(path, {**s, "id": sid})}
+    if not os.path.exists(backup):
+        return {"action": "none", "changed": []}
+    with open(backup, encoding="utf-8") as f:
+        saved = json.load(f)
+    changed = []
+    for name, block in (saved or {}).items():
+        if isinstance(block, dict) and mcp.get(name) != block:
+            text = jsonc.replace_value(text, ("mcp", name), block)
+            changed.append(name)
+    if changed:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    os.remove(backup)
+    return {"action": "restore", "changed": changed}
 
 
 def main(argv=None) -> int:
