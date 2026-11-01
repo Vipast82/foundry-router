@@ -434,7 +434,8 @@ def test_every_setting_is_typed_in_the_schema():
 def _heartbeat(state, version, pid=None, age=0):
     os.makedirs(state, exist_ok=True)
     with open(os.path.join(state, "coordinator.heartbeat"), "w", encoding="utf-8") as f:
-        json.dump({"pid": pid or os.getpid(), "ts": time.time() - age, "version": version}, f)
+        json.dump({"pid": pid or os.getpid(), "ts": time.time() - age, "version": version,
+                   "root": "/srv/foundry-deploy"}, f)
 
 
 def test_cli_refuses_writing_commands_against_another_running_version(tmp_path, capsys):
@@ -449,7 +450,7 @@ def test_cli_refuses_writing_commands_against_another_running_version(tmp_path, 
     assert cli.main(unblock, **kw) == 2
     err = capsys.readouterr().err
     assert f"this CLI is v{__version__}" in err and "running coordinator is v9.9.9" in err
-    assert "foundry-deploy" in err
+    assert "run it from /srv/foundry-deploy" in err        # the running coordinator's folder
     assert c.store.task("game", "T1")["state"] == S.BLOCKED
     assert cli.main(base + ["status"], **kw) == 0                 # read-only: runs
     assert cli.main(base + ["queue", "show"], **kw) == 0

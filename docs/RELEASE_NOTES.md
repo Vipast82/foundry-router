@@ -2,6 +2,33 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.162.2 — Linux workstation W1 (portable paths), and the slot installer always matches the router
+
+2026-11-01. W1 of docs/plans/LINUX_WORKSTATION_PLAN.md (approved: "Yes, recommended").
+- **The audit found less Windows-only code than planned:**
+  - process trees are killed with taskkill on Windows and process groups elsewhere;
+  - the client already has Linux config, keyring and systemd paths;
+  - the browser search already falls back to Linux names;
+  - the game's PowerShell gate scripts run under PowerShell 7 for Linux, which the slot image
+    already installs.
+- **Fixed:**
+  - `mcp_stdio`: the community Studio MCP server runs `npx` from PATH. Windows still wraps
+    `npx.cmd` in `cmd.exe`, now found on PATH before `C:\Program Files\nodejs`.
+  - `mcp_stdio`: the official server, Studio's own `mcp.bat`, exists only on Windows. Elsewhere
+    it now says so ("no Roblox Studio on this machine") instead of starting `cmd.exe`; W2 gives
+    Linux its Studio container.
+  - The CLI's version guard no longer names the hard-coded `C:\Users\shock\foundry-deploy`. The
+    coordinator's heartbeat records its own code folder (`root`), and the guard says "run it
+    from <that folder>".
+- **CI:** `.github/workflows/tests-linux.yml` runs the suite on Ubuntu 24.04, weekly and on
+  demand (Actions → Tests on Linux). The first run is still to be seen.
+- **Slot installer** (setup-host.sh): before asking for the code, it fetches the router's own
+  release of itself and runs that when it differs.
+  - On 2026-11-01 slot-1's reinstall ran an older copy left on the LXC. It wrote an old slot.env,
+    so VNC stayed on localhost (NPM 502), with no key timer and 16 CPUs.
+- Tests: test_mcp_stdio (+1, the Windows asserts only on Windows), test_selfheal (the guard
+  names the heartbeat's folder), test_slot_ssh (+1).
+
 ## v0.162.1 — A slot's CPU limit: an idle Studio no longer takes every core
 
 2026-11-01. Victor: "why is the container using 80% CPU when nothing is going on?"

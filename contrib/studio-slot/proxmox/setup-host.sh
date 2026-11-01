@@ -29,6 +29,7 @@ USER_NAME=studio
 SLOT_UID=1000
 REPO=https://github.com/Vipast82/foundry-router.git
 ROUTER="" ; CODE="" ; FINGERPRINT="" ; BUILD=1 ; CODE_STDIN=0
+ORIG_ARGS=("$@")
 while [ $# -gt 0 ]; do
     case "$1" in
         --router) ROUTER="$2"; shift 2 ;;
@@ -55,6 +56,21 @@ if [ -z "$ROUTER" ]; then
 fi
 ROUTER="${ROUTER%/}"
 case "$ROUTER" in http://*|https://*) ;; *) ROUTER="http://$ROUTER" ;; esac
+# This installer must match the router's release: an older copy left from an earlier install
+# writes an old slot.env (2026-11-01: slot-1's VNC stayed on localhost). Before the code is
+# asked for (a code works once), fetch the router's own installer and run that one instead.
+if [ -z "${FOUNDRY_SETUP_MATCHED:-}" ] && command -v curl >/dev/null 2>&1; then
+    RV=$(curl -fsS -m 10 -k "$ROUTER/health" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' || true)
+    NEW=$(mktemp /tmp/setup-host.XXXXXX.sh)
+    if [ -n "$RV" ] && curl -fsSLo "$NEW" \
+            "https://raw.githubusercontent.com/Vipast82/foundry-router/v$RV/contrib/studio-slot/proxmox/setup-host.sh" \
+            && ! cmp -s "$NEW" "$0"; then
+        echo "   this installer is older or newer than the router (v$RV): running v$RV's installer"
+        cp "$NEW" "$0" 2>/dev/null || true
+        FOUNDRY_SETUP_MATCHED=1 exec bash "$NEW" "${ORIG_ARGS[@]}" --router "$ROUTER"
+    fi
+    rm -f "$NEW"
+fi
 if [ "$CODE_STDIN" = 1 ]; then
     read -r CODE
 else

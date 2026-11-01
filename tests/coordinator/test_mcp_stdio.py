@@ -111,8 +111,9 @@ def test_registry_commands_and_override(monkeypatch):
     monkeypatch.delenv("FOUNDRY_MCP_OFFICIAL", raising=False)
     monkeypatch.delenv("FOUNDRY_MCP_COMMUNITY", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\x\AppData\Local")
-    assert M.official_command()[:3] == ["cmd.exe", "/d", "/c"]
-    assert M.official_command()[3].endswith(os.path.join("Roblox", "mcp.bat"))
+    if os.name == "nt":
+        assert M.official_command()[:3] == ["cmd.exe", "/d", "/c"]
+        assert M.official_command()[3].endswith(os.path.join("Roblox", "mcp.bat"))
     assert M.community_command()[-2:] == ["-y", "@chrrxs/robloxstudio-mcp@3.4.2"]
     monkeypatch.setenv("FOUNDRY_MCP_COMMUNITY", json.dumps(argv("community")))
     with M.connect("community") as c:
@@ -264,3 +265,18 @@ def test_official_resolve_waits_for_studio_to_connect_to_a_fresh_host(monkeypatc
     monkeypatch.setattr(M.time, "monotonic", lambda: t.__setitem__(0, t[0] + 5.0) or t[0])
     with pytest.raises(M.McpError, match="found 0"):          # gives up after CONNECT_WAIT_S
         M.OfficialStudio(Off()).resolve()
+
+
+def test_linux_commands_have_no_windows_shell(monkeypatch):
+    """LINUX_WORKSTATION_PLAN W1: npx from PATH without cmd.exe; no native Studio means the
+    official server must come from a Studio container (an override), never a Windows path."""
+    import shutil
+    monkeypatch.delenv("FOUNDRY_MCP_OFFICIAL", raising=False)
+    monkeypatch.delenv("FOUNDRY_MCP_COMMUNITY", raising=False)
+    monkeypatch.setattr(M.os, "name", "posix")
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/npx" if n == "npx" else None)
+    assert M.community_command() == ["/usr/bin/npx", "-y", "@chrrxs/robloxstudio-mcp@3.4.2"]
+    with pytest.raises(M.McpError, match="no Roblox Studio on this machine"):
+        M.official_command()
+    monkeypatch.setenv("FOUNDRY_MCP_OFFICIAL", json.dumps(["docker", "exec", "-i", "studio-main", "x"]))
+    assert M.official_command()[0] == "docker"

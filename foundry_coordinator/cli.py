@@ -122,8 +122,11 @@ class _ProcessFiles:
             from foundry_router import __version__ as release
         except Exception:                                        # noqa: BLE001
             release = ""
+        # root: the running coordinator's code folder (the deploy checkout), so a CLI from
+        # another checkout can say where to run from (version_guard; any OS)
         doc = {"pid": os.getpid(), "ts": time.time(), "release": release,
-               "version": __version__, **fields}
+               "version": __version__,
+               "root": os.path.dirname(os.path.dirname(os.path.abspath(__file__))), **fields}
         with self._hb_lock:
             self._last_beat = dict(fields)
             try:
@@ -337,7 +340,6 @@ def _state_dir(a) -> str:
         a.state or os.environ.get("FOUNDRY_COORD_STATE") or "~/.foundry-coordinator"))
 
 
-DEPLOY_CHECKOUT = r"C:\Users\shock\foundry-deploy"
 # (command, subcommand or None) pairs that change coordinator state
 _WRITING = {("unblock", None), ("approve", None), ("reject", None), ("answer", None),
             ("resume", None), ("pause", None), ("cancel", None), ("decision", None),
@@ -374,6 +376,17 @@ def running_version(state_dir: str) -> tuple[str, str]:
     return str(hb["version"]), ""
 
 
+def running_root(state_dir: str) -> str:
+    """The running coordinator's code folder, from its heartbeat ('' when unknown)."""
+    from . import supervisor as SV
+    try:
+        with open(os.path.join(state_dir, SV.HEARTBEAT_FILE), encoding="utf-8") as f:
+            hb = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    return str(hb.get("root") or "") if isinstance(hb, dict) else ""
+
+
 def version_guard(a) -> str:
     """'' when the command may run, else why not: a writing command from a CLI whose
     version differs from the running coordinator's (2026-10-28: an unblock ran old dev
@@ -385,7 +398,8 @@ def version_guard(a) -> str:
     if not running or running == __version__:
         return ""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    deploy = os.environ.get("FOUNDRY_DEPLOY_DIR") or DEPLOY_CHECKOUT
+    deploy = os.environ.get("FOUNDRY_DEPLOY_DIR") or running_root(_state_dir(a)) \
+        or "the running coordinator's folder"
     return (f"this CLI is v{__version__} from {here}, the running coordinator is v{running}: "
             f"run it from {deploy} (or pass --force)")
 

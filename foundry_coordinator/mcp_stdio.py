@@ -36,7 +36,15 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
 COMMUNITY_PACKAGE = "@chrrxs/robloxstudio-mcp@3.4.2"
 CONNECT_WAIT_S = 30.0          # how long a fresh community server waits for the Studio plugin
-NPX = r"C:\Program Files\nodejs\npx.cmd"
+NPX = r"C:\Program Files\nodejs\npx.cmd"     # Windows default when npx.cmd is not on PATH
+
+
+def npx_path() -> str:
+    """npx: from PATH (any OS), else Windows' usual install folder (LINUX_WORKSTATION_PLAN W1)."""
+    import shutil
+    if os.name == "nt":
+        return shutil.which("npx.cmd") or shutil.which("npx") or NPX
+    return shutil.which("npx") or "npx"
 
 
 def kill_tree(pid: int, timeout: float = 15.0) -> bool:
@@ -317,13 +325,26 @@ def _override(var: str) -> Optional[list]:
 
 
 def official_command() -> list:
-    return _override("FOUNDRY_MCP_OFFICIAL") or [
-        "cmd.exe", "/d", "/c",
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "mcp.bat")]
+    """The official Studio MCP server: Studio's own mcp.bat (Windows). Studio has no Linux
+    build: there it runs in a Studio container (a slot), whose servers are reached with
+    `docker exec` (slots.kilo_mcp_overrides / FOUNDRY_MCP_OFFICIAL)."""
+    o = _override("FOUNDRY_MCP_OFFICIAL")
+    if o:
+        return o
+    if os.name != "nt":
+        raise McpError("no Roblox Studio on this machine (Studio runs on Windows, or in a Studio "
+                       "container): set FOUNDRY_MCP_OFFICIAL, or give the project a Studio slot")
+    return ["cmd.exe", "/d", "/c",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "mcp.bat")]
 
 
 def community_command(package: str = COMMUNITY_PACKAGE) -> list:
-    return _override("FOUNDRY_MCP_COMMUNITY") or ["cmd.exe", "/d", "/c", NPX, "-y", package]
+    o = _override("FOUNDRY_MCP_COMMUNITY")
+    if o:
+        return o
+    if os.name == "nt":                       # npx.cmd is a batch file: it needs cmd.exe
+        return ["cmd.exe", "/d", "/c", npx_path(), "-y", package]
+    return [npx_path(), "-y", package]
 
 
 SERVERS = {"official": official_command, "community": community_command}

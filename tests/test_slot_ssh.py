@@ -331,3 +331,14 @@ def test_cpu_rules_on_the_slot_host():
     assert 'GEOMETRY: "${SLOT_GEOMETRY:-2560x1440}"' in compose
     setup = (root / "setup-host.sh").read_text(encoding="utf-8")
     assert "SLOT_RENDER_THREADS=$CPUS" in setup and "CPUS=$(( NPROC / 3 ))" in setup
+
+
+def test_installer_switches_to_the_routers_release_before_the_code():
+    """2026-11-01: an old setup-host.sh left on slot-1 wrote an old slot.env (VNC on localhost).
+    The installer now runs the router's own release of itself, before a code is spent."""
+    root = Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "proxmox"
+    setup = (root / "setup-host.sh").read_text(encoding="utf-8")
+    check = setup.index('if [ -z "${FOUNDRY_SETUP_MATCHED:-}" ]')
+    assert check < setup.index('read -r -s -p "Enrollment code')
+    assert 'FOUNDRY_SETUP_MATCHED=1 exec bash "$NEW" "${ORIG_ARGS[@]}" --router "$ROUTER"' in setup
+    assert "/v$RV/contrib/studio-slot/proxmox/setup-host.sh" in setup
