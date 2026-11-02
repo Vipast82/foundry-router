@@ -373,8 +373,12 @@ class Coordinator:
         try:
             # 0.147.0: forget background check runs of tasks that left the state
             # they were started in (cancelled, paused, unblocked, head moved on)
+            # (a Lead repair candidate's validation: while its case still validates it)
             want = {"verify": S.VERIFYING, "closeout": S.CLOSING}
+            from .lead import VALIDATE_JOB_KIND
             self.bg_checks.drop(lambda k: self.tracks.merger.keeps_check(k) if k[2] == "merge"
+                                else (self.lead is not None and self.lead.keeps_validation(k))
+                                if k[2] == VALIDATE_JOB_KIND
                                 else (self.store.task(k[0], k[1]) or {}).get("state")
                                 == want.get(k[2]))
         except Exception as e:                                    # noqa: BLE001

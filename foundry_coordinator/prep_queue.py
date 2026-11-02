@@ -506,7 +506,8 @@ def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:
     try:
         for j in c.bg_checks.running():
             k = j.get("key") or ()
-            if k and k[0] == pid:
+            # a Lead candidate validates in its own repair worktree, not this checkout
+            if k and k[0] == pid and (len(k) < 3 or k[2] != "lead_validate"):
                 return False, f"background check running: {j.get('label')}"
     except Exception:                                             # noqa: BLE001
         pass

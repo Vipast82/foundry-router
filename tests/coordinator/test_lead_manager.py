@@ -1547,3 +1547,138 @@ def test_a_lead_prompt_kilo_never_admits_is_a_stalled_session():
     d = store["k"]
     why = lm._stall("k", d, st, 1000.0 + 301, 300)
     assert "never admitted" in why
+
+
+# ------------------------------------------------------------------ background validation
+
+class BlockingRepair(FakeRepair):
+    """validate() holds until `release` is set, like a 15-minute candidate pytest."""
+
+    def __init__(self, tmp, ok=True):
+        super().__init__(tmp, ok)
+        import threading
+        self.release, self.entered = threading.Event(), threading.Event()
+
+    def validate(self, P, path, **kw):
+        self.entered.set()
+        assert self.release.wait(30), "the test never released the validation"
+        return super().validate(P, path, **kw)
+
+
+def _to_validate(env, lm):
+    env["replies"] += [reply(report("coordinator_repair", "coordinator")), "Repaired it."]
+    return drive(env, open_case(env), lambda c: ((c.get("validation") or {}).get("repair")
+                                                 or {}).get("phase") == "validate", lm=lm)
+
+
+def test_candidate_validation_runs_off_the_tick_and_the_case_picks_up_the_result(env):
+    """2026-11-02 GF-LOBBY1 (rc-616ceb9a980df824): the candidate's pytest ran inside the
+    engine tick and the coordinator wrote nothing for 16 minutes. The gate now runs as a
+    background job: a step returns at once while it runs, the case stays in validation,
+    and a later step applies the result."""
+    from foundry_coordinator.lead import VALIDATE_JOB_KIND
+    fr = BlockingRepair(env["tmp"])
+    lm = LeadManager(env["c"], repair_factory=lambda P, s: fr)
+    case = _to_validate(env, lm)
+    try:
+        for _ in range(3):
+            t0 = time.time()
+            case = lm.step(env["P"], task(env), case)
+            assert time.time() - t0 < 10                  # inline wait (2 s), never the gate
+        assert fr.entered.is_set()
+        assert case["state"] == "REPAIRING"
+        assert case["validation"]["repair"]["phase"] == "validate"
+        assert "in the background" in case["validation"]["lead_waiting"]
+        key = f"repair:{case['case_id']}:1:validate"
+        assert lm._action(key)["status"] == "started"
+        jobs = [j["key"] for j in env["c"].bg_checks.running()]
+        assert [k[2] for k in jobs] == [VALIDATE_JOB_KIND]
+        assert lm.keeps_validation(jobs[0])
+        assert [c[0] for c in fr.calls] == ["create", "commit"]     # validate not returned
+    finally:
+        fr.release.set()
+    case = drive(env, case, state_is("UPGRADING", "NEEDS_VICTOR"), lm=lm)
+    assert case["state"] == "UPGRADING", lm.actions(case["case_id"])
+    assert [c[0] for c in fr.calls] == ["create", "commit", "validate"]   # ran exactly once
+    assert lm._action(f"repair:{case['case_id']}:1:validate")["status"] == "done"
+    assert not case["validation"].get("lead_waiting")
+    assert not env["c"].bg_checks.running()
+
+
+def test_engine_tick_returns_while_a_candidate_validates_and_keeps_the_job(env):
+    """The engine tick (its background-job sweep included) neither waits on nor drops a
+    running candidate validation; the case moves on once the job finished."""
+    c = env["c"]
+    fr = BlockingRepair(env["tmp"])
+    lm = LeadManager(c, repair_factory=lambda P, s: fr)
+    c.lead = lm
+    case = _to_validate(env, lm)
+    cid = case["case_id"]
+    c.store.update_task("game", "T1", data={**(task(env).get("data") or {}),
+                                            "recovery_case": cid})
+    try:
+        lm.step(env["P"], task(env), case)                # starts the job
+        assert fr.entered.wait(10)
+        t0 = time.time()
+        c.tick()
+        c.tick()
+        assert time.time() - t0 < 20, "the tick waited on the candidate validation"
+        assert lm.case(cid)["state"] == "REPAIRING"
+        assert [j["key"][2] for j in c.bg_checks.running()] == ["lead_validate"]
+    finally:
+        fr.release.set()
+    for _ in range(40):
+        c.tick()
+        if lm.case(cid)["state"] != "REPAIRING":
+            break
+        time.sleep(0.05)
+    assert lm.case(cid)["state"] in ("UPGRADING", "RESUMING", "RESOLVED"), lm.actions(cid)
+    assert lm._action(f"repair:{cid}:1:validate")["status"] == "done"
+    assert [x[0] for x in fr.calls].count("validate") == 1
+
+
+def test_background_validation_job_is_dropped_once_its_case_leaves_validation(env):
+    fr = BlockingRepair(env["tmp"])
+    lm = LeadManager(env["c"], repair_factory=lambda P, s: fr)
+    case = _to_validate(env, lm)
+    try:
+        lm.step(env["P"], task(env), case)
+        key = env["c"].bg_checks.running()[0]["key"]
+        assert lm.keeps_validation(key)
+        assert not lm.keeps_validation(key[:3] + ("2:" + key[3].split(":", 1)[1],))
+        lm.cancel(case["case_id"], "test")
+        assert not lm.keeps_validation(key)
+    finally:
+        fr.release.set()
+
+
+def test_a_timed_out_candidate_run_is_named_in_the_rejection_and_the_action(env):
+    """GF-LOBBY1's rejection said only "focused or broader tests failed: timed out": the
+    broader run of the whole tests/coordinator folder hit the 900 s limit. The rejection
+    (fed back to the Lead) and the validation action now name the run that timed out."""
+    class TimedOut(FakeRepair):
+        def validate(self, P, path, **kw):
+            self.calls.append(("validate",))
+            run = lambda ids, s, to: {"ids": ids, "rc": None if to else 0, "timed_out": to,
+                                      "seconds": s, "log": "[timeout after 900.0s]" if to
+                                      else "1 passed", "problems": ["timed out"] if to else []}
+            return {"ok": False, "reasons": ["focused or broader tests failed: timed out"],
+                    "reproduce": {"base": run(["tests/coordinator/test_x.py::test_x"], 3, False),
+                                  "candidate": run(["tests/coordinator/test_x.py::test_x"], 2,
+                                                   False)},
+                    "tests": {"focused": run(["tests/coordinator/test_x.py"], 4, False),
+                              "broader": run(["tests/coordinator"], 900.4, True)}}
+
+    fr = TimedOut(env["tmp"])
+    lm = LeadManager(env["c"], repair_factory=lambda P, s: fr)
+    case = _to_validate(env, lm)
+    case = drive(env, case, lambda c: any(a["kind"] == "candidate_rejected"
+                                          for a in lm.actions(c["case_id"])), lm=lm)
+    why = case["validation"]["last_rejection"]["reasons"]
+    assert why[0] == "focused or broader tests failed: timed out"       # kept as it was
+    assert "broader pytest run of tests/coordinator timed out after 900 s" in why[1]
+    runs = lm._action(f"repair:{case['case_id']}:1:validate")["detail"]["test_runs"]
+    assert [(r["run"], r["timed_out"]) for r in runs] == [
+        ("reproduce_base", False), ("reproduce_candidate", False), ("focused", False),
+        ("broader", True)]
+    assert runs[-1]["seconds"] == 900.4 and "timeout after" in runs[-1]["log_tail"]

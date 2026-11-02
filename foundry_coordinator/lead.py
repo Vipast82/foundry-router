@@ -198,6 +198,32 @@ UPGRADE_DONE = "done"
 # when this coordinator process started: a "coordinator" case opened before it may be fixed
 # by the upgrade it runs (retry_after_upgrade)
 PROCESS_START = time.time()
+
+# the engine.bg_checks job kind of a repair candidate's validation (2026-11-02)
+VALIDATE_JOB_KIND = "lead_validate"
+
+
+def validation_job_key(project_id: str, task_id: str, n: int, sha: str) -> tuple:
+    return (project_id, task_id, VALIDATE_JOB_KIND, f"{int(n)}:{sha}")
+
+
+def _test_runs(res: dict) -> list[dict]:
+    """The candidate gate's pytest runs, short: which ids, how long, timed out or not,
+    the log's tail (GF-LOBBY1's rejection said only "timed out")."""
+    res = res if isinstance(res, dict) else {}
+    rep = res.get("reproduce") if isinstance(res.get("reproduce"), dict) else {}
+    t = res.get("tests") if isinstance(res.get("tests"), dict) else {}
+    runs = [("reproduce_base", rep.get("base")), ("reproduce_candidate", rep.get("candidate")),
+            ("focused", t.get("focused")), ("broader", t.get("broader"))]
+    out = []
+    for name, r in runs:
+        if not isinstance(r, dict) or not r:
+            continue
+        out.append({"run": name, "ids": list(r.get("ids") or [])[:20],
+                    "seconds": r.get("seconds"), "timed_out": bool(r.get("timed_out")),
+                    "rc": r.get("rc"), "problems": list(r.get("problems") or [])[:10],
+                    "log_tail": str(r.get("log") or "")[-800:]})
+    return out
 # a Lead session whose prompt Kilo never admitted: a fresh try after a minute, twice per case
 NEVER_ADMITTED_RETRY_SECONDS = 60
 NEVER_ADMITTED_QUICK_RETRIES = 2
@@ -417,7 +443,10 @@ def report_contract(full_authority: bool = False, write_access: bool = False) ->
         "[\"<Foundry-Router paths>\"], \"reproducing_test\": \"tests/...::test_x\", "
         "\"focused_tests\": [...], \"broader_tests\": [...], \"manifest\": "
         "{\"acceptance_tests\": []}} (classification coordinator; the coordinator suites live "
-        "under tests/coordinator/, and the repair may add or extend tests under tests/); "
+        "under tests/coordinator/, and the repair may add or extend tests under tests/; "
+        "broader_tests names the test files of the modules you change, never the whole "
+        "tests/coordinator folder: each pytest run stops after 15 minutes and that folder "
+        "takes longer); "
         "{\"kind\": \"wait\", "
         "\"seconds\": N} (environment or provider_quota); {\"kind\": \"reverify\"} (evidence); "
         "{\"kind\": \"ask_victor\", \"user_action\": \"<only if Victor must do something "
@@ -3903,12 +3932,31 @@ class LeadManager:
                           project_id=P.id, declared_test_changes=declared)
                 if _accepts(rw.validate, "approved_test_changes"):
                     kw["approved_test_changes"] = approved
-                try:
-                    res = rw.validate(_ReviewJournal(self, P, case, review_key, s), path, **kw)
-                except _ReviewUncertain as e:
-                    res = {"ok": False, "reasons": [str(e)]}
-                except Exception as e:                           # noqa: BLE001
-                    res = {"ok": False, "reasons": [f"validation error: {e}"]}
+                journal = _ReviewJournal(self, P, case, review_key, s)
+
+                def gate():
+                    try:
+                        return rw.validate(journal, path, **kw)
+                    except _ReviewUncertain as e:
+                        return {"ok": False, "reasons": [str(e)]}
+                    except Exception as e:                       # noqa: BLE001
+                        return {"ok": False, "reasons": [f"validation error: {e}"]}
+
+                # 2026-11-02: off the tick (GF-LOBBY1's candidate pytest froze the whole
+                # coordinator for 16 minutes); the case stays here until the job is done
+                res = self._validate_in_background(P, case, n, rep.get("candidate_sha") or "",
+                                                   gate)
+                if res is None:
+                    return self.case(case["case_id"])
+                case = self._note_wait(P, self.case(case["case_id"]), "")
+                slow = [r for r in _test_runs(res) if r["timed_out"]]
+                if slow and not res.get("ok"):
+                    res = {**res, "reasons": list(res.get("reasons") or []) + [
+                        f"the {r['run'].replace('_', ' ')} pytest run of "
+                        f"{', '.join(r['ids'][:5]) or '?'} timed out after "
+                        f"{int(float(r['seconds'] or 0))} s: name smaller broader tests "
+                        f"(the files your change touches), not a whole suite folder"
+                        for r in slow]}
                 ra = self._action(review_key)
                 if ra is not None and ra["status"] in ("started", "uncertain"):
                     res = {"ok": False, "reasons": list(res.get("reasons") or []) + [
@@ -3918,7 +3966,7 @@ class LeadManager:
                           "; ".join(res.get("reasons") or [])[:1500],
                           ok=bool(res.get("ok")), reasons=res.get("reasons") or [],
                           review=_cut((res.get("review") or {}).get("verdict"), 40),
-                          manifest=res.get("manifest"))
+                          manifest=res.get("manifest"), test_runs=_test_runs(res))
             if not res.get("ok"):
                 return self._reject(P, t, case, s, list(res.get("reasons") or ["invalid"]),
                                     "validate")
@@ -3941,6 +3989,54 @@ class LeadManager:
             uid = self._request_upgrade(P, case, key, man, rep, cid)
             return self._save(case["case_id"], state="UPGRADING", upgrade_id=uid)
         return self._reject(P, t, case, s, [f"unknown repair phase {phase}"], phase)
+
+    def _validate_in_background(self, P, case: dict, n: int, sha: str, gate) -> Optional[dict]:
+        """The candidate gate's result, or None while it runs as a background job
+        (engine.bg_checks, keyed by the task, the attempt and the candidate commit).
+        The gate runs pytest (up to repair.DEFAULT_TIMEOUT per run) and the paid
+        review; a tick only asks whether it finished. Without a job runner (tests,
+        a bare coordinator) it runs inline as before."""
+        bg = getattr(self.c, "bg_checks", None)
+        if bg is None or not callable(getattr(bg, "run", None)):
+            return gate()
+        try:
+            from .automation import get as auto_get
+            cap = int(auto_get(P, "max_parallel_checks") or 2)
+            wait = float(auto_get(P, "inline_check_wait_s") or 0)
+        except Exception:                                        # noqa: BLE001
+            cap, wait = 2, 2.0
+        # one slot beyond the sprint checks' cap: a candidate never waits on Lune runs
+        st, val = bg.run(validation_job_key(P.id, case["task_id"], n, sha), gate, wait, cap + 1)
+        if st == "done":
+            if isinstance(val, BaseException):
+                return {"ok": False, "reasons": [f"validation error: {type(val).__name__}: "
+                                                 f"{val}"[:500]]}
+            return val if isinstance(val, dict) else {"ok": False,
+                                                      "reasons": ["validation returned nothing"]}
+        if st == "queued":
+            self._note_wait(P, case, f"candidate validation queued: {val} background check "
+                                     f"run(s) already running")
+        else:
+            self._note_wait(P, case, "candidate validation running in the background "
+                                     "(regression, focused and broader tests, then the "
+                                     "independent review)")
+        return None
+
+    def keeps_validation(self, key: tuple) -> bool:
+        """engine's background-job sweep: keep a validation job while its case is still
+        REPAIRING in the validate phase of that attempt and candidate."""
+        try:
+            pid, tid, _kind, head = key[:4]
+            for r in self.store.q("SELECT case_id FROM recovery_cases WHERE project_id=? AND "
+                                  "task_id=? AND state='REPAIRING'", (pid, tid)):
+                rep = ((self.case(r["case_id"]) or {}).get("validation") or {}).get(
+                    "repair") or {}
+                if rep.get("phase") == "validate" and \
+                        f"{int(rep.get('n') or 1)}:{rep.get('candidate_sha') or ''}" == head:
+                    return True
+        except Exception:                                        # noqa: BLE001
+            return True                     # unsure: let the job finish, the result is checked
+        return False
 
     @staticmethod
     def _committed_head(rw, path: str, base: str) -> str:

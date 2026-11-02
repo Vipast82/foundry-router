@@ -68,6 +68,13 @@ class BackgroundChecks:
             return "running", int(time.time() - job["wall"])
         except Exception as e:                                    # noqa: BLE001
             res = e
+        except BaseException:
+            # a crash (KeyboardInterrupt, SystemExit) reaches the tick as it would have
+            # inline; the job is forgotten so a restarted caller runs it afresh
+            with self._lock:
+                if self._jobs.get(key) is job:
+                    self._jobs.pop(key)
+            raise
         with self._lock:
             if self._jobs.get(key) is job:
                 self._jobs.pop(key)

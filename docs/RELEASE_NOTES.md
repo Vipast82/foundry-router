@@ -2,6 +2,49 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.7 — Lead candidate validation runs off the tick
+
+2026-11-02. Between 05:57 and 06:17 the coordinator wrote no events, logged nothing and
+started no sessions. GF-LOBBY1's recovery case (rc-616ceb9a980df824) was validating its
+repair candidate, and `candidate_validation` ran pytest inside the engine tick. The broader
+suite was the whole `tests/coordinator` folder (1,952 tests). The test conftest caps xdist
+workers by free memory, and with about 1.4 GB free that suite runs serially for about 35
+minutes. It hit the 900 s per-run limit, the candidate was rejected as "timed out", and every
+other sprint waited 16 minutes.
+
+- **Lead `_repairing`, validate phase:** the candidate gate (regression reproduce, existing
+  tests, focused and broader pytest, the independent review) runs as an `engine.bg_checks`
+  job keyed `(project, task, "lead_validate", "<attempt>:<candidate sha>")`. A tick waits at
+  most `[automation] inline_check_wait_s` for it, then moves on. The case stays REPAIRING in
+  the validate phase and its blocker says the validation runs in the background (queued when
+  the check pool is full; a validation gets one slot beyond `max_parallel_checks`). The next
+  tick after the job finishes applies the result: accept, or reject as before. The timeout
+  (`repair.DEFAULT_TIMEOUT`, 900 s per pytest run), the journaled review (never sent twice)
+  and the result format are unchanged. Without a job runner the gate still runs inline.
+- **Engine background-job sweep:** keeps a validation job while its case is still
+  validating that attempt and candidate, and drops it once the case moves on (cancelled,
+  escalated, a new attempt).
+- **Landing idle check (`prep_queue`):** a Lead validation runs in its own repair worktree,
+  so it no longer counts as a background check in the project's main checkout.
+- **`BackgroundChecks.run`:** a crash-type exception from a job (KeyboardInterrupt,
+  SystemExit) is still raised on the tick, but the job is forgotten first, so a restarted
+  caller runs it again instead of getting the same exception.
+- **Timeouts are named:** the validation action stores `test_runs` (each pytest run's ids,
+  seconds, timed out or not, rc, problems, log tail). A rejection adds one reason per run
+  that timed out, for example "the broader pytest run of tests/coordinator timed out after
+  900 s: name smaller broader tests". That reason goes back to the Lead. The Lead's report
+  contract also says broader_tests names the test files of the changed modules, never the
+  whole tests/coordinator folder.
+- Wrong test paths (`tests/test_engine.py` for `tests/coordinator/test_engine.py`) were
+  fixed in v0.181.6.
+- Tests: `tests/coordinator/test_lead_manager.py`:
+  `test_candidate_validation_runs_off_the_tick_and_the_case_picks_up_the_result`,
+  `test_engine_tick_returns_while_a_candidate_validates_and_keeps_the_job`,
+  `test_background_validation_job_is_dropped_once_its_case_leaves_validation`,
+  `test_a_timed_out_candidate_run_is_named_in_the_rejection_and_the_action`.
+- Deploy only after a read-first Lead-case check (no DIAGNOSING or REPAIRING cases, no open
+  lead sessions).
+
 ## v0.181.6 — the Lead can grant review calls, and stops looping on a used review budget
 
 2026-11-02. Between 02:42 and 04:41, AS-P10 opened seven Lead cases on "review budget used
