@@ -2009,6 +2009,8 @@ const SECTION_RENDER = {
         <b>run ${esc(i + 1)} of ${esc(runs.length)}</b>
         <button class="ghost" data-bstep="1" ${i === runs.length - 1 ? "disabled" : ""} aria-label="Next run">→</button>
         ${exitPill(r.exit)} <span class="dim">${esc(tsText(r.started_ts, "datetime"))} · ${esc(r.source || "?")} · ${esc(where)}${r.seconds != null ? " · " + esc(r.seconds) + " s" : ""}</span></div>
+      ${w.commit && r.source !== "replay" ? `<div class="row" style="gap:6px;align-items:center;flex-wrap:wrap"><button class="ghost" data-brerun="${esc(r.run_id)}" data-bp="${esc(p)}" data-bt="${esc(tid)}" title="Runs commit ${esc(short(w.commit, 12))} with this run's script and arguments again on a Blender slot. The outputs stay in the journal, never in the sprint's worktree.">Re-run on a slot</button><span class="dim">same commit, script and arguments; the result is a new run here (needs blender.journal_rerun)</span></div>` : ""}
+      ${w.replay_of ? `<div class="dim">re-run of <code>${esc(w.replay_of)}</code></div>` : ""}
       ${sc.path ? `<div><code>${esc(sc.path)}</code>${sc.sha256 ? ` <code class="dim" title="${esc(sc.sha256)}">${esc(short(sc.sha256, 10))}</code>` : ""}
         ${sc.changed ? sprintPill("changed", "info") : sc.changed === false ? sprintPill("unchanged", "") : ""}${sc.first ? sprintPill("first run", "info") : ""}${sc.edited_after_run ? sprintPill("edited after the run", "warn") : ""}${sc.error ? sprintPill(sc.error, "warn") : ""}</div>` : `<div class="dim">no builder script (-P) in this command</div>`}
       ${tline ? `<div class="dim">${esc(tline)}</div>` : ""}
@@ -2572,6 +2574,12 @@ function wireBuilds(sec) {
   sec.querySelectorAll("[data-bstep]").forEach(x => x.onclick = () => step(+x.dataset.bstep));
   sec.querySelectorAll("[data-bsel]").forEach(x => x.onclick = () => { S.buildSel[b.key] = +x.dataset.bsel; renderInspector(); });
   sec.querySelectorAll("[data-bview]").forEach(x => x.onclick = () => { S.buildView = +x.dataset.bview; renderInspector(); });
+  // build replay R4: re-run a journal entry on a slot (the coordinator checks the setting)
+  sec.querySelectorAll("[data-brerun]").forEach(x => x.onclick = async () => {
+    x.disabled = true;
+    const a = await submitAction({kind: "build_rerun", project_id: x.dataset.bp, task_id: x.dataset.bt, expected: {}, run_id: x.dataset.brerun}, `build_rerun:${x.dataset.brerun}`);
+    if (!a) x.disabled = false;
+  });
   const body = sec.querySelector(".bld"); if (!body) return;
   body.onkeydown = e => {
     if (e.target !== body && e.target.closest("details, button")) return;

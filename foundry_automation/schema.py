@@ -1166,6 +1166,10 @@ FIELDS: list[Field] = [
     F("blender.journal_watch_seconds", "int", 20, "Build replay: how often a busy sprint's "
       "transcript is read for new Blender runs on this PC (one Kilo request each).", "fast_lane",
       "coordinator.slot_blender", min=5, max=600),
+    F("blender.journal_rerun", "bool", False, "Build replay: a run's \"Re-run on a slot\" button "
+      "runs the same commit, builder script (the journal's copy) and arguments again on a Blender "
+      "slot; the outputs stay in the journal (a new run, never the sprint's worktree). One "
+      "re-run at a time.", "fast_lane", "coordinator.slot_blender"),
     F("blender.journal_tools", "list", ["selftest_all.py"], "Build replay: the game's tools that "
       "start Blender themselves; a sprint command running one of them is journaled as a Blender "
       "run on this PC.", "fast_lane", "coordinator.slot_blender", item_type="str"),

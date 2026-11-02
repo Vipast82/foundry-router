@@ -238,3 +238,25 @@ def test_a_real_journal_entry_reaches_the_task_page_through_the_bridge(client, c
     assert run["thumbs"] == ["thumbs/00.png"]
     t = client.get(f"/control/api/builds/{e['run_id']}/thumb/thumbs/00.png")
     assert t.status_code == 200 and t.content[1:4] == b"PNG"
+
+
+def test_a_rerun_action_is_bound_to_a_reported_run_of_the_task(client, cc):
+    """BUILD_RERUN_PLAN (R4): the router accepts build_rerun only for a run it holds for that
+    task; the coordinator checks the setting, the commit and the slot again."""
+    from tests.test_control_center import task_obs
+    ingest(client, task_obs("COMPLETE"), obs(run_id="br-9", task="T-1"))
+    h = login(client)
+    base = {"kind": "build_rerun", "project_id": "proj", "task_id": "T-1"}
+    r = client.post("/control/api/actions", headers=h,
+                    json={**base, "run_id": "nope", "idempotency_key": "rerun-0000001"})
+    assert r.status_code == 404 and r.json()["code"] == "unknown_run"
+    r = client.post("/control/api/actions", headers=h,
+                    json={**base, "run_id": "br-9", "idempotency_key": "rerun-0000002"})
+    assert r.status_code == 200, r.text                         # no task-state binding
+    a = r.json()
+    assert a["kind"] == "build_rerun"
+
+
+def test_the_rerun_button_is_in_the_build_replay_section():
+    js = _script()
+    assert 'data-brerun="${esc(r.run_id)}"' in js and 'kind: "build_rerun"' in js

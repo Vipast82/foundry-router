@@ -216,7 +216,8 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "client_service_enable",
                 "memory_add", "memory_edit", "playbook_add", "playbook_edit",
                 "queue_approve", "queue_reorder", "queue_deps", "queue_requeue",
-                "prep_add", "prep_remove", "prep_reorder", "prep_run_now")
+                "prep_add", "prep_remove", "prep_reorder", "prep_run_now",
+                "build_rerun")
 # Repo changes (self-driving part 3, 2026-10-28): project-scoped edits of the
 # coordinator's prep queue (foundry_coordinator/prep_queue.py; payloads in its
 # control.py PREP_KINDS), handed only to a coordinator that declares the
@@ -348,7 +349,9 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
                          **{k: "project_memory" for k in MEMORY_ACTIONS},
                          **{k: "playbook" for k in PLAYBOOK_ACTIONS},
                          **{k: "queue" for k in QUEUE_ACTIONS},
-                         **{k: "prep_queue" for k in PREP_ACTIONS}}
+                         **{k: "prep_queue" for k in PREP_ACTIONS},
+                         # build replay R4: re-run a journal entry on a slot
+                         "build_rerun": "build_rerun"}
 # observation types that only make sense inside a project: an empty project_id
 # would bypass the per-key project allowlist, so they are refused
 PROJECT_SCOPED_TYPES = ("task", "lane_unit", "artifact", "mcp", "config", "capabilities", "todo",
@@ -2903,7 +2906,7 @@ class ControlCenter:
                                "unknown_task", 404)
         tdata = _uj(task["data"], {})
         expected = dict(body.get("expected") or {})
-        unbound = ("lanes", "decision_answer", *LEAD_ACTIONS)
+        unbound = ("lanes", "decision_answer", "build_rerun", *LEAD_ACTIONS)
         if kind in unbound:
             # lanes: a project-wide switch the task id only routes; decision_answer:
             # bound to the decision itself (its open status), not the task state;
@@ -3018,6 +3021,16 @@ class ControlCenter:
             payload = {"text": text, "delivery": delivery, "scope": scope}
             expected.update(session_id=sid if scope == "session" or delivery == "pause_and_steer"
                             else "")
+        elif kind == "build_rerun":
+            # build replay R4: bound to a journal run of THIS task; the coordinator checks
+            # the setting, the commit and the slot again before running anything
+            rid = _s(body.get("run_id"), 120)
+            run = self.db.query_one("SELECT run_id FROM cc_build_runs WHERE run_id=? AND "
+                                    "project_id=? AND task_id=?", (rid, pid, tid)) if rid else None
+            if not run:
+                raise ControlError(f"no build run {rid!r} reported for {tid}", "unknown_run", 404)
+            payload = {"run_id": rid, "slot": _s(body.get("slot"), 64)}
+            expected.pop("task_state", None)
         elif kind == "lanes":
             # operational: pause/un-pause proactive helper lanes for the project
             # (never enables a lane the profile has off)

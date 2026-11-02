@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.175.0 — build replay R4: re-run a journal entry on a slot (ships off)
+
+2026-11-01. Plan: `docs/plans/BUILD_RERUN_PLAN.md` (built with the recommended answers). Build
+replay showed every run but couldn't repeat one. Ships off: `blender.journal_rerun`.
+
+- **Task page → Build replay:** a "Re-run on a slot" button on runs that recorded a commit.
+- **Router:** a new control action `build_rerun {run_id, slot?}`.
+  - It is accepted only for a run the router holds for that task, and is not bound to the
+    task's state.
+  - It is handed to a coordinator that declares the `build_rerun` feature.
+- **Coordinator (`build_rerun.py`):**
+  - **checks:** the setting is on, and the entry has a commit and arguments; it picks a slot
+    (the pool's first, else `blender.slot`);
+  - **runs in the background, one at a time:** pushes the commit to the slot mirror as
+    `blender/replay`, syncs the library, and runs the same arguments under the pool's job
+    locks with the journal's copy of the builder script;
+  - **the outputs** go into the new entry's own folder under the journal, never into a
+    worktree;
+  - **records** a new `replay` entry (`where.replay_of`), with a note that other files
+    uncommitted at the original run aren't included;
+  - events `build_rerun_started` / `_done` / `_failed`.
+- **To switch on:**
+  - rebuild the router;
+  - set `blender.journal_rerun` on.
+- Tests:
+  - `tests/coordinator/test_build_rerun.py` (4);
+  - `tests/test_build_replay_router.py` (+2);
+  - the control and automation suites: 256 + 118 pass.
+
 ## v0.174.0 — builder per model: a fresh au-builder subagent per 3D model (gap 9, ships off)
 
 2026-11-01. Plan: `docs/plans/BUILDER_PER_MODEL_PLAN.md` (built with the recommended answers).

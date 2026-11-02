@@ -253,7 +253,8 @@ class ControlChannel:
                                "actions": ["answer_question", "reply_permission", "approve_review",
                                            "reject_review", "pause", "resume", "cancel", "unblock",
                                            "instruction", "withdraw_instruction",
-                                           "decision_answer", *PROJECT_KINDS, *ASSISTANT_KINDS,
+                                           "decision_answer", "build_rerun",
+                                           *PROJECT_KINDS, *ASSISTANT_KINDS,
                                            *TRACK_KINDS, *QUEUE_KINDS, *PREP_KINDS,
                                            *(LEAD_KINDS if lead_on else ()),
                                            *(MEMORY_KINDS if mem_on else ()),
@@ -266,7 +267,7 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause", "tracks", "queue", "prep_queue"]
+                + ["project_pause", "tracks", "queue", "prep_queue", "build_rerun"]
                 + (["lead_manager"] if lead_on else [])
                 + (["project_memory"] if mem_on else [])
                 + (["playbook"] if pb_on else []),
@@ -351,7 +352,8 @@ class ControlChannel:
             return self._report(a, "rejected", f"unsupported action {a['kind']!r}")
         actor = f"{a.get('actor') or 'operator'} (control center)"
         if a["kind"] not in ("answer_question", "reply_permission", "instruction",
-                             "withdraw_instruction", "lanes", "decision_answer", *LEAD_KINDS) \
+                             "withdraw_instruction", "lanes", "decision_answer", "build_rerun",
+                             *LEAD_KINDS) \
                 and exp.get("task_state") \
                 and exp["task_state"] != t["state"]:
             return self._report(a, "rejected", f"{tid} is now {t['state']}, not "
@@ -952,6 +954,22 @@ class ControlChannel:
 
     def _do_lead_case_instruct(self, a, t, actor):
         return self._lead_case(a, t, actor, "instruct", "given an operator instruction")
+
+    def _do_build_rerun(self, a, t, actor):
+        """Build replay R4 (docs/plans/BUILD_RERUN_PLAN.md): re-run one journal entry on a
+        slot, in the background; the result is a new journal entry (source `replay`)."""
+        from . import build_rerun as BR
+        p = a.get("payload") or {}
+        P = self.c.projects[a["project_id"]]
+        try:
+            out = BR.start(P.profile, self.c.state_dir, a["project_id"], a["task_id"],
+                           str(p.get("run_id") or ""), slot=str(p.get("slot") or ""),
+                           actor=actor, store=self.store)
+        except BR.RerunError as e:
+            return self._report(a, "rejected", str(e)[:500])
+        return self._report(a, "applied", f"re-running {p.get('run_id')} on {out['slot']} "
+                                          f"(commit {out['commit'][:12]}); it appears in Build "
+                                          f"replay as {out['replay_run_id']}", out)
 
     def _do_lanes(self, a, t, actor):
         """Operational kill switch for proactive helper lanes of this project.
