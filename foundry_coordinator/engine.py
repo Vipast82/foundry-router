@@ -903,6 +903,32 @@ class Coordinator:
                 base_sha=base, phase="implement", started_ts=t["started_ts"] or self.clock(),
                 next_action="session working", data=data)
 
+    def _kilo_reload_if_flagged(self, P: Project, tid: str) -> None:
+        """A track whose kilo.jsonc changed (set-needs / set-slot: `kilo_reload` in its data):
+        drop Kilo's instance for its worktree once, so this new session reads the new file.
+        A failure keeps the flag (the next session tries again) and never blocks the start."""
+        if not self.tracks.is_track(P):
+            return
+        try:
+            name = self.tracks.track_name(P)
+            row = self.store.track(P.id, name) or {}
+        except Exception:                                         # noqa: BLE001
+            return
+        data = row.get("data") or {}
+        if not data.get("kilo_reload"):
+            return
+        dispose = getattr(P.client, "dispose", None)
+        if dispose is None:
+            return
+        try:
+            dispose(P.profile.workspace)
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, tid, "warning", detail={
+                "kilo_reload": f"{type(e).__name__}: {e}"[:300], "track": name})
+            return
+        self.store.update_track(P.id, name, data={**data, "kilo_reload": False})
+        self.store.event(P.id, tid, "track_kilo_reloaded", detail={"track": name})
+
     def _start_session(self, P: Project, tid: str, spec, phase: str, role: str, run_id: str,
                        attempt: int, prompt: str, meta: Optional[dict] = None,
                        persona: str = "") -> str:
@@ -917,6 +943,7 @@ class Coordinator:
         res = (existing or {}).get("result") or {}
         sid = res.get("session_id")
         if not sid:
+            self._kilo_reload_if_flagged(P, tid)
             sid = P.client.start_session(
                 directory=directory, title=f"{P.id} {tid} {phase} #{attempt}", persona=persona,
                 agent=agent, metadata={"project": P.id, "task": tid, "run": run_id,

@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.0 — move a running track to another Studio slot; a track's Kilo folder reloads itself
+
+2026-11-01 22:4x. Victor: "split them". All 8 Blender tracks were started on slot-1, so their
+Studio checks queued there while slot-2 sat idle. A track's slot was fixed at its start.
+
+- **`tracks set-slot <project> <track> <slot>`** (`TrackManager.set_slot`):
+  - It moves a running track to another enabled slot.
+  - It is refused while one of the track's sprints holds a slot lock or has a scripted Studio
+    gate running or pending.
+  - The track gets the `studio` need. Its kilo.jsonc is rewritten with the Studio MCP pointed
+    at the new slot. Its Studio gates follow at once, because the slot is read per run.
+- **The track's Kilo folder reloads itself** (`kilo_reload` in the track data, set by
+  set-slot and set-needs):
+  - Before the track's next session starts, the engine drops Kilo's instance for that
+    worktree only (`KiloClient.dispose`, POST /instance/dispose). The session reads the new
+    kilo.jsonc.
+  - Other tracks' sessions are untouched. Before this, a needs change only took effect after a
+    full Kilo restart, which cut 4 running turns.
+  - A failed reload keeps the flag and never blocks the start.
+- Tests: `tests/coordinator/test_tracks_set_slot.py` (4).
+
 ## v0.179.7 — a sprint waiting for a landing commits its own leftover plan history first
 
 2026-11-01 22:2x. AS-V04's session ran `plan_new.py --set-next` after its last commit, which

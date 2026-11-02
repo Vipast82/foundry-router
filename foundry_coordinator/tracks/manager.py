@@ -495,10 +495,59 @@ class TrackManager:
             cfg = SL.configured(P.profile).get(slot)
             if cfg:
                 SL.patch_kilo_config(kc, {**cfg, "id": slot})
+        # Kilo caches each folder's config: the engine reloads this worktree's instance
+        # before the track's next session (2026-11-01: set-needs only took effect after a
+        # Kilo restart, which cut 4 running turns)
         row = self.store.update_track(P.id, name, data={**(row.get("data") or {}),
-                                                        "kilo_config": kc})
+                                                        "kilo_config": kc, "kilo_reload": True})
         self.store.event(P.id, "", "track_needs_changed", detail={
             "track": name, "needs": new, "kilo_config": kc, "actor": actor})
+        return row
+
+    def set_slot(self, P, name: str, slot: str, actor: str = "operator") -> dict:
+        """Move a running track to another Studio slot (2026-11-01, Victor: "split them": all 8
+        Blender tracks were bound to slot-1 while slot-2 sat idle). Refused while one of its
+        sprints holds a slot lock or has a scripted Studio gate running or pending. The track
+        needs `studio`; its kilo.jsonc is rewritten with the Studio MCP pointed at the new
+        slot, and the engine reloads the worktree's Kilo instance before its next session."""
+        from .. import slots as SL
+        P = self.main_of(P)
+        row = self.store.track(P.id, name)
+        if row is None:
+            raise TrackError(f"no track {name}")
+        if slot not in SL.configured(P.profile):
+            raise TrackError(f"no enabled Studio slot {slot!r} in [slots] "
+                             f"({', '.join(SL.configured(P.profile)) or 'none configured'})")
+        old = str((row.get("data") or {}).get("slot") or "")
+        if old == slot:
+            return row
+        sprints = list(row.get("sprints") or [])
+        for lk in self.store.locks():
+            if lk["project_id"] == P.id and lk["task_id"] in sprints \
+                    and str(lk["resource"]).startswith(SL.LOCK_PREFIX):
+                raise TrackError(f"{lk['task_id']} holds {lk['resource']}: move the track once "
+                                 f"its Studio work is done")
+        calls = getattr(self.c, "studio_calls", None)
+        for tid in sprints:
+            try:
+                busy = bool(calls is not None and calls.active(P, tid))
+            except Exception:                                     # noqa: BLE001
+                busy = False
+            if busy:
+                raise TrackError(f"{tid} has a scripted Studio gate running or pending")
+        needs = list(row.get("needs") or [])
+        if "studio" not in needs:
+            needs = AN._normalize(needs + ["studio"])
+            row = self.store.update_track(P.id, name, needs=needs)
+        row = self.store.update_track(P.id, name, data={**(row.get("data") or {}), "slot": slot})
+        kc = self._kilo_config(P, row)
+        changed = []
+        if kc:
+            changed = SL.patch_kilo_config(kc, {**SL.configured(P.profile)[slot], "id": slot})
+        row = self.store.update_track(P.id, name, data={**(row.get("data") or {}),
+                                                        "kilo_config": kc, "kilo_reload": True})
+        self.store.event(P.id, "", "track_slot_changed", detail={
+            "track": name, "from": old, "to": slot, "servers": changed, "actor": actor})
         return row
 
     def stop(self, P, name: str, actor: str = "operator", reason: str = "") -> dict:

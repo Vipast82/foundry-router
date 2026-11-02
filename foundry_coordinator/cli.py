@@ -805,6 +805,9 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1 = xs.add_parser("status"); x1.add_argument("project"); x1.add_argument("--json", action="store_true")
     x1 = xs.add_parser("set-max-agents"); x1.add_argument("project"); x1.add_argument("n", type=int)
     x1.add_argument("--by", default="operator")
+    x1 = xs.add_parser("set-slot", help="move a running track to another Studio slot")
+    x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("slot")
+    x1.add_argument("--by", default="operator")
     x1 = xs.add_parser("set-needs", help="change a track's needs and rewrite its kilo.jsonc")
     x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("needs", nargs="+")
     x1.add_argument("--by", default="operator")
@@ -1187,6 +1190,12 @@ def _tracks(c: Coordinator, a) -> int:
                       f"{(sv['lease'] or {}).get('track') or '-'}")
         elif a.tcmd == "set-max-agents":
             print(f"max_agents {tm.set_max_agents(P, a.n, a.by)}")
+        elif a.tcmd == "set-slot":
+            row = tm.set_slot(P, a.name, a.slot, a.by)
+            print(f"track {a.name} now on {row['data'].get('slot')}; needs "
+                  f"{', '.join(row['needs'])}; kilo.jsonc {row['data'].get('kilo_config')} "
+                  "(Kilo reloads that folder before the track's next session)")
+            return 0
         elif a.tcmd == "set-needs":
             row = tm.set_needs(P, a.name, a.needs, a.by)
             print(f"track {a.name} needs {', '.join(row['needs'])}; kilo.jsonc "

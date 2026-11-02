@@ -79,6 +79,12 @@ class KiloClient(CodingClient):
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             raise KiloError(f"{method} {path}: {e}") from None
 
+    def dispose(self, directory: str) -> bool:
+        """Drop Kilo's instance for `directory` (opencode-derived POST /instance/dispose), so
+        the next session there re-reads its kilo.jsonc. Other folders are untouched."""
+        self._req("POST", "/instance/dispose", {}, query={"directory": directory})
+        return True
+
     def health(self) -> dict:
         return self._req("GET", "/global/health") or {}
 
