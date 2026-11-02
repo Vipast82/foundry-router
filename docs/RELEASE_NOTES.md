@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.12 — Studio's device simulator stays in landscape
+
+2026-11-02 15:0x. Victor's Studio showed the AU_1920x1080 device rotated to portrait, and had
+for a while. Studio keeps the simulated orientation apart from the device. A phone-portrait
+capture left it on Portrait, and the gate's edit-time device switches (`SET_DESKTOP_DEVICE` for
+the regression lane, `SWITCH_AND_MOUNT` for story checks) set the device but never the
+orientation. Measured live on the workstation: in Portrait every AU device is swapped (1920x1080
+shows as 1080x1920, 390x844 as 844x390). In LandscapeRight each shows its configured size,
+including 390x844.
+
+The measured sizes were not affected. The play-client captures read their viewport back (all
+five sizes and the 1920x1080 restore matched), and the story checks compare screen and capture
+size with the size they asked for. The rotated state was what the owner saw in Studio's edit
+view.
+
+- `DEVICE_HELPER.pinLandscape()`: every edit-time device switch pins
+  `ScreenOrientation.LandscapeRight`. The AU devices' Width/Height already are the intended
+  viewport.
+- `SET_DESKTOP_DEVICE` reports `orientation=... resolution=...` in its raw line.
+- Every `calls` run ends by setting AU_1920x1080 landscape again (best effort), so the owner's
+  Studio is never left rotated.
+- Test: `test_every_device_switch_pins_landscape_and_the_run_ends_on_it`.
+
 ## v0.181.11 — automatic Studio runs never reuse tier C
 
 2026-11-02 14:2x. All five VFX sprints (AS-V08..V12) finished on the vfx-2 track. Its merge

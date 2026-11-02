@@ -1394,3 +1394,20 @@ def test_live_verify_checks_the_harness_baseline_when_nothing_loaded_is_under_te
     sent = [c["args"]["code"] for c in calls() if "verifyLive" in c["args"].get("code", "")]
     assert sent and "GateRunner.lua" in sent[-1] and "AS_P7_check.lua" in sent[-1]
     assert "src/a.lua" not in sent[-1] and ".rbxm" not in sent[-1]
+
+
+def test_every_device_switch_pins_landscape_and_the_run_ends_on_it():
+    """2026-11-02: Studio keeps the simulated orientation apart from the device. A Portrait
+    left by a phone capture rotated the owner's AU_1920x1080 view to 1080x1920 (measured live:
+    Portrait swaps every AU device, LandscapeRight gives each its configured WxH, 390x844
+    included). Every edit-time device switch pins LandscapeRight, the desktop reset reports
+    the orientation it ended on, and every calls run leaves Studio on it."""
+    import inspect
+    import re as _re
+    for name in ("SET_DESKTOP_DEVICE", "SWITCH_AND_MOUNT"):
+        code = getattr(G, name)
+        assert _re.search(r"SetDeviceAsync\(id\); task\.wait\(0\.35\)\npinLandscape\(\)", code), name
+        assert "Enum.ScreenOrientation.LandscapeRight" in code
+    assert "orientation=" in G.SET_DESKTOP_DEVICE
+    src = inspect.getsource(G._run_calls)
+    assert 'g.edit(SET_DESKTOP_DEVICE, "leave Studio on AU_1920x1080 landscape")' in src

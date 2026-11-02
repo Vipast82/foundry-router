@@ -840,6 +840,14 @@ local function nameOf(id, d)
     if ok and type(info) == "table" then return info.Name or info.name end
     return tostring(id)
 end
+-- Studio keeps the simulated orientation apart from the device: a Portrait left by a phone
+-- check rotated every later desktop run to 1080x1920 (2026-11-02). The AU devices'
+-- Width/Height are the intended viewport in landscape space, so every switch pins landscape.
+local function pinLandscape()
+    local ok = pcall(function() SDS:SetOrientationAsync(Enum.ScreenOrientation.LandscapeRight) end)
+    task.wait(0.35)
+    return ok
+end
 local function findDevice(name)
     for _, d in ipairs(SDS:GetDeviceListAsync()) do
         local id = idOf(d)
@@ -924,6 +932,7 @@ local HS = game:GetService("HttpService")
 local id = findDevice(__NAME__)
 if id == nil then id = SDS:CreateDeviceAsync({Name = __NAME__, Width = __W__, Height = __H__, PixelDensity = 96}) end
 SDS:SetDeviceAsync(id); task.wait(0.35)
+pinLandscape()
 SDS:SetScalingModeAsync(Enum.DeviceSimulatorScalingMode.ActualResolution); task.wait(0.35)
 local H = __freshRequire("StoryHarness")
 local ok, res = pcall(H.mountAndCheck, __MODULE__, __FIXTURE__, {size = __SIZE__, story = __STORY__})
@@ -950,8 +959,13 @@ SET_DESKTOP_DEVICE = DEVICE_HELPER + r'''
 local id = findDevice("AU_1920x1080")
 if id == nil then id = SDS:CreateDeviceAsync({Name = "AU_1920x1080", Width = 1920, Height = 1080, PixelDensity = 96}) end
 SDS:SetDeviceAsync(id); task.wait(0.35)
+pinLandscape()
 SDS:SetScalingModeAsync(Enum.DeviceSimulatorScalingMode.ActualResolution); task.wait(0.35)
-return "DEVICE AU_1920x1080"
+local oOk, o = pcall(function() return SDS:GetOrientationAsync() end)
+local rOk, r = pcall(function() return SDS:GetResolutionAsync() end)
+return string.format("DEVICE AU_1920x1080 orientation=%s resolution=%s",
+    oOk and tostring(o and o.Name or o) or "?",
+    rOk and r and string.format("%dx%d", math.floor(r.X + 0.5), math.floor(r.Y + 0.5)) or "?")
 '''
 
 VIEWPORT_READ = ('local cam = workspace.CurrentCamera; '
@@ -4095,6 +4109,10 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
         with contextlib.suppress(Exception):
             if g._playing:
                 g.stop_playtest()
+        # 2026-11-02: a phone-portrait capture left Studio's simulator in Portrait and the
+        # owner's Studio showed the 1920x1080 device rotated; every run ends on landscape
+        with contextlib.suppress(Exception):
+            g.edit(SET_DESKTOP_DEVICE, "leave Studio on AU_1920x1080 landscape")
         g.close()
     ctx["pre_existing"] = ctx_pre
     try:
