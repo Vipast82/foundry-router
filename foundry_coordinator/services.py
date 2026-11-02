@@ -284,7 +284,7 @@ def blocks(c, P, t: dict, spec=None) -> bool:
     if note:
         c._note(P, t, note)
         return True
-    if images_hold(c, P, t, needs):
+    if images_hold(c, P, t, needs, spec):
         return True
     ok, missing = ready(needs, db=c.store, now=c.clock(), profile=_profile(P))
     if ok:
@@ -369,10 +369,52 @@ def images_mode(P) -> str:
     return mode if mode in ("ask", "allow", "deny") else "ask"
 
 
-def images_allowed(c, P, t: dict, needs: list) -> bool:
+_REF_VIEWS = re.compile(r"\bref[_\- ]?views?\b", re.I)
+
+
+def ref_views_declared(t: dict, spec=None) -> bool:
+    """TURNAROUND_RECIPE_PLAN D-T3: does the sprint say its images are reference views drawn
+    from an approved 3D sheet? Task data `ref_views: true`, a `needs:ref_views` tag, or the
+    word `ref_views` in the plan's `## Needs` block."""
+    data = (t or {}).get("data") or {}
+    sdata = getattr(spec, "data", None) or {}
+    if data.get("ref_views") or sdata.get("ref_views"):
+        return True
+    for tag in getattr(spec, "tags", None) or []:
+        if _REF_VIEWS.fullmatch(str(tag).replace("needs:", "").strip()):
+            return True
+    text = str(getattr(spec, "spec", "") or "")
+    m = _HEAD.search(text)
+    if not m:
+        return False
+    body = text[m.end():]
+    nxt = re.search(r"^#{1,6}\s", body, re.M)
+    return bool(_REF_VIEWS.search(m.group(0) + "\n" + (body[:nxt.start()] if nxt else body)))
+
+
+def ref_views_mode(P) -> str:
+    """[automation] ref_views_images: 'ask' (default: the 2D decision as for any images) or
+    'allow' (D3's standing OK for reference views drawn from an approved 3D sheet)."""
+    from .automation import get as auto_get
+    try:
+        mode = str(auto_get(P, "ref_views_images") or "ask").strip().lower()
+    except KeyError:
+        mode = "ask"
+    return mode if mode in ("ask", "allow") else "ask"
+
+
+def ref_views_ok(P, t: dict, needs: list, spec=None) -> bool:
+    """The standing OK applies: the sprint needs `images` and declares `ref_views`, the owner
+    switched ref_views_images to 'allow', and media_gen_images is 'ask' ('deny' still wins)."""
+    return ("images" in needs and images_mode(P) == "ask" and ref_views_mode(P) == "allow"
+            and ref_views_declared(t, spec))
+
+
+def images_allowed(c, P, t: dict, needs: list, spec=None) -> bool:
     """May this sprint's session generate 2D images (foundry-media first, Media_Gen's image
     tools as the fallback)? Only a sprint that needs `images`, and only when
-    [automation] media_gen_images is 'allow' or the owner answered "Generate them"."""
+    [automation] media_gen_images is 'allow', the owner answered "Generate them", or the
+    reference-view standing OK applies (ref_views_ok)."""
     if "images" not in needs:
         return False
     mode = images_mode(P)
@@ -380,18 +422,29 @@ def images_allowed(c, P, t: dict, needs: list) -> bool:
         return True
     if mode == "deny":
         return False
+    if ref_views_ok(P, t, needs, spec):
+        return True
     return images_choice(c, P.id, t["task_id"]) == "generate"
 
 
-def images_hold(c, P, t: dict, needs: list) -> bool:
+def images_hold(c, P, t: dict, needs: list, spec=None) -> bool:
     """2026-10-27 (Victor): "if there is anything that needs 2D assets, let me know
     first". A sprint that needs `images` waits on an operator decision unless
-    [automation] media_gen_images is 'allow' or 'deny'. The answer lives in the
+    [automation] media_gen_images is 'allow' or 'deny', or the reference-view standing OK
+    applies (D3: ref_views_ok). The answer lives in the
     decision itself (task data can be rewritten by a transition); "Hold" keeps the
     sprint waiting. True = do not start it now."""
     if "images" not in needs or images_mode(P) != "ask":
         return False
     tid = t["task_id"]
+    if ref_views_ok(P, t, needs, spec):
+        key = f"ref_views_ok:{P.id}:{tid}"
+        if not c.store.meta(key):
+            c.store.set_meta(key, str(c.clock()))
+            c.store.event(P.id, tid, "ref_views_standing_ok", detail={
+                "needs": needs, "text": f"{tid} draws reference views from an approved 3D "
+                "sheet: started under the standing OK (ref_views_images = allow, D3)"})
+        return False
     choice = images_choice(c, P.id, tid)
     if choice in ("generate", "provide"):
         return False
@@ -417,11 +470,27 @@ def images_hold(c, P, t: dict, needs: list) -> bool:
     return True
 
 
-def images_brief(c, P, t: dict, needs: list) -> str:
+REF_VIEWS_BRIEF = (
+    "\n## 2D images (reference views only)\nThis sprint runs under the owner's standing OK for "
+    "reference views drawn from an already-approved 3D concept sheet. Use the \"Turnaround "
+    "views\" recipe of the `foundry-images` skill (the foundry-media tools: ChatGPT images): a "
+    "three-quarter view first, then each missing view, always with the approved sheet as a "
+    "reference. Save under `assets/source/<cat>/<ID>/ref/drawn/`; never overwrite or rename an "
+    "approved `<ID>_ref_v<n>.png`. At most six images per asset, one redraw per view. Check a "
+    "running job once per completed step (never a polling loop), and never call "
+    "generate_image / edit_image twice for the same request. The OK covers nothing else: an "
+    "icon, UI art, a texture or a decal in this sprint is reported BLOCKED `user_action` naming "
+    "the file. Drawn views are unapproved: list them in your report; sizes come from "
+    "`ref_align.py` and the bible, never from a drawn picture alone.\n")
+
+
+def images_brief(c, P, t: dict, needs: list, spec=None) -> str:
     """The BUILD prompt's 2D paragraph for a sprint that needs `images` ('' otherwise)."""
     if "images" not in needs:
         return ""
-    if images_allowed(c, P, t, needs):
+    if ref_views_ok(P, t, needs, spec):
+        return REF_VIEWS_BRIEF
+    if images_allowed(c, P, t, needs, spec):
         return ("\n## 2D images\nThe owner allowed image generation for this sprint. Use the "
                 "`foundry-images` skill (the foundry-media tools: ChatGPT images) first; use "
                 "Media_Gen's image tools only when foundry-media refuses or fails. Check a "

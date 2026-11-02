@@ -1001,14 +1001,16 @@ class Coordinator:
             return False
         from . import services as SV
         t = self.store.task(P.id, spec.task_id) or {"task_id": spec.task_id}
-        return SV.images_allowed(self, P, {**t, "task_id": spec.task_id}, SV.needs_of(t, spec))
+        return SV.images_allowed(self, P, {**t, "task_id": spec.task_id}, SV.needs_of(t, spec),
+                                 spec)
 
     def _images_brief(self, P: Project, spec) -> str:
         """The BUILD prompt's 2D paragraph (services.images_brief); '' without `images`."""
         from . import services as SV
         try:
             t = self.store.task(P.id, spec.task_id) or {"task_id": spec.task_id}
-            return SV.images_brief(self, P, {**t, "task_id": spec.task_id}, SV.needs_of(t, spec))
+            return SV.images_brief(self, P, {**t, "task_id": spec.task_id}, SV.needs_of(t, spec),
+                                   spec)
         except Exception:                                         # noqa: BLE001
             return ""
 

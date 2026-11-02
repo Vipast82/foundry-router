@@ -144,3 +144,26 @@ def test_stdio_protocol(tmp_path):
         "generate_image", "edit_image", "image_job_status", "list_image_jobs", "image_settings"}
     assert replies[3]["result"]["isError"] is True
     assert replies[4]["error"]["code"] == -32601
+
+
+def test_edit_sidecar_records_inputs_purpose_and_view(adapter):
+    """TURNAROUND_RECIPE_PLAN D-T4: provenance only; the request sent to Foundry is unchanged."""
+    import hashlib
+    mod, cfg, project = adapter
+    (project / "assets" / "sheet.png").write_bytes(png(24, 24))
+    res = mod.call_tool(cfg, "edit_image", {"prompt": "three-quarter view",
+                                            "images": ["assets/sheet.png"], "wait_seconds": 20,
+                                            "purpose": "reference_view", "view": "tq_+X",
+                                            "save_as": "assets/drawn/K_tq_+X_d1.png"})
+    assert res["isError"] is False, res
+    _path, sent = HITS[-1]
+    assert "purpose" not in json.dumps(sent) and "tq_+X" not in json.dumps(sent)
+    saved = _payload(res)["saved"][0]["path"]
+    meta = json.loads(Path(saved + ".foundry.json").read_text(encoding="utf-8"))
+    assert meta["purpose"] == "reference_view" and meta["view"] == "tq_+X"
+    assert meta["inputs"] == [{"path": "assets/sheet.png",
+                               "sha256": hashlib.sha256(png(24, 24)).hexdigest()}]
+    res = mod.call_tool(cfg, "generate_image", {"prompt": "an icon", "wait_seconds": 20})
+    meta = json.loads(Path(_payload(res)["saved"][0]["path"] + ".foundry.json")
+                      .read_text(encoding="utf-8"))
+    assert "inputs" not in meta and "view" not in meta

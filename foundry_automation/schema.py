@@ -280,6 +280,9 @@ AUTOMATION_DEFAULTS: dict = {
     "max_parallel_checks": 2,
     # 2026-10-27: 2D assets (images) come from the operator (ChatGPT) unless approved
     "media_gen_images": "ask",
+    # TURNAROUND_RECIPE_PLAN (D3): reference views drawn from an approved 3D sheet skip the
+    # 2D decision only when the plan declares `ref_views` and this is "allow"
+    "ref_views_images": "ask",
     "inline_check_wait_s": 2,
     # 2026-10-28 (E): the code review starts once done_check and the gate binding pass,
     # beside the Lune suite (dropped when the revision then fails)
@@ -836,7 +839,8 @@ _SC_DESC = {
     "outputs": "Runner files the coordinator commits after a run ({task} = task id).",
 }
 
-_AUTO_ENUMS = {"helpers": HELPER_MODES, "scope_unlisted_default": SCOPE_DEFAULTS}
+_AUTO_ENUMS = {"helpers": HELPER_MODES, "scope_unlisted_default": SCOPE_DEFAULTS,
+               "ref_views_images": ("ask", "allow")}
 _AUTO_DESC = {
     "helpers": "on_demand: proactive helper lanes are off; a helper starts only when the "
                "primary asks for one and that primary consumes it. proactive: [lanes] apply.",
@@ -912,6 +916,7 @@ _AUTO_DESC = {
                         "decision for the operator (provide the assets, e.g. from ChatGPT, use "
                         "Media_Gen's image tools, or hold); 'allow' gives it Media_Gen's image "
                         "tools; 'deny' starts it without them.",
+    "ref_views_images": "Reference views drawn from an already-approved 3D concept sheet (the foundry-images turnaround recipe; the plan lists `ref_views` in its ## Needs): 'ask' (default) holds the sprint for the 2D decision like any images; 'allow' is the owner's standing OK (D3): such a sprint starts with the image tools, for reference views only (icons, UI art and textures still ask). media_gen_images = 'deny' still wins.",
     "max_parallel_checks": "Verify / closeout check runs (done_check, Lune, project suites) "
                            "that run at once in the background; the coordinator keeps "
                            "starting and steering other sprints meanwhile.",

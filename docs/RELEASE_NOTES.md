@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.171.0 — turnaround recipe: draw an asset's missing views from its approved sheet (gap 5)
+
+2026-11-01. Plan: `docs/plans/TURNAROUND_RECIPE_PLAN.md` (built with the recommended answers).
+AU concept sheets show one side; the other side, the top and the underside were guessed. Ships
+off.
+
+- **`foundry-images` skill:** a "Turnaround views" section.
+  - The order: a three-quarter view first from the approved sheet, then each missing view with
+    the sheet + the three-quarter view as references.
+  - Views are named by axis (`tq_+X`, `side_+X`, `side_-X`, `back`, `top`, `under`, `sheet`;
+    the asset faces +Y, +X is screen-left in FRONT).
+  - Fixed settings and prompt; it saves to `ref/drawn/` and never touches an approved
+    `_ref_vN.png`.
+  - At most six images per asset, one redraw per view; `ref_align.py --check-only` when AS-P9
+    has landed.
+- **D3 standing OK, as a setting:** `[automation] ref_views_images` = `ask` (default) |
+  `allow`.
+  - With `allow`, a sprint whose plan lists `ref_views` beside `images` starts without the 2D
+    decision (event `ref_views_standing_ok`).
+  - Its BUILD prompt limits the OK to reference views: icons, UI art, textures and decals still
+    ask, and `media_gen_images = "deny"` still wins.
+- **foundry-media adapter 1.1.0:** `purpose` and `view` arguments.
+  - An edit's sidecar records its input images (project-relative path + SHA-256) and the view.
+  - It is metadata only: the request to Foundry is unchanged.
+- **To switch on:**
+  - rebuild the router (the Settings control);
+  - set `ref_views_images = allow`;
+  - pull the OneDrive checkout (the adapter runs from it).
+  - AU's copy of the skill updates through gap 7's installer.
+- Tests:
+  - `tests/coordinator/test_ref_views.py` (5);
+  - `tests/test_media_adapter.py` (`test_edit_sidecar_records_inputs_purpose_and_view`);
+  - the media, automation and rules suites: 94 pass.
+
 ## v0.170.2 — a decision never times out to "the owner did it"
 
 2026-11-01 17:44. Studio on the workstation stopped syncing and only Victor's Connect click

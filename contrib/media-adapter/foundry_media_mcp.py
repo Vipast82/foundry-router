@@ -43,7 +43,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_INPUT_BYTES = 20 * 1024 * 1024
 _EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
@@ -176,6 +176,29 @@ def read_input_image(cfg, path: str, base_dir: str) -> str:
     return f"data:{mime};base64," + base64.b64encode(data).decode()
 
 
+def input_info(cfg, path: str, base_dir: str) -> dict:
+    """Provenance of one input image (TURNAROUND_RECIPE_PLAN D-T4): its path, project-relative
+    when it is inside the first authorised folder, and its SHA-256."""
+    p = os.path.realpath(path if os.path.isabs(path) else os.path.join(base_dir, path))
+    with open(p, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    shown = p
+    if cfg["roots"] and inside_roots(p, cfg["roots"][:1]):
+        shown = os.path.relpath(p, os.path.realpath(cfg["roots"][0])).replace(os.sep, "/")
+    return {"path": shown, "sha256": digest}
+
+
+def _remember_provenance(job_id: str, prov: dict) -> None:
+    """Keep a job's provenance until its image is saved (a later image_job_status call may
+    save it)."""
+    if not (job_id and prov):
+        return
+    with _state_lock:
+        st = _load_state()
+        st["prov:" + job_id] = {**prov, "t": time.time()}
+        _save_state(st)
+
+
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
     return (s[:40].rstrip("-") or "image")
@@ -268,6 +291,9 @@ def save_artifacts(cfg, job: dict, save_as, overwrite) -> list:
                     "width": a.get("width"), "height": a.get("height"), "sha256": a["sha256"],
                     "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     "foundry": cfg["foundry_url"]}
+            with _state_lock:
+                prov = _load_state().get("prov:" + str(job["job_id"])) or {}
+            meta.update({k: v for k, v in prov.items() if k in ("inputs", "purpose", "view")})
             with open(target + ".foundry.json", "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2)
         with _state_lock:
@@ -327,6 +353,10 @@ COMMON = {
                 "model can look at it (default false)"},
     "overwrite": {"type": "boolean", "description": "replace an existing file at save_as "
                   "(default false: a -v1, -v2 suffix is added)"},
+    "purpose": {"type": "string", "description": "optional, recorded in the sidecar: what the "
+                "image is for, e.g. reference_view (a view drawn from an approved sheet)"},
+    "view": {"type": "string", "description": "optional, recorded in the sidecar: which view, "
+             "e.g. tq_+X, side_-X, top, under, sheet"},
 }
 
 TOOLS = [
@@ -439,8 +469,16 @@ def call_tool(cfg, name, args, req_id=None, progress=None) -> dict:
                     return _error(str(e))
                 if not body["images"]:
                     return _error("edit_image needs at least one input image path")
+            prov = {k: str(args[k])[:80] for k in ("purpose", "view") if args.get(k)}
+            if name == "edit_image":
+                try:
+                    prov["inputs"] = [input_info(cfg, p, cfg["roots"][0])
+                                      for p in args.get("images") or []]
+                except OSError:
+                    pass
             body["wait_seconds"] = min(25, wait)
             job = http(cfg, "POST", "/media/jobs", body, timeout=120)
+            _remember_provenance(str(job.get("job_id") or ""), prov)
             job = _wait_job(cfg, job, wait - min(25, wait), req_id, progress)
             return _result(cfg, job, args, req_id)
         if name == "image_job_status":
