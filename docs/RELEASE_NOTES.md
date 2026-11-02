@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.13 — a main checkout freed mid-tick goes to the sprint first in the queue
+
+2026-11-02 16:3x. GF-COS1 completed partway through a tick. GF-QUEEN1 and AS-G07b come earlier
+in the queue, but they had already been stepped in that tick and told to wait for GF-COS1.
+MV2-13 comes much later: it is an owner-step sprint the owner asked to keep near the end, and
+its three full test matches take hours. It stepped later in the same tick, found the main
+checkout free and took it. The tick steps sprints in queue order, so whichever later sprint
+came first after a completion won the checkout.
+
+- `engine._lane_yielded[pid]`: the main sprints told in this tick to wait for the main
+  checkout. It is reset at the start of each project's task loop.
+- A never-started main sprint does not take a checkout freed during the tick while an earlier
+  sprint was told to wait: "waiting for X (earlier in the queue) to take the main checkout
+  first". On the next tick the queue order decides. A started sprint keeps its own place in
+  line (the earliest started first, as before).
+- Test: `test_a_checkout_freed_mid_tick_goes_to_the_earlier_waiting_sprint`.
+
 ## v0.181.12 — Studio's device simulator stays in landscape
 
 2026-11-02 15:0x. Victor's Studio showed the AU_1920x1080 device rotated to portrait, and had

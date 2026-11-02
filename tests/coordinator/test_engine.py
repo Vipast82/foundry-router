@@ -1512,3 +1512,30 @@ def test_claude_agents_are_capped_and_the_cap_drops_at_the_usage_threshold(game)
     P.profile.raw["resources"]["claude_personas"] = ["Some-Local-Persona"]
     assert not any(r.startswith("claude") for r in c._session_locks(P, t1))
     R.CLAUDE_USAGE.pop("game", None)
+
+
+def test_a_checkout_freed_mid_tick_goes_to_the_earlier_waiting_sprint(game):
+    """2026-11-02 MV2-13: GF-COS1 completed mid-tick after GF-QUEEN1 (earlier in the queue)
+    had been told to wait for it; MV2-13, at the queue's end, stepped later in the same tick,
+    found the checkout free and took it for hours. A never-started main sprint does not take
+    a checkout freed this tick while an earlier sprint was told to wait; the queue order
+    decides on the next tick. A started sprint keeps its own place in line."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    c.store.update_task("game", "T1", state=S.READY, started_ts=None)
+    c.store.update_task("game", "T2", state=S.READY, started_ts=None)
+    # (the fixture's T2 depends on T1, so T1 plays the later sprint here)
+    c._lane_yielded["game"] = ["T2"]          # T2 was told to wait earlier in this tick
+    c._start_implementation(P, c.store.task("game", "T1"))
+    t1 = c.store.task("game", "T1")
+    assert t1["state"] == S.READY and not c.store.holds("game", "T1")
+    assert "waiting for T2 (earlier in the queue)" in (t1["next_action"] or "")
+    assert c._main_sprint_in_flight(P, t1) == ""          # nothing else holds the checkout
+    # a started sprint is not held back by it
+    c.store.update_task("game", "T1", started_ts=50.0)
+    c._lane_yielded["game"] = ["T2"]
+    c._start_implementation(P, c.store.task("game", "T1"))
+    assert "earlier in the queue" not in (c.store.task("game", "T1")["next_action"] or "")

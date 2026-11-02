@@ -152,6 +152,7 @@ class Coordinator:
         self.studio_calls = StudioCalls(self, clock=clock)
         from .bg_checks import BackgroundChecks
         self.bg_checks = BackgroundChecks()      # 0.147.0: verify/closeout off the tick
+        self._lane_yielded: dict = {}            # pid -> main sprints told to wait this tick
         try:
             # E (2026-10-28): check processes die with the coordinator (procjob); any a
             # crashed coordinator left behind are killed now
@@ -424,6 +425,8 @@ class Coordinator:
                 self._refresh_claude_usage(P)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: Claude usage refresh failed: {type(e).__name__}: {e}")
+            # main sprints told this tick to wait for the main checkout (queue order)
+            self._lane_yielded[pid] = []
             for t in self.store.tasks(pid):
                 # 0.147.0: re-read the row right before its step. An earlier task's
                 # long step (a 13-min verify) left this snapshot stale, and an
@@ -755,6 +758,14 @@ class Coordinator:
                 self.store.release(P.id, t["task_id"], give)
             return self._note(P, t, f"waiting for {landing} to land first (landing drain)")
         other = self._main_sprint_in_flight(P, t)
+        # 2026-11-02 MV2-13: GF-COS1 completed mid-tick, after GF-QUEEN1 and AS-G07b (earlier
+        # in the queue) had already been told to wait for it; MV2-13, an owner-step sprint at
+        # the queue's end, stepped later in the same tick, found the checkout free and took
+        # it for hours. A never-started main sprint does not take a checkout freed this tick
+        # while an earlier sprint was told to wait for it: the queue order decides next tick.
+        earlier = [x for x in self._lane_yielded.get(P.id, []) if x != t["task_id"]]
+        if not other and earlier and not self.tracks.is_track(P)                 and not (self.store.task(P.id, t["task_id"]) or t).get("started_ts"):
+            other = earlier[0]
         if other:
             # 2026-10-29 07:00: AS-P5 (restarted by an attempt reset, so later than HK-CLEAN1)
             # yielded to HK-CLEAN1 but kept the checkout lock, and HK-CLEAN1 waited for that
@@ -763,6 +774,11 @@ class Coordinator:
             give = [r for r in self._workspace_locks(P) + self._session_locks(P, t) if r in held]
             if give:
                 self.store.release(P.id, t["task_id"], give)
+            if not self.tracks.is_track(P):
+                self._lane_yielded.setdefault(P.id, []).append(t["task_id"])
+            if other in earlier:
+                return self._note(P, t, f"waiting for {other} (earlier in the queue) to take "
+                                        f"the main checkout first")
             return self._note(P, t, f"waiting for {other} to finish (one started main-checkout "
                                     f"sprint at a time)")
         held = self._acquire(P, t, self._workspace_locks(P) + self._session_locks(P, t),
