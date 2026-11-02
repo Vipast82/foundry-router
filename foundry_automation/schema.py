@@ -1169,6 +1169,22 @@ FIELDS: list[Field] = [
     F("blender.journal_tools", "list", ["selftest_all.py"], "Build replay: the game's tools that "
       "start Blender themselves; a sprint command running one of them is journaled as a Blender "
       "run on this PC.", "fast_lane", "coordinator.slot_blender", item_type="str"),
+    # one fresh builder per model (docs/plans/BUILDER_PER_MODEL_PLAN.md, gap 9) ------------
+    F("builder.enabled", "bool", False, "Builder per model (trial): Foundry writes the Kilo "
+      "subagent au-builder into kilo.jsonc, and the sprints matching builder.tasks build each "
+      "3D model in its own fresh au-builder session (it stops at mesh_report, side_check, "
+      "ref_iou and renders; the sprint exports, uploads and commits). Off until the pilot "
+      "shows a gain.", "fast_lane", "coordinator.builder", "next_session"),
+    F("builder.tasks", "list", ["AS-*"], "Builder per model: the task ids (globs, e.g. AS-J03R) "
+      "whose sprints use it. For the two-asset trial, name the two tasks.", "fast_lane",
+      "coordinator.builder", "next_session", item_type="str"),
+    F("builder.agent", "str", "au-builder", "Builder per model: the subagent's name in "
+      "kilo.jsonc.", "fast_lane", "coordinator.builder", "next_session"),
+    F("builder.model", "str", "", "Builder per model: the model the builder runs on, e.g. "
+      "foundry/Foundry-Kilo-Sonnet. Empty = the calling sprint session's model.", "fast_lane",
+      "coordinator.builder", "next_session"),
+    F("builder.steps", "int", 200, "Builder per model: the most tool steps one builder session "
+      "takes.", "fast_lane", "coordinator.builder", "next_session", min=10, max=1000),
     # Foundry-shipped Kilo skills (docs/plans/FOUNDRY_SKILLS_DELIVERY_PLAN.md, gap 7) -------
     F("skills.install", "list", [], "Kilo skills Foundry installs into the game's local skill "
       "folder (skills.target) and allows in kilo.jsonc, e.g. au-blender-asset, foundry-images. "

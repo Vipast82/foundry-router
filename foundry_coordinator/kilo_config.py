@@ -142,7 +142,29 @@ def merge_block(old: Optional[dict], generated: dict) -> dict:
     return out
 
 
-def plan(text: str, role_rules: Optional[dict], workspace: str) -> dict:
+def _write_agents(new: str, data: dict, extra_agents: Optional[dict], out: dict) -> str:
+    """Whole agents Foundry owns (gap 9: the `au-builder` subagent), written when they
+    differ; recorded in out["changed"] / out["blocks"] (their permission) for the read-back."""
+    agents = (data or {}).get("agent") or {}
+    for name, blk in (extra_agents or {}).items():
+        out["blocks"][name] = blk["permission"]
+        if agents.get(name) == blk:
+            out.setdefault("unchanged", []).append(name)
+            continue
+        new = jsonc.replace_value(new, ("agent", name), blk)
+        out.setdefault("changed", []).append(name)
+    return new
+
+
+def extra_agents(profile, role_rules: Optional[dict], workspace: str) -> dict:
+    """{name: agent object} Foundry writes whole into kilo.jsonc ({} while all are off)."""
+    from . import builder
+    blk = builder.agent_block(profile, role_rules, workspace) if profile is not None else None
+    return {builder.settings(profile)["agent"]: blk} if blk else {}
+
+
+def plan(text: str, role_rules: Optional[dict], workspace: str,
+         extra: Optional[dict] = None) -> dict:
     """{"text": new text, "changed": [agents], "unchanged": [...], "missing": [...],
     "blocks": {agent: merged block}}"""
     data = jsonc.parse(text)
@@ -169,6 +191,8 @@ def plan(text: str, role_rules: Optional[dict], workspace: str) -> dict:
             continue
         new = jsonc.replace_value(new, ("agent", agent, "permission"), merged)
         out["changed"].append(agent)
+    if extra and isinstance(data, dict) and isinstance(data.get("agent"), dict):
+        new = _write_agents(new, data, extra, out)
     out["text"] = new
     return out
 
@@ -205,7 +229,8 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
     except OSError as e:
         raise KiloConfigError(f"cannot read {path}: {e}") from None
     try:
-        p = plan(text, rules, profile.workspace)
+        p = plan(text, rules, profile.workspace,
+                 extra_agents(profile, rules, profile.workspace))
     except jsonc.JsoncError as e:
         raise KiloConfigError(f"{path} is not valid JSONC: {e}") from None
     result = {"path": path, "changed": p["changed"], "unchanged": p["unchanged"],
@@ -276,7 +301,8 @@ def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
     return out
 
 
-def track_text(text: str, needs, role_rules: Optional[dict], workspace: str) -> dict:
+def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
+               extra: Optional[dict] = None) -> dict:
     """Pure part of `track_kilo_config`: {"text", "mcp": {name: enabled}, "blocks": {agent: block},
     "missing": [agents]}. Raises JsoncError on an unparseable source."""
     needs = SM.normalize_needs(needs)
@@ -316,6 +342,8 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str) -> 
             if agents[agent].get("permission") != gen:
                 new = jsonc.replace_value(new, ("agent", agent, "permission"), gen)
             out["blocks"][agent] = gen
+    if extra and isinstance(data.get("agent"), dict):
+        new = _write_agents(new, data, extra, out)
     out["text"] = new
     return out
 
@@ -355,7 +383,8 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
     except OSError as e:
         raise KiloConfigError(f"cannot read {source}: {e}") from None
     try:
-        p = track_text(text, needs, role_rules, workspace or wt)
+        p = track_text(text, needs, role_rules, workspace or wt,
+                       extra_agents(profile, role_rules, workspace or wt))
     except (jsonc.JsoncError, RR.RuleError) as e:
         raise KiloConfigError(f"{source}: {e}") from None
     target = os.path.join(wt, "kilo.jsonc")

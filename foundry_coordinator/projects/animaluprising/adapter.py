@@ -698,6 +698,8 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                       "result when this track merges.\n")
         notice += self._blender_notice(spec.task_id, str(ctx.get("run_id") or ""))
         notice += self._asset_skill_notice(spec.task_id)
+        from ...builder import notice as builder_notice
+        notice += builder_notice(self.p, spec.task_id)
         a = ctx.get("assignment") if isinstance(ctx.get("assignment"), dict) else {}
         rerun = [str(x) for x in (a.get("affected_checks_to_rerun") or [])][:20]
         rerun_txt = (", ".join(rerun) if rerun else "the checks the findings below name")
@@ -1767,6 +1769,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
                   # 2026-10-27 (Victor): the coordinator pushes master after closeout
                   # verification; no session pushes, in any phase (CLOSE included)
                   {"permission": "bash", "pattern": "git push*", "action": "deny"}]
+        # gap 9: a matching AS- implementer may call the au-builder subagent (after the role
+        # rules, so their `task` deny doesn't win)
+        from ...builder import session_rules as builder_rules
+        rules += builder_rules(self.p, spec.task_id, self.ROLE_OF_PHASE.get(phase, "implementer"))
         return rules
 
     def doctor(self) -> list:

@@ -72,7 +72,7 @@ def hold_restart_keys(merged: dict, live_raw: dict, paths: list[str]) -> dict:
 def role_rules_changed(prev: Optional[dict], doc: dict) -> bool:
     """The kilo.jsonc agent blocks depend on these: the role rules, and where Blender runs
     (the local blender.exe is denied while it runs on a slot: SLOT_BLENDER_PLAN B2)."""
-    return any(c["path"].startswith(("role_rules.", "blender.", "skills."))
+    return any(c["path"].startswith(("role_rules.", "blender.", "skills.", "builder."))
                for c in D.diff(prev, doc))
 
 

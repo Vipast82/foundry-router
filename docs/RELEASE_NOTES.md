@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.174.0 — builder per model: a fresh au-builder subagent per 3D model (gap 9, ships off)
+
+2026-11-01. Plan: `docs/plans/BUILDER_PER_MODEL_PLAN.md` (built with the recommended answers).
+An AS- sprint built every model in one long session, so by the second model its context carried
+all of the first model's Studio and upload work. Ships off: the report's Phase D waits for the
+pilot, and D4 asks for a two-asset trial first.
+
+- **`builder.py` + kilo.jsonc:** while `builder.enabled`, Foundry writes the Kilo subagent
+  `au-builder` (main and track files):
+  - `mode: subagent`, `steps` 200, a short "build ONE model, stop at the result lines" prompt;
+  - no `model` unless `builder.model` is set, so it runs on the sprint session's model;
+  - its permission is the implementer's block, with commit, push, tag, nested `task`, Studio,
+    foundry-media, Media_Gen and the secrets folder denied, and `au-blender-asset` allowed.
+- **Who may call it:** an implementer session of a task matching `builder.tasks` (globs;
+  default `AS-*`). It gets `task: au-builder allow` after the role rules. A reviewer or helper
+  never does.
+- **The BUILD prompt** of a matching sprint:
+  - one `au-builder` per model, several at once, given the pack, the short note, the script
+    and absolute output folders;
+  - the sprint keeps the look gate, the judge, export, upload, Studio, records and every
+    commit.
+- A `builder.*` change rewrites kilo.jsonc and reloads Kilo.
+- The second candidate (D5) is not built yet; it needs the judge's threshold from the pilot.
+- **To switch on (after the pilot):**
+  - rebuild the router;
+  - `builder.enabled` on, `builder.tasks` = the two trial tasks;
+  - best with `skills.install` listing `au-blender-asset`.
+- Tests:
+  - `tests/coordinator/test_builder_per_model.py` (4);
+  - the AU adapter suites: 447 pass.
+
 ## v0.173.0 — Foundry-shipped skills reach AU's Kilo; new `au-blender-asset` skill (gap 7)
 
 2026-11-01. Plan: `docs/plans/FOUNDRY_SKILLS_DELIVERY_PLAN.md` (built with the recommended
