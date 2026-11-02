@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.4 — approval frames include the plan's own sub-folder globs
+
+2026-11-02 05:0x. After v0.181.3, AS-P10's visual approval answered "no frame matches
+docs/evidence/AS-P10/cand_A/*.png", and the sprint waited for a person. Its 16 frames are
+committed, but `approval_artifacts` listed only the rule's own pattern
+(`docs/evidence/{task}/*.png`), which does not reach sub-folders.
+
+- **`GenericAdapter.approval_artifacts`:** the frames an approval rule covers are its own
+  patterns plus the plan's glob scope entries that fall under them (for example
+  `docs/evidence/AS-P10/cand_A/*.png`). All callers share this one list: the visual
+  approval, the engine's approval binding, the asset judge, control and telemetry.
+  Without such entries the list is unchanged.
+- Test: `tests/coordinator/test_visual_model_approval.py`
+  (`test_approval_artifacts_list_the_frames_of_the_plans_own_subfolder_globs`; fails on
+  v0.181.3).
+
 ## v0.181.3 — visual approval expands a glob in the plan's scope
 
 2026-11-02 04:3x. AS-P10's plan lists `docs/evidence/AS-P10/*.png` in its scope.

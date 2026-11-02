@@ -256,9 +256,16 @@ class GenericAdapter(ReviewContractDefaults):
     # -- approvals --------------------------------------------------------------------
 
     def approval_artifacts(self, spec: TaskSpec, patterns: list[str]) -> dict:
+        """{relative path: sha256} of the frames an approval rule covers: its own patterns,
+        plus the plan's glob scope entries that fall under them. 2026-11-02 AS-P10: the plan
+        named docs/evidence/AS-P10/cand_A/*.png; the rule's docs/evidence/{task}/*.png does not
+        reach sub-folders, so its 16 frames were never listed and the approval found none."""
+        from ..profile import matches_any
+        pats = [p.replace("{task}", spec.task_id) for p in patterns]
+        extra = [s.replace("\\", "/") for s in (getattr(spec, "scope", None) or [])
+                 if any(ch in s for ch in "*?[") and matches_any(s.replace("\\", "/"), pats)]
         out = {}
-        for pat in patterns:
-            pat = pat.replace("{task}", spec.task_id)
+        for pat in dict.fromkeys(pats + extra):
             for path in sorted(glob.glob(os.path.join(self.p.workspace, pat), recursive=True)):
                 rel = os.path.relpath(path, self.p.workspace).replace("\\", "/")
                 if os.path.isfile(path) and self.p.in_workspace(rel):

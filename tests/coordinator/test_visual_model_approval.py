@@ -201,3 +201,28 @@ def test_a_glob_scope_entry_requires_the_frames_it_matches(tmp_path):
     assert [f[0] for f in frames] == rels
     # a glob that matches no frame is still a missing requirement
     assert "no frame matches" in _required(project, spec, rule, {})[1]
+
+
+def test_approval_artifacts_list_the_frames_of_the_plans_own_subfolder_globs(tmp_path):
+    """2026-11-02 AS-P10 (after v0.181.3): its plan names `docs/evidence/AS-P10/cand_A/*.png`;
+    the approval rule's own pattern `docs/evidence/{task}/*.png` does not reach into
+    sub-folders, so the 16 committed frames were never listed and the visual approval
+    answered "no frame matches docs/evidence/AS-P10/cand_A/*.png"."""
+    from foundry_coordinator.adapters.project import GenericAdapter
+    for rel in ("docs/evidence/AS-P10/compare_A.png", "docs/evidence/AS-P10/cand_A/front.png",
+                "docs/evidence/AS-P10/cand_B/front.png", "docs/evidence/AS-P10/notes/x.txt"):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(PNG + rel.encode())
+    profile = SimpleNamespace(workspace=str(tmp_path), in_workspace=lambda p: True)
+    spec = SimpleNamespace(task_id="AS-P10", scope=[
+        "docs/evidence/AS-P10/cand_A/*.png", "docs/evidence/AS-P10/cand_B/*.png",
+        "docs/evidence/AS-P10/**", "src/x.lua"])
+    arts = GenericAdapter(profile, "").approval_artifacts(spec, ["docs/evidence/{task}/*.png"])
+    assert sorted(arts) == ["docs/evidence/AS-P10/cand_A/front.png",
+                            "docs/evidence/AS-P10/cand_B/front.png",
+                            "docs/evidence/AS-P10/compare_A.png"]
+    # without such scope entries: the rule's pattern alone, as before
+    spec.scope = ["docs/evidence/AS-P10/*.png"]
+    assert sorted(GenericAdapter(profile, "").approval_artifacts(
+        spec, ["docs/evidence/{task}/*.png"])) == ["docs/evidence/AS-P10/compare_A.png"]
