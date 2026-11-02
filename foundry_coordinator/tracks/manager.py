@@ -218,12 +218,21 @@ class TrackManager:
     def is_track(P) -> bool:
         return bool(getattr(P.profile, "__dict__", {}).get("track"))
 
-    @staticmethod
-    def studio_less(P) -> bool:
+    def studio_less(self, P) -> bool:
         """A track WITHOUT Studio: unbound to a Studio slot (2026-10-31). Its Studio rows,
-        visual approval and gate belong to the merge gate; a slot-bound track runs them."""
+        visual approval and gate belong to the merge gate; a slot-bound track runs them.
+        The slot is read from the store (2026-11-02: `set-slot none` from the CLI runs in
+        another process, so the live engine's cached track profile still names the slot)."""
         d = getattr(P.profile, "__dict__", {})
-        return bool(d.get("track")) and not d.get("slot")
+        if not d.get("track"):
+            return False
+        try:
+            row = self.store.track(P.id, d["track"])
+            if row is not None:
+                return not ((row.get("data") or {}).get("slot"))
+        except Exception:                                         # noqa: BLE001
+            pass
+        return not d.get("slot")
 
     @staticmethod
     def track_name(P) -> str:
@@ -396,6 +405,8 @@ class TrackManager:
         if self.store.track(P.id, name):
             raise TrackError(f"track {name} already exists ({self.store.track(P.id, name)['state']})")
         sprints = self._check_sprints(P, sprints)
+        if slot:
+            self._refuse_workstation_only(P, sprints, slot)
         if needs is None:
             plans = [AN.plan_from_spec(P.adapter.describe(s)) for s in sprints]
             try:
@@ -529,6 +540,40 @@ class TrackManager:
             "track": name, "needs": new, "kilo_config": kc, "actor": actor})
         return row
 
+    def _refuse_workstation_only(self, P, sprints: list, slot: str) -> None:
+        """[automation] workstation_only_sprints: a sprint whose Studio checks measure frames
+        or performance never goes on a slot-bound track (2026-11-02 AS-V08: the slots render
+        in software at ~36 fps and its one-frame timing check failed there)."""
+        import fnmatch
+        try:
+            pats = [str(p) for p in (self.setting(P, "workstation_only_sprints") or [])]
+        except (KeyError, TypeError):
+            pats = []
+        hits = [s for s in sprints if any(fnmatch.fnmatchcase(s, p) for p in pats)]
+        if hits:
+            raise TrackError(f"{', '.join(hits)} run(s) Studio work on the workstation "
+                             f"([automation] workstation_only_sprints): not on slot {slot}; "
+                             f"start the track without --slot (its Studio checks then run at "
+                             f"the merge on the workstation)")
+
+    def _unbind_slot(self, P, row: dict, old: str, actor: str) -> dict:
+        """`set-slot <track> none`: the track has no Studio of its own. Its kilo.jsonc is
+        rewritten without the Studio MCP servers (`studio` leaves its needs, so its sessions
+        never reach the workstation's Studio), and its sprints' Studio checks run on the
+        workstation in the merge's Studio batch."""
+        name = row["name"]
+        data = {k: v for k, v in (row.get("data") or {}).items() if k != "slot"}
+        needs = [n for n in (row.get("needs") or []) if n != "studio"]
+        row = self.store.update_track(P.id, name, needs=needs, data=data)
+        kc = self._kilo_config(P, row)
+        row = self.store.update_track(P.id, name, data={**(row.get("data") or {}),
+                                                        "kilo_config": kc, "kilo_reload": True})
+        self.forget_project(P, name)
+        self.store.event(P.id, "", "track_slot_changed", detail={
+            "track": name, "from": old, "to": "", "servers": [], "actor": actor,
+            "unbound": True})
+        return row
+
     def set_slot(self, P, name: str, slot: str, actor: str = "operator") -> dict:
         """Move a running track to another Studio slot (2026-11-01, Victor: "split them": all 8
         Blender tracks were bound to slot-1 while slot-2 sat idle). Refused while one of its
@@ -540,13 +585,18 @@ class TrackManager:
         row = self.store.track(P.id, name)
         if row is None:
             raise TrackError(f"no track {name}")
-        if slot not in SL.configured(P.profile):
+        unbind = str(slot or "").strip().lower() in ("", "none", "-")
+        if not unbind and slot not in SL.configured(P.profile):
             raise TrackError(f"no enabled Studio slot {slot!r} in [slots] "
                              f"({', '.join(SL.configured(P.profile)) or 'none configured'})")
         old = str((row.get("data") or {}).get("slot") or "")
-        if old == slot:
+        if (unbind and not old) or old == slot:
             return row
         sprints = list(row.get("sprints") or [])
+        if not unbind:
+            live = [s for s in sprints
+                    if (self.store.task(P.id, s) or {}).get("state") not in S.TERMINAL]
+            self._refuse_workstation_only(P, live, slot)
         for lk in self.store.locks():
             if lk["project_id"] == P.id and lk["task_id"] in sprints \
                     and str(lk["resource"]).startswith(SL.LOCK_PREFIX):
@@ -560,11 +610,14 @@ class TrackManager:
                 busy = False
             if busy:
                 raise TrackError(f"{tid} has a scripted Studio gate running or pending")
+        if unbind:
+            return self._unbind_slot(P, row, old, actor)
         needs = list(row.get("needs") or [])
         if "studio" not in needs:
             needs = AN._normalize(needs + ["studio"])
             row = self.store.update_track(P.id, name, needs=needs)
         row = self.store.update_track(P.id, name, data={**(row.get("data") or {}), "slot": slot})
+        self.forget_project(P, name)          # the cached track profile carries the old slot
         kc = self._kilo_config(P, row)
         changed = []
         if kc:

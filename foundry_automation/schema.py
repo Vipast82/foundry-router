@@ -307,6 +307,10 @@ AUTOMATION_DEFAULTS: dict = {
     # 2026-10-30: a red merge Studio batch reopens each red sprint on the main checkout as
     # a Lead repair ([lead_manager] on); off = the track only fails (the old behaviour)
     "merge_red_repair": True,
+    # 2026-11-02 Victor: the Studio slots are slow (software rendering, ~36 fps); sprints
+    # whose Studio checks measure frames or performance run their Studio work on the
+    # workstation (main, or an unbound track whose merge runs the Studio batch)
+    "workstation_only_sprints": [],
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
                           "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
                           "docs/design/ASSET_LEDGER.md", "docs/memory/**",
@@ -963,6 +967,10 @@ _AUTO_DESC = {
                                      "Studio goes before pending main-checkout sprints.",
     "merge_red_repair": "When a track merge's Studio check is red, the Lead reopens each red "
                         "sprint on the main checkout with the failing rows as its assignment.",
+    "workstation_only_sprints": "Sprint ids (globs, e.g. AS-V*) whose Studio checks measure "
+                                "frames or performance: never placed on a track bound to a "
+                                "Studio slot (the slots render in software, ~36 fps). They run "
+                                "on main or on an unbound track (Studio checked at its merge).",
     "track_append_safe": "Shared files two sprints may both change without being serial "
                          "(append-only ledgers the rebase merges row by row).",
     "self_heal": "Self-repair sweep (every minute): ends dead sessions, cancels stuck Lead "

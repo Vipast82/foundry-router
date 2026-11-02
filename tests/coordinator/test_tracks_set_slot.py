@@ -69,3 +69,46 @@ def test_a_failed_reload_keeps_the_flag_and_never_blocks(tmp_path):
     TP.client.dispose = boom
     c._kilo_reload_if_flagged(TP, "B1")                          # no exception
     assert c.store.track("game", "blender")["data"]["kilo_reload"] is True
+
+
+def test_a_track_unbinds_from_its_slot_and_its_studio_work_moves_to_the_merge(tmp_path):
+    """2026-11-02 Victor: "The slots are very slow systems as far as gaming goes, why is that the
+    test?" AS-V08's frame-timing check failed on slot-1 (~36 fps under Wine). `set-slot none`
+    unbinds a track: its sessions get no Studio tools and its Studio checks run on the
+    workstation in the merge's Studio batch."""
+    from foundry_coordinator.tracks.manager import TrackManager
+    c, P, root = env(tmp_path)
+    _two_slots(P)
+    c.tracks.create(P, "blender", ["B1", "B2"], actor="victor", slot="slot-1")
+    TP = c.tracks.track_project(P, c.store.track("game", "blender"))
+    assert not c.tracks.studio_less(TP)
+    row = c.tracks.set_slot(P, "blender", "none", actor="victor")
+    assert "slot" not in row["data"] and "studio" not in row["needs"]
+    assert row["data"]["kilo_reload"] is True
+    TP2 = c.tracks.track_project(P, c.store.track("game", "blender"))
+    assert c.tracks.studio_less(TP2)
+    assert c.tracks.studio_less(TP)             # a stale cached profile reads the store too
+    ev = [e for e in c.store.events("game", 100) if e["kind"] == "track_slot_changed"]
+    assert ev[0]["detail"]["from"] == "slot-1" and ev[0]["detail"]["to"] == ""
+    assert c.tracks.set_slot(P, "blender", "none")["data"].get("slot") is None   # no-op
+    # unbinding waits like a move: never while a sprint holds the slot
+    c.tracks.set_slot(P, "blender", "slot-2")
+    assert c.store.acquire([SL.LOCK_PREFIX + "slot-2"], "game", "B1") is None
+    with pytest.raises(TrackError, match="holds slot:slot-2"):
+        c.tracks.set_slot(P, "blender", "none")
+
+
+def test_workstation_only_sprints_never_go_on_a_slot(tmp_path):
+    """[automation] workstation_only_sprints: sprints whose Studio checks measure frames or
+    performance (VFX timing, S56) are refused on a slot-bound track."""
+    c, P, root = env(tmp_path)
+    _two_slots(P)
+    P.profile.raw.setdefault("automation", {})["workstation_only_sprints"] = ["B*"]
+    from foundry_coordinator import automation
+    automation._CACHE.clear()
+    with pytest.raises(TrackError, match="workstation"):
+        c.tracks.create(P, "blender", ["B1"], actor="victor", slot="slot-1")
+    c.tracks.create(P, "blender", ["B1"], actor="victor")            # no slot: fine
+    with pytest.raises(TrackError, match="workstation"):
+        c.tracks.set_slot(P, "blender", "slot-1")
+    c.tracks.create(P, "audio", ["A1"], actor="victor", slot="slot-1")   # not listed: fine

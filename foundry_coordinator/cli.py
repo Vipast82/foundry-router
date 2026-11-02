@@ -805,7 +805,7 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1 = xs.add_parser("status"); x1.add_argument("project"); x1.add_argument("--json", action="store_true")
     x1 = xs.add_parser("set-max-agents"); x1.add_argument("project"); x1.add_argument("n", type=int)
     x1.add_argument("--by", default="operator")
-    x1 = xs.add_parser("set-slot", help="move a running track to another Studio slot")
+    x1 = xs.add_parser("set-slot", help="move a running track to another Studio slot, or `none` to unbind it (its Studio checks then run at the merge on the workstation)")
     x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("slot")
     x1.add_argument("--by", default="operator")
     x1 = xs.add_parser("set-needs", help="change a track's needs and rewrite its kilo.jsonc")

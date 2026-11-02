@@ -2,6 +2,30 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.9 — timing work stays off the Studio slots
+
+2026-11-02 12:xx. Victor: "The Slots are very slow systems as far as gaming goes, why is that the
+test?" The VFX chain AS-V08..V12 ran on a track bound to slot-1. There Studio renders in
+software under Wine at about 36 fps, and AS-V08's one-frame telegraph-timing check failed.
+Victor then approved the test fix (it reads the runtime's own resolve frame) and asked that
+timing work never run on a slot.
+
+- **`tracks set-slot <track> none`:** unbinds a running track from its Studio slot. It is refused
+  while a sprint holds the slot or has a scripted gate pending, like a move. `studio` leaves the
+  track's needs, its kilo.jsonc is rewritten without the Studio MCP servers, so its sessions
+  never reach the workstation's Studio, and Kilo reloads that folder before the next session.
+  Its sprints' Studio checks then run on the workstation in the merge's Studio batch. A
+  `track_slot_changed` event records the change with `to: ""`.
+- **`[automation] workstation_only_sprints`** (sprint-id globs, in the Automation UI): sprints
+  whose Studio checks measure frames or performance are refused on a slot-bound track, by
+  `tracks start --slot` and by `set-slot <slot>`.
+- **`TrackManager.studio_less`:** reads the track's slot from the store. A CLI `set-slot` runs
+  in another process, so the live engine's cached track profile still named the old slot.
+  `set-slot` also drops that cached profile in its own process.
+- Tests: `tests/coordinator/test_tracks_set_slot.py`
+  (`test_a_track_unbinds_from_its_slot_and_its_studio_work_moves_to_the_merge`,
+  `test_workstation_only_sprints_never_go_on_a_slot`; both fail on v0.181.8).
+
 ## v0.181.8 — a repair's broader suite runs the tests its change can reach
 
 2026-11-02. A coordinator repair's broader suite defaults to the whole `tests/coordinator`
