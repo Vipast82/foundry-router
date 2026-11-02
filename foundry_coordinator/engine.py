@@ -331,11 +331,19 @@ class Coordinator:
         if self._deps_cycle(project_id, task_id, deps):
             raise ValueError("those dependencies make a loop")
         old = self.store.queue_entry(project_id, task_id)
+        before = list((old or {}).get("deps") or [])
         with self.store.tx():
             entry = self.store.set_deps(project_id, task_id, deps)
+            if actor != "coordinator":
+                # 2026-11-02 S55/S57b: the owner moved them ahead of his review (AS-VR1) and the
+                # beta (GF-BETA1); the operator removed those deps, and the readiness check put
+                # them straight back from the plan's "Depends on" line (AS-R7 rule), which would
+                # have deadlocked the polish phase. A dep a person removes stays removed.
+                dropped = set((t.get("data") or {}).get("deps_dropped") or [])
+                dropped = (dropped | (set(before) - set(deps))) - set(deps)
+                self.store.merge_data(project_id, task_id, deps_dropped=sorted(dropped) or None)
             self.store.event(project_id, task_id, "deps_changed",
-                             detail={"from": (old or {}).get("deps") or [], "to": deps,
-                                     "actor": actor})
+                             detail={"from": before, "to": deps, "actor": actor})
         return entry
 
     def _deps_cycle(self, project_id: str, task_id: str, deps: list[str]) -> bool:
@@ -592,7 +600,9 @@ class Coordinator:
             self.store.event(P.id, t["task_id"], "warning", detail={
                 "deps": f"ignored {', '.join(not_tasks)}: named in the task source's deps but "
                         f"not a sprint of this project"})
+        dropped = set((t.get("data") or {}).get("deps_dropped") or [])
         undeclared = [d for d in spec.deps if d not in q["deps"] and d not in not_tasks
+                      and d not in dropped
                       and not self._dep_satisfied(P, self.store.task(P.id, d) or {})
                       and not self._dep_done_outside(P, d)]
         # 2026-10-29 AS-R7: its plan names AS-P5, which was on the queue (running) but not in

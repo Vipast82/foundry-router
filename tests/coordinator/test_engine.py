@@ -1539,3 +1539,25 @@ def test_a_checkout_freed_mid_tick_goes_to_the_earlier_waiting_sprint(game):
     c._lane_yielded["game"] = ["T2"]
     c._start_implementation(P, c.store.task("game", "T1"))
     assert "earlier in the queue" not in (c.store.task("game", "T1")["next_action"] or "")
+
+
+def test_a_dependency_a_person_removes_is_not_put_back_from_the_task_source(game):
+    """2026-11-02 S55/S57b: the owner moved them ahead of his review and the beta; the operator
+    removed AS-VR1 / GF-BETA1 from their deps, and the readiness check put them straight back from
+    the plan's "Depends on" line (the AS-R7 rule), which would have deadlocked the polish phase.
+    A dependency a person removes stays removed; the coordinator's own additions still happen."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", ["T1"], "victor")                    # the source also names T1
+    c.set_deps("game", "T2", [], "victor")
+    assert c.store.task("game", "T2")["data"].get("deps_dropped") == ["T1"]
+    c.store.update_task("game", "T1", state=S.IMPLEMENTING)      # T1 live, not done
+    c.tick()
+    t2 = c.store.task("game", "T2")
+    assert c.store.queue_entry("game", "T2")["deps"] == []
+    assert t2["state"] != S.QUEUED or "waiting for T1" not in (t2["next_action"] or "")
+    # a person adding it back clears the mark
+    c.store.update_task("game", "T2", state=S.QUEUED)
+    c.set_deps("game", "T2", ["T1"], "victor")
+    assert not c.store.task("game", "T2")["data"].get("deps_dropped")

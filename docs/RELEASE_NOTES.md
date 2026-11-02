@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.19 — a dependency a person removes stays removed
+
+2026-11-03 00:4x. The owner moved S55 (art pass) and S57b (exploit audit) ahead of his visual
+review (AS-VR1) and the closed beta (GF-BETA1). Those reviews now wait for the polish phase's last
+sprint (POL-7), and POL-1 waits for S55 and S57b. The operator removed AS-VR1 from S55's queue
+deps, but the readiness check added it straight back from the plan's "Depends on" line (the
+2026-10-29 AS-R7 rule: a dependency named in the task source and already on the queue becomes a
+queue dependency). The loop S55 -> AS-VR1 -> POL-7 -> POL-1 -> S55 would never have started.
+
+- `engine.set_deps` by anyone other than the coordinator records the deps it removes in the
+  task's `data.deps_dropped`; adding one back clears it.
+- The readiness check skips `deps_dropped` when it turns task-source deps into queue deps.
+  The coordinator's own additions are unchanged.
+- Test: `test_a_dependency_a_person_removes_is_not_put_back_from_the_task_source`.
+
 ## v0.181.18 — an installed skill is allowed in Kilo at once
 
 2026-11-02 23:3x. The 27 `roblox-*` skills and `au-roblox-world-building` were added to the live
