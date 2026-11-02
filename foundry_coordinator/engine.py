@@ -4465,6 +4465,19 @@ class Coordinator:
             return bool(d and d["project_id"] == project and d["task_id"] == task
                         and d["status"] == "open"
                         and decision_policy.decision_category(d) == decision_policy.AUTOMATION)
+        from .lead import OPEN_STATES, REVIEW_BUDGET_CLASS, REVIEW_REF_KEY
+        if counter == "review_calls" and key.startswith(REVIEW_REF_KEY):
+            # `lead-<case>-<n>`: a Lead extend_reviews, only for an open case of this very
+            # task opened on its review-call budget, with full authority on (AS-P10)
+            cid = key[len(REVIEW_REF_KEY):].rsplit("-", 1)[0]
+            P = self.projects.get(project)
+            if P is None or not self._lead_on(P) or \
+                    not self.lead.settings(P).get("full_authority"):
+                return False
+            case = self.lead.case(cid)
+            return bool(case and case["project_id"] == project and case["task_id"] == task
+                        and case["state"] in OPEN_STATES and
+                        (case.get("trigger") or {}).get("class") == REVIEW_BUDGET_CLASS)
         if counter == "review_calls" and key:
             return not self.store.reviews(project, task, key)
         return False
@@ -6517,7 +6530,7 @@ class Coordinator:
         rev = P.ws.head()
         spec = L._spec(P, tid)
         s = L.settings(P)
-        failures, results = [], []
+        failures, results, review_cap = [], [], ""
         for i, op in enumerate(act.get("operations") or []):
             key = f"{cid}:op:{i}"
             prior = L._action(key)
@@ -6539,6 +6552,8 @@ class Coordinator:
             results.append(result)
             if not ok:
                 failures.append(f"{op['op']}: {result}")
+                if op["op"] == "extend_reviews" and (validation or {}).get("cap_reached"):
+                    review_cap = result
         t = self.store.task(pid, tid)
         if failures:
             self.store.release(pid, tid, self._workspace_locks(P))
@@ -6546,12 +6561,19 @@ class Coordinator:
                    result="; ".join(failures)[:1500],
                    detail={"failures": failures, "results": results},
                    op_key=f"{cid}:operate_failed:{len(L.actions(cid))}")
-            L._save(cid, state="DIAGNOSING", proposed_action={})
             self.store.event(pid, tid, "lead_operate_failed", detail={
                 "case_id": cid, "failures": failures[:6]})
+            if review_cap:
+                # no other Lead action can add review calls today: one question, not
+                # another diagnosis round (AS-P10, 2026-11-02)
+                L.escalate_review_cap(P, t, L.case(cid), why=review_cap)
+                return
+            L._save(cid, state="DIAGNOSING", proposed_action={})
             return
         then = str(act.get("then") or "resume")
-        if then == "reverify" and P.ws.head() == t.get("base_sha"):
+        adds_reviews = any(o.get("op") == "extend_reviews" for o in act.get("operations") or [])
+        if then == "reverify" and P.ws.head() == t.get("base_sha") and not adds_reviews:
+            # (with extend_reviews the missing step IS the review of this head)
             # nothing was committed since the last verification: re-running the
             # same checks proves nothing new, the primary continues instead
             then = "resume"
@@ -6713,6 +6735,43 @@ class Coordinator:
                 "note": str(op.get("reason") or "")[:300]})
             return after.get("status") == "answered", f"{did} ({d['kind']}) resolved", \
                 {"decision_id": did, "status": after.get("status")}
+        if kind == "extend_reviews":
+            # review calls through the self-repair policy ledger: one audited unit per
+            # `policy:review_calls:lead-<case>-<i>` row, within the daily cap shared with
+            # the engine's automatic review extensions (obligations._require_policy)
+            from . import decision_policy
+            from .lead import REVIEW_REF_KEY
+            from .obligations import POLICY_ACTOR, POLICY_REF, LedgerRefused
+            n = int(op.get("calls") or 1)
+            if not self._lc(P, "obligations"):
+                return False, "no budget ledger ([lifecycle] obligations): review calls " \
+                              "cannot be extended", {"cap_reached": True, "granted": []}
+            self._lc_backfill(P, t)
+            granted, problems = [], []
+            for i in range(1, n + 1):
+                ref = f"{POLICY_REF}review_calls:{REVIEW_REF_KEY}{cid}-{i}"
+                try:
+                    self.obligations.authorize(pid, tid, "review_calls", 1,
+                                               f"lead case {cid} (delegated authority): "
+                                               f"{op.get('reason')}"[:500], POLICY_ACTOR, ref)
+                    granted.append(ref)
+                except LedgerRefused as e:
+                    if "already authorized" in str(e):
+                        granted.append(ref)                 # idempotent after a crash
+                    else:
+                        problems.append(str(e)[:200])
+                        break
+            for ref in granted:
+                decision_policy.record_step(self, pid, tid, "lead_review_extension", {
+                    "counter": "review_calls", "ref": ref, "case_id": cid,
+                    "why": str(op.get("reason") or "")[:300]})
+            lim = self.obligations.effective_limits(P, self.store.task(pid, tid))["review_calls"]
+            cap_hit = any("cap reached" in p for p in problems)
+            return not problems, (f"{len(granted)}/{n} review call(s) authorized "
+                                  f"({lim['remaining']} remaining)"
+                                  + (f"; refused: {'; '.join(problems)}" if problems else "")), \
+                {"granted": granted, "problems": problems, "cap_reached": cap_hit,
+                 "remaining": lim["remaining"]}
         if kind == "raise_bound":
             v = (self.lead.case(cid) or {}).get("validation") or {}
             raised = dict(v.get("raised") or {})

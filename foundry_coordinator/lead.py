@@ -63,7 +63,16 @@ ACTION_KINDS = ("assign_game_repair", "coordinator_repair", "wait", "reverify", 
 # [lead_manager] full_authority: operational steps the COORDINATOR executes for the
 # lead (the lead session itself stays read-only), each journaled and verified
 OPS = ("clean_untracked", "extend_budget", "resolve_decision", "raise_bound",
-       "approve_test_change")
+       "approve_test_change", "extend_reviews")
+# 2026-11-02 (AS-P10): a task BLOCKED by its review-call budget. extend_budget and
+# raise_bound never refill review calls, so the Lead looped; extend_reviews grants them
+# as `policy:review_calls:lead-<case>-<n>` rows that share the daily automatic cap
+# ([automation] self_repair_max_reviews_per_day). With that cap used the case
+# escalates once (REVIEW_CAP_REASON, not a delegable bound).
+REVIEW_BUDGET_CLASS = "review_budget"
+REVIEW_REF_KEY = "lead-"
+MAX_EXTEND_REVIEWS = 2
+REVIEW_CAP_REASON = "review_extension_cap"
 OPERATE_THEN = ("assign", "reverify", "resume")
 # bounds a delegated round may raise; a counter alone never goes to Victor
 DELEGABLE_BOUNDS = frozenset({"max_diagnoses", "max_candidates", "max_upgrades",
@@ -382,7 +391,11 @@ def report_contract(full_authority: bool = False, write_access: bool = False) ->
             "decisions only, never scope/approval/policy); {\"op\": \"raise_bound\", "
             "\"bound\": \"max_...\", \"by\": N}; {\"op\": \"approve_test_change\", "
             "\"path\": \"<acceptance test>\"} (a recorded decision; the change must still be "
-            "made and re-run). ask_victor is only for input that needs Victor personally "
+            "made and re-run); {\"op\": \"extend_reviews\", \"calls\": 1|2} (review calls, "
+            "within the daily automatic review-extension cap). A task blocked by its "
+            "review-call budget is cleared ONLY by extend_reviews: extend_budget (attempts) "
+            "and raise_bound never add review calls. ask_victor is only for input that needs "
+            "Victor personally "
             "(user_action) or a change to the core game goal you cannot reconcile. Propose an "
             "action different from every earlier one in the dossier (the same diagnosis may "
             "stand).")
@@ -403,7 +416,9 @@ def report_contract(full_authority: bool = False, write_access: bool = False) ->
         "Other action kinds: {\"kind\": \"coordinator_repair\", \"plan\": \"...\", \"files\": "
         "[\"<Foundry-Router paths>\"], \"reproducing_test\": \"tests/...::test_x\", "
         "\"focused_tests\": [...], \"broader_tests\": [...], \"manifest\": "
-        "{\"acceptance_tests\": []}} (classification coordinator); {\"kind\": \"wait\", "
+        "{\"acceptance_tests\": []}} (classification coordinator; the coordinator suites live "
+        "under tests/coordinator/, and the repair may add or extend tests under tests/); "
+        "{\"kind\": \"wait\", "
         "\"seconds\": N} (environment or provider_quota); {\"kind\": \"reverify\"} (evidence); "
         "{\"kind\": \"ask_victor\", \"user_action\": \"<only if Victor must do something "
         "himself>\"}.\n"
@@ -415,9 +430,11 @@ def report_contract(full_authority: bool = False, write_access: bool = False) ->
 def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs=None,
                     prior_hypotheses=None, full_authority: bool = False, prior_actions=None,
                     max_extend: int = 3, max_clean: int = 20,
-                    self_changed_tests=None) -> tuple[Optional[dict], list[str]]:
+                    self_changed_tests=None,
+                    trigger_class: str = "") -> tuple[Optional[dict], list[str]]:
     """(clean report, errors). Errors make the report invalid (it counts a
-    diagnosis and is retried within bounds)."""
+    diagnosis and is retried within bounds). `trigger_class` is the case's
+    trigger class: a review_budget block needs an action that adds review calls."""
     errs: list[str] = []
     if not isinstance(rep, dict):
         return None, ["the report is not a JSON object"]
@@ -615,6 +632,13 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
                     errs.append(f"operations[{i}].by must be 1..3")
                     n = 1
                 c.update(bound=b, by=int(n))
+            elif op == "extend_reviews":
+                n = o.get("calls", 1)
+                if isinstance(n, bool) or not isinstance(n, int) or \
+                        not 1 <= n <= MAX_EXTEND_REVIEWS:
+                    errs.append(f"operations[{i}].calls must be 1..{MAX_EXTEND_REVIEWS}")
+                    n = 1
+                c["calls"] = int(n)
             elif op == "approve_test_change":
                 r = _safe_rel(str(o.get("path") or ""))
                 if r is None:
@@ -651,6 +675,22 @@ def validate_report(rep: Any, *, scope=None, allowed_dirs=None, acceptance_globs
                     errs.append(f"action.files: {f} is outside the task scope")
             clean_act.update(assignment=text[:4000], files=files,
                              manifest={"acceptance_tests": declared + approved})
+    if str(trigger_class or "") == REVIEW_BUDGET_CLASS:
+        # AS-P10: extend_budget / raise_bound then reverify or resume came straight back
+        # to the same review-budget block, five cases with an Opus call each
+        ops_now = [o.get("op") for o in clean_act.get("operations") or []]
+        back_to_review = kind in ("reverify", "assign_game_repair") or (
+            kind == "operate" and clean_act.get("then") in OPERATE_THEN)
+        if back_to_review and "extend_reviews" not in ops_now:
+            errs.append("the task is blocked by its review-call budget: extend_budget "
+                        "(attempts), raise_bound and a plain reverify/resume/assign never add "
+                        "review calls, so the block comes straight back. Use {\"op\": "
+                        "\"extend_reviews\", \"calls\": 1} (within the daily review-extension "
+                        "cap), a coordinator_repair, or ask_victor")
+        if any(o.get("op") == "raise_bound" and o.get("bound") == "max_fingerprint_repeats"
+               for o in clean_act.get("operations") or []):
+            errs.append("max_fingerprint_repeats cannot be raised for a review-call budget "
+                        "block: its repeats are bounded by the daily review-extension cap")
     same_action = bool(prior_actions) and action_fp(clean_act) in set(prior_actions)
     if full_authority and kind != "ask_victor" and same_action:
         errs.append("this action repeats an earlier lead action for the task: a materially "
@@ -1630,6 +1670,12 @@ class LeadManager:
                           "repeats": repeats, "task_totals": totals},
                   repo="game", op_key=f"{cid}:open")
         t2 = self.store.task(P.id, tid) or t
+        if parts["class"] == REVIEW_BUDGET_CLASS:
+            room = self.review_extension_room(P, tid)
+            if room["room"] <= 0:
+                # nothing the Lead may do refills the review budget today: one question
+                # now instead of a Lead call per repeat (AS-P10, 2026-11-02)
+                return self.escalate_review_cap(P, t2, case, room)
         if s.get("full_authority") and not self.store.q(
                 "SELECT 1 FROM recovery_cases WHERE project_id=? AND task_id=? AND case_id<>? "
                 "AND created_ts>=? AND repeat_key=?",
@@ -1661,6 +1707,50 @@ class LeadManager:
                 f"coordinator authorize another bounded round for a repair you name, or "
                 f"stop {tid}?", bound=("max_cases_per_task", totals["cases"], lim))
         return case
+
+    def review_extension_room(self, P, tid: str) -> dict:
+        """Review calls the Lead may still grant the task today: the daily automatic
+        review-extension cap minus the policy extensions already used (the engine's own
+        unreviewed-head grants and earlier extend_reviews share it). No budget ledger
+        ([lifecycle] obligations off) or self-repair off: none."""
+        out = {"used": 0, "cap": 0, "room": 0, "ledger": False}
+        O = self._obligations()
+        prof = getattr(P, "profile", None)
+        lc = getattr(prof, "lifecycle_on", None)
+        try:
+            if O is None or not callable(lc) or not lc("obligations"):
+                return out
+            from . import decision_policy as DP
+            out["ledger"] = True
+            out["cap"] = int(DP.policy_cap(P, "review_calls"))
+            out["used"] = int(O.policy_extensions(P.id, tid, "review_calls"))
+        except Exception:                                        # noqa: BLE001
+            return out
+        out["room"] = max(0, out["cap"] - out["used"])
+        return out
+
+    def escalate_review_cap(self, P, t, case, room: Optional[dict] = None, why: str = ""):
+        """One question for Victor: the task is blocked by its review-call budget and
+        the Lead cannot grant more review calls today. Not a delegable bound, so it is
+        never taken back for another Lead round; the decision's capped self-repair
+        parks the task when nobody answers."""
+        room = room or self.review_extension_room(P, case["task_id"])
+        trig = (case.get("trigger") or {}).get("reason") or "review budget used"
+        how = (f"today's automatic review extensions are used ({room['used']}/{room['cap']}, "
+               f"[automation] self_repair_max_reviews_per_day)" if room.get("ledger") else
+               "the project has no budget ledger ([lifecycle] obligations), so review calls "
+               "cannot be extended by policy")
+        q = (f"{case['task_id']} is blocked only by its review-call budget ({_cut(trig, 200)}) "
+             f"and {how}. The Lead cannot grant more review calls"
+             + (f" ({_cut(why, 300)})" if why else "") + ". Reset the task's budget "
+             f"(unblock --reset-attempts), raise self_repair_max_reviews_per_day, or stop "
+             f"{case['task_id']}?")
+        self._act(case, "review_budget_blocked", result=q[:600],
+                  detail={"room": room, "why": _cut(why, 300)},
+                  op_key=f"{case['case_id']}:review_cap:{len(self.actions(case['case_id']))}")
+        return self._escalate(P, t, case, REVIEW_CAP_REASON, q,
+                              bound=("self_repair_max_reviews_per_day", room.get("used", 0),
+                                     room.get("cap", 0)))
 
     # ------------------------------------------------------------------ dossier
 
@@ -2909,7 +2999,8 @@ class LeadManager:
                 prior_actions=self._prior_actions(P, case),
                 max_extend=int(s.get("max_extend_attempts") or 3),
                 max_clean=int(s.get("max_clean_paths") or 20),
-                self_changed_tests=self_changed or None)
+                self_changed_tests=self_changed or None,
+                trigger_class=str((case.get("trigger") or {}).get("class") or ""))
         if clean is None:
             if self._repair_report(P, t, case, key, sid, ws, s, errors):
                 return self.case(case["case_id"])
@@ -3872,7 +3963,9 @@ class LeadManager:
             f"You are repairing a Foundry-Router coordinator defect for recovery case "
             f"{case['case_id']}. Work ONLY in this isolated worktree: {path}.",
             f"Plan: {act.get('plan')}",
-            "Files you may change (nothing else): " + ", ".join(act.get("files") or []),
+            "Files you may change: " + ", ".join(act.get("files") or [])
+            + "; plus new test files and existing test_*.py modules under tests/ (the "
+            "coordinator suites are in tests/coordinator/). Nothing else.",
             f"Add or update the reproducing regression test {act.get('reproducing_test')} so it "
             f"fails before your fix and passes after it. Focused tests: "
             + ", ".join(act.get("focused_tests") or []) + ". Broader tests: "

@@ -2,6 +2,48 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.6 — the Lead can grant review calls, and stops looping on a used review budget
+
+2026-11-02. Between 02:42 and 04:41, AS-P10 opened seven Lead cases on "review budget used
+(N/N review calls, budget ledger)", one Opus call each, until the operator reset the
+budget. The Lead's operations raise attempts and bounds, never review calls, so every
+case ran `extend_budget` → reverify/resume → the same block. All seven cases had one
+repeat key. The repeat guard escalated, but `max_fingerprint_repeats` is a delegable
+bound, so the Lead took the question back and raised the bound itself. The daily
+automatic review-extension cap (`self_repair_max_reviews_per_day` = 2) was already used
+at 02:36, before the first case opened. In the same incident, two `coordinator_repair`
+candidates were rejected: c1 because its new test file was outside the declared files,
+c2 because the Lead named `tests/test_engine.py` (the suite is
+`tests/coordinator/test_engine.py`) and validation reported "not collected".
+
+- **New Lead operation `extend_reviews`** (`{"op": "extend_reviews", "calls": 1|2}`):
+  writes `policy:review_calls:lead-<case>-<n>` ledger rows as the policy actor. They
+  count against the same daily cap as the engine's automatic review extensions. A
+  `lead-…` reference is valid only for an open case of the same task whose trigger is
+  `review_budget`, with full authority on. Before this, any key naming an unreviewed
+  head passed the check. With `then: reverify` the head is verified and reviewed again.
+- **One escalation instead of a loop:** a `review_budget` case whose daily cap is used
+  (or whose project has no budget ledger) goes straight to NEEDS_VICTOR with reason
+  `review_extension_cap`, with no Lead call. An `extend_reviews` refused by the cap does
+  the same, instead of returning to DIAGNOSING. That reason is not a delegable bound, so
+  the Lead never takes the question back. Unanswered, the decision's capped self-repair
+  parks the task.
+- **Report contract:** for a `review_budget` trigger, a report whose action leads back
+  to review without `extend_reviews` is refused, and so is raising
+  `max_fingerprint_repeats`. The contract text names `extend_reviews` and says that
+  attempts and bounds never add review calls.
+- **Coordinator repairs and tests:** new files and existing `test_*.py` modules under
+  `tests/` are always in a repair's scope. Changed expectations still need the
+  declaration plus operator approval. Existing helpers, fixtures, `conftest.py` and
+  `__init__.py` under `tests/` still need declaring. `RepairWorkspace.validate` maps a
+  test id whose file is missing to the only file of that name under `tests/` (reported
+  as `test_paths`, used in the manifest). The repair prompt and the report contract say
+  where the suites live.
+- Tests: `tests/coordinator/test_lead_review_budget.py` (6 tests; 5 fail on v0.181.5)
+  and `tests/coordinator/test_repair_workspace.py`
+  (`test_replay_repair_may_add_and_extend_tests_outside_its_declared_files`,
+  `test_replay_bare_test_paths_resolve_to_tests_coordinator`; both fail on v0.181.5).
+
 ## v0.181.5 — scope grants survive a non-UTF-8 byte in the plan
 
 2026-11-02 06:2x. GF-LOBBY1's plan Notes held one cp1252 byte, 0x97 (an em dash pasted from

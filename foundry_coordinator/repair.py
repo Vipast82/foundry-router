@@ -66,6 +66,10 @@ DIFF_CHARS = 150_000          # the review packet's diff cap
 LOG_CHARS = 20_000            # per test-run log kept in results
 DEFAULT_TIMEOUT = 900.0
 DEFAULT_BROADER = ("tests/coordinator",)   # the broader suite when none is named
+# 2026-11-02 (AS-P10 rc-a7dc71fff1a8a4a1-c1): every repair may add or extend tests here
+# without declaring them; changed expectations and pytest configuration stay guarded
+# by expectation_changes (declared + operator-approved only)
+REPAIR_TEST_ROOT = "tests/"
 
 REPAIR_REVIEW_SYSTEM = """You are an independent code reviewer for one Foundry-Router coordinator repair.
 You review only the diff, files and evidence in the packet. You did not write this change.
@@ -202,6 +206,40 @@ def parse_test_id(tid, *, require_node: bool = False) -> tuple[str, list[str]]:
     if nodes and not path.endswith(".py"):
         raise RepairError(f"invalid test id {tid!r}: a node id needs a .py file")
     return path, nodes
+
+
+def resolve_test_ids(root: str, ids: Iterable[str]) -> tuple[list[str], dict]:
+    """(ids, {named path: real path}) with each id whose file or folder is missing in
+    `root` mapped to the one file of that name under tests/ (AS-P10 c2: the Lead named
+    tests/test_engine.py; the suite is tests/coordinator/test_engine.py). Unsafe ids,
+    existing paths, unknown or ambiguous names stay as given (pytest reports them)."""
+    out, mapped = [], {}
+    index: Optional[dict] = None
+    for tid in ids or []:
+        try:
+            path, nodes = parse_test_id(tid)
+        except RepairError:
+            out.append(tid)
+            continue
+        if os.path.exists(os.path.join(root, path)) or not path.endswith(".py"):
+            out.append(tid)
+            continue
+        if index is None:
+            index = collections.defaultdict(list)
+            troot = os.path.join(root, REPAIR_TEST_ROOT.rstrip("/"))
+            for dirpath, dirnames, files in os.walk(troot):
+                dirnames[:] = sorted(d for d in dirnames if not d.startswith((".", "__")))
+                for f in files:
+                    if f.endswith(".py"):
+                        rel = os.path.relpath(os.path.join(dirpath, f), root).replace("\\", "/")
+                        index[f].append(rel)
+        got = index.get(os.path.basename(path)) or []
+        if len(got) == 1:
+            mapped[path] = got[0]
+            out.append("::".join([got[0]] + nodes))
+        else:
+            out.append(tid)
+    return out, mapped
 
 
 def check_test_ids(ids: Iterable[str], *, require_node: bool = False) -> list[str]:
@@ -715,6 +753,21 @@ class RepairWorkspace:
                 out[f] = why
         return out
 
+    def _repair_test(self, ap: str, base: str, f: str) -> bool:
+        """A file under tests/ every repair may touch without declaring it: a new file,
+        or an existing test module (test_*.py / *_test.py, whose expectation changes
+        are still checked). Existing helpers, fixtures and pytest configuration under
+        tests/ are not: a change there can alter many tests at once."""
+        if not f.startswith(REPAIR_TEST_ROOT):
+            return False
+        base_name = f.rsplit("/", 1)[-1]
+        if base_name == "conftest.py" or base_name == "__init__.py":
+            return False
+        if self._show(ap, base, f) is None:
+            return True
+        return base_name.endswith(".py") and (base_name.startswith("test_")
+                                              or base_name.endswith("_test.py"))
+
     def check_scope(self, path: str, scope: list[str],
                     declared_test_changes: Iterable[str] = (),
                     approved_test_changes: Iterable[str] = ()) -> list[str]:
@@ -729,7 +782,8 @@ class RepairWorkspace:
         approved = {str(d).replace("\\", "/") for d in approved_test_changes or []}
         out = []
         changed = self.changed_files(ap, base)
-        outside = [f for f in changed if not scope_match(f, scope)]
+        outside = [f for f in changed if not scope_match(f, scope)
+                   and not self._repair_test(ap, base, f)]
         if outside:
             out.append("dirty scope: files outside the declared repair scope: "
                        + ", ".join(outside[:20]))
@@ -1055,7 +1109,15 @@ class RepairWorkspace:
         {ok, reasons, reproduce, existing, tests, review, manifest}."""
         ap = self.check_path(path)
         out = {"ok": False, "reasons": [], "reproduce": None, "existing": None, "tests": None,
-               "review": None, "manifest": None}
+               "review": None, "manifest": None, "test_paths": {}}
+        # AS-P10 c2: test paths named without their tests/coordinator/ folder
+        named = [regression_test] if regression_test else []
+        ids, mapped = resolve_test_ids(ap, named + list(focused or []) + list(broader or []))
+        if mapped:
+            out["test_paths"] = mapped
+            if regression_test:
+                regression_test, ids = ids[0], ids[1:]
+            focused, broader = ids[:len(focused or [])], ids[len(focused or []):]
         if _git(ap, "status", "--porcelain").stdout.strip():
             out["reasons"].append("uncommitted changes in the worktree")
             return out

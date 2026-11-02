@@ -568,3 +568,75 @@ def test_validate_refuses_declared_but_unapproved_test_change(ws, router):
     bad = ws.validate(P(f), path, **dict(kw, regression_test="tests/test_regression.py"),
                       approved_test_changes=["tests/test_calc.py"])
     assert not bad["ok"] and "invalid test id" in bad["reasons"][0]
+
+
+# -------------------------------------------------------------------- AS-P10 replays (v0.181.6)
+
+def test_replay_repair_may_add_and_extend_tests_outside_its_declared_files(ws, router):
+    """rc-a7dc71fff1a8a4a1-c1 (2026-11-02): the plan declared only the code file; the
+    session added the regression test next to it and the commit was refused as a dirty
+    scope. Test files under tests/ are part of every repair; changed expectations still
+    need the declaration and the operator approval."""
+    path = ws.create("asp10-c1", base(router))
+    fix(path)                                              # calc.py + new tests/test_regression.py
+    write(path, "tests/test_calc.py",
+          TEST_CALC + "\n\ndef test_mul_more():\n    assert calc.mul(3, 3) == 9\n")
+    assert ws.check_scope(path, ["calc.py"]) == []
+    assert ws.commit(path, "fix", scope=["calc.py"])
+    # an expectation change under tests/ is still refused without the approval
+    path = ws.create("asp10-c1b", base(router))
+    fix(path)
+    write(path, "tests/test_calc.py", TEST_CALC.replace("== -3", "== 3"))
+    probs = ws.check_scope(path, ["calc.py"])
+    assert any("assertion" in p and "tests/test_calc.py" in p for p in probs), probs
+    # and a non-test file outside the declared files is still a dirty scope
+    path = ws.create("asp10-c1c", base(router))
+    fix(path)
+    write(path, "README.md", "edited\n")
+    assert any("dirty scope" in p and "README.md" in p for p in ws.check_scope(path, ["calc.py"]))
+
+
+@pytest.fixture
+def nested_router(tmp_path):
+    """The real layout: the suites live under tests/coordinator/."""
+    repo = tmp_path / "nested"
+    repo.mkdir()
+    g(repo, "init", "-q", "-b", "main")
+    g(repo, "config", "core.autocrlf", "false")
+    write(repo, "calc.py", CALC_BUG)
+    write(repo, "tests/__init__.py", "")
+    write(repo, "tests/coordinator/__init__.py", "")
+    write(repo, "tests/coordinator/test_calc.py", TEST_CALC)
+    write(repo, "tests/coordinator/test_other.py", "def test_other():\n    assert True\n")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-q", "-m", "base")
+    return str(repo)
+
+
+def test_replay_bare_test_paths_resolve_to_tests_coordinator(nested_router, tmp_path):
+    """rc-a7dc71fff1a8a4a1-c2: validation ran "tests/test_asset_judge.py: not collected;
+    tests/test_engine.py: not collected" because the Lead named the suites without their
+    tests/coordinator/ folder. Ids whose file is missing map to the one existing file of
+    that name under tests/; the mapping is reported."""
+    ws = RepairWorkspace(str(tmp_path / "repairs"), nested_router)
+    path = ws.create("asp10-c2", g(nested_router, "rev-parse", "HEAD"))
+    write(path, "calc.py", CALC_FIX)
+    write(path, "tests/coordinator/test_regression.py", REGRESSION)
+    ws.commit(path, "fix", scope=["calc.py"])
+    assert RP.resolve_test_ids(path, ["tests/test_calc.py", "tests/test_regression.py::test_add",
+                                      "tests/coordinator", "tests/nope.py"]) == (
+        ["tests/coordinator/test_calc.py", "tests/coordinator/test_regression.py::test_add",
+         "tests/coordinator", "tests/nope.py"],
+        {"tests/test_calc.py": "tests/coordinator/test_calc.py",
+         "tests/test_regression.py": "tests/coordinator/test_regression.py"})
+    kw = dict(case_id="asp10-c2", regression_test="tests/test_regression.py::test_add",
+              focused=["tests/test_regression.py"],
+              broader=["tests/test_calc.py", "tests/test_other.py"], scope=["calc.py"],
+              lead_persona="Lead", reviewer_persona="Reviewer", project_id="p1", timeout=120)
+    res = ws.validate(P(FakeFoundry("APPROVED", case="asp10-c2")), path, **kw)
+    assert res["ok"], res["reasons"]
+    assert res["test_paths"]["tests/test_other.py"] == "tests/coordinator/test_other.py"
+    m = res["manifest"]
+    assert m["tests"]["regression"] == "tests/coordinator/test_regression.py::test_add"
+    assert m["tests"]["broader"] == ["tests/coordinator/test_calc.py",
+                                     "tests/coordinator/test_other.py"]
