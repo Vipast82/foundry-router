@@ -2,6 +2,11 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.5 — version strings
+
+v0.179.4 shipped its fix but left both `__version__` strings at 0.179.3, so the coordinator
+heartbeat reported 0.179.3. This release only sets them (no code change).
+
 ## v0.179.4 — a track bound to a Studio slot always gets the slot's Studio MCP
 
 2026-11-01 21:5x. AS-F04 and AS-J06 stopped BLOCKED: "Studio MCP not routed to slot-1" / "No
