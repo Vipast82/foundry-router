@@ -26,7 +26,7 @@ from . import states as S
 from . import training_hook
 from . import handoff
 from . import selfheal
-from . import build_journal
+from . import build_journal, skills_install
 from .adapters import Project
 from .adapters.base import (FAIL, PASS, UNKNOWN, SessionState, VerificationResult,
                             blocker_kind)
@@ -374,6 +374,9 @@ class Coordinator:
         auto_queue: dict = {}
         for pid in order:
             P = self.projects[pid]
+            gate = getattr(self, "workstation_gate", None)
+            if gate is not None and gate.on_standby(pid):
+                continue          # another workstation holds this project (workstation_gate.py)
             self._queue_approved_followups(P)
             try:
                 self.tracks.tick(P)                          # track lifecycle + merges
@@ -393,6 +396,9 @@ class Coordinator:
                 build_journal.sweep(self, P)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: build journal sweep failed: {type(e).__name__}: {e}")
+            # Foundry-shipped Kilo skills into the game's local skill folder (gap 7; off
+            # while [skills] install is empty; never raises)
+            skills_install.tick(self, P)
             for t in self.store.tasks(pid):
                 # 0.147.0: re-read the row right before its step. An earlier task's
                 # long step (a 13-min verify) left this snapshot stale, and an

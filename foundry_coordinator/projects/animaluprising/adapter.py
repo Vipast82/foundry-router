@@ -506,6 +506,22 @@ class AnimalUprisingAdapter(GenericAdapter):
                 "Paths must be inside this worktree. The local blender.exe is denied. Exit 75 = "
                 "the slot's Blender stayed busy (another job): retry once, then report it.\n")
 
+    def _asset_skill_notice(self, task_id: str) -> str:
+        """FOUNDRY_SKILLS_DELIVERY_PLAN (gap 7): an AS- sprint loads `au-blender-asset` once
+        Foundry installs it ([skills] install lists it)."""
+        if not str(task_id).upper().startswith("AS-"):
+            return ""
+        try:
+            from ...skills_install import settings
+            if "au-blender-asset" not in settings(self.p)["install"]:
+                return ""
+        except Exception:                                         # noqa: BLE001
+            return ""
+        return ("\nASSET SKILL: load the `au-blender-asset` skill first (the 3D conventions, the "
+                "one-asset loop, sides by axis, how Blender runs, the traps). It replaces "
+                "re-reading all of docs/ASSET_PIPELINE.md section 7; the runbook still wins "
+                "where they differ.\n")
+
     def _studio_less(self) -> str:
         """A track with no Studio (no slot): its Studio rows belong to the merge gate."""
         return self._track() if not self._slot() else ""
@@ -681,6 +697,7 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                       "the main checkout. The coordinator runs the Studio gate on the merge "
                       "result when this track merges.\n")
         notice += self._blender_notice(spec.task_id, str(ctx.get("run_id") or ""))
+        notice += self._asset_skill_notice(spec.task_id)
         a = ctx.get("assignment") if isinstance(ctx.get("assignment"), dict) else {}
         rerun = [str(x) for x in (a.get("affected_checks_to_rerun") or [])][:20]
         rerun_txt = (", ".join(rerun) if rerun else "the checks the findings below name")

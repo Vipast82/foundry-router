@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.173.0 — Foundry-shipped skills reach AU's Kilo; new `au-blender-asset` skill (gap 7)
+
+2026-11-01. Plan: `docs/plans/FOUNDRY_SKILLS_DELIVERY_PLAN.md` (built with the recommended
+answers). AU's Kilo skills were hand copies in its untracked `.kilo/skills/` (`foundry-images`
+was already stale), and a new skill also needed an allow in kilo.jsonc. Ships off.
+
+- **`skills_install.py`:** installs the skills `[skills] install` lists into
+  `<workspace>/.kilo/skills/` (`skills.target`). Main and track sessions both read that folder.
+  - Sources: `projects/<project>/kilo_skills/`, `contrib/media-adapter/skills/`,
+    `contrib/skills/`.
+  - **Refuses** when anything under the target is tracked in git (`skills_install_refused`).
+    The AU repo is never edited.
+  - Foundry's folders carry `.foundry-skill.json` and are updated when the source changes.
+  - A hand copy is backed up to `<state_dir>/skills_backup/` first, then replaced.
+  - A skill taken off the list is removed only when Foundry installed it.
+  - It runs every `skills.check_seconds` (300), and at once on a list change.
+- **kilo.jsonc:** each listed skill is allowed in the agent blocks (main and track files).
+  Generated denies still win (`foundry-images` without `images`). A `skills.*` change
+  regenerates kilo.jsonc and reloads Kilo.
+- **New skill `au-blender-asset`:**
+  - what it covers: the 3D conventions (+Y front, sides by axis), how Blender runs (pool,
+    `--bg`, exit 75), the A-E one-asset loop with the AS-P9 reference pack and the short-note
+    rule, and the traps;
+  - an AS- prompt says to load it once it is installed.
+- **To switch on:**
+  - rebuild the router;
+  - set `skills.install` = `au-blender-asset, foundry-images`.
+- Tests: `tests/coordinator/test_skills_install.py` (7).
+
 ## v0.172.0 — local-model sessions run in parallel; audio sprints no longer take the GPU lock
 
 2026-11-01. Victor: "Run the Audio Sprints in parallel with local AI (Strata) as the implementor,

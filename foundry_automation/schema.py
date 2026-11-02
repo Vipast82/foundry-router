@@ -1169,6 +1169,18 @@ FIELDS: list[Field] = [
     F("blender.journal_tools", "list", ["selftest_all.py"], "Build replay: the game's tools that "
       "start Blender themselves; a sprint command running one of them is journaled as a Blender "
       "run on this PC.", "fast_lane", "coordinator.slot_blender", item_type="str"),
+    # Foundry-shipped Kilo skills (docs/plans/FOUNDRY_SKILLS_DELIVERY_PLAN.md, gap 7) -------
+    F("skills.install", "list", [], "Kilo skills Foundry installs into the game's local skill "
+      "folder (skills.target) and allows in kilo.jsonc, e.g. au-blender-asset, foundry-images. "
+      "Kept up to date with Foundry's copy; a hand copy is backed up first; a skill taken off "
+      "the list is removed if Foundry installed it. Empty = off.", "fast_lane",
+      "coordinator.skills_install", "next_session", item_type="str"),
+    F("skills.target", "str", ".kilo/skills", "Where Kilo reads the game's skills, relative to "
+      "the game checkout. Must be untracked in git (Foundry refuses to write into tracked "
+      "files).", "fast_lane", "coordinator.skills_install", "next_session"),
+    F("skills.check_seconds", "int", 300, "How often the installed skills are compared with "
+      "Foundry's copy (a change to skills.install applies at once).", "fast_lane",
+      "coordinator.skills_install", min=30, max=86400),
     # the main checkout's Studio on a slot (docs/plans/LINUX_WORKSTATION_PLAN.md W2) ---------
     F("studio.main_slot", "str", "", "The MAIN sprints' Studio: empty = this PC's Studio (today); "
       "a slot id = that Studio slot, like a slot-bound track: the scripted gate runs there (its "

@@ -196,8 +196,9 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
     if not rules:
         raise KiloConfigError("no role rules: deploy role rules from the router GUI first "
                               "(or put [role_rules] in the profile)")
+    from .skills_install import allow_rules
     from .slot_blender import deny_rules
-    rules = with_extra(rules, deny_rules(profile))
+    rules = with_extra(rules, deny_rules(profile) + allow_rules(profile))
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -336,6 +337,10 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
         raise KiloConfigError("no source kilo.jsonc: pass source= or profile=")
     if role_rules is None and profile is not None:
         role_rules = (getattr(profile, "raw", None) or {}).get("role_rules")
+    if profile is not None:
+        # gap 7: the skills Foundry installs are allowed (before track_rules adds its denies)
+        from .skills_install import allow_rules
+        role_rules = with_extra(role_rules, allow_rules(profile))
     # SLOT_BLENDER_PLAN B2: a track bound to a slot (or a project whose Blender is on a slot)
     # never runs the local blender.exe
     from . import slot_blender
