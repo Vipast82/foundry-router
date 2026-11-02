@@ -702,7 +702,7 @@ class MergeManager:
         sc = getattr(self.c, "studio_calls", None)
         if not callable(fn) or sc is None:
             return []
-        from ..studio_calls import DEFAULT_FILES, PATH_RE
+        from ..studio_calls import DEFAULT_FILES, PATH_RE, code_tier
         files = [f.replace("\\", "/") for f in (row.get("data") or {}).get("merged_files") or []]
         files = [f for f in files if not f.startswith("docs/") and PATH_RE.fullmatch(f)][:200]
         plan, bare = [], []
@@ -727,7 +727,7 @@ class MergeManager:
             plan.append({"key": sid, "sprint": sid, "tier": tier, "req": req, "covers": [sid]})
         if bare:
             last = row["sprints"][-1]
-            tier = sc._tier(P, last)
+            tier = code_tier(sc._tier(P, last))
             reg = self._batch_regression(P, files)
             if reg:
                 plan.append({"key": "regression", "sprint": last, "tier": tier, "covers": bare,

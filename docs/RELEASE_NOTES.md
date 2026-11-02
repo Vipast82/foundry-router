@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.11 — automatic Studio runs never reuse tier C
+
+2026-11-02 14:2x. All five VFX sprints (AS-V08..V12) finished on the vfx-2 track. Its merge
+Studio batch then failed in 11 seconds, before any Studio call ran: `FAIL: GATE no code -
+src/tests changed since the previous commit (tier C)`. AS-V08's last host half had been tier C
+("nothing under src/ or tests/ changed"), and `studio_calls.default_request` copied that tier
+into the batch. A merge always brings in master's code (here GF-SINK1's), so tier C fails by
+definition. The Lead reopened AS-V08 and AS-V12 on main as repairs for nothing.
+
+- `studio_calls.code_tier()` turns tier C into A for every automatic request: the re-gate on
+  new code and the track merge's Studio batch, including its shared regression run. Tiers A
+  and B are kept. A session that asks for tier C itself is unchanged.
+- Test: `test_an_automatic_request_never_copies_tier_c`.
+
 ## v0.181.10 — a regression suite's own frame no longer fails another sprint's gate
 
 2026-11-02 12:4x. The audio-int track's merge Studio batch was red for AS-AI1, although every

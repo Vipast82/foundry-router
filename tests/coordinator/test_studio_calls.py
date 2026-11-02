@@ -697,3 +697,29 @@ def test_default_request_keeps_every_required_suite_after_a_one_suite_rerun(tmp_
         "GATE RUN sprint=MV2-11 tier=A regression=subset:map suites=[S17]\n", encoding="utf-8")
     req = sc.default_request(P, "MV2-11", object())
     assert req["suites"] == ["S17", "S46", "MV2_11"] and req["regression"] == "subset:map"
+
+
+def test_an_automatic_request_never_copies_tier_c(tmp_path):
+    """2026-11-02 vfx-2: AS-V08's last host half was tier C ("no src/tests change since the
+    previous commit"); the track merge's Studio batch copied it and failed 'GATE no code' on
+    the integrated master, and the Lead reopened the finished VFX sprints. An automatic run
+    (re-gate on new code, merge batch) always follows new code: tier C becomes A."""
+    from types import SimpleNamespace
+    ws = tmp_path / "au"
+    (ws / "tests").mkdir(parents=True)
+    (ws / "docs" / "progress").mkdir(parents=True)
+    (ws / "tests" / "RegressionIndex.lua").write_text(
+        'return { { id = "AS_V00" }, { id = "S17" } }', encoding="utf-8")
+    checks = [{"check_id": "suite:AS_V00"}]
+    P = SimpleNamespace(profile=SimpleNamespace(workspace=str(ws)),
+                        adapter=SimpleNamespace(required_checks=lambda spec, phase: checks))
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    sc._tier = lambda P, tid, spec=None: "C"
+    assert sc.default_request(P, "AS-V08", object())["tier"] == "A"       # own suites
+    (ws / "docs" / "progress" / "AS-V08_EVIDENCE_RAW.log").write_text(
+        "GATE RUN sprint=AS-V08 tier=C regression=none suites=[AS_V00]\n", encoding="utf-8")
+    assert sc.default_request(P, "AS-V08", object())["tier"] == "A"       # copied last run
+    (ws / "docs" / "progress" / "AS-V08_EVIDENCE_RAW.log").write_text(
+        "GATE RUN sprint=AS-V08 tier=b regression=none suites=[AS_V00]\n", encoding="utf-8")
+    assert sc.default_request(P, "AS-V08", object())["tier"] == "B"       # others kept
+    assert SC.code_tier("") == "A" and SC.code_tier("c") == "A"

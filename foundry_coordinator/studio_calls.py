@@ -1254,13 +1254,23 @@ class StudioCalls:
             # the sprint. The sprint's required suites always join the last run's.
             own = _known_suites(split_ids(last), known)
             req = {"suites": own + [s for s in suites if s not in own], "regression": reg,
-                   "tier": tier.upper(), "rerun": "failed", "files": []}
+                   "tier": code_tier(tier), "rerun": "failed", "files": []}
             if req["suites"] or req["regression"] != "none":
                 return req
         if not suites:
             return None
-        return {"suites": suites, "regression": "none", "tier": self._tier(P, tid, spec),
-                "rerun": "failed", "files": []}
+        return {"suites": suites, "regression": "none",
+                "tier": code_tier(self._tier(P, tid, spec)), "rerun": "failed", "files": []}
+
+
+def code_tier(tier: str) -> str:
+    """The tier for an automatic run (a re-gate on new code, a track merge's Studio batch).
+    Tier C means "no src/ or tests/ change since the previous commit": an automatic run
+    always follows new code, so a copied tier C fails by definition (2026-11-02 vfx-2:
+    AS-V08's last host half was tier C, the merge batch copied it and failed 'GATE no code'
+    on the integrated master; the Lead reopened five finished VFX sprints)."""
+    t = str(tier or "A").upper()
+    return "A" if t == "C" else t
 
 
 def _index_ids(ws: str) -> Optional[set]:
