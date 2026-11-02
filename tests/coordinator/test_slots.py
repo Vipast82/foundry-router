@@ -104,6 +104,16 @@ def test_a_slot_track_takes_the_slot_lock_never_the_workstation_studio():
     assert sc2._slot(P2) is None
 
 
+def test_a_gate_run_never_waits_for_a_blender_unit():
+    """2026-11-01: gate runs named the pool's first unit (`blender`) and every slot track's
+    gate waited behind the one sprint holding it."""
+    sc, P = _calls_for_track("slot-1")
+    sc.c._session_locks = lambda P: ["studio:victor-workstation", "writer", "blender",
+                                     "blender#3"]
+    locks = sc._run_locks(P)
+    assert "slot:slot-1" in locks and not [x for x in locks if x.startswith("blender")]
+
+
 def test_a_lead_abort_that_fails_here_is_queued_and_retried_by_the_running_coordinator(tmp_path):
     """2026-10-31 AS-J05: a CLI `unblock` cancelled a lead case in a process with no Kilo
     credentials; the abort failed silently and the lead session kept the workstation's

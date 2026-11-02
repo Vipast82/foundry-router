@@ -618,6 +618,10 @@ class StudioCalls:
 
     def _run_locks(self, P) -> list:
         locks = list(dict.fromkeys(self.c._workspace_locks(P) + self.c._session_locks(P)))
+        # 2026-11-01: a Studio gate drives Studio, never Blender. With no task given,
+        # _session_locks named the pool's first unit (`blender`), so every slot track's gate
+        # waited for whichever sprint held that one unit (AS-E10, F04, F17, F19 behind AS-F30)
+        locks = [x for x in locks if str(x).split("#", 1)[0] != "blender"]
         slot = self._slot(P)
         if slot is not None:
             # a slot-bound track's run drives the slot's Studio, never the workstation's

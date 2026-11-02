@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.1 — Studio gates and CLOSE take no Blender unit; a session end gives back an idle Studio slot
+
+2026-11-01 20:5x. Two Blender tracks blocked each other. AS-D08 was CLOSING (docs only) and
+waited for a Blender unit; AS-F30 held a unit and waited for slot-1, which AS-D08 still held
+from its gate run. Only another sprint finishing its Blender work could break the loop.
+
+- **`engine` CLOSE start:** the CLOSE session's locks drop every `blender` unit. Before it
+  starts, the task lets go of any Blender unit it still holds, and of an idle Studio-slot lock.
+- **`engine._release_session`:** a session end also gives back a `slot:<id>` lock when no
+  scripted Studio run of the task is active (`_idle_slot_lock`). Before this, a slot stayed held
+  from the gate until the sprint completed, through review and CLOSE.
+- **`studio_calls._run_locks`:** a Studio gate run takes no Blender unit. Built with no task, it
+  named the pool's first unit, so every slot track's gate waited behind the one sprint holding
+  `blender` (AS-E10, F04, F17, F19 behind AS-F30).
+- Tests: `tests/coordinator/test_slots.py` (`test_a_gate_run_never_waits_for_a_blender_unit`) and
+  `tests/coordinator/test_engine.py`
+  (`test_a_session_end_gives_back_an_idle_studio_slot_lock`,
+  `test_a_close_takes_no_blender_unit_and_lets_go_of_a_held_slot`; both fail on v0.177.0).
+
 ## v0.179.0 — an AU plan's `ref_views` reaches the engine (D3 fix)
 
 2026-11-01. Found while pre-coding the Phase C pilot. v0.171.0 looked for the word `ref_views`

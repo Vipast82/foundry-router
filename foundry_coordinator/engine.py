@@ -3097,6 +3097,15 @@ class Coordinator:
                 close_persona = self._closeout_frontier(P, t, locks)
                 if close_persona:
                     locks = [r for r in locks if r.split("#", 1)[0] != "gpu"]
+                # 2026-11-01 AS-D08 / AS-F30: CLOSE writes docs only. It took a Blender unit
+                # (and kept the Studio slot from its gate) while AS-F30 held a unit and waited
+                # for that slot. A CLOSE needs neither: drop them from its locks and let go
+                # of any it still holds.
+                locks = [r for r in locks if r.split("#", 1)[0] != "blender"]
+                spare = [r for r in self.store.holds(pid, tid)
+                         if r.split("#", 1)[0] == "blender" or self._idle_slot_lock(P, tid, r)]
+                if spare:
+                    self.store.release(pid, tid, spare)
                 if self._acquire(P, t, locks, writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
@@ -7174,10 +7183,24 @@ class Coordinator:
         except Exception:                                         # noqa: BLE001
             pass
 
+    def _idle_slot_lock(self, P: Project, tid: str, res: str) -> bool:
+        """A Studio-slot lock (`slot:<id>`) the task holds with no scripted Studio run active:
+        the gate that took it is over, so nothing of the task is using the slot."""
+        if not str(res).startswith("slot:"):
+            return False
+        try:
+            return not self.studio_calls.active(P, tid)
+        except Exception:                                         # noqa: BLE001
+            return False
+
     def _release_session(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]
         held = self.store.holds(pid, tid)
-        res = self._session_locks(P, t) + [r for r in held if r.startswith("writer:")]
+        # 2026-11-01: a slot track's gate lock (`slot:<id>`) was never given back between
+        # sessions, so the slot stayed held until the sprint completed (AS-D08 kept slot-1
+        # through review and CLOSE while AS-F30 waited for it)
+        res = self._session_locks(P, t) + [r for r in held if r.startswith("writer:")
+                                           or self._idle_slot_lock(P, tid, r)]
         self.store.release(pid, tid, res)
         self._journal_locks(P, t, [r for r in res if r in held and not r.startswith("writer:")],
                             "release")

@@ -1031,6 +1031,54 @@ def test_local_streams_let_that_many_local_sprints_run_at_once(game):
         FL.is_local_primary = orig
 
 
+def test_a_session_end_gives_back_an_idle_studio_slot_lock(game):
+    """2026-11-01: AS-D08's slot gate took `slot:slot-1`; no session end released it, so the
+    slot stayed held through review and CLOSE while AS-F30 waited for it."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    t = c.store.task("game", "T1")
+    assert c.store.acquire(["slot:slot-1", "writer:0"], "game", "T1") is None
+    orig = c.studio_calls.active
+    try:
+        c.studio_calls.active = lambda P, tid: True             # its gate still runs: keep it
+        c._release_session(P, t)
+        assert "slot:slot-1" in c.store.holds("game", "T1")
+        assert "writer:0" not in c.store.holds("game", "T1")
+        c.studio_calls.active = lambda P, tid: False            # the gate is over: give it back
+        c._release_session(P, t)
+        assert "slot:slot-1" not in c.store.holds("game", "T1")
+    finally:
+        c.studio_calls.active = orig
+
+
+def test_a_close_takes_no_blender_unit_and_lets_go_of_a_held_slot(game):
+    """2026-11-01: AS-D08 (CLOSING, docs only) waited for a Blender unit held by AS-F30, while
+    AS-F30 waited for the Studio slot AS-D08 still held."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    P = c.projects["game"]
+    P.profile.resources.append("blender")
+    P.adapter.closeout_mode = lambda: "session"                  # AU closes in a CLOSE session
+    c.approve("game", "T1", [], "victor")
+    seen = []
+    orig = c._acquire
+
+    def spy(P_, t_, resources, writer=False):
+        cur = c.store.task(P_.id, t_["task_id"]) or t_
+        if cur.get("state") == S.CLOSING:
+            seen.append((list(resources), list(c.store.holds(P_.id, t_["task_id"]))))
+        return orig(P_, t_, resources, writer=writer)
+    c._acquire = spy
+    c.store.acquire(["slot:slot-1"], "game", "T1")              # left over from its gate
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.COMPLETE)
+    assert seen, "the CLOSE start was not observed"
+    for wanted, held in seen:
+        assert not [r for r in wanted if r.split("#")[0] == "blender"]
+        assert "slot:slot-1" not in held                         # given back before CLOSE
+
+
 def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):
     """2026-10-30: Claude weekly 100% + ChatGPT capped: GF-LOOP1 and MV2-9 fell to the
     local model AS-D14 held and failed a session every few minutes."""
