@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.2 — the Blender skill says how to save a slot Studio screenshot
+
+2026-11-01 23:1x. AS-F04 and AS-F21 stopped BLOCKED. On a slot track, `capture_screenshot`
+shows the model the image but writes no file, and `tools/capture-window.ps1` captures the
+workstation's Studio, so the capture evidence could not be saved. The Lead solved AS-F04 with a
+one-off script.
+
+- **AU** (prep pq-078a965432): `tools/assets/slot_capture.py` runs that script as a self-tested
+  tool. It starts the track's own robloxstudio-mcp (already pointed at the slot) and saves the
+  PNG. It refuses to run outside a slot track, so the workstation's TEST place is never
+  captured.
+- **`au-blender-asset` skill (Traps):** sessions frame the view with `execute_luau`, then call
+  `slot_capture.py` once per view. The skill reaches the game's `.kilo/skills` at the next
+  install check (`skills.check_seconds`).
+
 ## v0.180.1 — audio closeouts write themselves again; a templated closeout never waits for Strata
 
 2026-11-01 22:5x. Victor: "AS-A08 says closing but nothing seems to be running".

@@ -95,6 +95,11 @@ description: Build, check and ship one Animal Uprising 3D asset (model, faces, c
   (`studio_asset_check.luau` does this).
 - Fresh uploads take about a minute before their faces show. Preload with retries before
   capturing.
+- On a track bound to a Studio slot, `capture_screenshot` shows you the image but saves nothing,
+  and `tools/capture-window.ps1` captures the workstation's Studio, never the slot. Frame the
+  camera with `execute_luau`, then save the frame with
+  `python tools/assets/slot_capture.py docs/evidence/<ID>/studio_front.png` (one call per view;
+  it refuses to run outside a slot track).
 - `tools\guard\run.py` with a quoted exe path: use `--shell none`.
 - Blender's bundled Python has numpy but no Pillow: Pillow steps run with the system `python`.
 - A mirrored part (AS-E10 grill, AS-J03 lever, AS-G02 cleaver): check it with the `asymmetry`
