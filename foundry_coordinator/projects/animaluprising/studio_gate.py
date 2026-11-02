@@ -3408,6 +3408,51 @@ UNMAPPED_FIX = (". Move a new check into tests/checks/ (folder-mounted for serve
                 "tests/*_check.lua rows, commit, then request the gate again; no CALL ran")
 
 
+# 2026-11-02 AS-H07: 38 animation clips written as rbx_xml TEXT but named `.rbxm` under
+# assets/roblox (Rojo-mounted). Rojo reads `.rbxm` as the binary container, refuses the WHOLE
+# project ("Malformed rbxm file ... Invalid file header") and the slot's Studio kept the
+# pre-sprint sources; PRE-PLAY verify called it stale sync and a Lead case parked the sprint.
+# A file Rojo cannot read at HEAD is the sprint's to fix, like an unmapped one.
+PROJECT_UNSERVABLE = ("PROJECT: Rojo cannot serve HEAD (it refuses the whole project, so "
+                      "Studio keeps the old sources): rbx_xml text named .rbxm: ")
+UNSERVABLE_FIX = (". A `.rbxm` is Roblox's binary container; a file starting `<roblox xmlns` "
+                  "is rbx_xml and must be named `.rbxmx`. Clip files that are only uploaded "
+                  "(roblox_cloud.py --type animation) belong outside Rojo's tree (for example "
+                  "assets/exports/...), not under a mounted folder. Rename or move them (a "
+                  "scope request if the new path is not in the plan), commit, then request the "
+                  "gate again; no CALL ran")
+
+
+def rojo_unservable(repo: str, rev: str = "HEAD", limit: int = 2000) -> list:
+    """Files Rojo mounts at `rev` that it refuses to read: a `.rbxm` whose bytes are rbx_xml
+    text (binary files start `<roblox!`). Read from the checkout (the gate checked out
+    `rev`); [] when nothing is wrong or git cannot list."""
+    mounts = rojo_mounts(project_at(repo, rev) or {})
+    if not mounts:
+        return []
+    try:
+        r = subprocess.run(["git", "-C", repo, "ls-tree", "-r", "--name-only", rev],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    out = []
+    for f in r.stdout.splitlines()[:200000]:
+        if not f.lower().endswith(".rbxm") or not rojo_resolve(mounts, f):
+            continue
+        try:
+            with open(os.path.join(repo, *f.split("/")), "rb") as fh:
+                head = fh.read(16)
+        except OSError:
+            continue
+        if head.lstrip().startswith(b"<roblox") and not head.startswith(b"<roblox!"):
+            out.append(f)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def unmapped_unresolved(verify_text: str, repo: str, rev: str) -> list:
     """UNRESOLVED paths of a verify text that no Rojo mount at `rev` covers (all of them,
     or [] when any unresolved path IS mounted: then it is real sync staleness)."""
@@ -3932,6 +3977,11 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             unmounted = unmapped_unresolved(g.last_verify_text, g.repo, g.head or "HEAD")
             if unmounted:
                 raise GateTooling(PROJECT_UNMAPPED + ", ".join(unmounted[:8]) + UNMAPPED_FIX)
+            unservable = rojo_unservable(g.repo, g.head or "HEAD")
+            if unservable:
+                more = f" (+{len(unservable) - 6} more)" if len(unservable) > 6 else ""
+                raise GateTooling(PROJECT_UNSERVABLE + ", ".join(unservable[:6]) + more
+                                  + UNSERVABLE_FIX)
             raise GateTooling("PRE-PLAY verify: Studio's loaded sources are not HEAD's ("
                               + one_line(pre["detail"], 300) + "); no CALL ran (Rojo / plugin "
                               "sync is stale)")

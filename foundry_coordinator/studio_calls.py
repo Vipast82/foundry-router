@@ -66,6 +66,9 @@ SEL_RE = re.compile(r"(?:none|full|subset:[A-Za-z0-9_.\-]+|[A-Za-z0-9_.\-]+(?:[,
 PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
 DEFAULT_FILES = ["tests/RegressionIndex.lua", "tests/GateRunner.lua"]
 MAX_GATE_FILES = 200
+# gate ERRORs that are the sprint's own file to fix (studio_gate PROJECT_UNMAPPED /
+# PROJECT_UNSERVABLE): the session gets them back instead of a tooling stop
+PROJECT_MARKERS = ("PROJECT: not mapped in default.project.json", "PROJECT: Rojo cannot serve")
 
 
 def _task_scope(P, task_id: str) -> list:
@@ -1015,9 +1018,10 @@ class StudioCalls:
                 self.c.store.release(P.id, tid, self._run_locks(P))
                 return outcome
             cur = self.store.task(P.id, tid) or t
-            if "PROJECT: not mapped in default.project.json" in str(outcome["error"]) and \
+            if any(m in str(outcome["error"]) for m in PROJECT_MARKERS) and \
                     cur.get("session_id"):
-                # the sprint's own file is unmapped (UI-SKIN2 2026-10-28): the session fixes it
+                # the sprint's own file is unmapped (UI-SKIN2 2026-10-28) or one Rojo cannot
+                # read (AS-H07 2026-11-02): the session fixes it
                 outcome["sent"] = self._prompt(
                     P, cur, "The scripted Studio gate did not run: "
                     + str(outcome["error"]).split("tooling: ", 1)[-1][:1200],

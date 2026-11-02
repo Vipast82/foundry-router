@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.5 — the gate names a commit Rojo cannot serve and hands it to the sprint
+
+2026-11-02 00:3x. AS-H07 wrote 38 animation clips as rbx_xml text but named them `.rbxm`,
+under the Rojo-mounted `assets/roblox/Animations/`. Rojo reads `.rbxm` as the binary format
+and refused the whole project ("Malformed rbxm file ... Invalid file header"), so slot-2's
+Studio kept the pre-sprint sources. Every gate failed PRE-PLAY verify as "stale sync". The
+Lead could not reach the slot to see Rojo's error, so it parked the sprint on a question for
+Victor.
+
+- **`studio_gate.rojo_unservable(repo, rev)`:** lists the files Rojo mounts at HEAD that are
+  `.rbxm` but start with `<roblox xmlns` (rbx_xml text). Binary `.rbxm` files, `.rbxmx` files
+  and unmounted files are fine.
+- **PRE-PLAY verify:** when it fails and such files exist, the ERROR now says
+  `PROJECT: Rojo cannot serve HEAD ...`. It names the files and the fix: rename them to
+  `.rbxmx`, or move upload-only clips out of Rojo's tree.
+- **`studio_calls`:** this error goes back to the sprint's session, the same way the unmapped
+  case (`PROJECT_MARKERS`) does, instead of a tooling stop or a Lead case.
+- Test: `tests/coordinator/test_studio_gate.py`
+  (`test_rbx_xml_text_named_rbxm_is_the_sprints_to_fix_not_stale_sync`).
+
 ## v0.180.4 — a sprint keeps Strata while it waits on a short decision
 
 2026-11-01 23:4x. Victor: "AS-A02 doesn't look like it's moving". AS-A02 stopped for 3 minutes on a

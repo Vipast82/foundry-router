@@ -282,6 +282,46 @@ def test_an_unmapped_new_file_is_the_sprints_to_fix_not_stale_sync(monkeypatch):
                                  "HEAD") == []
 
 
+def test_rbx_xml_text_named_rbxm_is_the_sprints_to_fix_not_stale_sync(tmp_path):
+    """AS-H07 2026-11-02 replay: clips written as rbx_xml text but named .rbxm under the
+    Rojo-mounted assets/roblox; Rojo refused the whole project and PRE-PLAY verify called it
+    stale sync. The gate names those files (only mounted ones; binary .rbxm and .rbxmx are fine)."""
+    repo = str(tmp_path)
+
+    def git(*a):
+        subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    proj = {"name": "x", "tree": {"$className": "DataModel", "ReplicatedStorage": {
+        "Assets": {"$path": "assets/roblox"}}}}
+    files = {
+        "default.project.json": json.dumps(proj).encode(),
+        "assets/roblox/Animations/HERO_Attack.rbxm": b'<roblox xmlns:xmime="x" version="4">',
+        "assets/roblox/Enemies/EN-RAT.rbxm": b"<roblox!\x89\xff\r\n\x1a\n\x00\x00",
+        "assets/roblox/Animations/HERO_Idle.rbxmx": b'<roblox xmlns:xmime="x" version="4">',
+        "assets/exports/clips/HERO_Run.rbxm": b'<roblox xmlns:xmime="x" version="4">',
+    }
+    for rel, data in files.items():
+        p = os.path.join(repo, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data)
+    git("add", "-A")
+    git("commit", "-qm", "x")
+    assert G.rojo_unservable(repo, "HEAD") == ["assets/roblox/Animations/HERO_Attack.rbxm"]
+    # the session gets it back (studio_calls), like an unmapped file
+    from foundry_coordinator import studio_calls as SC
+    msg = "tooling: " + G.PROJECT_UNSERVABLE + "assets/roblox/Animations/HERO_Attack.rbxm" + G.UNSERVABLE_FIX
+    assert any(m in msg for m in SC.PROJECT_MARKERS)
+    assert any(m in "tooling: " + G.PROJECT_UNMAPPED + "tests/X_check.lua" for m in SC.PROJECT_MARKERS)
+    # fixed: renamed to .rbxmx -> nothing to report
+    git("mv", "assets/roblox/Animations/HERO_Attack.rbxm", "assets/roblox/Animations/HERO_Attack.rbxmx")
+    git("commit", "-qm", "y")
+    assert G.rojo_unservable(repo, "HEAD") == []
+
+
 # ---- evidence block (H6) ---------------------------------------------------------
 def _v(head, result="FAIL", checks=None):
     return {"mode": "sprint", "head": head, "result": result, "run_id": "r-1",
