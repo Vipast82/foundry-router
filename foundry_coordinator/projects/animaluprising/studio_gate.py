@@ -1422,7 +1422,7 @@ class Gate:
         if self.lines is not None:
             self.lines.line(text)
 
-    def capture_ready(self, text: str) -> None:
+    def capture_ready(self, text: str, suite: str = "") -> None:
         """2026-10-29 AS-P5: a suite CALL that stages a frame prints `CAPTURE_READY <path> ...`
         and expects the host to take it before the next CALL restores the scene; the runner
         never did, so the frame was never taken. Take the game viewport (capture_screenshot,
@@ -1435,7 +1435,22 @@ class Gate:
             out = []
             want = f"docs/evidence/{self.sprint}/"
             path = os.path.abspath(os.path.join(self.repo, *relp.split("/")))
-            if not relp.startswith(want) or ".." in relp.split("/") or not path.startswith(
+            parts = relp.split("/")
+
+            def norm(s):
+                return str(s or "").upper().replace("-", "_")
+            # another sprint's own frame, staged by that sprint's suite run as regression here
+            other = (len(parts) >= 4 and parts[0] == "docs" and parts[1] == "evidence"
+                     and ".." not in parts and bool(suite)
+                     and norm(parts[2]) == norm(suite) and norm(suite) != norm(self.sprint))
+            if other:
+                # 2026-11-02 AS-AI1: a regression suite (AS_P5) staged its own sprint's frame;
+                # the refusal was a FAIL line and turned a gate red whose suites all passed.
+                # That frame is the other sprint's evidence, not this one's: noted, not taken.
+                out.append(f"NOTE: CAPTURE {relp} - skipped: another sprint's frame "
+                           f"({parts[2]}, staged by its regression suite); not "
+                           f"{self.sprint}'s evidence, nothing written")
+            elif not relp.startswith(want) or ".." in parts or not path.startswith(
                     os.path.abspath(os.path.join(self.repo, *want.rstrip("/").split("/")))):
                 out.append(f"FAIL: CAPTURE {relp} - refused: a capture path must be under {want}")
             else:
@@ -2268,7 +2283,7 @@ class Gate:
             self.emit_call(c, payload, res[n], bool(err) or n in tool_err,
                            " DYNARG" if c.get("dynarg") else (" tight" if c.get("tight") else ""))
             if not err and "CAPTURE_READY " in str(res[n]):
-                self.capture_ready(str(res[n]))
+                self.capture_ready(str(res[n]), suite=str(entry_of.get(n) or ""))
             att["order"].append(n)
 
     def _run_group(self, g: dict, boot: list, entry_of: dict) -> dict:

@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.10 — a regression suite's own frame no longer fails another sprint's gate
+
+2026-11-02 12:4x. The audio-int track's merge Studio batch was red for AS-AI1, although every
+suite passed: AS_P5 12/12, AS_V00, and AS_AI1 12/12. AS_P5's check, re-run as regression,
+staged its own frame at `docs/evidence/AS-P5/proxy_telegraph_...png`. The runner refused it
+because it was not under `docs/evidence/AS-AI1/`, and the `FAIL: CAPTURE` line turned the gate
+red. The Lead reopened AS-AI1 as a repair for nothing. Every sprint that re-runs AS_P5 (AS-D18,
+S55, ...) would hit the same thing.
+
+- **`Gate.capture_ready(text, suite)`:** the CALL's regression-index suite is passed in. A
+  frame under `docs/evidence/<that suite's sprint>/` (suite `AS_P5` → `AS-P5/`), staged by a
+  suite that isn't the sprint's own, becomes `NOTE: CAPTURE ... skipped: another sprint's
+  frame` and nothing is written. A path outside `docs/evidence/`, a suite writing into a third
+  sprint's folder, the sprint's own suite in the wrong folder, or no known suite is still
+  refused with `FAIL` (the 2026-10-29 rule; `test_capture_ready_outside_the_sprints_evidence_is_refused`
+  unchanged).
+- Test: `tests/coordinator/test_studio_gate_calls.py`
+  (`test_a_regression_suites_own_frame_is_skipped_not_failed`; fails on v0.181.9).
+
 ## v0.181.9 — timing work stays off the Studio slots
 
 2026-11-02 12:xx. Victor: "The Slots are very slow systems as far as gaming goes, why is that the

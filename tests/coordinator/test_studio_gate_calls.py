@@ -837,6 +837,29 @@ def test_capture_ready_never_writes_a_frame_of_the_wrong_size(tmp_path):
     assert (tmp_path / "docs/evidence/CS/plain.png").is_file() and len(sized) == 2
 
 
+
+def test_a_regression_suites_own_frame_is_skipped_not_failed(tmp_path):
+    """2026-11-02 AS-AI1: its merge gate re-ran AS_P5 as regression; AS_P5's check staged its
+    own frame (docs/evidence/AS-P5/...), the runner refused it as "not under
+    docs/evidence/AS-AI1/" with a FAIL line, and the gate went red although every suite
+    passed (AS_P5 12/12, AS_V00, AS_AI1). Another sprint's frame is a NOTE (not this
+    sprint's evidence, nothing written); a path outside docs/evidence/ still fails."""
+    g, sized = _capture_gate(tmp_path, lambda s: _png(1920, 1080))
+    g.capture_ready("CAPTURE_READY docs/evidence/AS-P5/proxy_telegraph.png runtime=playtest",
+                    suite="AS_P5")
+    assert not any(ln.startswith("FAIL:") for ln in g.capture_log), g.capture_log
+    assert any(ln.startswith("NOTE: CAPTURE docs/evidence/AS-P5/proxy_telegraph.png") and
+               "another sprint" in ln for ln in g.capture_log)
+    assert not (tmp_path / "docs/evidence/AS-P5/proxy_telegraph.png").exists() and not sized
+    # still refused: outside docs/evidence/, a suite writing into a third sprint's folder, the
+    # sprint's own suite in the wrong folder, or no suite known (the 2026-10-29 rule)
+    for bad, suite in (("assets/x.png", "AS_P5"), ("docs/evidence/../src/x.png", "AS_P5"),
+                       ("docs/evidence/x.png", "AS_P5"), ("docs/evidence/GF-X/a.png", "AS_P5"),
+                       ("docs/evidence/AS-P5/a.png", ""), ("docs/evidence/OTHER/a.png", "CS")):
+        g.capture_log.clear()
+        g.capture_ready(f"CAPTURE_READY {bad} runtime=playtest", suite=suite)
+        assert any(ln.startswith(f"FAIL: CAPTURE {bad}") for ln in g.capture_log), (bad, suite)
+
 def test_a_red_run_on_code_the_sprints_base_never_had_is_not_a_baseline(tmp_path, monkeypatch):
     """2026-10-31 MV2-V1: MV2-11's UseV2-on run was red on S15/UI_02a..05a/UI_POLISH1, MV2-11
     reverted the flip, and MV2-V1 flipped it again: those reds were MV2-V1's own change, yet
