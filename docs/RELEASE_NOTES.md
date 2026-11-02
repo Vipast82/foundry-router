@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.170.2 — a decision never times out to "the owner did it"
+
+2026-11-01 17:44. Studio on the workstation stopped syncing and only Victor's Connect click
+could fix it. GF-RT3's Lead asked a user_action question whose recommended option read "I
+clicked Connect in Studio; re-run the gate". The 3-minute timeout applied it as if Victor had
+clicked, and GF-RT3 spent another attempt on the same stale sync.
+
+- **`decision_policy.needs_human_act`:** also recognises an option written in the owner's voice
+  ("I clicked / opened / signed in / connected / installed / did ..."). A timeout never applies
+  such an option; the decision parks instead.
+- **`decision_policy.meta`:** a `user_action` decision (only the owner can do it) may time out
+  to PARK at most (its own stop option or PARK), never to any other option.
+- Test: `tests/coordinator/test_audit_d_decisions_commits.py`
+  (`test_an_owner_voice_option_and_any_user_action_option_only_ever_time_out_to_park`). 419
+  decision, Lead, lifecycle and engine tests pass.
+
 ## v0.170.1 — `blender.pool` typed on one line still works; Settings refuse a bad pool
 
 2026-11-01. The pool went live as one entry, `slot-1:2,Slot-2:22,local:1,`. The coordinator read

@@ -78,6 +78,27 @@ def test_only_a_user_action_blocker_cancels_the_timeout():
     assert m["recommended"] is None and m["timeout_minutes"] == 0
 
 
+def test_an_owner_voice_option_and_any_user_action_option_only_ever_time_out_to_park():
+    """2026-11-01 GF-RT3: a lead escalation (category user_action) recommended "I clicked
+    Connect in Studio; re-run the gate" and the 3-minute timeout applied it as if Victor had."""
+    assert DP.needs_human_act("I clicked Connect in Studio; re-run the GF-RT3 gate")
+    assert DP.needs_human_act("I've signed in to Studio on slot-2")
+    assert not DP.needs_human_act("Let the coordinator reopen the TEST place, then re-run")
+    assert not DP.needs_human_act("Did the gate pass? re-run it")
+    opts = ["I clicked Connect in Studio; re-run the GF-RT3 gate (failed rows only)",
+            "Let the coordinator's TEST-place auto-reopen reconnect Rojo, then re-run the gate",
+            "Leave GF-RT3 parked BLOCKED for now"]
+    for rec in opts[:2]:
+        m = DP.meta(P0, "lead_escalation", {"user_action": "click Connect in Studio",
+                                            "recommended": rec}, opts)
+        assert m["category"] == "user_action"
+        assert m["recommended"] == json.dumps(DP.PARK), (rec, m)
+    # a user_action decision's own stop option is still a valid default
+    stop = ["stop the task", "authorize another bounded round"]
+    m = DP.meta(P0, "lead_escalation", {"user_action": "x", "recommended": stop[0]}, stop)
+    assert m["recommended"] == json.dumps("stop the task")
+
+
 def test_lead_takes_review_access_and_scope_requests_first():
     assert "review_access" in Coordinator.LEAD_WAIT_KINDS
     assert "scope_request" in Coordinator.LEAD_WAIT_KINDS

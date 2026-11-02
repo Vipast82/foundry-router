@@ -181,7 +181,13 @@ _HUMAN_ACT = re.compile(
     r"\b(?:victor|the owner|the operator|a human|a person|manually|by hand|in person)\b"
     r"|\b(?:owner|operator|human|person|user|you)\s+(?:must\s+|will\s+|to\s+|should\s+)?"
     r"(?:clicks?|opens?|logs?\s+in|signs?\s+in|installs?|approves?|provides?|uploads?|"
-    r"purchases?|buys?|pays?|presses?|connects?|restarts?|plugs?|reboots?|enters?|types?)\b",
+    r"purchases?|buys?|pays?|presses?|connects?|restarts?|plugs?|reboots?|enters?|types?)\b"
+    # 2026-11-01 GF-RT3: a lead option written in the owner's voice ("I clicked Connect in
+    # Studio; re-run the gate") was applied by the timeout as if Victor had done it
+    r"|\bI(?:'ve|\s+have)?\s+(?:just\s+|now\s+|already\s+)?(?:clicked|opened|logged\s+in|"
+    r"signed\s+in|installed|approved|provided|uploaded|purchased|bought|paid|pressed|"
+    r"connected|reconnected|restarted|plugged|rebooted|entered|typed|fixed|set\s+up|did|"
+    r"done|added|enabled|turned\s+on)\b",
     re.I)
 
 
@@ -245,6 +251,12 @@ def meta(P, kind: str, evidence: Optional[dict], options: list,
             # blocker (a person must act) waits for the owner with no timeout
             if str(ev.get("blocker_kind") or "") == "user_action":
                 rec = None
+            # 2026-11-01 GF-RT3: a user_action decision (only the owner can do it) may
+            # time out to PARK at most, never to another option: its other options are
+            # what the owner does, and nobody did them
+            elif rec is not None and cat == USER_ACTION and not is_park(rec) \
+                    and rec != _option(options, "stop"):
+                rec = park
             # self-driving part 1: an automation decision never times out to a stop;
             # its default is the capped self-repair (sweep -> self_repair_plan)
             if rec is not None and cat == AUTOMATION and is_park(rec) and self_repair_on(P):
