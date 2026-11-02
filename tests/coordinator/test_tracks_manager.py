@@ -115,6 +115,7 @@ def test_create_refuses_bad_names_unknown_sprints_and_duplicates(tmp_path):
     with pytest.raises(TrackError, match="already exists"):
         c.tracks.create(P, "blender", ["B2"])
     c.approve("game", "A1", [], "victor")
+    c.store.update_task("game", "A1", attempt=1)        # started: it stays on main (v0.181.2)
     with pytest.raises(TrackError, match="already QUEUED on the main checkout"):
         c.tracks.create(P, "audio", ["A1"])
 
@@ -395,3 +396,29 @@ def test_a_track_review_arguing_only_about_the_deferral_is_an_approval(tmp_path)
         "required_repairs": ["Fill the SPIKE doc from measured numbers or obtain an explicit "
                              "decision to defer the measurement"]}}
     assert c._track_review_owed_only(TP, b1, rev)["verdict"] == "APPROVED"
+
+
+def test_a_never_started_main_sprint_moves_onto_a_track_without_cancelling(tmp_path):
+    """2026-11-02 vfx-2: moving AS-V08..V12 onto a track meant cancelling them first;
+    AS-D18 and S53 saw a CANCELLED dependency, stopped BLOCKED and opened two Lead cases.
+    A never-started sprint (QUEUED / READY, attempt 0) now moves as it is: its deps stay,
+    its dependents never see a CANCELLED dependency. A started sprint is still refused."""
+    c, P, _ = env(tmp_path, extra=chr(10).join(["", "[automation]", "max_agents = 2", ""]))
+    c.approve("game", "A1", [], "victor")
+    c.approve("game", "X1", ["A1"], "victor")                  # a main sprint depending on it
+    c.store.update_task("game", "A1", state=S.READY)           # deps met, waiting its turn
+    c.tracks.create(P, "audio", ["A1"], actor="victor")
+    c.tracks.start(P, "audio", "victor")
+    t = c.store.task("game", "A1")
+    assert t["state"] == S.QUEUED and c.store.task_track("game", "A1") == "audio"
+    assert [e for e in c.store.events("game", 50) if e["kind"] == "moved_to_track"]
+    assert c.store.queue_entry("game", "X1")["deps"] == ["A1"]
+    c.tick()
+    assert c.store.task("game", "X1")["state"] != S.BLOCKED
+    assert c.store.track("game", "audio")["state"] != "failed"
+    assert run_until(c, lambda: c.store.task("game", "A1")["state"] == S.COMPLETE, limit=60)
+    # a sprint that already ran a session is not moved
+    c.approve("game", "B1", [], "victor")
+    c.store.update_task("game", "B1", state=S.READY, attempt=1, sessions=1)
+    with pytest.raises(TrackError, match="never-started"):
+        c.tracks.create(P, "blender", ["B1"], actor="victor")

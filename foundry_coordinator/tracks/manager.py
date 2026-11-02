@@ -315,9 +315,11 @@ class TrackManager:
             except Exception as e:                                # noqa: BLE001
                 raise TrackError(f"sprint {s}: {e}") from None
             t = self.store.task(P.id, s)
-            if t and t["state"] not in S.TERMINAL:
+            if t and t["state"] not in S.TERMINAL and not self._movable(P, t):
                 where = self.store.task_track(P.id, s) or "the main checkout"
-                raise TrackError(f"sprint {s} is already {t['state']} on {where}")
+                raise TrackError(f"sprint {s} is already {t['state']} on {where}"
+                                 + (" (started; only a never-started sprint moves)"
+                                    if not self.store.task_track(P.id, s) else ""))
             if t and t["state"] == S.COMPLETE:
                 raise TrackError(f"sprint {s} is already COMPLETE")
             out.append(s)
@@ -447,6 +449,16 @@ class TrackManager:
             "sprints": sprints, "needs": list(needs or []), "kilo_config": kc, "actor": actor})
         return row
 
+    def _movable(self, P, t: dict) -> bool:
+        """A main-queue sprint that never started (QUEUED / READY, attempt 0, no session):
+        `tracks start` moves it onto the track as it is. 2026-11-02 vfx-2: moving AS-V08..V12
+        meant cancelling them first; AS-D18 and S53 saw a CANCELLED dependency in that window,
+        stopped BLOCKED and opened two Lead cases."""
+        return (t.get("state") in (S.QUEUED, S.READY)
+                and not self.store.task_track(P.id, t["task_id"])
+                and int(t.get("attempt") or 0) == 0 and int(t.get("sessions") or 0) == 0
+                and not t.get("session_id"))
+
     def start(self, P, name: str, actor: str = "operator") -> dict:
         """Queue the track's sprints on it (a chain: each depends on the one
         before) and mark it running."""
@@ -462,6 +474,19 @@ class TrackManager:
             if not t:
                 self.c.approve(P.id, s, [prev] if prev else [], actor,
                                note=f"on track {name}", track=name)
+            elif self._movable(P, t):
+                # its own deps stay; the track chain adds the sprint before it
+                old = list((self.store.queue_entry(P.id, s) or {}).get("deps") or [])
+                deps = sorted(set(old) | ({prev} if prev else set()))
+                with self.store.tx():
+                    if t["state"] == S.READY:
+                        self.store.release(P.id, s)
+                        self.store.transition(P.id, s, S.QUEUED,
+                                              {"moved_to_track": name}, actor=actor)
+                    self.store.approve(P.id, s, deps, actor, note=f"moved onto track {name}",
+                                       track=name)
+                self.store.event(P.id, s, "moved_to_track", detail={
+                    "track": name, "deps": deps, "actor": actor})
             elif t["state"] == S.CANCELLED:
                 # 2026-10-29 HK-STORE1: a sprint cancelled off the main queue to move it
                 # onto a track was accepted here but stayed CANCELLED; the track failed 2 s

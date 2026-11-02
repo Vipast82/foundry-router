@@ -44,6 +44,8 @@ WRITING = (IMPLEMENTING, CLOSING)
 # of alternative tuples (any one fully present is enough).
 TRANSITIONS: dict[tuple[str, str], object] = {
     (QUEUED, READY): ("deps_satisfied",),
+    # a never-started main sprint moved onto a parallel track re-checks its deps there
+    (READY, QUEUED): ("moved_to_track",),
     (QUEUED, BLOCKED): ("blocker",),
     (READY, IMPLEMENTING): ("session_id", "base_sha", "run_id"),
     (READY, BLOCKED): ("blocker",),

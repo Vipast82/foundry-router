@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.2 — move a never-started main sprint onto a track without cancelling it
+
+2026-11-02 02:4x. All asset tracks had merged, so only one Claude sprint was running (main)
+while the cap allows 5. The VFX chain AS-V08..V12 shares files only with later sprints, so it
+went to a track, `vfx-2` on slot-1. `tracks start` takes only sprints that are not yet on the
+queue, so the five were cancelled on main first. In that window AS-D18 and S53 saw a
+CANCELLED dependency, stopped BLOCKED and opened two Lead cases. I unblocked both.
+
+- **`tracks start` / `TrackManager._movable`:** a main-queue sprint that never started
+  (QUEUED or READY, attempt 0, no session) moves onto the track as it is. Its own deps stay,
+  and the track chain adds the sprint before it. A READY one returns to QUEUED
+  (new transition READY → QUEUED, which requires `moved_to_track`), so its deps are checked
+  again on the track. Each move records a `moved_to_track` event. A sprint that has started
+  is still refused ("only a never-started sprint moves").
+- Tests: `tests/coordinator/test_tracks_manager.py`
+  (`test_a_never_started_main_sprint_moves_onto_a_track_without_cancelling`; fails on
+  v0.181.1). `test_create_refuses_...` now checks the started case.
+
 ## v0.181.1 — say why Claude usage was not read
 
 After v0.181.0 went live, no Claude usage reading arrived and nothing said why. Now a failed
