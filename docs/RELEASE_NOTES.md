@@ -2,6 +2,43 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.16 — a general Roblox skill library (27 skills) for every Foundry game
+
+2026-11-02. Victor asked for "the absolute best skills for all of the work we are doing, and future
+roblox games", comparing three public libraries with ours: EL4CTEO/roblox-skills (MIT, 23 compact
+skills), TabooHarmony/roblox-brain (MIT, 29 skills with sourced, doc-checked deep references) and
+SyphoDev-yt/roblox-ai-skills (free licence with credit, no selling; pipeline skills built on its own
+tooling).
+
+- `contrib/skills/roblox-*` holds 27 game-agnostic skills: luau, architecture, networking, security,
+  data, performance, world-building, physics, npc-ai, camera, input, ui, animation-vfx, audio,
+  localization, text-chat, teleport-matchmaking, game-systems, game-design, monetization,
+  analytics-liveops, testing, code-review, tooling, studio-mcp, open-cloud and publish-checklist.
+- Each `SKILL.md` is Foundry's own short entry page (4.2 KB at most) that merges the sources' rules
+  with Foundry lessons, among them:
+  - Device-simulator orientation is kept apart from the device.
+  - Software-rendered Studios give no timing or frame-rate evidence.
+  - XML saved as `.rbxm` breaks Rojo.
+  - Check that the live code matches HEAD before testing; carry passes forward by content hash.
+  - Audio quality gates and listening rounds.
+  - Agents never handle API keys.
+  - Ethical limits on game design for young players.
+- Its `references/` carry the upstream deep references with a provenance line, plus per-folder
+  `THIRD_PARTY_NOTICES.md`. SyphoDev's map-design research is summarised in Foundry's own words with
+  credit (`roblox-world-building/references/map-design-notes.md`); no SyphoDev file is copied.
+- Contested claims follow the Roblox API reference, checked this session:
+  - `Lighting.LightingStyle` and `PrioritizeLightingQuality` are script-writable. roblox-brain says
+    otherwise; only the deprecated `Technology` is not.
+  - `Player.User` is the identity for new code.
+  - `ConfigService` and `MarketplaceService:BindReceiptHandler` exist.
+- `contrib/skills/ROBLOX_SKILLS.md` is the index and routing table.
+  `contrib/skills/_build/build_roblox_skills.py` refreshes `references/` from new upstream commits
+  and never touches `SKILL.md`.
+- `au-roblox-world-building` now builds on `roblox-world-building` (its duplicate references are
+  removed).
+- Tests: `tests/coordinator/test_roblox_skill_library.py` checks frontmatter, entry-page size,
+  listed references, notices, provenance lines, installer lookup and the contested-claim wording.
+
 ## v0.181.15 — AU skill: au-roblox-world-building
 
 2026-11-02. Victor: "the map looks like it needs real work". No AU skill covered lighting,

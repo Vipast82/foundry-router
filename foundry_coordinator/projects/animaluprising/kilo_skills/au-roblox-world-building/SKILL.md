@@ -5,7 +5,7 @@ description: Build or improve the AnimalUprising map's look in code - lighting, 
 
 # Map look and world building (AnimalUprising)
 
-Load `au-luau-development` and `au-roblox-development` first. This skill adds how to change what the map looks like without breaking the Map v2 generator, its seeds or its budgets. Read `references/world-building.md` for Roblox APIs (parts, Lighting, Atmosphere, Terrain, materials, effects) and `references/streaming.md` before changing streaming or client code that reads map parts. Verify any API you have not used before with `rbx-docs-search` (Roblox_Studio `skill` tool); the references are generic Roblox notes, and project rules win.
+Load `au-luau-development` and `au-roblox-development` first, and the general `roblox-world-building` skill for Roblox APIs and map-design rules (lighting, atmosphere, terrain, materials, props, verification); `roblox-architecture` (its streaming reference) before client code that reads map parts. This skill adds how to change what the map looks like without breaking the Map v2 generator, its seeds or its budgets; where they differ, this skill wins. Verify any API you have not used before with `rbx-docs-search` (Roblox_Studio `skill` tool).
 
 ## Where the map comes from
 

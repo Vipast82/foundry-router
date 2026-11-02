@@ -1,5 +1,4 @@
-<!-- Adapted from EL4CTEO/roblox-skills, skills/roblox-world-building/SKILL.md (MIT; see THIRD_PARTY_NOTICES.md). Generic Roblox reference: AnimalUprising rules in ../SKILL.md win. -->
-
+<!-- From EL4CTEO/roblox-skills (https://github.com/EL4CTEO/roblox-skills, commit a7538bc), skills/roblox-world-building/SKILL.md, MIT (see THIRD_PARTY_NOTICES.md). Deep reference; the SKILL.md entry and any project rules win where they differ. -->
 
 # World building with code
 

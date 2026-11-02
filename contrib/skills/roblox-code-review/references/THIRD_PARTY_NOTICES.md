@@ -1,13 +1,11 @@
 # Third-party notices
 
-`references/world-building.md` and `references/streaming.md` are adapted from
-[EL4CTEO/roblox-skills](https://github.com/EL4CTEO/roblox-skills) (files
-`skills/roblox-world-building/SKILL.md` and `skills/roblox-architecture/references/streaming.md`,
-taken 2026-11-02), under the MIT License below. Only a short provenance note was added at the
-top of each file. `SKILL.md` is AnimalUprising's own text.
+Files in this folder other than this notice are copied from the libraries below (with a one-line provenance comment added at the top), under the MIT License. The skill's `SKILL.md` is Foundry's own text.
 
----
+## EL4CTEO/roblox-skills
+https://github.com/EL4CTEO/roblox-skills (commit a7538bc)
 
+```
 MIT License
 
 Copyright (c) 2026 EL4CTEO
@@ -29,3 +27,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
