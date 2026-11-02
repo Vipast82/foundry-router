@@ -9,7 +9,8 @@ without a model call:
     plan, the existing `**NEEDS (MCP):**` line (every spelling the AU plans
     use), else an inference from the plan: UI stories or a gate file -> studio;
     `assets/**` with .blend/.fbx -> blender; `audio/**` -> audio; else backend.
-    audio / images imply `gpu` (one card for ACE-Step, Comfy and the local model).
+    audio / images use Media_Gen (TrueNAS, its own job queue; 2026-10-27) and no
+    longer imply `gpu`, which is only the local model's streams (`resources.local_streams`).
   * the dependency graph: explicit "Depends on" plus file overlap (two sprints
     that may change the same file are serial), except files on the
     `append_safe` list (shared ledgers the coordinator merges row by row).
@@ -262,8 +263,6 @@ def _normalize(needs: Iterable[str]) -> list[str]:
             out.append(n)
     if "none" in out and len(out) > 1:
         out.remove("none")
-    if ("audio" in out or "images" in out) and "gpu" not in out:
-        out.append("gpu")
     if "backend" in out and any(n in out for n in ("studio", "blender", "audio", "images")):
         out.remove("backend")
     return sorted(out, key=NEEDS.index)

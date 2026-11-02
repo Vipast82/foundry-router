@@ -1005,6 +1005,32 @@ def test_a_local_model_sprint_takes_the_gpu_lock(game):
     assert "gpu" not in c._session_locks(P)
 
 
+def test_local_streams_let_that_many_local_sprints_run_at_once(game):
+    """2026-11-01 Victor: "run the audio sprints in parallel with Strata as the implementer":
+    resources.local_streams = 2 gives two local sessions a gpu unit each; the third waits."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    P = c.projects["game"]
+    P.profile.raw.setdefault("resources", {})["local_streams"] = 2
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    try:
+        FL.is_local_primary = lambda P, tid: True
+        got = []
+        for tid in ("A1", "A2", "A3"):
+            t = {"task_id": tid}
+            locks = [r for r in c._session_locks(P, t) if r.split("#")[0] == "gpu"]
+            held = c.store.acquire(locks, "game", tid)
+            got.append((locks, held))
+        assert got[0] == (["gpu"], None) and got[1] == (["gpu#2"], None)
+        assert got[2][1] is not None                         # both units taken: it waits
+        c.store.release("game", "A1", ["gpu"])
+        assert c._session_locks(P, {"task_id": "A3"})[-1] == "gpu"
+        assert c._session_locks(P, {"task_id": "A2"})[-1] == "gpu#2"   # keeps its unit
+    finally:
+        FL.is_local_primary = orig
+
+
 def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):
     """2026-10-30: Claude weekly 100% + ChatGPT capped: GF-LOOP1 and MV2-9 fell to the
     local model AS-D14 held and failed a session every few minutes."""

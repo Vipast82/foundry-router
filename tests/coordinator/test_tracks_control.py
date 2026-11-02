@@ -87,7 +87,7 @@ def test_analyze_propose_start_status_stop_through_actions(tmp_path):
     assert status == "applied" and st["tracks"][0]["name"] == "b1"
     assert st["tracks"][0]["sprints"][0]["state"] in (S.QUEUED, S.READY)
     _, status, detail, res = act(ch, ctl, "track_start", {"name": "audio", "sprints": ["A1"]})
-    assert status == "applied" and res["tracks"][0]["needs"] == ["audio", "gpu"]
+    assert status == "applied" and res["tracks"][0]["needs"] == ["audio"]
     _, status, detail, res = act(ch, ctl, "track_stop", {"name": "audio", "reason": "later"})
     assert status == "applied" and res["state"] == "stopped"
     assert c.store.task("game", "A1")["state"] == S.CANCELLED

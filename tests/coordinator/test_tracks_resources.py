@@ -54,6 +54,24 @@ def msg(tool, created_ms, end_ms=None):
 def test_needs_map_to_capacity_rows_and_studio_never(tmp_path):
     assert R.needs_locks(["blender"]) == ["blender"]
     assert R.needs_locks(["audio", "images", "gpu"]) == ["gpu"]
+    assert R.needs_locks(["audio", "images"]) == []          # Media_Gen queues its own jobs
+
+
+def test_gpu_units_follow_resources_local_streams():
+    """2026-11-01 Victor: audio sprints on Strata in parallel; the router lets N sessions in."""
+    class Prof:
+        raw = {"resources": {"local_streams": 3}}
+
+    class Proj:
+        profile = Prof()
+    assert R.capacity(Proj, "gpu") == 3
+    assert R.unit_names("gpu", R.capacity(Proj, "gpu")) == ["gpu", "gpu#2", "gpu#3"]
+    Prof.raw = {"resources": {"local_streams": 99}}
+    assert R.capacity(Proj, "gpu") == 8
+    Prof.raw = {"resources": {"local_streams": "x"}}
+    assert R.capacity(Proj, "gpu") == 1
+    Prof.raw = {}
+    assert R.capacity(Proj, "gpu") == 1
     assert R.needs_locks(["studio", "backend"]) == []
     assert R.is_studio_tool("Roblox_Studio_execute_luau")
     assert R.is_studio_tool("robloxstudio-mcp_get_place_info")

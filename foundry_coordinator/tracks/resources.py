@@ -1,7 +1,7 @@
 """Resources with capacity and the Studio scheduler (Team Lead piece 3).
 
 Resources are rows of the generic `locks` table, one row per unit of capacity
-(`studio`, `gpu`, `blender`: capacity 1 each), next to the writer slots and
+(`studio` 1; `gpu` = resources.local_streams; `blender` = the pool's jobs), next to the writer slots and
 the profile's exclusive names the engine already takes. A track's sprint takes
 the rows its needs map to (`needs_locks`); Studio is never one of them: a
 worktree cannot drive the one Rojo-served checkout.
@@ -39,11 +39,24 @@ CAPACITY = {"studio": 1, "gpu": 1, "blender": 1}
 
 def capacity(P, res: str) -> int:
     """Units of a capacity resource: the Blender pool's total jobs for `blender`
-    (BLENDER_POOL_PLAN D-P5), else CAPACITY."""
+    (BLENDER_POOL_PLAN D-P5), `resources.local_streams` for `gpu` (sessions the local model
+    serves at once; match the router backend's helpers_allowed + 1), else CAPACITY."""
     if res == "blender" and P is not None:
         from ..slot_blender import blender_capacity
         return blender_capacity(P.profile)
+    if res == "gpu" and P is not None:
+        return local_streams(P.profile)
     return CAPACITY.get(res, 1)
+
+
+def local_streams(profile) -> int:
+    """`resources.local_streams` (1-8, default 1): local-model sessions that run at once."""
+    raw = getattr(profile, "raw", None) or {}
+    try:
+        n = int((raw.get("resources") or {}).get("local_streams") or 1)
+    except (TypeError, ValueError):
+        n = 1
+    return max(1, min(8, n))
 
 
 def unit_names(res: str, n: int) -> list:
@@ -67,8 +80,9 @@ def pick_unit(store, P, task_id: str, res: str) -> str:
     return next((n for n in names if n not in taken), names[0])
 STUDIO_TOOL_GLOBS = ("Roblox_Studio_*", "robloxstudio-mcp_*", "robloxstudio_mcp_*")
 # needs (analysis.py) -> capacity resources a track sprint holds while it runs
-NEED_RESOURCES = {"blender": ("blender",), "gpu": ("gpu",), "audio": ("gpu",),
-                  "images": ("gpu",)}
+# 2026-11-01: audio / images run on Media_Gen (TrueNAS, its own one-at-a-time job queue), not
+# on the local model: they hold no `gpu` unit (Victor: "run the audio sprints in parallel")
+NEED_RESOURCES = {"blender": ("blender",), "gpu": ("gpu",)}
 MAIN_STUDIO_STATES = (S.VERIFYING,)                 # a main session live in VERIFYING
 MAIN_PENDING_STATES = (S.READY, S.CHANGES_REQUIRED, S.VERIFYING, S.APPROVED, S.CLOSING)
 OBSERVE_EVERY_S = 120

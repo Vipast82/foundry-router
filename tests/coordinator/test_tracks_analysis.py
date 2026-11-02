@@ -138,9 +138,10 @@ def test_needs_from_the_mcp_line_every_spelling():
     assert A.parse_mcp_line("no such line") is None
 
 
-def test_needs_block_wins_and_implies_gpu_for_audio():
+def test_needs_block_wins_and_audio_no_longer_implies_gpu():
+    """2026-11-01: audio/images run on Media_Gen (its own queue), not the local model."""
     p = A.parse_plan("AS-A1", AUDIO_PLAN)
-    assert p.needs == ["audio", "gpu"] and p.needs_source == "block"
+    assert p.needs == ["audio"] and p.needs_source == "block"
     assert A.parse_needs_block("## Needs\nnone\n") == ["none"]
     assert A.parse_needs_block("## Needs\n- studio\n- blender\n") == ["studio", "blender"]
 
@@ -150,7 +151,7 @@ def test_inference_when_nothing_is_declared():
     assert A.parse_plan("AS-Z", INFER_BLEND_PLAN).needs == ["blender"]
     p = A.parse_plan("S99", INFER_BACKEND_PLAN)
     assert p.needs == ["backend"] and p.needs_source == "inferred"
-    assert A.infer_needs(["audio/sfx/*.ogg"], []) == ["audio", "gpu"]
+    assert A.infer_needs(["audio/sfx/*.ogg"], []) == ["audio"]
     assert A.infer_needs(["src/x.lua"], ["a.b"]) == ["studio"]
 
 
@@ -178,7 +179,7 @@ def test_shared_ledgers_are_not_conflicts_but_strings_lua_is():
                    for r in reasons.values())
     ui = next(t for t in out["tracks"] if "UI-03a" in t["sprints"])
     assert ui["needs"] == ["studio"] and ui["studio_at_merge"]
-    assert next(t for t in out["tracks"] if "AS-A1" in t["sprints"])["needs"] == ["audio", "gpu"]
+    assert next(t for t in out["tracks"] if "AS-A1" in t["sprints"])["needs"] == ["audio"]
     assert out["tracks"][0]["kind"] == "main" and all(t["kind"] == "parallel"
                                                       for t in out["tracks"][1:])
     assert any("GF-SEC2" in w for w in out["warnings"])         # external dependency
@@ -264,7 +265,7 @@ def test_plan_from_a_generic_task_spec():
     p = A.plan_from_spec(s)
     assert p.needs == ["blender"] and p.needs_source == "task" and p.deps == ["T0"]
     s2 = TaskSpec("p", "T2", "t", "spec", ["audio/x.ogg"], data={"needs": "audio, images"})
-    assert A.plan_from_spec(s2).needs == ["audio", "images", "gpu"]
+    assert A.plan_from_spec(s2).needs == ["audio", "images"]
     s3 = TaskSpec("p", "T3", "t", "spec", ["src/a.txt"])
     assert A.plan_from_spec(s3).needs == ["backend"]
 

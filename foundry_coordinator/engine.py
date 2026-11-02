@@ -3090,7 +3090,7 @@ class Coordinator:
                 locks = self._workspace_locks(P) + self._session_locks(P, t)
                 close_persona = self._closeout_frontier(P, t, locks)
                 if close_persona:
-                    locks = [r for r in locks if r != "gpu"]
+                    locks = [r for r in locks if r.split("#", 1)[0] != "gpu"]
                 if self._acquire(P, t, locks, writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
@@ -5606,11 +5606,12 @@ class Coordinator:
         `gpu` held by an asset track while the main checkout and its Claude/ChatGPT sprints
         sat idle. CLOSE is no Blender work: it runs on the project's default implementer
         (frontier first) when the GPU is taken."""
-        if "gpu" not in locks or self.tracks.is_track(P):
+        if not any(r.split("#", 1)[0] == "gpu" for r in locks) or self.tracks.is_track(P):
             return ""
-        held = [l for l in self.store.locks() if l["resource"] == "gpu"
+        from .tracks.resources import capacity
+        held = [l for l in self.store.locks() if l["resource"].split("#", 1)[0] == "gpu"
                 and not (l["project_id"] == P.id and l["task_id"] == t["task_id"])]
-        if not held:
+        if len(held) < capacity(P, "gpu"):          # a free local stream: no need to switch
             return ""
         default = str((P.profile.roles or {}).get("implementer") or "")
         raw = getattr(P.profile, "raw", None) or {}
@@ -7088,17 +7089,20 @@ class Coordinator:
             from .tracks.resources import pick_unit
             unit = pick_unit(self.store, P, t["task_id"] if t else "", "blender")
             out = [unit if r == "blender" else r for r in out]
-        if t is not None and "gpu" not in out:
+        if t is not None and not any(r.split("#", 1)[0] == "gpu" for r in out):
             from .fast_lane import is_local_primary
+            from .tracks.resources import pick_unit
+            # 2026-11-01: `gpu` has resources.local_streams units (gpu, gpu#2, ...): one per
+            # local-model session the router lets run at once (Victor: audio on Strata in parallel)
             if is_local_primary(P, t["task_id"]):
-                out.append("gpu")
+                out.append(pick_unit(self.store, P, t["task_id"], "gpu"))
             else:
                 # infra.session_failure: the frontier persona fell back to the local model
                 # (quota) and found it busy: wait for `gpu` instead of failing sessions
                 cur = self.store.task(P.id, t["task_id"]) or t
                 until = float(((cur.get("data") or {}).get("local_fallback_until")) or 0)
                 if until > self.clock():
-                    out.append("gpu")
+                    out.append(pick_unit(self.store, P, t["task_id"], "gpu"))
         return out
 
     def _acquire(self, P: Project, t: dict, resources: list[str],
@@ -7108,7 +7112,9 @@ class Coordinator:
         what it is waiting for (and keeps nothing it newly took)."""
         pid, tid = P.id, t["task_id"]
         before = set(self.store.holds(pid, tid))
-        if "gpu" in resources and "gpu" not in before and self.tracks.is_track(P):
+        if (any(r.split("#", 1)[0] == "gpu" for r in resources)
+                and not any(r.split("#", 1)[0] == "gpu" for r in before)
+                and self.tracks.is_track(P)):
             # 2026-10-29: AS-R5 (main, local, mid-sprint) waited for `gpu` held by the
             # assets-2 track; the main checkout sat idle and its Claude/ChatGPT sprints could
             # not start behind it. The main track is the bottleneck: it gets the GPU first.

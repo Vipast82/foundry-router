@@ -1029,6 +1029,12 @@ FIELDS: list[Field] = [
       "restart"),
     F("resources.exclusive", "list", [], "Resources one task holds at a time "
       "(e.g. studio:host, rojo:34872).", "workspace", "coordinator.engine", item_type="str"),
+    F("resources.local_streams", "int", 1, "Local model sessions that run at once (sprints whose "
+      "implementer is a local persona, e.g. Strata). Each holds one unit of `gpu`; more wait. "
+      "Match the router: Backends -> Pool -> the local backend's helpers_allowed + 1 (a session "
+      "over the router's limit is refused). Audio and image sprints no longer hold `gpu`: "
+      "Media_Gen queues its own jobs.", "workspace", "coordinator.engine", "next_session",
+      min=1, max=8),
     # client ---------------------------------------------------------------------
     F("client.kind", "enum", "kilo", "Coding client.", "client", "coordinator.adapters",
       "restart", enum=["kilo", "fake", "scripted"]),

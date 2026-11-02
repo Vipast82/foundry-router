@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.172.0 — local-model sessions run in parallel; audio sprints no longer take the GPU lock
+
+2026-11-01. Victor: "Run the Audio Sprints in parallel with local AI (Strata) as the implementor,
+and run them non stop, run as many parallel sprints as possible". Two things made that
+impossible: every audio (and image) sprint held the one `gpu` lock for its whole track, and the
+`gpu` lock had a single unit, so only one local-model session could run at a time.
+
+- **Audio/images no longer imply `gpu`** (`tracks/analysis.py`, `tracks/resources.py`). Since
+  2026-10-27 they run on Media_Gen (TrueNAS), which queues its own jobs one at a time. The `gpu`
+  lock is now only the local model's sessions.
+- **New setting `resources.local_streams`** (1-8, default 1; Automation → Settings → workspace).
+  `gpu` gets that many units (`gpu`, `gpu#2`, ...). A local-implementer session takes a free
+  unit and keeps it; when all are taken it waits as before. The main-sprint-first rule and the
+  frontier CLOSE fallback count units.
+- **Router side (Victor's setting):** the router must let that many sessions in. Backends → Pool
+  → the local backend's `helpers_allowed` = local_streams - 1. While it is 0 the router serves
+  one session ("serves the main stream only"), so keep local_streams at 1 until it is raised.
+- Tests: `test_tracks_analysis.py`, `test_tracks_resources.py`
+  (`test_gpu_units_follow_resources_local_streams`), `test_engine.py`
+  (`test_local_streams_let_that_many_local_sprints_run_at_once`).
 ## v0.171.0 — turnaround recipe: draw an asset's missing views from its approved sheet (gap 5)
 
 2026-11-01. Plan: `docs/plans/TURNAROUND_RECIPE_PLAN.md` (built with the recommended answers).
