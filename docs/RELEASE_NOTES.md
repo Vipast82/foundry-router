@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.4 — a sprint keeps Strata while it waits on a short decision
+
+2026-11-01 23:4x. Victor: "AS-A02 doesn't look like it's moving". AS-A02 stopped for 3 minutes on a
+decision with a timeout default, gave up the single local-model unit, and AS-A10 took it for a
+whole turn. AS-A02, with only its uploads and closeout left, waited 10 to 30 minutes.
+
+- **`engine._lc_wait`:** when one of the decisions answers itself within
+  `LEAD_SHORT_DEFER_SECONDS` (15 min), the sprint keeps its `gpu` unit(s) and releases the
+  rest. `store.transition` frees everything on BLOCKED, so the kept unit is taken back in the
+  same engine step. The resumed sprint picks its own unit and starts at once. A decision with
+  no deadline, or a far one, releases everything as before. The `decision_wait` event lists
+  what was kept.
+- **`selfheal.stale_locks`:** it leaves those `gpu` units alone while the decision is short.
+  This is the same `_main_pause_is_automatic` rule that keeps the main checkout.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_a_short_decision_wait_keeps_the_sprints_gpu_unit`; fails on v0.180.3).
+
 ## v0.180.3 — a frontier sprint is not pinned to Strata while the frontier serves
 
 2026-11-01 23:3x. Victor asked whether every sprint was moving. AS-F28 (a Blender sprint, frontier

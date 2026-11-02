@@ -1192,6 +1192,40 @@ def test_a_local_fallback_hold_clears_while_the_frontier_serves_the_same_persona
         FL.is_local_primary = orig
 
 
+def test_a_short_decision_wait_keeps_the_sprints_gpu_unit(game):
+    """2026-11-01 AS-A02: it stopped 3 minutes for a decision with a timeout default, gave up
+    Strata, and AS-A10 took it for a whole turn. A decision that answers itself soon keeps the
+    local-model unit; a decision with no deadline releases it as before."""
+    from foundry_coordinator import selfheal
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    c.obligations  # schema
+    now = c.clock()
+
+    def decision(did, deadline):
+        c.store.x("INSERT INTO decisions (decision_id, project_id, task_id, kind, question, "
+                  "status, opened_ts, deadline_ts) VALUES (?,?,?,?,?,?,?,?)",
+                  (did, "game", "T1", "implementer_blocked", "q", "open", now, deadline))
+
+    decision("d-soon", now + 180)
+    c.store.acquire(["gpu", "writer:0"] + c._workspace_locks(P), "game", "T1")
+    c._lc_wait(P, c.store.task("game", "T1"), ["d-soon"], "why", S.READY)
+    assert c.store.holds("game", "T1") == ["gpu"]                # Strata kept, the rest given back
+    # the stale-lock sweep leaves it alone while the decision answers itself soon
+    c.store.x("UPDATE locks SET acquired_ts=? WHERE task_id='T1'", (now - 7200,))
+    selfheal.stale_locks(c, P)
+    assert c.store.holds("game", "T1") == ["gpu"]
+
+    c.store.release("game", "T1")
+    c.store.update_task("game", "T1", state=S.IMPLEMENTING)
+    decision("d-person", None)
+    c.store.acquire(["gpu", "writer:0"], "game", "T1")
+    c._lc_wait(P, c.store.task("game", "T1"), ["d-person"], "why", S.READY)
+    assert c.store.holds("game", "T1") == []                     # a person's answer: released
+
+
 def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):
     """2026-10-30: Claude weekly 100% + ChatGPT capped: GF-LOOP1 and MV2-9 fell to the
     local model AS-D14 held and failed a session every few minutes."""

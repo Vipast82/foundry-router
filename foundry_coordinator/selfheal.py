@@ -640,6 +640,13 @@ def stale_locks(c, P) -> list[dict]:
             continue                 # a track lease / a live state: not ours to judge
         if _task_busy(c, P, t) or not _allowed(c, P, tid):
             continue
+        if t["state"] == S.BLOCKED and all(str(r).split("#", 1)[0] == "gpu" for r in res):
+            try:
+                kept = c._main_pause_is_automatic(P, t)
+            except Exception:                                     # noqa: BLE001
+                kept = False
+            if kept:
+                continue             # its decision answers itself soon: it keeps Strata (v0.180.4)
         c.store.release(P.id, tid, res)
         try:
             c._journal_locks(P, t, [r for r in res if not r.startswith("writer:")], "release")

@@ -5085,12 +5085,43 @@ class Coordinator:
                                   "why": why[:500],
                                   "question_hashes": self._lc_question_hashes(ids)}}
         data.pop(self.LC_PENDING, None)
-        self.store.release(pid, tid)
+        keep = self._short_wait_gpu(pid, tid, ids)
+        if keep:
+            # 2026-11-01 AS-A02: it stopped 3 minutes for a decision with a timeout default,
+            # gave up Strata, and AS-A10 took it for a whole turn. A decision that answers
+            # itself soon keeps the sprint's local-model unit (as _main_pause_is_automatic
+            # keeps the main checkout); everything else is released as before.
+            self.store.release(pid, tid, [r for r in self.store.holds(pid, tid)
+                                          if r not in keep])
+        else:
+            self.store.release(pid, tid)
         self.store.event(pid, tid, "decision_wait", detail={"decisions": ids, "why": why[:500],
-                                                            "resume": resume})
+                                                            "resume": resume,
+                                                            "kept": keep})
         self.store.transition(pid, tid, S.BLOCKED, {
             **(evidence or {}), "blocker": text, "blocker_class": "decision",
             "decision_id": ",".join(ids)}, blocker=text, data=data)
+        if keep:
+            # store.transition releases everything a stopping task holds; take the kept
+            # local-model unit back in the same engine step (nothing else runs between)
+            self.store.acquire(keep, pid, tid)
+
+    def _short_wait_gpu(self, pid: str, tid: str, ids: list) -> list:
+        """The `gpu` units the task holds, when one of `ids` is an open decision whose
+        timeout default lands within LEAD_SHORT_DEFER_SECONDS ([] otherwise)."""
+        held = [r for r in self.store.holds(pid, tid) if str(r).split("#", 1)[0] == "gpu"]
+        if not held or not ids:
+            return []
+        try:
+            rows = self.store.q("SELECT status, deadline_ts FROM decisions WHERE decision_id IN "
+                                "(%s)" % ",".join("?" * len(ids)), tuple(ids))
+        except Exception:                                         # noqa: BLE001
+            return []
+        now = self.clock()
+        soon = any(r["status"] == "open" and r["deadline_ts"]
+                   and float(r["deadline_ts"]) - now <= self.LEAD_SHORT_DEFER_SECONDS
+                   for r in rows)
+        return held if soon else []
 
     def _lc_decided(self, did: str) -> bool:
         d = self.obligations.decision(did)
