@@ -98,6 +98,11 @@ LEAD_MANAGER_DEFAULTS = {
                                               # *_test.*, *.spec.* ...)
     "repair_broader_tests": ["tests/coordinator"],  # broader suite of a coordinator repair
                                               # when the lead names none
+    # 2026-11-02 (GF-LOBBY1): the whole tests/coordinator folder runs ~35 min serially on
+    # a busy workstation. "affected" runs only a folder's test files that import a changed
+    # module (judged as the folder); "all" runs the folder as named.
+    "repair_broader_select": "affected",
+    "repair_broader_timeout_minutes": 45,     # the broader pytest run's limit (focused 15)
     "repair_root": "",
     "router_repo": "",
     "supervisor": "manual",                   # manual | supervisor
@@ -123,6 +128,7 @@ LEAD_MANAGER_DEFAULTS = {
     "max_clean_paths": 20,                    # files one clean_untracked op may remove
 }
 LEAD_SUPERVISOR_MODES = ("manual", "supervisor")
+LEAD_BROADER_SELECT_MODES = ("affected", "all")
 
 # [fast_lane] (UI-T0): named tasks run as one long session verified by the
 # project's studio_gate runner (fast_lane.py). Off by default; a task not in
@@ -451,9 +457,12 @@ def lead_manager_table(path: str, raw) -> dict:
     if out["reviewer"] and out["reviewer"].strip().casefold() == out["persona"].strip().casefold():
         raise SettingsError(f"{path}: lead_manager.reviewer must differ from the lead persona",
                             "lead_manager.reviewer")
+    if out["repair_broader_select"] not in LEAD_BROADER_SELECT_MODES:
+        raise SettingsError(f"{path}: lead_manager.repair_broader_select must be affected or all",
+                            "lead_manager.repair_broader_select")
     for k in ("max_diagnoses", "max_quota_calls", "max_case_minutes", "lead_timeout_minutes",
               "max_cases_per_task", "max_lead_calls_per_task", "max_upgrade_minutes",
-              "max_resuming_minutes"):
+              "max_resuming_minutes", "repair_broader_timeout_minutes"):
         if out[k] < 1:
             raise SettingsError(f"{path}: lead_manager.{k} must be at least 1",
                                 f"lead_manager.{k}")
@@ -790,6 +799,9 @@ _LM_DESC = {
     "defer_seconds": "First DEFERRED backoff (doubles, capped at 1 h).",
     "acceptance_tests": "Game test globs an assignment must declare to change.",
     "repair_broader_tests": "Broader suite of a coordinator repair.",
+    "repair_broader_select": "affected = a folder in the broader suite runs only its test files "
+                             "that import a changed module; all = the whole folder.",
+    "repair_broader_timeout_minutes": "Time limit of a repair's broader pytest run.",
     "repair_root": "Repair worktree root (default <state_dir>/repairs).",
     "router_repo": "Router checkout for repairs (default the running package).",
     "supervisor": "manual | supervisor.",
@@ -1129,9 +1141,11 @@ FIELDS: list[Field] = [
         role_binding="lead" if k == "persona" else None,
         min=(1 if k in ("max_diagnoses", "max_quota_calls", "max_case_minutes",
                         "lead_timeout_minutes", "max_cases_per_task", "max_lead_calls_per_task",
-                        "max_upgrade_minutes", "max_resuming_minutes")
+                        "max_upgrade_minutes", "max_resuming_minutes",
+                        "repair_broader_timeout_minutes")
              else 0 if isinstance(v, int) and not isinstance(v, bool) else None),
-        enum=list(LEAD_SUPERVISOR_MODES) if k == "supervisor" else None)
+        enum=list(LEAD_SUPERVISOR_MODES) if k == "supervisor" else
+        list(LEAD_BROADER_SELECT_MODES) if k == "repair_broader_select" else None)
       for k, v in LEAD_MANAGER_DEFAULTS.items()],
     # fast lane ------------------------------------------------------------------
     *[F(f"fast_lane.{k}", {bool: "bool", int: "int", str: "str", list: "list"}[type(v)], v,

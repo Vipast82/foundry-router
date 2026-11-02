@@ -242,6 +242,61 @@ def resolve_test_ids(root: str, ids: Iterable[str]) -> tuple[list[str], dict]:
     return out, mapped
 
 
+BROADER_SELECT_MODES = ("affected", "all")
+
+
+def affected_tests(root: str, folder: str, changed: Iterable[str]) -> Optional[list[str]]:
+    """The test files under `folder` a candidate's change can affect: those that import
+    a changed module (by its dotted name, or `from <package> import <name>`) or are
+    named after it (test_<name>*.py), plus the changed test files. None = the folder
+    can't be narrowed (a changed non-Python file, a changed support file such as
+    helpers.py or conftest.py, or nothing matched): run all of it. 2026-11-02 GF-LOBBY1:
+    the whole tests/coordinator folder ran serially for ~35 min on a busy workstation."""
+    folder = folder.replace("\\", "/").rstrip("/")
+    top = os.path.join(root, folder)
+    if not folder or not os.path.isdir(top):
+        return None
+    pats, picked = [], set()
+    for c in [str(x).replace("\\", "/") for x in changed or []]:
+        under = c.startswith(folder + "/")
+        if is_test_path(c):
+            base = c.rsplit("/", 1)[-1]
+            if under and base.startswith("test_") and c.endswith(".py"):
+                if os.path.isfile(os.path.join(root, c)):
+                    picked.add(c)
+            elif under or base == "conftest.py":
+                return None                      # a fixture or helper change reaches every test
+            continue
+        if not c.endswith(".py"):
+            return None                          # data or prompt files: no import to follow
+        parts = c[:-3].split("/")
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not parts:
+            return None
+        dotted, last, pkg = ".".join(parts), parts[-1], ".".join(parts[:-1])
+        alts = [rf"\b{re.escape(dotted)}\b"]
+        if pkg:
+            alts.append(rf"\bfrom\s+{re.escape(pkg)}\s+import\s+(?:\([^)]*|[^\n]*)\b{last}\b")
+        pats.append((re.compile("|".join(alts)), last))
+    for dirpath, dirnames, files in os.walk(top):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith((".", "__")))
+        for f in sorted(files):
+            if not (f.startswith("test_") and f.endswith(".py")):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, f), root).replace("\\", "/")
+            if rel in picked:
+                continue
+            try:
+                with open(os.path.join(dirpath, f), encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            if any(f.startswith(f"test_{last}") or rx.search(text) for rx, last in pats):
+                picked.add(rel)
+    return sorted(picked) or None
+
+
 def check_test_ids(ids: Iterable[str], *, require_node: bool = False) -> list[str]:
     """The normalized ids, or RepairError for the first unsafe one."""
     out = []
@@ -316,7 +371,7 @@ def id_problems(ids: list[str], cases: Optional[list[dict]]) -> list[str]:
 
 
 def run_pytest(python: str, cwd: str, ids: list[str], timeout: float, *,
-               collect_only: bool = False) -> dict:
+               collect_only: bool = False, expect: Optional[list[str]] = None) -> dict:
     """One sandboxed pytest subprocess over validated ids (after `--`, so an
     id is never an option), with a junit report. {ids, rc, ok, timed_out,
     seconds, log, cases, problems, collected}. ok = rc 0 and every named id
@@ -352,7 +407,10 @@ def run_pytest(python: str, cwd: str, ids: list[str], timeout: float, *,
                             if "::" in ln and not ln.startswith((" ", "<", "="))]
         res["ok"] = rc == 0
         return res
-    res["problems"] = id_problems(ids, cases) if rc is not None else ["timed out"]
+    # expect: the ids the run answers for (a folder narrowed to some of its files is
+    # judged as that folder: one test passed, none failed)
+    res["problems"] = id_problems(list(expect or ids), cases) if rc is not None \
+        else ["timed out"]
     res["ok"] = rc == 0 and not res["problems"]
     return res
 
@@ -876,11 +934,16 @@ class RepairWorkspace:
         return got
 
     def run_tests(self, path: str, focused: list[str], broader: list[str],
-                  timeout: float = DEFAULT_TIMEOUT) -> dict:
+                  timeout: float = DEFAULT_TIMEOUT, *, broader_timeout: Optional[float] = None,
+                  broader_select: str = "all", changed: Optional[list[str]] = None) -> dict:
         """Focused tests (required, non-empty) then a non-empty broader suite
         (the default when none is named), each a sandboxed subprocess pytest
         in the worktree; every named id must be collected and pass.
-        ok = both passed. `broader_ids` is the suite that ran."""
+        ok = both passed. `broader_ids` is the suite as named.
+        broader_select "affected": a folder in the broader suite runs only the test
+        files `affected_tests` picks for `changed` (judged as the folder); `selected`
+        maps each narrowed folder to its files. broader_timeout: the broader run's
+        limit (default `timeout`)."""
         ap = self.check_path(path)
         if not focused:
             return {"ok": False, "focused": None, "broader": None, "broader_ids": [],
@@ -894,12 +957,24 @@ class RepairWorkspace:
         if not broader:
             return {"ok": False, "focused": None, "broader": None, "broader_ids": [],
                     "log": "no broader test suite named or available"}
+        run_ids, selected = list(broader), {}
+        if broader_select == "affected" and changed is not None:
+            run_ids = []
+            for b_id in broader:
+                got = None if "::" in b_id or b_id.endswith(".py") else \
+                    affected_tests(ap, b_id, changed)
+                if got:
+                    selected[b_id] = got
+                run_ids += [g for g in (got or [b_id]) if g not in run_ids]
         f = self._pytest(ap, list(focused), timeout)
-        b = self._pytest(ap, list(broader), timeout) if f["ok"] else None
+        b = None
+        if f["ok"]:
+            kw = {"expect": list(broader)} if selected else {}
+            b = self._pytest(ap, run_ids, float(broader_timeout or timeout), **kw)
         ok = bool(f["ok"] and b and b["ok"])
         probs = (f["problems"] or []) + ((b or {}).get("problems") or [])
         return {"ok": ok, "focused": f, "broader": b, "broader_ids": broader,
-                "problems": probs,
+                "selected": selected, "problems": probs,
                 "log": (("; ".join(probs) + "\n") if probs else "")
                 + (f["log"] + ("\n" + b["log"] if b else ""))[-LOG_CHARS:]}
 
@@ -1104,7 +1179,8 @@ class RepairWorkspace:
                  declared_test_changes: Iterable[str] = (),
                  approved_test_changes: Iterable[str] = (), migrations: Optional[list] = None,
                  timeout: float = DEFAULT_TIMEOUT, context: str = "",
-                 lead_enabled: bool = True) -> dict:
+                 lead_enabled: bool = True, broader_timeout: Optional[float] = None,
+                 broader_select: str = "all") -> dict:
         """The candidate gate, in order; stops at the first failure.
         {ok, reasons, reproduce, existing, tests, review, manifest}."""
         ap = self.check_path(path)
@@ -1150,7 +1226,9 @@ class RepairWorkspace:
         if not ex["ok"]:
             out["reasons"].append("existing tests no longer hold: " + "; ".join(ex["problems"][:10]))
             return out
-        tests = self.run_tests(ap, focused, broader, timeout)
+        tests = self.run_tests(ap, focused, broader, timeout, broader_timeout=broader_timeout,
+                               broader_select=broader_select,
+                               changed=self.changed_files(ap, base))
         out["tests"] = tests
         if not tests["ok"]:
             out["reasons"].append("focused or broader tests failed"

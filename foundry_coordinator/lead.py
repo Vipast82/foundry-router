@@ -444,9 +444,8 @@ def report_contract(full_authority: bool = False, write_access: bool = False) ->
         "\"focused_tests\": [...], \"broader_tests\": [...], \"manifest\": "
         "{\"acceptance_tests\": []}} (classification coordinator; the coordinator suites live "
         "under tests/coordinator/, and the repair may add or extend tests under tests/; "
-        "broader_tests names the test files of the modules you change, never the whole "
-        "tests/coordinator folder: each pytest run stops after 15 minutes and that folder "
-        "takes longer); "
+        "broader_tests names the test files of the modules you change; a folder there runs "
+        "only its test files that import a changed module); "
         "{\"kind\": \"wait\", "
         "\"seconds\": N} (environment or provider_quota); {\"kind\": \"reverify\"} (evidence); "
         "{\"kind\": \"ask_victor\", \"user_action\": \"<only if Victor must do something "
@@ -3932,6 +3931,12 @@ class LeadManager:
                           project_id=P.id, declared_test_changes=declared)
                 if _accepts(rw.validate, "approved_test_changes"):
                     kw["approved_test_changes"] = approved
+                if _accepts(rw.validate, "broader_select"):
+                    # 2026-11-02: a folder runs only its tests the change can affect, with
+                    # its own time limit (the whole tests/coordinator took ~35 min)
+                    kw["broader_select"] = s.get("repair_broader_select") or "affected"
+                    kw["broader_timeout"] = float(
+                        s.get("repair_broader_timeout_minutes") or 45) * 60
                 journal = _ReviewJournal(self, P, case, review_key, s)
 
                 def gate():
@@ -3954,8 +3959,8 @@ class LeadManager:
                     res = {**res, "reasons": list(res.get("reasons") or []) + [
                         f"the {r['run'].replace('_', ' ')} pytest run of "
                         f"{', '.join(r['ids'][:5]) or '?'} timed out after "
-                        f"{int(float(r['seconds'] or 0))} s: name smaller broader tests "
-                        f"(the files your change touches), not a whole suite folder"
+                        f"{int(float(r['seconds'] or 0))} s: name fewer, more specific tests "
+                        f"(the test files of the modules you change)"
                         for r in slow]}
                 ra = self._action(review_key)
                 if ra is not None and ra["status"] in ("started", "uncertain"):

@@ -640,3 +640,63 @@ def test_replay_bare_test_paths_resolve_to_tests_coordinator(nested_router, tmp_
     assert m["tests"]["regression"] == "tests/coordinator/test_regression.py::test_add"
     assert m["tests"]["broader"] == ["tests/coordinator/test_calc.py",
                                      "tests/coordinator/test_other.py"]
+
+
+# -------------------------------------------------------------------- affected broader tests
+
+def test_affected_tests_picks_the_folder_files_that_import_a_changed_module(tmp_path):
+    """2026-11-02 GF-LOBBY1: the broader suite was the whole tests/coordinator folder
+    (~35 min serially). A folder narrows to its test files that import a changed module,
+    plus the changed test files; anything it cannot follow keeps the whole folder."""
+    root = str(tmp_path)
+    write(root, "pkg/__init__.py", "")
+    write(root, "pkg/alpha.py", "A = 1\n")
+    write(root, "pkg/sub/beta.py", "B = 1\n")
+    write(root, "tests/c/helpers.py", "")
+    write(root, "tests/c/test_by_dotted.py", "from pkg.alpha import A\n")
+    write(root, "tests/c/test_by_from.py", "from pkg.sub import (\n    gamma,\n    beta,\n)\n")
+    write(root, "tests/c/test_beta_named.py", "def test_x():\n    pass\n")
+    write(root, "tests/c/test_unrelated.py", "import os\n")
+    write(root, "tests/c/test_new.py", "def test_new():\n    pass\n")
+    write(root, "tests/c/deep/test_deep.py", "import pkg.alpha\n")
+    got = RP.affected_tests(root, "tests/c", ["pkg/alpha.py", "pkg/sub/beta.py",
+                                              "tests/c/test_new.py"])
+    assert got == ["tests/c/deep/test_deep.py", "tests/c/test_beta_named.py",
+                   "tests/c/test_by_dotted.py", "tests/c/test_by_from.py", "tests/c/test_new.py"]
+    # the whole folder: a helper or conftest change, a data file, nothing matched, no folder
+    assert RP.affected_tests(root, "tests/c", ["pkg/alpha.py", "tests/c/helpers.py"]) is None
+    assert RP.affected_tests(root, "tests/c", ["pkg/alpha.py", "tests/conftest.py"]) is None
+    assert RP.affected_tests(root, "tests/c", ["pkg/prompt.txt"]) is None
+    assert RP.affected_tests(root, "tests/c", ["pkg/nobody.py"]) is None
+    assert RP.affected_tests(root, "tests/none", ["pkg/alpha.py"]) is None
+
+
+def test_run_tests_affected_runs_only_the_folder_tests_the_change_reaches(ws, router):
+    path = ws.create("affected-1", base(router))
+    fix(path)
+    write(path, "tests/test_other.py", "def test_other():\n    assert False, 'not affected'\n")
+    write(path, "tests/test_calc_skipped.py",
+          "import calc\nimport pytest\n\n\n@pytest.mark.skip\ndef test_s():\n    pass\n")
+    changed = ["calc.py", "tests/test_regression.py"]
+    r = ws.run_tests(path, ["tests/test_regression.py"], ["tests"], timeout=120,
+                     broader_select="affected", changed=changed)
+    assert r["ok"], r["log"]
+    assert r["selected"] == {"tests": ["tests/test_calc.py", "tests/test_calc_skipped.py",
+                                       "tests/test_regression.py"]}
+    assert r["broader_ids"] == ["tests"]               # judged as the folder: a skipped file ok
+    assert sorted(r["broader"]["ids"]) == r["selected"]["tests"]
+    full = ws.run_tests(path, ["tests/test_regression.py"], ["tests"], timeout=120,
+                        broader_select="all", changed=changed)
+    assert not full["ok"] and full["selected"] == {}   # the whole folder reaches test_other
+
+
+def test_the_broader_run_has_its_own_time_limit(ws, router, monkeypatch):
+    path = ws.create("affected-2", base(router))
+    fix(path)
+    seen = []
+    monkeypatch.setattr(ws, "_pytest", lambda cwd, ids, timeout, **kw: seen.append(
+        (list(ids), timeout, kw)) or {"ok": True, "problems": [], "log": "", "ids": ids})
+    ws.run_tests(path, ["tests/test_regression.py"], ["tests"], timeout=900,
+                 broader_timeout=2700, broader_select="affected",
+                 changed=["calc.py", "tests/test_regression.py"])
+    assert [(t, kw) for _, t, kw in seen] == [(900, {}), (2700.0, {"expect": ["tests"]})]

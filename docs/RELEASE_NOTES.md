@@ -2,6 +2,38 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.8 — a repair's broader suite runs the tests its change can reach
+
+2026-11-02. A coordinator repair's broader suite defaults to the whole `tests/coordinator`
+folder (125 files, about 1,770 tests). The test conftest caps xdist workers by free memory,
+and this workstation often has about 1.4 GB free, so that folder runs serially for about 35
+minutes, more than twice the 900 s pytest limit. GF-LOBBY1's candidate timed out this way.
+v0.181.7 moved validation off the tick; this release makes the broader run fit.
+
+- **Affected tests (`lead_manager.repair_broader_select`, default `affected`):** a folder in
+  the broader suite, whether the default or named by the Lead, runs only its test files that
+  import a changed module (`foundry_coordinator.x.y`, or `from foundry_coordinator.x import
+  y`), test files named after it (`test_y*.py`), and the changed test files. The run is still
+  judged as the folder: at least one test passes and none fail, so a selected file that is
+  all skips is fine. The folder runs whole when the selection can't be followed: a changed
+  non-Python file, a changed helper or conftest under tests, or no match. For GF-LOBBY1's
+  change (scope.py plus the AU adapter) that is 26 files instead of 125; a bg_checks change
+  is 2. `all` restores the old behavior. Explicitly named files and node ids run as named.
+- **Broader time limit (`lead_manager.repair_broader_timeout_minutes`, default 45):** the
+  broader pytest run has its own limit. Reproduce, existing-test and focused runs keep 900 s.
+  Since v0.181.7 a long run no longer stalls the coordinator, only the case clock
+  (`max_case_minutes`, 240).
+- Both settings have UI controls (Lead section) and are validated: `affected` or `all`, and
+  at least 1 minute.
+- The Lead's report contract now says a folder in broader_tests runs only its test files
+  that import a changed module. A timed-out run's rejection reason asks for fewer, more
+  specific tests.
+- Tests: `tests/coordinator/test_repair_workspace.py`
+  (`test_affected_tests_picks_the_folder_files_that_import_a_changed_module`,
+  `test_run_tests_affected_runs_only_the_folder_tests_the_change_reaches`,
+  `test_the_broader_run_has_its_own_time_limit`) and `tests/coordinator/test_lead_manager.py`
+  (`test_the_lead_passes_broader_selection_and_its_time_limit_to_the_gate`).
+
 ## v0.181.7 — Lead candidate validation runs off the tick
 
 2026-11-02. Between 05:57 and 06:17 the coordinator wrote no events, logged nothing and

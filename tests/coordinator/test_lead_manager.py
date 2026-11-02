@@ -1682,3 +1682,29 @@ def test_a_timed_out_candidate_run_is_named_in_the_rejection_and_the_action(env)
         ("reproduce_base", False), ("reproduce_candidate", False), ("focused", False),
         ("broader", True)]
     assert runs[-1]["seconds"] == 900.4 and "timeout after" in runs[-1]["log_tail"]
+
+
+def test_the_lead_passes_broader_selection_and_its_time_limit_to_the_gate(env):
+    """2026-11-02: lead_manager.repair_broader_select / repair_broader_timeout_minutes
+    reach repair.validate (affected tests, 45 min by default; set per project)."""
+    from foundry_automation.schema import SettingsError, lead_manager_table
+    seen = []
+
+    class Recording(FakeRepair):
+        def validate(self, P, path, **kw):
+            seen.append({k: kw.get(k) for k in ("broader_select", "broader_timeout")})
+            return super().validate(P, path, **kw)
+
+    fr = Recording(env["tmp"])
+    lm = LeadManager(env["c"], repair_factory=lambda P, s: fr)
+    case = drive(env, _to_validate(env, lm), state_is("UPGRADING", "NEEDS_VICTOR"), lm=lm)
+    assert case["state"] == "UPGRADING"
+    assert seen == [{"broader_select": "affected", "broader_timeout": 2700.0}]
+    base = {"enabled": True, "persona": "L", "agent": "lead", "kilo_client": "kilo",
+            "expected_models": ["m"]}
+    t = lead_manager_table("p", {**base, "repair_broader_select": "all",
+                                 "repair_broader_timeout_minutes": 20})
+    assert (t["repair_broader_select"], t["repair_broader_timeout_minutes"]) == ("all", 20)
+    for bad in ({"repair_broader_select": "some"}, {"repair_broader_timeout_minutes": 0}):
+        with pytest.raises(SettingsError):
+            lead_manager_table("p", {**base, **bad})
