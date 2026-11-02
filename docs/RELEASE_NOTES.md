@@ -2,6 +2,31 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.178.0 — the asset judge scores candidates blind (Phase C pilot)
+
+2026-11-01. Plan: `docs/plans/ASSET_PILOT_PLAN.md` (Victor: "Yes, start the pilot"). The pilot
+rebuilds AS-J03's lever the new way and compares it with the shipped one. The v0.167.0 judge
+could only score one set of images per task.
+
+- **Approval rules: `candidates`** (asset rubric only). They are artifact globs with `{task}`,
+  one per candidate (e.g. `docs/evidence/{task}/cand_A/*.png`, `.../cand_B/*.png`).
+  - One checklist is written once from the design. Each candidate is then scored in its own
+    blind call against it: only that candidate's images, letters shuffled per candidate, no
+    file names, and a line saying the images show ONE candidate.
+  - Event `asset_judge_candidates`: per candidate, its score, verdict, findings and files.
+    It is recorded once per revision.
+  - The best candidate decides the task's verdict: approved first, then the most items
+    passed, then the fewest findings. A CHANGES verdict sends its findings back, prefixed with
+    the candidate.
+  - Fewer than two candidates with images scores as before. Rules without `candidates` are
+    unchanged, and the single-model prompt is byte-identical (refactored into
+    `score_parts`).
+- The pilot rule and the settings Victor turns on are listed in the plan. The pilot sprint is
+  AU `AS-P10`, pre-coded and queued through the prep queue.
+- Tests:
+  - `tests/coordinator/test_asset_judge.py` (+4);
+  - the judge, visual-approval, profile, engine and automation suites: 140 pass.
+
 ## v0.177.0 — slots: Studio's reopen puts missing plugins back
 
 2026-11-02. Slot-2's Studio had no MCP plugin and no Rojo plugin, so Foundry could not reach it,

@@ -90,6 +90,9 @@ class ApprovalRule:
     scope_any: list[str] = field(default_factory=list)   # the plan scope must name one
     asset_from: list[str] = field(default_factory=list)  # regexes (group 1 = asset id) on scope
     max_frames: int = 0                   # 0 = the judge's default
+    # Phase C pilot (docs/plans/ASSET_PILOT_PLAN.md): artifact globs, one per candidate; each
+    # candidate's images are scored on their own, blind, against the same checklist
+    candidates: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -321,7 +324,7 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
         if rubric not in ("", "screen", "asset"):
             raise ProfileError(f"{path}: approval rubric must be screen or asset")
         lists = {}
-        for k in ("references", "notes", "scope_any", "asset_from"):
+        for k in ("references", "notes", "scope_any", "asset_from", "candidates"):
             v = r.get(k) or []
             if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
                 raise ProfileError(f"{path}: approval {k} must be a list of strings")
@@ -341,7 +344,8 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
                                   artifacts=_frame_globs(list(r.get("artifacts") or [])),
                                   rubric=rubric, references=lists["references"],
                                   notes=lists["notes"], scope_any=lists["scope_any"],
-                                  asset_from=lists["asset_from"], max_frames=mf))
+                                  asset_from=lists["asset_from"], max_frames=mf,
+                                  candidates=lists["candidates"][:6]))
     if "asset_judge" in appr and not isinstance(appr["asset_judge"], bool):
         raise ProfileError(f"{path}: approval.asset_judge must be true or false")
     tasks = dict(raw.get("tasks") or {})

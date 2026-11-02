@@ -1096,7 +1096,9 @@ FIELDS: list[Field] = [
       "\"asset\"; off = those rules are ignored.", "review", "coordinator.asset_judge"),
     F("approval.rules", "table", [], "Approval rules [{match, kind, stage, artifacts}]; an "
       "asset rule adds rubric = \"asset\", references / notes (globs with {asset}), scope_any "
-      "(the plan must list one), asset_from (regexes, group 1 = asset id) and max_frames.",
+      "(the plan must list one), asset_from (regexes, group 1 = asset id), max_frames and "
+      "candidates (artifact globs with {task}, one per candidate: each candidate is scored on "
+      "its own, blind, against the same checklist; the best one decides).",
       "review", "coordinator.engine"),
     F("verify.checks", "table", [], "Verification checks [{name, command, phase, ...}].",
       "review", "coordinator.engine"),

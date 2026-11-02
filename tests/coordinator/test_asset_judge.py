@@ -295,3 +295,72 @@ def test_unverified_serving_model_never_approves(tmp_path):
     AJ.step(c, P, t, _spec(SCOPE), rule, "rev1")
     assert not c.store.approvals_
     assert c.store.data.get("visual_uncertain")              # one structured retry scheduled
+
+
+# ------------------------------------------------------------------ Phase C pilot: candidates
+
+def _cand_env(tmp_path, answers, both=True):
+    P, rule, c, t, calls, ref, _ = _env(tmp_path, answers)
+    rule = _rule(artifacts=["docs/evidence/{task}/cand_*/*.png"],
+                 candidates=["docs/evidence/{task}/cand_A/*.png",
+                             "docs/evidence/{task}/cand_B/*.png"])
+    frames = [_write(tmp_path, f"docs/evidence/AS-X1/cand_A/K_{v}.png", PNG + b"a" + v.encode())
+              for v in ("front", "back")]
+    if both:
+        frames += [_write(tmp_path, f"docs/evidence/AS-X1/cand_B/K_{v}.png",
+                          PNG + b"b" + v.encode()) for v in ("front", "back")]
+    P.adapter.approval_artifacts = lambda *_: {
+        r: hashlib.sha256((tmp_path / r).read_bytes()).hexdigest() for r in sorted(frames)}
+    return P, rule, c, t, calls, frames
+
+
+def test_profile_parses_candidates(tmp_path):
+    path = _toml(tmp_path, ['rubric = "asset"', 'artifacts = ["docs/evidence/{task}/cand_*/*.png"]',
+                            'candidates = ["docs/evidence/{task}/cand_A/*.png", '
+                            '"docs/evidence/{task}/cand_B/*.png"]'])
+    r = load(path).approvals[0]
+    assert r.candidates == ["docs/evidence/{task}/cand_A/*.png",
+                            "docs/evidence/{task}/cand_B/*.png"]
+
+
+def test_candidates_are_scored_one_by_one_blind_and_the_best_decides(tmp_path):
+    def answers(call, parts):
+        if call == 1:
+            return {"checklist": CHECK}
+        Ls = _letters_in(parts)
+        text = " ".join(p["text"] for p in parts if p.get("type") == "text")
+        assert "ONE candidate model" in text and "cand_" not in text
+        if call == 2:                                       # candidate A: one item fails
+            return {"verdict": "changes_required", "frames": [_frame(L) for L in Ls],
+                    "items": _items(("fail", "pass", "pass"), letters=(Ls[0],))}
+        return {"verdict": "approve", "frames": [_frame(L) for L in Ls], "items": _items()}
+    P, rule, c, t, calls, frames = _cand_env(tmp_path, answers)
+    spec = _spec(SCOPE + ["docs/evidence/AS-X1/cand_A/**"])
+    AJ.step(c, P, t, spec, rule, "rev1")
+    assert len(calls) == 3                                  # checklist + one score per candidate
+    for call in calls[1:]:
+        assert sorted(_letters_in(call)) == ["A", "B"]      # each sees only its own two images
+    ev = [d for k, d in c.store.events if k == "asset_judge_candidates"][0]
+    assert ev["best"] == "B"
+    assert [(x["candidate"], x["score"], x["verdict"]) for x in ev["candidates"]] == [
+        ("A", "2/3", "changes_required"), ("B", "3/3", "approve")]
+    assert len(c.store.approvals_) == 1 and "best B" in c.store.approvals_[0][6]
+    AJ.step(c, P, t, spec, rule, "rev1")                    # recorded: never paid again
+    assert len(calls) == 3
+    assert len([k for k, _ in c.store.events if k == "asset_judge_candidates"]) == 1
+
+
+def test_one_candidate_with_images_is_judged_as_a_single_model(tmp_path):
+    P, rule, c, t, calls, frames = _cand_env(tmp_path, _answers, both=False)
+    assert AJ.candidate_sets(_spec(SCOPE), rule, P.adapter.approval_artifacts()) == []
+    AJ.step(c, P, t, _spec(SCOPE), rule, "rev1")
+    assert len(calls) == 2 and len(c.store.approvals_) == 1
+    assert not [k for k, _ in c.store.events if k == "asset_judge_candidates"]
+
+
+def test_best_candidate_ranks_verdict_then_score_then_findings():
+    r = [("A", {"verdict": "changes_required", "score": "9/10", "findings": ["x"]}),
+         ("B", {"verdict": "approve", "score": "7/10", "findings": []}),
+         ("C", {"verdict": "approve", "score": "8/10", "findings": []})]
+    assert AJ.best_candidate(r)[0] == "C"
+    assert AJ.best_candidate(r[:1] + [("D", {"verdict": "uncertain", "score": None})])[0] == "A"

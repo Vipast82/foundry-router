@@ -223,6 +223,68 @@ def letters(fingerprint: str, rels: list[str]) -> dict:
     return out
 
 
+def candidate_sets(spec, rule, arts: dict) -> list:
+    """Phase C pilot (docs/plans/ASSET_PILOT_PLAN.md): [(label, {rel: sha})] for the rule's
+    `candidates` globs (labels A, B, ... in rule order), split out of the bound artifacts.
+    [] = score all images as one model (fewer than two candidates have images)."""
+    import fnmatch
+    tid = str(getattr(spec, "task_id", "") or "")
+    out = []
+    for i, pat in enumerate(getattr(rule, "candidates", None) or []):
+        pat = str(pat).replace("{task}", tid).replace("\\", "/")
+        mine = {rel: h for rel, h in arts.items() if fnmatch.fnmatchcase(rel, pat)}
+        if mine:
+            out.append((chr(ord("A") + i), mine))
+    return out if len(out) >= 2 else []
+
+
+def score_parts(pid: str, tid: str, assets: list, lettered: dict, blob_of: dict, checklist: list,
+                refs, retry_note: str = "", candidate: str = "") -> list:
+    """The score call's message parts: the judge's checklist, the references, then the model
+    images under their shuffled letters (no file names)."""
+    one = (" These images show ONE candidate model; judge it on its own merits. "
+           if candidate else "")
+    parts = [{"type": "text", "text": retry_note + (
+        f"Project {pid}, task {tid}. Below: YOUR checklist for {', '.join(assets)} (you wrote "
+        "it from the design before seeing the model), the approved reference images R1.., "
+        f"then {len(lettered)} images of the finished model labelled with shuffled letters. "
+        "The letters and their order say nothing about the view or which version is newest; "
+        "file names are hidden on purpose." + one + " " + HOUSE_AXES + " Score EVERY checklist "
+        "item: pass, fail or unclear, naming the letters that show it. For every image give: "
+        "letter, image_seen (true only if you see it), subject_present (the model is clearly "
+        'shown), validity (exactly "ok", "invalid", "occluded" or "missing_subject"), '
+        "observation (one line), findings (defects that break the design; empty when none). "
+        "Approve only if no item fails and every image is valid. Return JSON "
+        '{"verdict": "approve|changes_required|uncertain", "frames": [{"letter", "image_seen", '
+        '"subject_present", "validity", "observation", "findings"}], "items": [{"id", '
+        '"status", "letters", "note"}], "limitations": []}.\n\nChecklist:\n' +
+        "\n".join(f"{x['id']} [{x['kind']}] {x['part']} "
+                  f"{('(' + x['side'] + ')') if x['side'] else ''}: {x['check']}"
+                  for x in checklist))}]
+    parts += _intro_refs(refs)
+    for L, rel in lettered.items():
+        mime, blob = blob_of[rel]
+        parts.append({"type": "text", "text": f"Model image {L}"})
+        parts.append({"type": "image_url", "image_url": {
+            "url": f"data:{mime};base64,{base64.b64encode(blob).decode()}"}})
+    return parts
+
+
+def _passed(res: dict) -> int:
+    try:
+        return int(str(res.get("score") or "0/0").split("/")[0])
+    except ValueError:
+        return 0
+
+
+def best_candidate(results: list):
+    """(label, result) of the best candidate: approved first, then the most checklist items
+    passed, then the fewest findings, then the label."""
+    rank = {"approve": 0, "changes_required": 1, "uncertain": 2}
+    return min(results, key=lambda x: (rank.get(x[1].get("verdict"), 3), -_passed(x[1]),
+                                       len(x[1].get("findings") or []), x[0]))
+
+
 # ------------------------------------------------------------------------- answers
 
 def _answer(text: str) -> dict:
@@ -522,6 +584,11 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         checklist = items
 
     # -- 2. score the model images, blind -----------------------------------------------
+    cands = candidate_sets(spec, rule, arts)
+    if cands:
+        return _step_candidates(c, P, t, spec, rule, revision, arts, cands, checklist, refs,
+                                assets, persona, routes, fingerprint, tries, sfx, retry_note,
+                                max_frames)
     skey = f"asset-judge:{pid}:{tid}:{fingerprint}{sfx}"
     prior, go = _op(c, skey, pid, tid, "asset_judge")
     if prior and prior["status"] == "done":
@@ -544,28 +611,7 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         return
     lettered = letters(fingerprint, [rel for rel, _, _ in frames])
     blob_of = {rel: (mime, blob) for rel, mime, blob in frames}
-    parts = [{"type": "text", "text": retry_note + (
-        f"Project {pid}, task {tid}. Below: YOUR checklist for {', '.join(assets)} (you wrote "
-        "it from the design before seeing the model), the approved reference images R1.., "
-        f"then {len(lettered)} images of the finished model labelled with shuffled letters. "
-        "The letters and their order say nothing about the view or which version is newest; "
-        "file names are hidden on purpose. " + HOUSE_AXES + " Score EVERY checklist item: "
-        "pass, fail or unclear, naming the letters that show it. For every image give: letter, "
-        "image_seen (true only if you see it), subject_present (the model is clearly shown), "
-        'validity (exactly "ok", "invalid", "occluded" or "missing_subject"), observation (one '
-        "line), findings (defects that break the design; empty when none). Approve only if no "
-        'item fails and every image is valid. Return JSON {"verdict": "approve|changes_required'
-        '|uncertain", "frames": [{"letter", "image_seen", "subject_present", "validity", '
-        '"observation", "findings"}], "items": [{"id", "status", "letters", "note"}], '
-        '"limitations": []}.\n\nChecklist:\n' +
-        "\n".join(f"{x['id']} [{x['kind']}] {x['part']} {('(' + x['side'] + ')') if x['side'] else ''}"
-                  f": {x['check']}" for x in checklist))}]
-    parts += _intro_refs(refs)
-    for L, rel in lettered.items():
-        mime, blob = blob_of[rel]
-        parts.append({"type": "text", "text": f"Model image {L}"})
-        parts.append({"type": "image_url", "image_url": {
-            "url": f"data:{mime};base64,{base64.b64encode(blob).decode()}"}})
+    parts = score_parts(pid, tid, assets, lettered, blob_of, checklist, refs, retry_note)
     sid = f"asset-judge-{fingerprint[:20]}{sfx.replace(':', '-')}"
     raw, served = _call(c, P, t, skey, sid, persona, routes, parts, revision, "asset_judge")
     if raw is None:
@@ -601,3 +647,81 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         VA._changes(c, P, t, revision, arts, actor, res["findings"])
     else:
         VA._uncertain(c, P, t, revision, arts, actor, fingerprint, tries, res["findings"])
+
+
+def _step_candidates(c, P, t, spec, rule, revision, arts, cands, checklist, refs, assets,
+                     persona, routes, fingerprint, tries, sfx, retry_note, max_frames) -> None:
+    """Phase C pilot: score each candidate's images in its own blind call against the same
+    checklist (letters shuffled per candidate, no file names, the judge never learns which
+    candidate is which); record the comparison; the best candidate decides the verdict."""
+    from . import visual_approval as VA
+    pid, tid = P.id, t["task_id"]
+    results = []
+    for label, carts in cands:
+        key = f"asset-judge:{pid}:{tid}:{fingerprint}:cand{label}{sfx}"
+        prior, go = _op(c, key, pid, tid, "asset_judge")
+        if prior and prior["status"] == "done":
+            results.append((label, prior.get("result") or {}))
+            continue
+        if not go:
+            if prior and prior["status"] == "calling":
+                c.store.update_task(pid, tid, next_action=f"asset judge candidate {label} call "
+                                    "outcome uncertain after restart; paid call not repeated")
+            return
+        frames, left = pick_frames(P, carts, max_frames)
+        if not frames:
+            rec = {"verdict": "uncertain", "score": None, "unclear": 0, "clean": [],
+                   "findings": [f"no readable image for candidate {label}"], "files": sorted(carts)}
+            c.store.op_update(key, "done", rec)
+            results.append((label, rec))
+            continue
+        lettered = letters(fingerprint + ":" + label, [rel for rel, _, _ in frames])
+        blob_of = {rel: (mime, blob) for rel, mime, blob in frames}
+        parts = score_parts(pid, tid, assets, lettered, blob_of, checklist, refs, retry_note,
+                            candidate=label)
+        sid = f"asset-judge-{fingerprint[:16]}-{label}{sfx.replace(':', '-')}"
+        raw, served = _call(c, P, t, key, sid, persona, routes, parts, revision, "asset_judge")
+        if raw is None:
+            return
+        res = valid_score(_answer(raw), lettered, carts, checklist)
+        if not served:
+            res = {"verdict": "uncertain", "score": None, "unclear": 0, "clean": [],
+                   "findings": ["actual serving model was not verified as vision-capable"]}
+        rec = {"session_id": sid, "verdict": res["verdict"], "score": res["score"],
+               "unclear": res["unclear"], "clean": res["clean"], "served_model": served,
+               "findings": res["findings"][:12], "files": sorted(carts), "letters": lettered,
+               "left_out": left[:20],
+               "response_sha256": hashlib.sha256(str(raw).encode()).hexdigest()}
+        c.store.op_update(key, "done", rec)
+        results.append((label, rec))
+    table = [{"candidate": label, "verdict": r.get("verdict"), "score": r.get("score"),
+              "unclear": r.get("unclear"), "findings": (r.get("findings") or [])[:12],
+              "files": (r.get("files") or [])[:24]} for label, r in results]
+    best_label, best = best_candidate(results)
+    ekey = f"asset-judge-candidates:{pid}:{tid}:{fingerprint}{sfx}"
+    if not c.store.op(ekey):
+        c.store.op_begin(ekey, pid, tid, "asset_judge")
+        c.store.op_update(ekey, "done", {"best": best_label})
+        c.store.event(pid, tid, "asset_judge_candidates", detail={
+            "revision": revision, "assets": assets, "persona": persona, "best": best_label,
+            "candidates": table, "references": [r for r, _, _ in refs], "policy": POLICY})
+    if ((P.ws.head() != revision and not VA._frames_unchanged_since(P, spec, rule, revision)) or
+            P.adapter.approval_artifacts(spec, rule.artifacts) != arts or
+            any(path in {p for _, p in P.ws.status()} for path in arts)):
+        c.store.update_task(pid, tid, next_action="asset judge review became stale; the "
+                            "current revision is judged next")
+        return
+    actor = f"model:{persona}/{best.get('served_model') or 'unknown'}"
+    summary = "; ".join(f"{x['candidate']} {x['score'] or '?'} {x['verdict']}" for x in table)
+    if best.get("verdict") == "approve":
+        VA.remember_clean(c.store, pid, tid, [arts[r] for r in best.get("clean") or []
+                                              if r in arts])
+        c.store.add_approval(pid, tid, "visual", revision, arts, actor,
+                             f"asset judge candidates ({summary}); best {best_label}; {POLICY}")
+    elif best.get("verdict") == "changes_required":
+        VA._changes(c, P, t, revision, arts, actor,
+                    [f"candidate {best_label} (the best of {len(table)}: {summary}): {f}"
+                     for f in (best.get("findings") or [])])
+    else:
+        VA._uncertain(c, P, t, revision, arts, actor, fingerprint, tries,
+                      [f"candidate {best_label}: {f}" for f in (best.get("findings") or [])])
