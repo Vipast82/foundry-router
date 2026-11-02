@@ -3101,11 +3101,7 @@ class Coordinator:
                 # (and kept the Studio slot from its gate) while AS-F30 held a unit and waited
                 # for that slot. A CLOSE needs neither: drop them from its locks and let go
                 # of any it still holds.
-                locks = [r for r in locks if r.split("#", 1)[0] != "blender"]
-                spare = [r for r in self.store.holds(pid, tid)
-                         if r.split("#", 1)[0] == "blender" or self._idle_slot_lock(P, tid, r)]
-                if spare:
-                    self.store.release(pid, tid, spare)
+                locks = self._close_locks(P, t, locks)
                 if self._acquire(P, t, locks, writer=True):
                     return
                 run_id = f"{t['run_id']}-close{int(t['data'].get('closeout_attempts') or 0)}"
@@ -3300,7 +3296,8 @@ class Coordinator:
             return "done" if st.get("head") == head else "none"
         if self._held(P, t, "closeout"):
             return "wait"
-        if self._acquire(P, t, self._session_locks(P, t), writer=True):
+        if self._acquire(P, t, self._close_locks(P, t, self._session_locks(P, t)),
+                         writer=True):
             return "wait"
 
         def failed(why: str) -> str:
@@ -7182,6 +7179,17 @@ class Coordinator:
             self.tracks.resources.on_locks(P, t, resources, event)
         except Exception:                                         # noqa: BLE001
             pass
+
+    def _close_locks(self, P: Project, t: dict, locks: list) -> list:
+        """The locks a closeout (templated or CLOSE session) takes: never a Blender unit (it
+        writes docs only), and it lets go of any Blender unit or idle Studio-slot lock it
+        still holds. 2026-11-01 AS-D08 waited for a unit while keeping slot-1."""
+        pid, tid = P.id, t["task_id"]
+        spare = [r for r in self.store.holds(pid, tid)
+                 if r.split("#", 1)[0] == "blender" or self._idle_slot_lock(P, tid, r)]
+        if spare:
+            self.store.release(pid, tid, spare)
+        return [r for r in locks if r.split("#", 1)[0] != "blender"]
 
     def _idle_slot_lock(self, P: Project, tid: str, res: str) -> bool:
         """A Studio-slot lock (`slot:<id>`) the task holds with no scripted Studio run active:

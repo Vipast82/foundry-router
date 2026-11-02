@@ -5,6 +5,7 @@ profile/adapter, a scripted coding client and a fake Foundry, so the state
 machine, the mechanical checks and the store are exercised exactly as in
 production; only the model is replaced by a script."""
 
+import foundry_coordinator.engine as engine_mod
 import json
 import os
 import sys
@@ -1077,6 +1078,28 @@ def test_a_close_takes_no_blender_unit_and_lets_go_of_a_held_slot(game):
     for wanted, held in seen:
         assert not [r for r in wanted if r.split("#")[0] == "blender"]
         assert "slot:slot-1" not in held                         # given back before CLOSE
+
+
+def test_close_locks_drop_blender_and_give_back_held_units_and_idle_slots(game):
+    """2026-11-01: the templated closeout asked for `_session_locks` (with a Blender unit) and
+    AS-D08 waited for one while keeping slot-1."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    t = c.store.task("game", "T1")
+    c.store.acquire(["blender#2", "slot:slot-1", "writer:0"], "game", "T1")
+    orig = c.studio_calls.active
+    try:
+        c.studio_calls.active = lambda P, tid: False
+        out = c._close_locks(P, t, ["workspace:x", "blender", "blender#3", "writer:0"])
+    finally:
+        c.studio_calls.active = orig
+    assert out == ["workspace:x", "writer:0"]
+    assert c.store.holds("game", "T1") == ["writer:0"]
+    src = open(os.path.join(os.path.dirname(engine_mod.__file__), "engine.py"), encoding="utf-8").read()
+    body = src[src.index("def _closeout_template"):src.index("def ", src.index("def _closeout_template") + 10)]
+    assert "_close_locks(" in body                              # the templated closeout uses it
 
 
 def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):

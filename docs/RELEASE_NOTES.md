@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.2 — the templated closeout takes no Blender unit either
+
+2026-11-01 21:2x. After v0.179.1 AS-D08 still waited in CLOSING for a Blender unit while holding
+slot-1: the templated closeout (the no-model one that runs before any CLOSE session) asked for
+`_session_locks` with a Blender unit, a path v0.179.1 missed.
+
+- **`engine._close_locks`:** one helper for both closeout paths. It drops every Blender unit and
+  first gives back any Blender unit or idle Studio-slot lock the task still holds.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_close_locks_drop_blender_and_give_back_held_units_and_idle_slots`).
+
 ## v0.179.1 — Studio gates and CLOSE take no Blender unit; a session end gives back an idle Studio slot
 
 2026-11-01 20:5x. Two Blender tracks blocked each other. AS-D08 was CLOSING (docs only) and
