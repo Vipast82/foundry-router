@@ -1486,6 +1486,19 @@ def test_claude_agents_are_capped_and_the_cap_drops_at_the_usage_threshold(game)
     assert Router.calls == 1
     ev = [e for e in c.store.q("SELECT detail FROM events WHERE kind='claude_agent_cap'")]
     assert len(ev) == 1 and '"cap": 1' in ev[0]["detail"]
+    # a read with no Claude windows is recorded once (why the cap cannot switch)
+    R.CLAUDE_USAGE["game"]["ts"] = 0
+    answer_saved = dict(answer)
+    answer.clear()
+    answer["routes"] = [{"backend": "meridian", "state": "unknown", "accounts": []}]
+    c._refresh_claude_usage(P)
+    R.CLAUDE_USAGE["game"]["ts"] = 0
+    c._refresh_claude_usage(P)
+    un = c.store.q("SELECT detail FROM events WHERE kind='claude_usage_unread'")
+    assert len(un) == 1 and "meridian" in un[0]["detail"]
+    assert R.CLAUDE_USAGE["game"]["pct"] == 78.5           # the last reading stands
+    answer.clear()
+    answer.update(answer_saved)
 
     # over the threshold: one unit; a second Claude sprint waits
     c.store.acquire(["claude"], "game", "OTHER")

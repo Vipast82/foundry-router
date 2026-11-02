@@ -7256,14 +7256,22 @@ class Coordinator:
         if now - float(last.get("ts") or 0) < self.CLAUDE_USAGE_EVERY_S:
             return
         CLAUDE_USAGE[P.id] = {**last, "ts": now}
+        def unread(why: str) -> None:
+            # once per distinct reason: the operator can see why the cap cannot switch
+            if why != last.get("detail"):
+                self.store.event(P.id, "", "claude_usage_unread", detail={"why": why[:600]})
+                self.log(f"{P.id}: Claude usage not read: {why[:300]}")
+            CLAUDE_USAGE[P.id]["detail"] = why
         try:
             ans = P.foundry.helper_admission(cfg["personas"][0])
         except Exception as e:                                    # noqa: BLE001
-            CLAUDE_USAGE[P.id]["detail"] = f"usage read failed: {type(e).__name__}: {e}"[:300]
+            unread(f"usage read failed: {type(e).__name__}: {e}"[:600])
             return
         pct = claude_used_pct(ans, cfg["backend"])
         if pct is None:
-            CLAUDE_USAGE[P.id]["detail"] = "no Claude window reading in the router's answer"
+            routes = [(r.get("backend"), r.get("state"), len(r.get("accounts") or []),
+                       str(r.get("reason") or "")[:120]) for r in (ans or {}).get("routes") or []]
+            unread(f"no {cfg['backend']} window reading in the router's answer: routes {routes}")
             return
         before = last.get("pct")
         CLAUDE_USAGE[P.id] = {"pct": pct, "ts": now, "detail": ""}

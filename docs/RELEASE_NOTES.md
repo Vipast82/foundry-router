@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.1 — say why Claude usage was not read
+
+After v0.181.0 went live, no Claude usage reading arrived and nothing said why. Now a failed
+or empty read records a `claude_usage_unread` event and a log line, once per distinct
+reason. An empty read names the routes the router answered with: backend, state and account
+count. The last good reading still stands. The AU profile turns the cap on:
+`[resources] claude_agents = 5`, `claude_agents_over = 2`, `claude_usage_pct = 75`.
+
 ## v0.181.0 — Claude agent cap that drops at a usage threshold
 
 2026-11-02 01:5x. Victor: "keep 4 or 5 right now ... after 75% usage on Claude, then it's only
