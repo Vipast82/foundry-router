@@ -401,6 +401,11 @@ class TrackManager:
             except Exception:                                     # noqa: BLE001
                 pass
             needs = AN._normalize(n for p in plans for n in p.needs)
+        if slot and "studio" not in (needs or []):
+            # 2026-11-01: a slot track's kilo.jsonc enables (and points at the slot) only the
+            # Studio MCP servers its needs turn on. Blender plans read as `blender` alone, so
+            # AS-F04 / AS-J06 sessions had no Studio tools on a track bound to slot-1.
+            needs = AN._normalize(list(needs or []) + ["studio"])
         base = self.base_sha(P)
         path = os.path.join(self.root(P), name)
         branch = f"track/{name}"

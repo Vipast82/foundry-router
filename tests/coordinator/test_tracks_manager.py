@@ -53,6 +53,17 @@ def tracks_events(c, kind=None):
 
 # ------------------------------------------------------------------ creation
 
+def test_a_track_bound_to_a_slot_always_needs_studio(tmp_path):
+    """2026-11-01: AS-F04 / AS-J06 ran on tracks bound to slot-1 with needs `blender` alone,
+    so their kilo.jsonc kept the Studio MCP off and the sessions had no Studio tools."""
+    c, P, root = env(tmp_path)
+    P.profile.raw.setdefault("slots", {})["slot-1"] = {"container": "studio-slot"}
+    row = c.tracks.create(P, "blender", ["B1", "B2"], actor="victor", slot="slot-1")
+    assert row["needs"] == ["studio", "blender"] and row["data"]["slot"] == "slot-1"
+    plain = c.tracks.create(P, "audio", ["A1"], actor="victor")
+    assert "studio" not in plain["needs"]                     # no slot: unchanged
+
+
 def test_create_makes_a_worktree_and_branch_under_dot_tracks(tmp_path):
     c, P, root = env(tmp_path)
     row = c.tracks.create(P, "blender", ["B1", "B2"], actor="victor")

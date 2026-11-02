@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.4 — a track bound to a Studio slot always gets the slot's Studio MCP
+
+2026-11-01 21:5x. AS-F04 and AS-J06 stopped BLOCKED: "Studio MCP not routed to slot-1" / "No
+Roblox_Studio MCP tools available in this session". Their tracks were started with `--slot
+slot-1`, but the Blender plans read as needs `blender` alone. A track's kilo.jsonc enables only
+the Studio MCP servers its needs turn on, and the slot routing then points only enabled servers
+at the slot, so the sessions had no Studio tools at all.
+
+- **`tracks.manager.create`:** a track created with a slot always needs `studio`, so its
+  kilo.jsonc enables Roblox_Studio and robloxstudio-mcp and they run on the slot over ssh.
+- The 8 live slot tracks were fixed with `tracks set-needs <track> blender studio`, which
+  rewrites kilo.jsonc and re-points the servers.
+- Test: `tests/coordinator/test_tracks_manager.py` (`test_a_track_bound_to_a_slot_always_needs_studio`).
+
 ## v0.179.3 — Settings: list settings (approval.rules, verify.checks) take a JSON list
 
 2026-11-02. The pilot's `approval.rules` (the existing visual rule plus the AS-P10 asset rule)
