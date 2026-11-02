@@ -7161,9 +7161,42 @@ class Coordinator:
                 # (quota) and found it busy: wait for `gpu` instead of failing sessions
                 cur = self.store.task(P.id, t["task_id"]) or t
                 until = float(((cur.get("data") or {}).get("local_fallback_until")) or 0)
+                if until > self.clock() and self._frontier_serving(P, t):
+                    # 2026-11-01 AS-F28: one "local busy" after a connection reset held this
+                    # frontier sprint on Strata for an hour while 4 sprints with the same
+                    # persona were served by Claude/ChatGPT. Their live sessions prove the
+                    # frontier serves: drop the hold and start on the frontier again.
+                    self.store.merge_data(P.id, t["task_id"], local_fallback_until=None)
+                    self.store.event(P.id, t["task_id"], "local_fallback_cleared", detail={
+                        "why": "the same persona is serving other sprints on the frontier"})
+                    until = 0.0
                 if until > self.clock():
                     out.append(pick_unit(self.store, P, t["task_id"], "gpu"))
         return out
+
+    def _frontier_serving(self, P: Project, t: dict) -> bool:
+        """Another sprint whose implementer is this task's (non-local) persona has a session
+        working right now without holding a `gpu` unit: the frontier route serves (the local
+        model serves one stream, and that one holds `gpu`)."""
+        try:
+            persona = P.profile.persona("implementer", t["task_id"])
+        except Exception:                                         # noqa: BLE001
+            return False
+        holders = {(l["project_id"], l["task_id"]) for l in self.store.locks()
+                   if str(l["resource"]).split("#", 1)[0] == "gpu"}
+        for row in self.store.q(
+                "SELECT task_id FROM tasks WHERE project_id=? AND task_id != ? AND state IN "
+                "(?, ?) AND next_action LIKE ?", (P.id, t["task_id"], S.IMPLEMENTING, S.CLOSING,
+                                                  "%session working%")):
+            tid = row["task_id"]
+            if (P.id, tid) in holders:
+                continue
+            try:
+                if P.profile.persona("implementer", tid) == persona:
+                    return True
+            except Exception:                                     # noqa: BLE001
+                continue
+        return False
 
     def _acquire(self, P: Project, t: dict, resources: list[str],
                  writer: bool = False) -> Optional[dict]:

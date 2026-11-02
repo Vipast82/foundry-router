@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.3 — a frontier sprint is not pinned to Strata while the frontier serves
+
+2026-11-01 23:3x. Victor asked whether every sprint was moving. AS-F28 (a Blender sprint, frontier
+persona) got one "backend 'strata' serves the main stream only" right after a connection reset.
+`infra.session_failure` then held it for `gpu` for an hour (`LOCAL_FALLBACK_S`), behind the serial
+audio sprints. Meanwhile four sprints with the same persona were being served by Claude and
+ChatGPT.
+
+- **`engine._session_locks` + `_frontier_serving`:** a `local_fallback_until` hold is dropped,
+  with a `local_fallback_cleared` event, while another sprint with the same implementer persona
+  has a session working and holds no `gpu` unit. The local model serves one stream, and that
+  stream holds `gpu`. With nobody served (the 2026-10-30 case: frontier quotas out) the hold
+  stands as before.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_a_local_fallback_hold_clears_while_the_frontier_serves_the_same_persona`; fails on
+  v0.180.2).
+
 ## v0.180.2 — the Blender skill says how to save a slot Studio screenshot
 
 2026-11-01 23:1x. AS-F04 and AS-F21 stopped BLOCKED. On a slot track, `capture_screenshot`

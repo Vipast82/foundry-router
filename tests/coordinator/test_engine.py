@@ -1163,6 +1163,35 @@ def test_close_locks_drop_blender_and_give_back_held_units_and_idle_slots(game):
     assert 'split("#", 1)[0] != "gpu"' in body                  # and never waits for the model
 
 
+def test_a_local_fallback_hold_clears_while_the_frontier_serves_the_same_persona(game):
+    """2026-11-01 AS-F28: one "local busy" after a connection reset held a frontier sprint on
+    Strata for an hour while 4 sprints with the same persona were served by Claude/ChatGPT."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    try:
+        FL.is_local_primary = lambda P, tid: False
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() + 3600)
+        t1 = c.store.task("game", "T1")
+        # nobody else is served: the hold stands (Oct 30 case: the frontier was out)
+        assert any(r.split("#")[0] == "gpu" for r in c._session_locks(P, t1))
+        # T2 (same persona) has a session working without a gpu unit: the frontier serves
+        c.store.update_task("game", "T2", state=S.IMPLEMENTING, next_action="implement session working")
+        locks = c._session_locks(P, c.store.task("game", "T1"))
+        assert not any(r.split("#")[0] == "gpu" for r in locks)
+        assert not (c.store.task("game", "T1")["data"].get("local_fallback_until"))
+        # a T2 that itself holds gpu (it is the local stream) proves nothing
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() + 3600)
+        c.store.acquire(["gpu"], "game", "T2")
+        assert any(r.split("#")[0] == "gpu" for r in c._session_locks(P, c.store.task("game", "T1")))
+    finally:
+        FL.is_local_primary = orig
+
+
 def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):
     """2026-10-30: Claude weekly 100% + ChatGPT capped: GF-LOOP1 and MV2-9 fell to the
     local model AS-D14 held and failed a session every few minutes."""
