@@ -1413,3 +1413,31 @@ def test_a_sprint_waiting_on_a_decision_that_answers_itself_soon_keeps_the_main_
     c.store.x("UPDATE decisions SET deadline_ts=?, status='answered' WHERE decision_id='dec-1'",
               (c.clock() + 60,))
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+
+
+def test_the_gpu_unit_goes_to_the_waiter_first_in_queue_order(game):
+    """2026-11-02 AS-A02 (queue position 119) waited 30 min for Strata: the sprint giving it
+    up released it during its own step, and the sprint stepped right after it in the same
+    tick (AS-A22, AS-A21, positions 134/137) took it before AS-A02 looked again. A later
+    sprint now steps aside for an earlier one already waiting."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED)    # between sessions
+    c.store.update_task("game", "T2", state=S.READY)
+    c.store.acquire(["gpu"], "game", "HOLDER")
+    assert c._acquire(P, c.store.task("game", "T1"), ["gpu"]) is not None
+    assert c.store.task("game", "T1")["next_action"].startswith("waiting for gpu")
+    c.store.release("game", "HOLDER")                      # freed mid-tick, T2 steps next
+    w = c._acquire(P, c.store.task("game", "T2"), ["gpu"])
+    assert w and w["task_id"] == "T1"
+    assert "T1 is first in line" in c.store.task("game", "T2")["next_action"]
+    assert c.store.holds("game", "T2") == []
+    assert c._acquire(P, c.store.task("game", "T1"), ["gpu"]) is None     # T1 takes it
+    assert c.store.holds("game", "T1") == ["gpu"]
+    # an earlier task's stale note (it stopped) does not hold the line
+    c.store.release("game", "T1")
+    c.store.update_task("game", "T1", state=S.BLOCKED, next_action="waiting for gpu (old)")
+    assert c._acquire(P, c.store.task("game", "T2"), ["gpu"]) is None

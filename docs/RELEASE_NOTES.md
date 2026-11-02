@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.7 — Strata goes to the sprint first in line
+
+2026-11-02 01:2x. AS-A02 (queue position 119) waited 30 minutes for the single Strata unit
+while AS-A22 and then AS-A21 (positions 134, 137) started fresh sessions on it. The sprint
+giving up Strata releases it during its own engine step. The sprint stepped right after it
+in the same tick took the unit before AS-A02, which steps first, looked again. So an early
+sprint lost every hand-off.
+
+- **`engine._acquire` / `_gpu_first_in_line`:** a sprint about to take a `gpu` unit steps
+  aside when a sprint earlier in queue order is already "waiting for gpu", between sessions
+  or mid-sprint (READY, CHANGES_REQUIRED, IMPLEMENTING or CLOSING), and holds no unit. Its
+  note says "waiting for gpu (<task> is first in line)". A stale note on a stopped task
+  does not hold the line. The existing "main sprint goes first" rule is unchanged.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_the_gpu_unit_goes_to_the_waiter_first_in_queue_order`; fails on v0.180.6).
+
 ## v0.180.6 — self-heal ends sessions their task no longer follows
 
 2026-11-02 00:4x. Twelve main sprints sat behind the landing drain for an hour. Four prep

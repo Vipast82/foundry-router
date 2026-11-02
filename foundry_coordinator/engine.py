@@ -7250,6 +7250,12 @@ class Coordinator:
             if main_wait:
                 self._note(P, t, f"waiting for gpu (main sprint {main_wait[0]} goes first)")
                 return {"resource": "gpu", "project_id": pid, "task_id": main_wait[0]}
+        if (any(r.split("#", 1)[0] == "gpu" for r in resources)
+                and not any(r.split("#", 1)[0] == "gpu" for r in before)):
+            first = self._gpu_first_in_line(pid, tid)
+            if first:
+                self._note(P, t, f"waiting for gpu ({first} is first in line)")
+                return {"resource": "gpu", "project_id": pid, "task_id": first}
         held = self.store.acquire(resources, pid, tid)
         if held:
             self._note(P, t, f"waiting for {held['resource']} (held by "
@@ -7285,6 +7291,34 @@ class Coordinator:
             return {"resource": "writer"}
         self._journal_locks(P, t, [r for r in resources if r not in before], "acquire")
         return None
+
+    GPU_LINE_STATES = (S.READY, S.CHANGES_REQUIRED, S.IMPLEMENTING, S.CLOSING)
+
+    def _gpu_first_in_line(self, pid: str, tid: str) -> str:
+        """The task ahead of `tid` in queue order that already waits for the gpu unit ("" when
+        none). 2026-11-02 AS-A02: the releasing sprint frees Strata during its own step, and
+        the sprint stepped right after it in the same tick took it; AS-A02 (queue position
+        119) looked first each tick but always one tick late, and waited 30 minutes while
+        AS-A22 and AS-A21 (positions 134, 137) started fresh sessions."""
+        try:
+            mine = self.store.q("SELECT position FROM queue WHERE project_id=? AND task_id=?",
+                                (pid, tid))
+            if not mine:
+                return ""
+            rows = self.store.q(
+                "SELECT t.task_id, t.state, q.position FROM tasks t JOIN queue q ON "
+                "q.project_id=t.project_id AND q.task_id=t.task_id WHERE t.project_id=? AND "
+                "t.next_action LIKE 'waiting for gpu%' AND t.task_id != ? AND q.position < ? "
+                "ORDER BY q.position", (pid, tid, mine[0]["position"]))
+        except Exception:                                         # noqa: BLE001
+            return ""
+        for r in rows:
+            if r["state"] not in self.GPU_LINE_STATES:
+                continue                      # a stale note on a stopped task
+            if any(str(h).split("#", 1)[0] == "gpu" for h in self.store.holds(pid, r["task_id"])):
+                continue
+            return r["task_id"]
+        return ""
 
     def _journal_locks(self, P: Project, t: dict, resources: list[str], event: str) -> None:
         try:
