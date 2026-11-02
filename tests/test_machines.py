@@ -212,3 +212,13 @@ def test_slot_files_open_vnc_on_the_lan_with_its_password():
     assert "COPY novnc-index.html /usr/share/novnc/index.html" in docker
     index = (root / "novnc-index.html").read_text(encoding="utf-8")
     assert "vnc.html?autoconnect=1&resize=scale" in index
+
+
+def test_studio_reopen_puts_missing_plugins_back():
+    """A Wine prefix rebuilt while the container runs gets the MCP and Rojo plugins back at the
+    next reopen (entrypoint.sh copies them only at start; slot-2, 2026-11-02)."""
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" /
+            "studio-reopen.sh").read_text(encoding="utf-8")
+    copy = text.index('cp -u /opt/studio-slot/plugins/* "$RBX/Plugins/"')
+    assert text.index("wineserver -k") < copy < text.index("nohup vinegar")

@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.177.0 — slots: Studio's reopen puts missing plugins back
+
+2026-11-02. Slot-2's Studio had no MCP plugin and no Rojo plugin, so Foundry could not reach it,
+and it showed as a lost sign-in ("Connecting..."). The cause: `entrypoint.sh` copies the plugins
+into the Wine prefix only when the container starts, and slot-2's prefix had been rebuilt while
+the container ran (the half-built prefix moved aside, v0.166.2), so the new prefix never got
+them. Fixed by hand on 2026-11-02: the plugins were copied in and Studio reopened; the MCP check
+then passed.
+
+- `studio-reopen.sh` copies the plugins (`cp -u`, only new or newer files) into
+  `%LOCALAPPDATA%\Roblox\Plugins` while Studio is closed, before it opens again. Every reopen,
+  by Foundry or by hand, now puts them back.
+- Reaches a slot with its image: a reinstall (Access → Machines → New code, then
+  `setup-host.sh`). Slot-1 and slot-2 got the new script copied into their running containers
+  on 2026-11-02.
+- Tests: `tests/test_machines.py` (a new test: the copy sits between closing Studio and opening it).
+
 ## v0.176.0 — Linux main workstation: installer, enrollment, Export/Import, one active workstation (W3-W5); slot place field
 
 2026-11-01. Plan: `docs/plans/LINUX_WORKSTATION_PLAN.md` W3-W5 (approved; built with the
