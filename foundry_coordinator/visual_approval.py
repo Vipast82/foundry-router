@@ -36,9 +36,23 @@ def _answer(text: str) -> dict:
 
 def _required(P, spec, rule, arts: dict) -> tuple[list[tuple[str, str, bytes]], str]:
     pats = [p.replace("{task}", spec.task_id) for p in rule.artifacts]
-    named = sorted({p.replace("\\", "/") for p in spec.scope
-                    if p.lower().endswith((".png", ".jpg", ".jpeg"))
-                    and matches_any(p, pats)})
+    img = (".png", ".jpg", ".jpeg")
+    named_set = set()
+    for p in spec.scope:
+        p = p.replace("\\", "/")
+        if not p.lower().endswith(img) or not matches_any(p, pats):
+            continue
+        if any(ch in p for ch in "*?["):
+            # 2026-11-02 AS-P10: a glob scope entry ("docs/evidence/AS-P10/*.png") was taken as
+            # a literal frame path, reported "missing", and the approved sprint was sent back
+            # until its review budget ran out. It requires every evidence frame it matches.
+            hits = [a for a in arts if a.lower().endswith(img) and matches_any(a, [p])]
+            if not hits:
+                return [], f"no frame matches {p}"
+            named_set.update(hits)
+        else:
+            named_set.add(p)
+    named = sorted(named_set)
     if not named:
         return [], "the plan names no required visual frames"
     frames = []

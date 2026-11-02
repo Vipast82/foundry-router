@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.3 — visual approval expands a glob in the plan's scope
+
+2026-11-02 04:3x. AS-P10's plan lists `docs/evidence/AS-P10/*.png` in its scope.
+`visual_approval._required` took the glob as a literal frame path and reported "required frame
+docs/evidence/AS-P10/*.png is missing". The automatic visual approval sent the sprint back
+four times after code review had approved it. Each round cost a review, so the 5-review
+budget ran out, and the Lead looped on "review budget used".
+
+- **`visual_approval._required`:** a scope entry with `*`, `?` or `[` requires every evidence
+  frame (PNG/JPEG) it matches. A glob that matches no frame reports "no frame matches <glob>".
+  Literal entries are unchanged.
+- Test: `tests/coordinator/test_visual_model_approval.py`
+  (`test_a_glob_scope_entry_requires_the_frames_it_matches`; fails on v0.181.2).
+
 ## v0.181.2 — move a never-started main sprint onto a track without cancelling it
 
 2026-11-02 02:4x. All asset tracks had merged, so only one Claude sprint was running (main)

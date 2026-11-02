@@ -178,3 +178,26 @@ def test_frames_unchanged_since_closeout_lets_a_later_head_be_reviewed(tmp_path)
     project.ws.is_ancestor = lambda a, b: False          # history rewritten: fail closed
     changed["files"] = []
     assert not _frames_unchanged_since(project, spec, rule, "closeout")
+
+
+def test_a_glob_scope_entry_requires_the_frames_it_matches(tmp_path):
+    """2026-11-02 AS-P10: its plan's scope said `docs/evidence/AS-P10/*.png`; _required took
+    the glob as a literal frame path, found it "missing" and the visual approval sent the
+    approved sprint back four times, until the review budget (5/5) stopped it."""
+    rels = ["docs/evidence/AS-P10/kit_front.png", "docs/evidence/AS-P10/kit_side.png"]
+    arts = {}
+    for rel in rels:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(PNG + rel.encode())
+        arts[rel] = hashlib.sha256(PNG + rel.encode()).hexdigest()
+    arts["docs/evidence/AS-P10/notes.txt"] = "x"
+    profile = SimpleNamespace(workspace=str(tmp_path), in_workspace=lambda p: True)
+    project = SimpleNamespace(profile=profile)
+    spec = SimpleNamespace(task_id="AS-P10", scope=["docs/evidence/AS-P10/*.png"])
+    rule = SimpleNamespace(artifacts=["docs/evidence/{task}/*.png"])
+    frames, problem = _required(project, spec, rule, arts)
+    assert not problem
+    assert [f[0] for f in frames] == rels
+    # a glob that matches no frame is still a missing requirement
+    assert "no frame matches" in _required(project, spec, rule, {})[1]
