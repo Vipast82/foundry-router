@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.0 — an AU plan's `ref_views` reaches the engine (D3 fix)
+
+2026-11-01. Found while pre-coding the Phase C pilot. v0.171.0 looked for the word `ref_views`
+in the task spec's `## Needs` block. The AU adapter condenses each plan into a spec without
+that block, so an AU sprint's `ref_views` was never seen, and D3's standing OK
+(`ref_views_images = allow`) could not apply to any AU sprint.
+
+- **AU adapter (`_parse_plan`):** a plan whose `## Needs` lists `images` and the word
+  `ref_views` gets task data `ref_views: true`. The engine already reads that data.
+- **`services.ref_views_in_text`:** the Needs-block scan, shared by the adapter and
+  `ref_views_declared`.
+- Test: `tests/coordinator/test_ref_views.py`
+  (`test_the_au_adapter_carries_ref_views_as_task_data`). The AU adapter suites (459) pass.
+
 ## v0.178.0 — the asset judge scores candidates blind (Phase C pilot)
 
 2026-11-01. Plan: `docs/plans/ASSET_PILOT_PLAN.md` (Victor: "Yes, start the pilot"). The pilot

@@ -383,8 +383,14 @@ def ref_views_declared(t: dict, spec=None) -> bool:
     for tag in getattr(spec, "tags", None) or []:
         if _REF_VIEWS.fullmatch(str(tag).replace("needs:", "").strip()):
             return True
-    text = str(getattr(spec, "spec", "") or "")
-    m = _HEAD.search(text)
+    return ref_views_in_text(str(getattr(spec, "spec", "") or ""))
+
+
+def ref_views_in_text(text: str) -> bool:
+    """The word `ref_views` in a plan's `## Needs` block (the heading line or its body). A
+    project adapter that condenses the plan into the task spec records it as task data
+    `ref_views` (v0.179.0: the AU adapter's spec has no Needs block)."""
+    m = _HEAD.search(text or "")
     if not m:
         return False
     body = text[m.end():]

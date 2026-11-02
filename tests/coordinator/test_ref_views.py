@@ -95,3 +95,27 @@ def test_the_skill_has_the_turnaround_recipe():
     for view in ("tq_+X", "side_+X", "side_-X", "back", "top", "under", "sheet"):
         assert f"`{view}`" in text
     assert "ref/drawn/" in text and "screen-left" in text and "--check-only" in text
+
+
+def test_the_au_adapter_carries_ref_views_as_task_data(tmp_path):
+    """v0.179.0: the AU spec text has no Needs block, so the plan's `ref_views` word must reach
+    the engine as task data (v0.171.0 never saw it for AU plans)."""
+    from foundry_coordinator.profile import Profile
+    from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
+    from tests.coordinator.test_au_review_evidence import DONE_CHECK_STUB
+    ws = tmp_path / "au"
+    (ws / "tools" / "guard").mkdir(parents=True)
+    (ws / "tools" / "guard" / "done_check.py").write_text(DONE_CHECK_STUB, encoding="utf-8")
+    prof = Profile(id="animaluprising", name="AU", version="1", path="x", hash="h",
+                   workspace=str(ws), allowed_dirs=["docs"], branch="master", remote="origin",
+                   raw={}, client={}, roles={})
+    a = AnimalUprisingAdapter(prof, str(tmp_path / "state"))
+    head = "# AS-X9 — t — PLAN\n\n**Tier:** C\n\n## Needs\n"
+    rest = "\n## Files this sprint may change\n- `docs/x.md`\n\n## Goal\nx\n"
+    with_rv = a._parse_plan("AS-X9", "p", head + "- blender\n- images (ref_views: top)\n" + rest)
+    assert with_rv.data["needs"] == ["blender", "images"] and with_rv.data["ref_views"] is True
+    assert "## Needs" not in with_rv.spec and SV.ref_views_declared({}, with_rv)
+    plain = a._parse_plan("AS-X9", "p", head + "- images\n" + rest)
+    assert "ref_views" not in plain.data and not SV.ref_views_declared({}, plain)
+    no_images = a._parse_plan("AS-X9", "p", head + "- blender (ref_views later)\n" + rest)
+    assert "ref_views" not in no_images.data
