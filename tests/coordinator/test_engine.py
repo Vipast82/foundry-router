@@ -981,6 +981,32 @@ def test_a_drained_sprint_gives_back_the_checkout_lock(game):
     assert "landing drain" in (c.store.task("game", "T1")["next_action"] or "")
 
 
+def test_a_drained_sprint_commits_its_left_over_plan_history_first(game):
+    """2026-11-01 AS-V04: its session wrote <ID>_PLAN_HISTORY.md after its last commit and the
+    gate path went to CHANGES_REQUIRED without VERIFYING (where the auto-commit ran). The dirty
+    checkout was no safe point, so pq-17d5c583ba and AS-V04 waited on each other."""
+    import os as _os
+    from foundry_coordinator import prep_queue as PQ
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    PQ.ensure(c.store)
+    c.approve("game", "T1", [], "victor")
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED)
+    old = c.clock() - 3600
+    c.store.x("INSERT INTO prep_queue (id, project_id, ord, kind, source, message, condition, "
+              "status, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?)",
+              ("pq-test", "game", 1, "patch", "x.patch", "prep: x", "{}", "pending", old, old))
+    _os.makedirs(_os.path.join(root, "docs", "progress"), exist_ok=True)
+    with open(_os.path.join(root, "docs", "progress", "T1_PLAN_HISTORY.md"), "w") as f:
+        f.write("history" + chr(10))
+    head = P.ws.head()
+    c._start_implementation(P, c.store.task("game", "T1"))
+    assert "landing drain" in (c.store.task("game", "T1")["next_action"] or "")
+    assert P.ws.head() != head
+    assert "docs/progress/T1_PLAN_HISTORY.md" not in [p for _, p in P.ws.status()]
+
+
 def test_a_sprint_that_yields_to_an_earlier_one_gives_back_the_checkout_lock(game):
     """2026-10-29 07:00 replay: AS-P5 (restarted by an attempt reset) yielded to the earlier
     started HK-CLEAN1 but kept the checkout lock; HK-CLEAN1 waited for the lock: deadlock."""

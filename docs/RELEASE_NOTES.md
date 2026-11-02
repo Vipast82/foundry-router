@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.7 — a sprint waiting for a landing commits its own leftover plan history first
+
+2026-11-01 22:2x. AS-V04's session ran `plan_new.py --set-next` after its last commit, which
+wrote `docs/progress/AS-V04_PLAN_HISTORY.md`. Its gate path then went to CHANGES_REQUIRED
+without passing VERIFYING, the one place the coordinator commits such tool-written files
+(`[automation] auto_commit_task_files`). The main checkout stayed dirty, so the prep landing
+pq-17d5c583ba never found a safe point. AS-V04, GF-RT3 and the VFX chain waited behind it.
+
+- **`engine` landing drain:** before a main sprint between sessions gives way to a waiting
+  landing, the coordinator commits that sprint's own `auto_commit_task_files`.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_a_drained_sprint_commits_its_left_over_plan_history_first`; fails on v0.179.6).
+
 ## v0.179.6 — a session whose turn Kilo stopped running ends after 5 minutes, not 4 hours
 
 2026-11-01 22:1x. A forced Kilo restart (to load the slot tracks' Studio MCP) cut four turns

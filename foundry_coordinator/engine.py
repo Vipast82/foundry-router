@@ -714,6 +714,13 @@ class Coordinator:
             return                                 # "waiting for <service>": no lock, no attempt
         landing = self._landing_drain(P)
         if landing:
+            # 2026-11-01 AS-V04: a sprint between sessions may have left its own tool-written
+            # files dirty (plan_new.py --set-next -> <ID>_PLAN_HISTORY.md after its last
+            # commit; the gate path went to CHANGES_REQUIRED without VERIFYING, where the
+            # auto-commit runs). A dirty main checkout is no safe point, so the landing and
+            # this sprint waited on each other. Commit them here, before giving way.
+            if not self.tracks.is_track(P):
+                self._auto_commit_task_files(P, t)
             # a sprint between sessions gives the checkout back while it is drained, so the
             # landing can take it (2026-10-29: UI-SKIN2's lock blocked pq-d752da05ec); its
             # next session start takes the locks again
