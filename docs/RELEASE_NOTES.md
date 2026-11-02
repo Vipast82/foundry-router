@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.15 — AU skill: au-roblox-world-building
+
+2026-11-02. Victor: "the map looks like it needs real work". No AU skill covered lighting,
+atmosphere, terrain or materials, and no game code sets `Lighting`, so the map runs Roblox
+defaults on mostly `SmoothPlastic` parts. Victor approved adding a world-building skill and
+planning a map look sprint.
+
+- New shipped Kilo skill
+  `foundry_coordinator/projects/animaluprising/kilo_skills/au-roblox-world-building/`:
+  - `SKILL.md` (AnimalUprising's own text) covers the Map v2 generator (`src/server/MapBuild/`),
+    keeping seeds and time-sliced builds intact, and putting lighting in code rather than the
+    place file. It also covers materials and scenery cost, streaming, and the Map v2 regression
+    rows that must stay green.
+  - It sets how the look is judged: on the workstation only (never on the software-rendered
+    slots), through gate captures and the coordinator's vision approval, with the owner
+    approving the final look.
+  - `references/world-building.md` and `references/streaming.md` are adapted from
+    EL4CTEO/roblox-skills (MIT; `references/THIRD_PARTY_NOTICES.md`).
+- It is installed through `[skills] install` (skills_install.py) into the game's untracked
+  `.kilo/skills/`.
+
 ## v0.181.14 — a track sprint's plan needs join its track before the session
 
 2026-11-02 18:2x. The audio-local track (AS-AI1, then S54) started with needs `[studio]`, before
