@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.17 — operator backups in the deploy checkout no longer trip the Lead guard
+
+2026-11-02 22:4x. While AS-D18's Lead diagnosed a review block, the operator saved
+`project.toml.bak-2026-11-02-roblox-library` in the live deploy checkout. The Lead guard compares
+the router checkout's `git status` before and after a Lead call. It saw the new untracked file,
+aborted the Lead (`guard_violation`) and opened an escalation decision, which only a timeout
+default answered. The exemption for router changes during a Lead call only covers read-only Leads,
+and the live Lead has write access.
+
+- `lead.operator_status()`: the guard's router snapshot (`LeadManager._git_state`) leaves out
+  untracked `*.bak` / `*.bak-*` files, the operator's backups of the git-ignored live profile.
+  `clean` is computed the same way, so a deploy onto a release tag over such backups is
+  recognised as a deploy. Every other untracked file and every tracked change still counts.
+- Test: `test_operator_backup_files_in_the_deploy_checkout_never_trip_the_guard`. The
+  release-tag snapshot test now uses an ordinary untracked file for its dirty checkout.
+
 ## v0.181.16 — a general Roblox skill library (27 skills) for every Foundry game
 
 2026-11-02. Victor asked for "the absolute best skills for all of the work we are doing, and future

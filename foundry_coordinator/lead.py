@@ -890,6 +890,19 @@ def lead_self_changed_tests(P, before_head: str) -> dict:
     return out
 
 
+# Untracked files the operator keeps in the live deploy checkout (backups of the git-ignored live
+# profile before an edit, e.g. project.toml.bak-2026-11-02-roblox-library). Never a session's doing.
+OPERATOR_UNTRACKED = re.compile(r"^\?\? .*\.bak(-[^/]*)?$")
+
+
+def operator_status(porcelain: str) -> str:
+    """`git status --porcelain` without the operator's untracked backup files. 2026-11-02:
+    the operator saved a profile backup in the deploy checkout while AS-D18's lead diagnosed;
+    the router status changed, the guard aborted the lead (guard_violation) and opened a
+    decision for nothing."""
+    return "\n".join(ln for ln in porcelain.splitlines() if not OPERATOR_UNTRACKED.match(ln))
+
+
 def router_moved_by_deploy(before: dict, after: dict) -> bool:
     """A deploy (fast-forward / checkout of a release) moves the router checkout's
     HEAD and leaves its tree clean; an edit by a session leaves it dirty. Only the
@@ -2542,6 +2555,7 @@ class LeadManager:
         except Exception:                                        # noqa: BLE001
             return {"path": path, "head": "", "status": ""}
         rel = next((x for x in tags if re.fullmatch(r"v\d+\.\d+\.\d+", x)), "")
+        st = operator_status(st)
         return {"path": path, "head": head, "status": _sha(st)[:16], "clean": not st.strip(),
                 "release_tag": rel}
 

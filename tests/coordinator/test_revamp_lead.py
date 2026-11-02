@@ -203,7 +203,7 @@ def test_the_router_snapshot_names_the_release_tag_at_head(tmp_path):
     (r / "f.txt").write_text("x")
     g("add", "f.txt")
     g("commit", "-qm", "one")
-    (r / "backup.bak").write_text("untracked")
+    (r / "notes.txt").write_text("untracked")          # backups (*.bak) are ignored since v0.181.17
     s1 = LeadManager._git_state(str(r))
     assert s1["release_tag"] == "" and s1["clean"] is False
     (r / "f.txt").write_text("y")
@@ -311,3 +311,32 @@ def test_the_official_mcp_found_0_wording_reopens_studio():
     msg = "scripted Studio gate: McpError: need exactly one Studio, found 0 (open: none)"
     assert autoheal.plan("studio_calls_error", msg) == ("studio_reload", "restart")
     assert autoheal.infra_signature("the shop panel opens with none selected") == ""
+
+
+def test_operator_backup_files_in_the_deploy_checkout_never_trip_the_guard(tmp_path):
+    """2026-11-02 AS-D18: the operator saved project.toml.bak-2026-11-02-roblox-library in the
+    live deploy checkout while the lead diagnosed; the router status changed, the guard aborted
+    the lead (guard_violation) and opened a decision. Untracked `*.bak` / `*.bak-*` files are
+    the operator's; every other change still counts."""
+    import subprocess
+    from foundry_coordinator import lead as L
+    repo = tmp_path / "router"
+    repo.mkdir()
+    def git(*a):
+        subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (repo / "a.py").write_text("x = 1\n")
+    git("add", "a.py")
+    git("commit", "-qm", "init")
+    before = L.LeadManager._git_state(str(repo))
+    (repo / "project.toml.bak-2026-11-02-roblox-library").write_text("x")
+    (repo / "old.bak").write_text("x")
+    assert L.LeadManager._git_state(str(repo))["status"] == before["status"]
+    assert L.LeadManager._git_state(str(repo))["clean"] is True
+    (repo / "new.py").write_text("y = 2\n")                      # a real untracked change
+    assert L.LeadManager._git_state(str(repo))["status"] != before["status"]
+    (repo / "new.py").unlink()
+    (repo / "a.py").write_text("x = 2\n")                         # a tracked edit
+    assert L.LeadManager._git_state(str(repo))["status"] != before["status"]
