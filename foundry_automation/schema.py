@@ -1046,6 +1046,22 @@ FIELDS: list[Field] = [
       "over the router's limit is refused). Audio and image sprints no longer hold `gpu`: "
       "Media_Gen queues its own jobs.", "workspace", "coordinator.engine", "next_session",
       min=1, max=8),
+    F("resources.claude_agents", "int", 0, "Sprint sessions served by Claude that run at once "
+      "(sprints whose implementer persona is in resources.claude_personas); more wait. 0 = no "
+      "cap.", "workspace", "coordinator.engine", "next_session", min=0, max=32),
+    F("resources.claude_agents_over", "int", 2, "The Claude agent cap once Claude usage (the "
+      "highest 5-hour / weekly window the router reports) reaches resources.claude_usage_pct. "
+      "Running sessions finish; new ones wait.", "workspace", "coordinator.engine",
+      "next_session", min=1, max=32),
+    F("resources.claude_usage_pct", "float", 75.0, "Claude usage percent at which the Claude "
+      "agent cap drops to resources.claude_agents_over.", "workspace", "coordinator.engine",
+      "live", min=1, max=100),
+    F("resources.claude_backend", "str", "meridian", "The router backend that serves Claude "
+      "(its usage windows are read for resources.claude_usage_pct).", "workspace",
+      "coordinator.engine", "live"),
+    F("resources.claude_personas", "list", [], "Implementer personas whose sprint sessions "
+      "count as Claude agents (empty = the implementer role's persona).", "workspace",
+      "coordinator.engine", "next_session", item_type="str"),
     # client ---------------------------------------------------------------------
     F("client.kind", "enum", "kilo", "Coding client.", "client", "coordinator.adapters",
       "restart", enum=["kilo", "fake", "scripted"]),

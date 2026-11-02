@@ -97,6 +97,23 @@ def _prio(item) -> int:
 ROUTE_RETRY_S = 300
 
 
+def claude_used_pct(admission: dict, backend: str = "meridian"):
+    """The highest window `used` percent of the Claude backend's accounts in a router
+    helper-admission answer (None when it has no reading)."""
+    best = None
+    for route in (admission or {}).get("routes") or []:
+        if str(route.get("backend") or "") != backend:
+            continue
+        for acct in route.get("accounts") or []:
+            for w in acct.get("windows") or []:
+                try:
+                    u = float(w.get("used"))
+                except (TypeError, ValueError):
+                    continue
+                best = u if best is None else max(best, u)
+    return best
+
+
 class Coordinator:
     # ceiling of the heartbeat cover over one verify / closeout check run
     # (keepalive.busy); past it a stuck check lets the heartbeat go stale
@@ -399,6 +416,10 @@ class Coordinator:
             # Foundry-shipped Kilo skills into the game's local skill folder (gap 7; off
             # while [skills] install is empty; never raises)
             skills_install.tick(self, P)
+            try:
+                self._refresh_claude_usage(P)
+            except Exception as e:                                # noqa: BLE001
+                self.log(f"{pid}: Claude usage refresh failed: {type(e).__name__}: {e}")
             for t in self.store.tasks(pid):
                 # 0.147.0: re-read the row right before its step. An earlier task's
                 # long step (a 13-min verify) left this snapshot stale, and an
@@ -7203,7 +7224,57 @@ class Coordinator:
                     until = 0.0
                 if until > self.clock():
                     out.append(pick_unit(self.store, P, t["task_id"], "gpu"))
+                elif self._claude_session(P, t):
+                    out.append(pick_unit(self.store, P, t["task_id"], "claude"))
         return out
+
+    def _claude_session(self, P: Project, t: dict) -> bool:
+        """A sprint session served by Claude: resources.claude_agents is set and the task's
+        implementer persona is one of resources.claude_personas (Victor 2026-11-02: at most
+        4-5 Claude agents, 2 once Claude usage reaches 75%)."""
+        from .tracks.resources import claude_settings
+        cfg = claude_settings(P.profile)
+        if cfg["agents"] <= 0:
+            return False
+        try:
+            return P.profile.persona("implementer", t["task_id"]) in cfg["personas"]
+        except Exception:                                         # noqa: BLE001
+            return False
+
+    CLAUDE_USAGE_EVERY_S = 120
+
+    def _refresh_claude_usage(self, P: Project) -> None:
+        """Read Claude's subscription usage from the router (the helper admission answer for a
+        Claude persona: each account's 5-hour / weekly windows) every CLAUDE_USAGE_EVERY_S.
+        The highest window counts. A failed read keeps the last reading."""
+        from .tracks.resources import CLAUDE_USAGE, claude_settings
+        cfg = claude_settings(P.profile)
+        if cfg["agents"] <= 0 or P.foundry is None or not cfg["personas"]:
+            return
+        now = self.clock()
+        last = CLAUDE_USAGE.get(P.id) or {}
+        if now - float(last.get("ts") or 0) < self.CLAUDE_USAGE_EVERY_S:
+            return
+        CLAUDE_USAGE[P.id] = {**last, "ts": now}
+        try:
+            ans = P.foundry.helper_admission(cfg["personas"][0])
+        except Exception as e:                                    # noqa: BLE001
+            CLAUDE_USAGE[P.id]["detail"] = f"usage read failed: {type(e).__name__}: {e}"[:300]
+            return
+        pct = claude_used_pct(ans, cfg["backend"])
+        if pct is None:
+            CLAUDE_USAGE[P.id]["detail"] = "no Claude window reading in the router's answer"
+            return
+        before = last.get("pct")
+        CLAUDE_USAGE[P.id] = {"pct": pct, "ts": now, "detail": ""}
+        over = pct >= cfg["usage_pct"]
+        if before is None or (float(before) >= cfg["usage_pct"]) != over:
+            from .tracks.resources import claude_capacity
+            self.store.event(P.id, "", "claude_agent_cap", detail={
+                "usage_pct": round(pct, 1), "threshold": cfg["usage_pct"],
+                "cap": claude_capacity(P)})
+            self.log(f"{P.id}: Claude usage {pct:.1f}% -> Claude agent cap "
+                     f"{claude_capacity(P)}")
 
     def _frontier_serving(self, P: Project, t: dict) -> bool:
         """Another sprint whose implementer is this task's (non-local) persona has a session
@@ -7250,12 +7321,13 @@ class Coordinator:
             if main_wait:
                 self._note(P, t, f"waiting for gpu (main sprint {main_wait[0]} goes first)")
                 return {"resource": "gpu", "project_id": pid, "task_id": main_wait[0]}
-        if (any(r.split("#", 1)[0] == "gpu" for r in resources)
-                and not any(r.split("#", 1)[0] == "gpu" for r in before)):
-            first = self._gpu_first_in_line(pid, tid)
-            if first:
-                self._note(P, t, f"waiting for gpu ({first} is first in line)")
-                return {"resource": "gpu", "project_id": pid, "task_id": first}
+        for res in ("gpu", "claude"):
+            if (any(r.split("#", 1)[0] == res for r in resources)
+                    and not any(r.split("#", 1)[0] == res for r in before)):
+                first = self._gpu_first_in_line(pid, tid, res)
+                if first:
+                    self._note(P, t, f"waiting for {res} ({first} is first in line)")
+                    return {"resource": res, "project_id": pid, "task_id": first}
         held = self.store.acquire(resources, pid, tid)
         if held:
             self._note(P, t, f"waiting for {held['resource']} (held by "
@@ -7294,7 +7366,7 @@ class Coordinator:
 
     GPU_LINE_STATES = (S.READY, S.CHANGES_REQUIRED, S.IMPLEMENTING, S.CLOSING)
 
-    def _gpu_first_in_line(self, pid: str, tid: str) -> str:
+    def _gpu_first_in_line(self, pid: str, tid: str, res: str = "gpu") -> str:
         """The task ahead of `tid` in queue order that already waits for the gpu unit ("" when
         none). 2026-11-02 AS-A02: the releasing sprint frees Strata during its own step, and
         the sprint stepped right after it in the same tick took it; AS-A02 (queue position
@@ -7308,14 +7380,14 @@ class Coordinator:
             rows = self.store.q(
                 "SELECT t.task_id, t.state, q.position FROM tasks t JOIN queue q ON "
                 "q.project_id=t.project_id AND q.task_id=t.task_id WHERE t.project_id=? AND "
-                "t.next_action LIKE 'waiting for gpu%' AND t.task_id != ? AND q.position < ? "
-                "ORDER BY q.position", (pid, tid, mine[0]["position"]))
+                "t.next_action LIKE ? AND t.task_id != ? AND q.position < ? "
+                "ORDER BY q.position", (pid, f"waiting for {res}%", tid, mine[0]["position"]))
         except Exception:                                         # noqa: BLE001
             return ""
         for r in rows:
             if r["state"] not in self.GPU_LINE_STATES:
                 continue                      # a stale note on a stopped task
-            if any(str(h).split("#", 1)[0] == "gpu" for h in self.store.holds(pid, r["task_id"])):
+            if any(str(h).split("#", 1)[0] == res for h in self.store.holds(pid, r["task_id"])):
                 continue
             return r["task_id"]
         return ""

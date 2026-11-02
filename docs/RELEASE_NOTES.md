@@ -2,6 +2,28 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.0 — Claude agent cap that drops at a usage threshold
+
+2026-11-02 01:5x. Victor: "keep 4 or 5 right now ... after 75% usage on Claude, then it's only
+1 local LLM and 2 Claude agents".
+
+- **`resources.claude_agents`** (default 0 = no cap): the number of sprint sessions served by
+  Claude that may run at once. A sprint whose implementer persona is in
+  `resources.claude_personas` (empty = the implementer role's persona) takes one unit of a
+  new `claude` resource for its session. Further sprints wait ("waiting for claude ..."),
+  first in queue order first, as for `gpu` (v0.180.7).
+- **`resources.claude_agents_over`** (default 2) at **`resources.claude_usage_pct`**
+  (default 75): once Claude usage reaches the threshold, the cap drops to this number.
+  Usage is the highest 5-hour or weekly window the router reports for the
+  `resources.claude_backend` (default `meridian`). The coordinator reads it every 2 minutes
+  from the helper-admission answer for a Claude persona. A failed read keeps the last
+  reading. Running sessions finish and only new ones wait. Each crossing records a
+  `claude_agent_cap` event and a log line.
+- The local model is unchanged: `resources.local_streams` (1) units of `gpu`.
+- Schema (Automation UI): the five fields under Workspace → resources.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_claude_agents_are_capped_and_the_cap_drops_at_the_usage_threshold`).
+
 ## v0.180.7 — Strata goes to the sprint first in line
 
 2026-11-02 01:2x. AS-A02 (queue position 119) waited 30 minutes for the single Strata unit

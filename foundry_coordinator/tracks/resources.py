@@ -46,7 +46,49 @@ def capacity(P, res: str) -> int:
         return blender_capacity(P.profile)
     if res == "gpu" and P is not None:
         return local_streams(P.profile)
+    if res == "claude" and P is not None:
+        return claude_capacity(P)
     return CAPACITY.get(res, 1)
+
+
+# Claude agent cap (Victor 2026-11-02: "keep 4 or 5 right now ... after 75% usage on Claude,
+# only 1 local LLM and 2 Claude agents"). The engine refreshes CLAUDE_USAGE from the router.
+CLAUDE_USAGE: dict = {}          # project id -> {"pct": float | None, "ts": float, "detail": str}
+
+
+def claude_settings(profile) -> dict:
+    """resources.claude_agents (0 = no cap), claude_agents_over, claude_usage_pct,
+    claude_backend, claude_personas (default: the implementer role's persona)."""
+    raw = getattr(profile, "raw", None) or {}
+    r = raw.get("resources") or {}
+
+    def num(key, default, lo, hi, cast=int):
+        try:
+            v = cast(r.get(key, default))
+        except (TypeError, ValueError):
+            v = default
+        return max(lo, min(hi, v))
+    personas = r.get("claude_personas")
+    if not isinstance(personas, list) or not personas:
+        roles = getattr(profile, "roles", None) or {}
+        personas = [roles["implementer"]] if roles.get("implementer") else []
+    return {"agents": num("claude_agents", 0, 0, 32),
+            "agents_over": num("claude_agents_over", 2, 1, 32),
+            "usage_pct": num("claude_usage_pct", 75.0, 1.0, 100.0, float),
+            "backend": str(r.get("claude_backend") or "meridian"),
+            "personas": [str(p) for p in personas]}
+
+
+def claude_capacity(P) -> int:
+    """Claude sprint sessions that may run at once: claude_agents, or claude_agents_over once
+    the last Claude usage reading is at or over claude_usage_pct (never more than the base)."""
+    cfg = claude_settings(P.profile)
+    if cfg["agents"] <= 0:
+        return 32
+    pct = (CLAUDE_USAGE.get(P.id) or {}).get("pct")
+    if pct is not None and float(pct) >= cfg["usage_pct"]:
+        return min(cfg["agents"], cfg["agents_over"])
+    return cfg["agents"]
 
 
 def local_streams(profile) -> int:

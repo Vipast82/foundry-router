@@ -1441,3 +1441,61 @@ def test_the_gpu_unit_goes_to_the_waiter_first_in_queue_order(game):
     c.store.release("game", "T1")
     c.store.update_task("game", "T1", state=S.BLOCKED, next_action="waiting for gpu (old)")
     assert c._acquire(P, c.store.task("game", "T2"), ["gpu"]) is None
+
+
+def test_claude_agents_are_capped_and_the_cap_drops_at_the_usage_threshold(game):
+    """Victor 2026-11-02: "keep 4 or 5 [Claude agents] right now ... after 75% usage on Claude,
+    then it's only 1 local LLM and 2 Claude agents". A sprint whose implementer persona is a
+    Claude persona takes a `claude` unit; the units drop from claude_agents to
+    claude_agents_over once the router reports Claude at or over claude_usage_pct."""
+    from foundry_coordinator import engine as EN
+    from foundry_coordinator.tracks import resources as R
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    persona = P.profile.persona("implementer", "T1")
+    t1 = c.store.task("game", "T1")
+    assert not any(r.startswith("claude") for r in c._session_locks(P, t1))   # off by default
+    P.profile.raw.setdefault("resources", {}).update(
+        claude_agents=3, claude_agents_over=1, claude_usage_pct=75)
+    R.CLAUDE_USAGE.pop("game", None)
+    assert R.claude_settings(P.profile)["personas"] == [persona]   # default: implementer role
+    assert R.capacity(P, "claude") == 3
+    assert "claude" in c._session_locks(P, t1)
+
+    # the router's answer for a Claude persona: the highest window counts
+    answer = {"routes": [
+        {"backend": "meridian", "accounts": [{"windows": [{"name": "5h", "used": 41.0},
+                                                          {"name": "7d", "used": 78.5}]}]},
+        {"backend": "cliproxyapi", "accounts": [{"windows": [{"name": "5h", "used": 99.0}]}]}]}
+    assert EN.claude_used_pct(answer) == 78.5
+    assert EN.claude_used_pct({"routes": []}) is None
+
+    class Router:
+        calls = 0
+
+        def helper_admission(self, persona_, **kw):
+            Router.calls += 1
+            assert persona_ == persona
+            return answer
+    P.foundry = Router()
+    c._refresh_claude_usage(P)
+    assert R.CLAUDE_USAGE["game"]["pct"] == 78.5 and R.capacity(P, "claude") == 1
+    c._refresh_claude_usage(P)                     # within CLAUDE_USAGE_EVERY_S: no new read
+    assert Router.calls == 1
+    ev = [e for e in c.store.q("SELECT detail FROM events WHERE kind='claude_agent_cap'")]
+    assert len(ev) == 1 and '"cap": 1' in ev[0]["detail"]
+
+    # over the threshold: one unit; a second Claude sprint waits
+    c.store.acquire(["claude"], "game", "OTHER")
+    held = c._acquire(P, t1, ["claude"])
+    assert held and c.store.holds("game", "T1") == []
+    # below it again: the base cap; it takes the next unit
+    R.CLAUDE_USAGE["game"]["pct"] = 30.0
+    unit = R.pick_unit(c.store, P, "T1", "claude")
+    assert unit == "claude#2" and c._acquire(P, t1, [unit]) is None
+    # a sprint whose persona is not a Claude persona never takes a unit
+    P.profile.raw["resources"]["claude_personas"] = ["Some-Local-Persona"]
+    assert not any(r.startswith("claude") for r in c._session_locks(P, t1))
+    R.CLAUDE_USAGE.pop("game", None)
