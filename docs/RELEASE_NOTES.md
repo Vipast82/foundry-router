@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.18 — an installed skill is allowed in Kilo at once
+
+2026-11-02 23:3x. The 27 `roblox-*` skills and `au-roblox-world-building` were added to the live
+profile's `[skills] install` list and installed into `.kilo/skills/`. kilo.jsonc still denied them
+(`"skill": {"*": "deny", ...}`), so no session could load them. The kilo.jsonc skill allows
+(`skills_install.allow_rules`) are only written when the agent blocks are regenerated, and only a
+router-side settings change (config_pull) did that. A list edited in the profile file never
+reached kilo.jsonc.
+
+- `skills_install.refresh_kilo()`: when a sync installs or removes a skill, it does three things:
+  - rewrites the main workspace's kilo.jsonc agent blocks (`kilo_config.regenerate`, using the
+    cached router role rules, else the profile's own);
+  - files a `reload_kilo` client request;
+  - rewrites every planned, running or merging track's kilo.jsonc through
+    `tracks.set_needs` with its current needs, which flags that track's Kilo reload.
+
+  A `skills_kilo_refreshed` event records it.
+- Test: `test_an_installed_skill_refreshes_kilo_and_live_tracks`.
+
 ## v0.181.17 — operator backups in the deploy checkout no longer trip the Lead guard
 
 2026-11-02 22:4x. While AS-D18's Lead diagnosed a review block, the operator saved

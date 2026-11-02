@@ -171,3 +171,32 @@ def test_a_skills_change_regenerates_kilo_and_the_as_prompt_names_the_skill():
     assert "au-blender-asset" in AnimalUprisingAdapter._asset_skill_notice(on, "AS-K1")
     assert AnimalUprisingAdapter._asset_skill_notice(on, "GF-RT3") == ""
     assert AnimalUprisingAdapter._asset_skill_notice(off, "AS-K1") == ""
+
+
+def test_an_installed_skill_refreshes_kilo_and_live_tracks(monkeypatch, tmp_path):
+    """2026-11-02: 28 skills listed in the profile file were installed but kilo.jsonc still
+    denied them ("*": deny), because only a router-side settings change regenerated it. A skill
+    installed or removed now rewrites the main kilo.jsonc, asks for a Kilo reload and rewrites
+    every live track's kilo.jsonc."""
+    from foundry_coordinator import client_requests, kilo_config
+    calls = {"regen": 0, "reload": [], "needs": [], "events": []}
+
+    def fake_regen(profile, rules, apply=False, store=None, clock=None, path=""):
+        calls["regen"] += 1
+        return {"applied": True, "changed": ["code"], "backup": "b"}
+    monkeypatch.setattr(kilo_config, "regenerate", fake_regen)
+    monkeypatch.setattr(client_requests, "request",
+                        lambda state, kind, pid, why, **kw: calls["reload"].append((kind, why)))
+    rows = {"audio-local": {"name": "audio-local", "needs": ["studio", "audio"]},
+            "plain": {"name": "plain", "needs": []}}
+    store = SimpleNamespace(
+        q=lambda sql, args: [{"name": n} for n in rows],
+        track=lambda pid, n: rows[n],
+        event=lambda pid, tid, kind, detail=None: calls["events"].append(kind))
+    tracks = SimpleNamespace(set_needs=lambda P, name, needs, actor="": calls["needs"].append((name, needs)))
+    engine = SimpleNamespace(store=store, tracks=tracks, state_dir=str(tmp_path), clock=lambda: 0.0)
+    P = SimpleNamespace(id="g", profile=SimpleNamespace(id="g", workspace=str(tmp_path), raw={}))
+    res = SI.refresh_kilo(engine, P, {"installed": ["roblox-luau"], "removed": []})
+    assert calls["regen"] == 1 and calls["reload"][0][0] == "reload_kilo"
+    assert ("audio-local", ["studio", "audio"]) in calls["needs"] and ("plain", ["none"]) in calls["needs"]
+    assert res["tracks"] == ["audio-local", "plain"] and "skills_kilo_refreshed" in calls["events"]

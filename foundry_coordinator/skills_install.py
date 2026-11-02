@@ -245,7 +245,61 @@ def tick(engine, P) -> Optional[dict]:
                     _marker(os.path.join(target, n)) for n in os.listdir(target)
                     if os.path.isdir(os.path.join(target, n))):
                 return None
-        return sync(prof, engine.state_dir, engine.store, engine.clock)
+        out = sync(prof, engine.state_dir, engine.store, engine.clock)
+        if out and (out.get("installed") or out.get("removed")):
+            refresh_kilo(engine, P, out)
+        return out
     except Exception as e:                                       # noqa: BLE001
         _event(engine.store, P.id, "skills_install_failed", {"error": f"{type(e).__name__}: {e}"})
         return None
+
+
+def refresh_kilo(engine, P, out: dict) -> dict:
+    """A skill installed or removed changes the kilo.jsonc skill allows (`allow_rules`): rewrite
+    the main workspace's agent blocks, ask the client for a Kilo reload, and rewrite each live
+    track's kilo.jsonc (its Kilo instance reloads before its next session). 2026-11-02: 28 skills
+    listed in the profile file were installed, but kilo.jsonc still denied them ("*": deny),
+    because only a router-side settings change regenerated it (config_pull)."""
+    from . import client_requests
+    from .kilo_config import KiloConfigError, regenerate
+    pid, res = P.id, {"main": None, "tracks": []}
+    changed = list(out.get("installed") or []) + list(out.get("removed") or [])
+    rules = None
+    try:
+        from .config_pull import ConfigPuller
+        cached = ConfigPuller(engine).cached(pid)
+        rules = ((cached or {}).get("doc") or {}).get("role_rules")
+    except Exception:                                            # noqa: BLE001
+        rules = None
+    try:
+        res["main"] = regenerate(P.profile, rules, apply=True, store=engine.store,
+                                 clock=engine.clock)
+    except KiloConfigError as e:
+        _event(engine.store, pid, "skills_kilo_skipped", {"why": str(e)[:500], "skills": changed})
+    if (res["main"] or {}).get("applied"):
+        client_requests.request(
+            engine.state_dir, "reload_kilo", pid,
+            f"skills {', '.join(changed)} changed the kilo.jsonc skill allows",
+            detail={"skills": changed, "backup": res["main"].get("backup")},
+            store=engine.store, clock=engine.clock)
+    tm = getattr(engine, "tracks", None)
+    if tm is not None:
+        try:
+            names = [r["name"] for r in engine.store.q(
+                "SELECT name FROM tracks WHERE project_id=? AND state IN "
+                "('planned','running','merging')", (pid,))]
+        except Exception:                                        # noqa: BLE001
+            names = []
+        for name in names:
+            try:
+                row = engine.store.track(pid, name) or {}
+                tm.set_needs(P, name, list(row.get("needs") or []) or ["none"],
+                             actor=f"skills_install ({', '.join(changed)[:200]})")
+                res["tracks"].append(name)
+            except Exception as e:                               # noqa: BLE001
+                _event(engine.store, pid, "skills_kilo_skipped",
+                       {"why": f"track {name}: {type(e).__name__}: {e}"[:500]})
+    _event(engine.store, pid, "skills_kilo_refreshed", {
+        "skills": changed, "main_applied": bool((res["main"] or {}).get("applied")),
+        "tracks": res["tracks"]})
+    return res
