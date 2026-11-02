@@ -1264,6 +1264,16 @@ def _dispatch(a, c: Coordinator) -> int:
         # back into Foundry's known_hosts (slot_ssh.py); at start, then every 10 minutes
         from .slot_ssh import SlotSsh
         c.after_tick.append(SlotSsh(c, log=c.log).poll)
+        # one active workstation per project (workstation_gate.py, LINUX_WORKSTATION_PLAN W4):
+        # asked before the first tick, so a standby coordinator never starts a sprint; fails open
+        try:
+            from .workstation_gate import WorkstationGate
+            gate = WorkstationGate(c, log=c.log)
+            gate.check()
+            c.workstation_gate = gate
+            c.after_tick.append(gate.poll)
+        except Exception as e:                                    # noqa: BLE001
+            c.log(f"workstation check unavailable ({type(e).__name__}: {e}); running every project")
         if a.telemetry:
             import threading
             bridge = _bridge(c, a)

@@ -169,7 +169,7 @@ $("#v-status").onclick = async e => {
 const FIELDS = [
   ["Foundry", [["client.backend_url", "Foundry router URL", "text"], ["client.state_dir", "Coordinator state folder", "text"], ["client.api_port", "Local settings port", "number"]]],
   ["Workspace", [["workspace.game", "Game project folder (Kilo works here)", "text"], ["workspace.profiles", "Coordinator profiles folder (…/foundry_coordinator/projects)", "text"], ["workspace.deploy", "Coordinator release checkout (for the upgrade supervisor; optional)", "text"], ["workspace.kilo_config", "kilo.jsonc (empty = game folder / kilo.jsonc)", "text"], ["workspace.project", "Coordinator project for role rules (empty = the only one)", "text"]]],
-  ["Watchdog", [["client.unhealthy_restart_seconds", "Restart a component that stays unhealthy this many seconds (0 = never)", "number"], ["client.safe_restart_max_wait_minutes", "Warn when a safe-point restart has waited this many minutes (0 = never)", "number"], ["client.update_check", "Look for a newer Foundry Client release on GitHub", "bool"], ["client.relay", "Take stack requests from the Foundry router", "bool"]]],
+  ["Watchdog", [["client.unhealthy_restart_seconds", "Restart a component that stays unhealthy this many seconds (0 = never)", "number"], ["client.safe_restart_max_wait_minutes", "Warn when a safe-point restart has waited this many minutes (0 = never)", "number"], ["client.update_check", "Look for a newer Foundry Client release on GitHub", "bool"], ["client.relay", "Take stack requests from the Foundry router", "bool"], ["client.secret_store", "Where secrets are kept: auto (the system keyring, else a private file), keyring, or file (a mode-600 file; for a Linux machine without a desktop)", "text"]]],
   ["Kilo server", [["components.kilo.enabled", "Run the Kilo server", "bool"], ["components.kilo.path", "kilo executable (empty = find it)", "text"], ["components.kilo.port", "Port", "number"]]],
   ["Coordinator", [["components.coordinator.enabled", "Run the coordinator", "bool"], ["components.coordinator.poll_seconds", "Poll seconds", "number"], ["components.supervisor.enabled", "Run the upgrade supervisor", "bool"]]],
   ["Blender", [["components.blender.enabled", "Run Blender (blender-mcp add-on; a running Blender is adopted)", "bool"], ["components.blender.path", "blender.exe (e.g. C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe)", "text"], ["components.blender.port", "Add-on port", "number"]]],
@@ -208,7 +208,7 @@ function renderSettings() {
 /* ------------------------------------------------------------------ secrets */
 async function renderSecrets() {
   let d; try { d = await api("secrets"); } catch (e) { $("#v-secrets").innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; return; }
-  $("#v-secrets").innerHTML = `<div class="banner">Secrets are stored in your system keyring and passed only to the components that need them. They are never shown again here.</div>
+  $("#v-secrets").innerHTML = `<div class="banner">Secrets are stored ${d.store === "file" ? `in a private file (${esc(d.file)}, readable only by this user)` : "in your system keyring"} and passed only to the components that need them. They are never shown again here.</div>
     ${Object.entries(d.secrets).map(([n, set]) => `<fieldset><legend>${esc(n)} ${set ? '<span class="ok">set</span>' : '<span class="bad">not set</span>'}</legend>
       <div class="dim">${esc(d.help[n] || "")}</div><div class="row"><input type="password" autocomplete="new-password" data-secret="${esc(n)}" placeholder="${set ? "replace…" : "value"}" style="flex:1">
       <button class="act primary" data-save="${esc(n)}">Save</button>${set ? `<button class="act" data-clear="${esc(n)}">Remove</button>` : ""}</div></fieldset>`).join("")}
@@ -216,7 +216,7 @@ async function renderSecrets() {
   $("#v-secrets").onclick = async e => {
     const sv = e.target.closest("[data-save]"), cl = e.target.closest("[data-clear]");
     try {
-      if (sv) { const inp = document.querySelector(`[data-secret="${sv.dataset.save}"]`); if (!inp.value) return; await api("secrets/" + sv.dataset.save, "PUT", {value: inp.value}); inp.value = ""; toast("Saved to the keyring"); renderSecrets(); }
+      if (sv) { const inp = document.querySelector(`[data-secret="${sv.dataset.save}"]`); if (!inp.value) return; await api("secrets/" + sv.dataset.save, "PUT", {value: inp.value}); inp.value = ""; toast("Saved"); renderSecrets(); }
       if (cl) { await api("secrets/" + cl.dataset.clear, "PUT", {value: ""}); toast("Removed"); renderSecrets(); }
       if (e.target.id === "legacy") { const r = await api("secrets/import-legacy", "POST", {}); toast("Imported: " + (r.imported.join(", ") || "nothing found")); renderSecrets(); }
     } catch (err) { toast(err.message, true); }

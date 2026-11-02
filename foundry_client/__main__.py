@@ -149,6 +149,9 @@ def main(argv=None) -> int:
     if argv and argv[0] == "supervisor":
         from foundry_coordinator.supervisor import main as sup_main
         return sup_main(argv[1:])
+    if argv and argv[0] == "workstation":                 # LINUX_WORKSTATION_PLAN W3/W4
+        from .workstation import main as ws_main
+        return ws_main(argv[1:])
     from . import autostart, config, secrets
     ap = argparse.ArgumentParser(prog="foundry-client", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -182,6 +185,7 @@ def main(argv=None) -> int:
     sub.add_parser("import-legacy-secrets")
     a = ap.parse_args(argv or ["run"])
     cfg = config.load()
+    secrets.configure(cfg)
     if a.cmd in (None, "run"):
         return cmd_run(cfg, getattr(a, "headless", False), getattr(a, "no_start", False))
     if a.cmd == "status":

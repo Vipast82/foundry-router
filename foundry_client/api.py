@@ -198,7 +198,9 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
     @app.get("/api/secrets")
     def get_secrets():
         names = {s for c in mgr.cfg["components"].values() for s in c.get("secrets") or []}
-        return {"secrets": secrets.status(names), "help": secrets.KNOWN}
+        return {"secrets": secrets.status(names), "help": secrets.KNOWN,
+                "store": secrets.store_in_use(),
+                "file": secrets.secrets_file() if secrets.store_in_use() == "file" else ""}
 
     @app.put("/api/secrets/{name}")
     async def put_secret(name: str, request: Request):

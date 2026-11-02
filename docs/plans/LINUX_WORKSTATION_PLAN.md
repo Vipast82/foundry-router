@@ -3,7 +3,7 @@
 Status: **approved 2026-11-01** (Victor: "Yes, recommended": D-L1 to D-L6 as recommended
 below). **W1 is done (v0.162.2). W2 is built (v0.166.0), off by default:** [studio] main_slot puts
 the main sprints' Studio on a slot. Its first live trial is Victor's call (it moves the live main
-sprints' Studio). W3 (the installer) is next. Victor: "If I want to have a LXC container to RUN a
+sprints' Studio). **W3-W5 are built (v0.176.0):** install/workstation.sh, Access → Machines → Add a workstation, Export / Import, one active workstation per game, docs/INSTALL_WORKSTATION.md. Victor: "If I want to have a LXC container to RUN a
 FULL Coding Suite location to take the place of my PC as the main implementor, can we make that?
 or have like a Script Installer for everything I need on a current Linux Install". This replaces
 phase 3 of docs/plans/FRESH_INSTALL_PLAN.md (workstation enrollment) with a Linux-first version,
@@ -100,6 +100,45 @@ D-L4. Then it runs the same installer inside it.
 
 **W5. Docs (small).** `docs/INSTALL_WORKSTATION.md`: Linux PC, LXC, moving from Windows, and
 back.
+
+## W3–W5 build notes (2026-11-01, Victor: "GO ahead and plan everything and then build it")
+
+Built with the recommended answers above. These choices fill in details the plan left open:
+- **Enrollment** reuses the slot flow. Access → Machines → **Add a workstation** (name, game, the
+  machine's IP, and optionally "a Studio for main sprints here" with its place). The code is
+  traded once at `POST /v1/foundry/enroll` for three client keys, which go straight into the
+  keyring:
+  - `<name>`: inference + orchestration, as `FOUNDRY_COORDINATOR_KEY`;
+  - `<name>-kilo`: inference + media, as `FOUNDRY_KEY_KILO` and `FOUNDRY_KEY`;
+  - `<name>-relay`: operator, as `FOUNDRY_CLIENT_KEY`.
+
+  It also returns the router's Kilo provider block and the game's clone settings. With "a
+  Studio here", it adds a Studio slot `<name>-studio` on the same IP and returns that slot's
+  one-time code, so the installer can run `setup-host.sh` for it. W2's `studio.main_slot` is not
+  set automatically: switching main sprints is still your call.
+- **The game's clone** comes from new project settings: `workspace.clone_url` and
+  `workspace.repo_key_secret`. The second names a secret in the game's group (an ssh private key,
+  or an https token) that enrollment hands over once. The branch is `workspace.branch`, as today.
+- **The keyring (D-L5):** a new client setting, `client.secret_store` = `auto` | `keyring` | `file`.
+  `file` keeps the values in a mode-600 file under the `foundry` user. `auto` uses the OS keyring
+  when one works, else the file.
+- **Blender on a Linux workstation:** the pool's "this PC" worker and the sprint drop-in also work
+  on Linux (a shell drop-in, `blender` from the PATH or `/opt/blender`).
+- **W4, one active workstation:**
+  - the router keeps one active workstation per project;
+  - a coordinator claims it at start and every minute; a second one goes to **standby** (no new
+    sprints) and says which PC holds the project;
+  - Machines shows the holder, with a **Make active** button;
+  - the check fails open: an old router, or one that can't be reached, never stops sprints;
+  - setting `workspace.single_workstation` (on by default).
+- **W4, Export / Import:** `foundry_client export` and `import`.
+  - The file holds the coordinator's state, the local `project.toml`, `client.toml`, `kilo.jsonc`,
+    and a `git bundle` of every local branch of the game checkout. Track branches travel even if
+    they were never pushed.
+  - It refuses if any worktree has uncommitted changes, and lists them.
+  - It is encrypted with the router backup's format (scrypt + AES-GCM).
+  - Import rewrites the old paths (Windows or Linux) to the new layout, including inside the
+    state DB.
 
 ## Decisions for Victor
 

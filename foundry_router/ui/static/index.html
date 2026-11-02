@@ -3298,7 +3298,9 @@ async function tabMachines() {
       <td class="nw"><code>${esc(m.host || "")}</code><div class="hint">${esc(s.container || "")}${m.enrolled_hostname ? " · " + esc(m.enrolled_hostname) : ""}</div>
         ${(m.host_keys || []).length ? `<div class="hint" title="ssh host key reported by the slot; the coordinator checks the slot against it">host key ${esc((m.host_keys.find(k => k.type === "ssh-ed25519") || m.host_keys[0]).fingerprint)}</div>`
           : (m.kind === "slot" && m.enrolled_ts ? `<div class="hint" title="Installed before v0.162.0: reinstall it (New code) so it reports its ssh host key">host key not reported</div>` : "")}</td>
-      <td class="nw">${s.place_id ? `place ${esc(s.place_id)}` : '<span class="hint">no place</span>'}</td>
+      <td class="nw">${m.kind === "workstation" ? (m.studio_slot ? `Studio: ${esc(m.studio_slot)}` : '<span class="hint">no Studio here</span>')
+        + `<div class="hint" title="Its three keys (coordinator, Kilo, relay) on Access → Clients &amp; Keys">${Object.values(m.keys || {}).filter(k => k === "enabled").length}/3 keys</div>`
+        : s.place_id ? `place ${esc(s.place_id)}` : '<span class="hint">no place</span>'}</td>
       <td class="nw">${vncCell(m.vnc)}${m.host_settings ? `<div class="hint" title="Studio's drawing: on the host's GPU, or in software on the CPU">${
         (m.host_settings.gpu_state || {}).in_use ? "GPU in use" : (m.host_settings.gpu_state || {}).device ? "GPU present, not used" : "software drawing"}</div>` : ""}</td>
       <td class="hint" style="white-space:normal">${m.enrolled_ts ? `enrolled ${when(m.enrolled_ts)} from ${esc(m.enrolled_addr || "")}` : ""}
@@ -3314,6 +3316,12 @@ async function tabMachines() {
       <td class="nw"><code>${esc(w.fingerprint)}</code></td>
       <td class="nw hint">registered ${when(w.first_ts)}<div>last seen ${when(w.last_ts)}</div></td>
       <td class="nw"><button class="act danger" data-ws-del="${esc(w.name)}">Remove</button></td></tr>`).join("");
+  const claimRows = (d.workstation_claims || []).map(c => `<tr><td class="nw">${esc(c.project)}</td>
+      <td class="nw"><b>${esc(c.name || c.client)}</b><div class="hint">key ${esc(c.client)}${c.addr ? " · " + esc(c.addr) : ""}</div></td>
+      <td class="nw">${c.active ? pill("runs the sprints", "ok") : pill("standby", "warn")}</td>
+      <td class="nw hint">${when(c.last_ts)}</td>
+      <td class="nw">${c.active ? "" : `<button class="act primary" data-wc-active="${esc(c.project)}|${esc(c.client)}">Make active</button>`}
+        ${c.active ? "" : `<button class="act" data-wc-forget="${esc(c.project)}|${esc(c.client)}" title="Drop it from this list (it comes back when it checks in again)">Forget</button>`}</td></tr>`).join("");
   const ev = (d.events || []).slice(0, 15).map(e => `<tr><td class="nw hint">${when(e.ts)}</td><td class="nw">${esc(e.machine)}</td>
     <td class="nw">${esc(e.event)}</td><td class="hint">${esc(e.addr || "")} ${esc(e.detail || "")}</td></tr>`).join("");
   $("#main").innerHTML = `
@@ -3350,6 +3358,26 @@ async function tabMachines() {
         <button class="act primary" id="mc-add">Add slot and make a code</button></div>
       <p class="hint">The slot starts switched off and its installer switches it on when its container is ready, so no gate goes to a half-built slot.
         Moving a slot from another machine? Stop the old container first: one place can be open in one Studio at a time.</p></div>
+    <div class="card"><h3>Which workstation runs each game</h3>
+      <p class="hint">Only one workstation runs a game's sprints (<code>workspace.single_workstation</code>, on by default). The first
+        coordinator to check in holds the game; another one stays on <b>standby</b> (it starts no sprints) until you press
+        <b>Make active</b> for it. The old one goes on standby within a minute: wait until its sprint sessions have ended.</p>
+      ${claimRows ? `<div class="tscroll"><table><tr><th>game</th><th>workstation</th><th>state</th><th>last check-in</th><th></th></tr>${claimRows}</table></div>`
+        : '<p class="hint">No coordinator has checked in yet (routers before v0.176.0 have no check).</p>'}</div>
+    <div class="card"><h3>Add a workstation</h3>
+      <p class="hint">A Linux machine (a PC, or a Proxmox LXC) that runs the coordinator, Kilo, the game checkout and Blender:
+        <code>install/workstation.sh</code> (docs/INSTALL_WORKSTATION.md). Its code gives it three keys of its own (coordinator, Kilo,
+        relay) and the game's clone settings (<code>workspace.clone_url</code>, <code>workspace.repo_key_secret</code>).</p>
+      <div class="row"><label>game</label><select id="mw-project">${d.projects.map(p => `<option>${esc(p)}</option>`).join("")}</select>
+        <label title="A short name; its keys are <name>, <name>-kilo and <name>-relay">name</label><input id="mw-name" placeholder="ws-linux" style="width:130px">
+        <label title="Its static IP (needed for a Studio here)">IP</label><input id="mw-ip" placeholder="192.168.0.120" style="width:140px">
+        <label>note</label><input id="mw-note" placeholder="e.g. Proxmox node 3" style="width:180px"></div>
+      <div class="row"><label title="Main sprints need a Studio. On Linux it runs in the Studio slot container on this same machine (a slot named <name>-studio). Main sprints use it once Automation → Settings → studio.main_slot names it.">a Studio for main sprints here</label>
+        <label class="sw"><input type="checkbox" id="mw-studio" checked>On</label>
+        <label title="The place this Studio opens: the main checkout's TEST place (never LIVE)">its place</label>
+        <input id="mw-place" placeholder="TEST place id or Studio link" style="min-width:260px">
+        <label>universe id</label><input id="mw-universe" placeholder="optional" style="width:130px">
+        <button class="act primary" id="mw-add">Add workstation and make a code</button></div></div>
     <div class="card"><h3>Workstations</h3>
       <p class="hint">The PCs that run the coordinator. Each registers its own ssh key here when its coordinator starts
         (its key lives in <code>~/.foundry-coordinator/ssh</code>), and every slot allows it within 5 minutes. A new main PC only
@@ -3372,7 +3400,9 @@ async function tabMachines() {
       <h4>Or: an LXC / Debian 13 machine you made yourself</h4>
       <p class="hint">As root inside it (needs nesting + keyctl on Proxmox).</p>
       <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(i.inside_lxc || "")}</pre>
-      <p class="hint">After the build (20-40 min) the installer prints how to sign Studio in once. That is the only step left.</p>`);
+      <p class="hint">${(r.machine || {}).kind === "workstation"
+        ? "The installer stores the keys, clones Foundry and the game, starts the Foundry Client as a service and runs doctor. With a Studio here it also builds the Studio container (20-40 min) and prints how to sign Studio in once. Moving the work over: docs/INSTALL_WORKSTATION.md."
+        : "After the build (20-40 min) the installer prints how to sign Studio in once. That is the only step left."}</p>`);
     $("#mc-copy", body).onclick = () => navigator.clipboard.writeText(r.code).then(() => toast("Code copied"), () => toast("Select and copy it", true));
   };
   $("#mc-add").onclick = () => {
@@ -3396,7 +3426,15 @@ async function tabMachines() {
     const h = m.host_settings || {cpu_limit: 0, desktop_size: "2560x1440", gpu: true, gpu_state: {}};
     const gs = h.gpu_state || {};
     const gpuNow = gs.in_use ? `in use${gs.name ? " (" + esc(gs.name) + ")" : ""}` : gs.device ? "present on the host, not used yet (run the installer again)" : "no GPU reported by the host";
+    const st = m.settings || {};
     const body = openModal(`Settings for ${n}`, `
+      <h4>Place</h4>
+      <div class="row"><label title="The slot's own copy of the game: a place id, or paste a roblox-studio: link / games URL">Place id or link</label>
+        <input id="mv-place" value="${esc(st.place_id || "")}" placeholder="e.g. 116058790793121" style="width:260px">
+        <label title="The universe (experience) id that place belongs to">universe id</label>
+        <input id="mv-universe" value="${esc(st.universe_id || "")}" placeholder="e.g. 10773901724" style="width:150px"></div>
+      <p class="hint">Never a LIVE or the main TEST place: each slot works on its own copy. The slot's Studio opens the new place at its next
+        reopen or container start; the coordinator uses it from its next settings pull.</p>
       <h4>GPU</h4>
       <div class="row"><label title="Draw Studio's view on the host's iGPU (/dev/dri) when it has one">Use the GPU</label>
         <label class="sw"><input type="checkbox" id="mv-gpu" ${h.gpu !== false ? "checked" : ""}>On</label>
@@ -3425,13 +3463,35 @@ async function tabMachines() {
       <div class="row"><button class="act primary" id="mv-save">Save</button></div>`);
     $("#mv-save", body).onclick = () => {
       const size = $("#mv-size", body).value.trim();
-      api(`machines/${encodeURIComponent(n)}/host`, {method: "POST",
-        body: {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080),
-               cpu_limit: Number($("#mv-cpu", body).value || 0), desktop_size: size === "2560x1440" ? "" : size,
-               gpu: $("#mv-gpu", body).checked}})
-        .then(() => { toast("Saved: the CPU limit applies within 5 minutes; the GPU, VNC and the desktop size when the installer runs again"); closeModal(); render(); })
+      const hb = {vnc_lan: $("#mv-lan", body).checked, vnc_port: Number($("#mv-port", body).value || 6080),
+                  cpu_limit: Number($("#mv-cpu", body).value || 0), desktop_size: size === "2560x1440" ? "" : size,
+                  gpu: $("#mv-gpu", body).checked};
+      const place = $("#mv-place", body).value.trim(), uni = $("#mv-universe", body).value.trim();
+      if (/^\d+$/.test(place)) hb.place_id = place; else if (place) hb.place_link = place;
+      if (/^\d+$/.test(uni)) hb.universe_id = uni; else if (uni) { toast("universe id: digits only", true); return; }
+      api(`machines/${encodeURIComponent(n)}/host`, {method: "POST", body: hb})
+        .then(() => { toast("Saved: the place at the slot's next Studio reopen; the CPU limit within 5 minutes; the GPU, VNC and the desktop size when the installer runs again"); closeModal(); render(); })
         .catch(e => toast(e.message, true));
     };
+  });
+  $("#mw-add").onclick = () => {
+    const place = $("#mw-place").value.trim(), studio = $("#mw-studio").checked;
+    const body = {kind: "workstation", project: $("#mw-project").value, name: $("#mw-name").value.trim(),
+                  ip: $("#mw-ip").value.trim(), note: $("#mw-note").value, studio};
+    if (studio) {
+      if (/^\d+$/.test(place)) body.place_id = place; else if (place) body.place_link = place;
+      if ($("#mw-universe").value.trim()) body.universe_id = $("#mw-universe").value.trim();
+    }
+    api("machines", {method: "POST", body}).then(r => { render(); showCode(`Workstation ${r.machine.name} added`, r); }).catch(e => toast(e.message, true));
+  };
+  document.querySelectorAll("[data-wc-active]").forEach(b => b.onclick = () => {
+    const [project, client] = b.dataset.wcActive.split("|");
+    if (!confirm(`Make ${client} run ${project}'s sprints? The workstation running them now goes on standby within a minute (wait until its sprint sessions have ended).`)) return;
+    api("machines/active", {method: "POST", body: {project, client}}).then(() => { toast("Done: it takes over at its next check-in (within a minute)"); render(); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-wc-forget]").forEach(b => b.onclick = () => {
+    const [project, client] = b.dataset.wcForget.split("|");
+    api("machines/active", {method: "POST", body: {project, client, forget: true}}).then(() => { toast("Forgotten"); render(); }).catch(e => toast(e.message, true));
   });
   document.querySelectorAll("[data-ws-del]").forEach(b => b.onclick = () => {
     const n = b.dataset.wsDel;

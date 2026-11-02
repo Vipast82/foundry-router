@@ -94,6 +94,11 @@ class Manager:
         """New settings: rebuild specs; running components keep running until restarted."""
         with self.lock:
             self.cfg = cfg
+            try:
+                from . import secrets as _secrets
+                _secrets.configure(cfg)
+            except Exception:                                    # noqa: BLE001
+                pass
             for n, s in build(cfg).items():
                 if n in self.procs:
                     self.procs[n].spec = s

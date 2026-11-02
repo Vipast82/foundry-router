@@ -1027,6 +1027,17 @@ FIELDS: list[Field] = [
       "restart"),
     F("workspace.remote", "str", "origin", "Git remote.", "workspace", "coordinator.git",
       "restart"),
+    # a new workstation's installer clones the game from these (LINUX_WORKSTATION_PLAN W3)
+    F("workspace.clone_url", "str", "", "Where a new workstation clones the game from (e.g. "
+      "git@github.com:you/game.git or an https URL). Used once, by install/workstation.sh.",
+      "workspace", "coordinator.profile"),
+    F("workspace.repo_key_secret", "str", "", "A secret in this game's group on Access → "
+      "Secrets that lets a new workstation clone the game: an ssh private key (deploy key) or an "
+      "https token. Empty = the clone needs no key.", "workspace", "coordinator.profile"),
+    F("workspace.single_workstation", "bool", True, "Only one workstation runs this project's "
+      "sprints: the router keeps the active one (Access → Machines → Make active); another "
+      "coordinator stays on standby. Fails open when the router can't answer.", "workspace",
+      "coordinator.engine"),
     F("resources.exclusive", "list", [], "Resources one task holds at a time "
       "(e.g. studio:host, rojo:34872).", "workspace", "coordinator.engine", item_type="str"),
     F("resources.local_streams", "int", 1, "Local model sessions that run at once (sprints whose "

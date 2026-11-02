@@ -42,6 +42,10 @@ DEFAULTS: dict[str, Any] = {
         # router_key names the keyring entry holding the router key (operator scope)
         "relay_enabled": True,
         "router_key": "FOUNDRY_CLIENT_KEY",
+        # where secrets live (secrets.py): auto = the OS keyring when one works, else a
+        # mode-600 file; file = always the file (a Linux LXC with no desktop, D-L5)
+        "secret_store": "auto",
+        "secrets_file": "",                             # empty = <config dir>/secrets.json
     },
     "workspace": {
         "game": "",                                     # e.g. C:/Roblox/AnimalUprising
@@ -162,6 +166,8 @@ def validate(cfg: dict) -> list[str]:
     for k in ("relay_enabled", "update_check"):
         if not isinstance(c.get(k), bool):
             errs.append(f"client.{k} must be true or false")
+    if c.get("secret_store", "auto") not in ("auto", "keyring", "file"):
+        errs.append("client.secret_store must be auto, keyring or file")
     if isinstance(cfg.get("resources"), dict):
         from .resources import validate as resources_validate
         errs += resources_validate(cfg["resources"])

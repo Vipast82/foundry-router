@@ -44,7 +44,11 @@ SLOT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"          # no 0/O, 1/I/L
 FAIL_WINDOW_S, FAIL_MAX = 600, 10
-KINDS = ("slot",)                                       # workstation / chat client: later phases
+KINDS = ("slot", "workstation")                         # chat client: a later phase
+# a workstation's three client keys (LINUX_WORKSTATION_PLAN W3): <name>, <name>-kilo, <name>-relay
+WS_KEYS = (("", ["inference", "orchestration"], ("FOUNDRY_COORDINATOR_KEY",)),
+           ("-kilo", ["inference", "media"], ("FOUNDRY_KEY_KILO", "FOUNDRY_KEY")),
+           ("-relay", ["operator"], ("FOUNDRY_CLIENT_KEY",)))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS machines (
@@ -56,6 +60,10 @@ CREATE TABLE IF NOT EXISTS machines (
 CREATE TABLE IF NOT EXISTS machine_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, machine TEXT NOT NULL DEFAULT '',
     event TEXT NOT NULL, addr TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS workstation_claims (
+    project TEXT NOT NULL, client TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+    addr TEXT NOT NULL DEFAULT '', first_ts REAL NOT NULL, last_ts REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (project, client));
 CREATE TABLE IF NOT EXISTS workstation_keys (
     name TEXT PRIMARY KEY, public_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
     client TEXT NOT NULL DEFAULT '', addr TEXT NOT NULL DEFAULT '',
@@ -194,6 +202,13 @@ class Machines:
             raise MachineError("unknown or already used enrollment code", "bad_code", 403)
         return row
 
+    def peek(self, code: str) -> Optional[dict]:
+        """The machine a still-valid code belongs to, without spending it."""
+        row = self.db.query_one("SELECT * FROM machines WHERE code_hash=?", (code_hash(code),))
+        if row and float(row.get("code_expires") or 0) >= self.clock():
+            return row
+        return None
+
     def enrolled(self, name: str, addr: str, hostname: str) -> None:
         self.db.execute("UPDATE machines SET enrolled_ts=?, enrolled_addr=?, enrolled_hostname=? "
                         "WHERE name=?", (self.clock(), addr[:80], hostname[:80], name))
@@ -251,6 +266,53 @@ class Machines:
 
     def remove_workstation(self, name: str) -> bool:
         return self.db.execute_count("DELETE FROM workstation_keys WHERE name=?", (name,)) == 1
+
+    # -- one active workstation per project (LINUX_WORKSTATION_PLAN W4)
+
+    def claims(self, project: str = "") -> list[dict]:
+        q, a = "SELECT * FROM workstation_claims", ()
+        if project:
+            q, a = q + " WHERE project=?", (project,)
+        return self.db.query(q + " ORDER BY project, active DESC, last_ts DESC", a)
+
+    def active(self, project: str) -> Optional[dict]:
+        return self.db.query_one("SELECT * FROM workstation_claims WHERE project=? AND active=1",
+                                 (project,))
+
+    def claim(self, project: str, client: str, name: str, addr: str) -> tuple[bool, dict]:
+        """A coordinator asking to run `project`: (active?, the holder). The first to ask holds
+        it; the others are recorded (Machines lists them) and stay on standby until someone
+        presses Make active."""
+        now = self.clock()
+        with self._lock:
+            self.db.execute("INSERT INTO workstation_claims (project, client, name, addr, first_ts, "
+                            "last_ts) VALUES (?,?,?,?,?,?) ON CONFLICT(project, client) DO UPDATE "
+                            "SET name=excluded.name, addr=excluded.addr, last_ts=excluded.last_ts",
+                            (project, client, name[:64], addr[:80], now, now))
+            holder = self.active(project)
+            if holder is None:
+                self.db.execute("UPDATE workstation_claims SET active=1 WHERE project=? AND "
+                                "client=?", (project, client))
+                holder = self.active(project)
+        return holder["client"] == client, holder
+
+    def make_active(self, project: str, client: str) -> bool:
+        with self._lock:
+            if not self.db.query_one("SELECT 1 FROM workstation_claims WHERE project=? AND "
+                                     "client=?", (project, client)):
+                return False
+            self.db.execute("UPDATE workstation_claims SET active=(client=?) WHERE project=?",
+                            (client, project))
+        return True
+
+    def release(self, project: str, client: str) -> bool:
+        """The holder steps down (Export: the old workstation hands over)."""
+        return self.db.execute_count("UPDATE workstation_claims SET active=0 WHERE project=? AND "
+                                     "client=? AND active=1", (project, client)) == 1
+
+    def forget_claim(self, project: str, client: str) -> bool:
+        return self.db.execute_count("DELETE FROM workstation_claims WHERE project=? AND "
+                                     "client=?", (project, client)) == 1
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -323,6 +385,16 @@ def _install_commands(request: Request, m: dict, code: str) -> dict:
     url = f"http://{host}:{_cfg(request).server.port}" if host else ""
     raw = (f"https://raw.githubusercontent.com/Vipast82/foundry-router/v{__version__}/"
            "contrib/studio-slot/proxmox")
+    if m.get("kind") == "workstation":
+        inst = f"https://raw.githubusercontent.com/Vipast82/foundry-router/v{__version__}/install"
+        return {
+            "router_url": url,
+            "proxmox_host": f"curl -fsSLO {inst}/create-workstation-lxc.sh && "
+                            "bash create-workstation-lxc.sh",
+            "inside_lxc": (f"apt-get update -qq && apt-get install -y -qq curl && "
+                           f"curl -fsSLO {inst}/workstation.sh && bash workstation.sh"),
+            "code": code,
+        }
     return {
         "router_url": url,
         "proxmox_host": f"curl -fsSLO {raw}/create-slot-lxc.sh && bash create-slot-lxc.sh",
@@ -343,7 +415,13 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
         pass
     seen = act_seen.get(m["name"]) or {}
     settings = slot_settings(svc, m["project"], m["slot"]) if m["kind"] == "slot" else {}
-    return {**{k: m.get(k) for k in ("name", "kind", "project", "slot", "host", "note",
+    extra = {}
+    if m["kind"] == "workstation":
+        keys = {n: _client(cfg, n) for n in ws_key_names(m["name"])}
+        extra = {"keys": {n: ("none" if k is None else "enabled" if k.enabled else "disabled")
+                          for n, k in keys.items()},
+                 "studio_slot": m.get("slot") or ""}
+    return {**extra, **{k: m.get(k) for k in ("name", "kind", "project", "slot", "host", "note",
                                      "created_ts", "created_by", "enrolled_ts", "enrolled_addr",
                                      "enrolled_hostname")},
             "code_pending": bool(m.get("code_hash")) and float(m.get("code_expires") or 0) > time.time(),
@@ -397,7 +475,8 @@ async def list_machines(request: Request):
                                             "last_ts")} for w in svc.machines.workstations()],
         "settings": svc.config_store.config.machines.model_dump(),
         "projects": _projects(svc), "kinds": list(KINDS), "tls": _tls(request),
-        "events": svc.machines.events(30), "blender_pool": blender_pool(svc)},
+        "events": svc.machines.events(30), "blender_pool": blender_pool(svc),
+        "workstation_claims": svc.machines.claims()},
         headers={"Cache-Control": "no-store"})
 
 
@@ -510,6 +589,8 @@ async def add_machine(request: Request):
     kind = str(b.get("kind") or "slot")
     if kind not in KINDS:
         raise MachineError(f"kind: one of {', '.join(KINDS)}")
+    if kind == "workstation":
+        return _add_workstation(request, svc, cfg, b)
     project = str(b.get("project") or "").strip()
     slot = str(b.get("slot") or "").strip()
     ip = str(b.get("ip") or "").strip()
@@ -544,6 +625,156 @@ async def add_machine(request: Request):
                         headers={"Cache-Control": "no-store"})
 
 
+def ws_key_names(name: str) -> list[str]:
+    return [name + suffix for suffix, _, _ in WS_KEYS]
+
+
+def _add_workstation(request: Request, svc, cfg, b: dict) -> JSONResponse:
+    """{kind: workstation, name, project, ip?, note?, studio?: bool, place_id? | place_link?,
+    universe_id?} -> the machine and its one-time code. With `studio`, a Studio slot
+    `<name>-studio` on the same IP is added too (off until its own installer reports ready);
+    the workstation's enrollment hands its code to install/workstation.sh."""
+    name = str(b.get("name") or "").strip()
+    project = str(b.get("project") or "").strip()
+    ip = str(b.get("ip") or "").strip()
+    studio = b.get("studio") is True or str(b.get("studio")).lower() in ("1", "true", "on")
+    if not SLOT_RE.match(name) or len(name) > 32:
+        raise MachineError("name: a short name like ws-linux (letters, digits, _ and -)")
+    if not project:
+        raise MachineError("project: which game this workstation runs")
+    if ip and not HOST_RE.match(ip):
+        raise MachineError("ip: the workstation's address (e.g. 192.168.0.120)")
+    if studio and not ip:
+        raise MachineError("ip: needed for a Studio on this workstation (its slot is reached "
+                           "over ssh like any slot)")
+    known = svc.machines.get(name)
+    if known and known["kind"] != "workstation":
+        raise MachineError(f"{name!r} is already a {known['kind']} on Machines", "name_taken", 409)
+    for n in ws_key_names(name):
+        if _client(cfg, n) is not None and known is None:
+            raise MachineError(f"a client key named {n!r} already exists (not a machine): "
+                               "rename or delete it on Clients & Keys first", "name_taken", 409)
+    slot = ""
+    if studio:
+        slot = f"{name}-studio"
+        other = svc.machines.get(slot)
+        if other and other["kind"] != "slot":
+            raise MachineError(f"{slot!r} is already a {other['kind']}", "name_taken", 409)
+        if _client(cfg, slot) is not None and other is None:
+            raise MachineError(f"a client key named {slot!r} already exists (not a machine)",
+                               "name_taken", 409)
+        settings = derived_slot(f"studio@{ip}", {"container": "studio-slot",
+                                                 **_slot_settings_from(b), "enabled": False})
+        svc.automation.put_slot(project, slot, settings, _actor(),
+                                note=f"Access → Machines: the main Studio of workstation {name}")
+        svc.machines.add(slot, "slot", project, slot, f"studio@{ip}",
+                         f"main Studio of workstation {name}", _actor())
+        svc.machines.event(slot, "added", _addr(), f"{project}/{slot} on {ip} (workstation {name})")
+    svc.machines.add(name, "workstation", project, slot, ip, str(b.get("note") or ""), _actor())
+    code, exp = svc.machines.mint(name, cfg.machines.code_minutes)
+    svc.machines.event(name, "added", _addr(), f"workstation for {project}"
+                                               + (f" on {ip}" if ip else "")
+                                               + (f", Studio slot {slot}" if slot else ""))
+    m = svc.machines.get(name)
+    return JSONResponse({"machine": _view(svc, m, {}), "code": code, "code_expires": exp,
+                         "install": _install_commands(request, m, code)},
+                        headers={"Cache-Control": "no-store"})
+
+
+def _ws_settings(svc, project: str) -> dict:
+    try:
+        doc = (svc.automation.deployed(project) or {}).get("doc") or {}
+    except Exception:                                            # noqa: BLE001
+        doc = {}
+    return (doc.get("settings") or {}).get("workspace") or {}
+
+
+def _ws_repo_key(svc, project: str, addr: str, who: str) -> tuple[Optional[str], str]:
+    """(the game's repo key or None, why not) from workspace.repo_key_secret."""
+    name = str(_ws_settings(svc, project).get("repo_key_secret") or "")
+    if not name:
+        return None, ""
+    try:
+        got = svc.secret_store.bundle([project], [name])
+    except Exception as e:                                       # noqa: BLE001
+        return None, f"the secret store could not give {project}/{name}: {e}"
+    try:
+        svc.secret_store.record_pull(who, addr, "workstation-installer", "enroll", project, "",
+                                     got, "ok" if got else "missing")
+    except Exception:                                            # noqa: BLE001
+        pass
+    if not got:
+        return None, f"no value set for {project}/{name} on Access → Secrets"
+    return got[0]["value"], ""
+
+
+def _ws_game(svc, project: str) -> dict:
+    ws = _ws_settings(svc, project)
+    return {"id": project, "clone_url": str(ws.get("clone_url") or ""),
+            "branch": str(ws.get("branch") or "main"), "remote": str(ws.get("remote") or "origin")}
+
+
+def _enroll_workstation(request: Request, svc, m: dict, addr: str, hostname: str) -> JSONResponse:
+    name = m["name"]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    made, keys = [], {}
+    for suffix, scopes, envs in WS_KEYS:
+        key = client_keys.generate_key()
+        made.append({"name": name + suffix, "key_hash": client_keys.hash_key(key),
+                     "key_hint": client_keys.hint(key), "scopes": list(scopes),
+                     "projects": [m["project"]] if m["project"] else [], "slots": [],
+                     "secret_names": [], "enabled": True,
+                     "note": f"workstation {name} ({hostname or addr}, enrolled {now[:10]})",
+                     "created": now})
+        for e in envs:
+            keys[e] = key
+    names = {x["name"] for x in made}
+
+    def mutate(raw):
+        raw.setdefault("clients", [])
+        if raw["clients"] is None:
+            raw["clients"] = []
+        raw["clients"] = [c for c in raw["clients"] if c.get("name") not in names] + made
+    svc.config_store.save(mutate)
+    svc.machines.enrolled(name, addr, hostname)
+    svc.machines.event(name, "enrolled", addr, hostname)
+    repo_key, repo_why = _ws_repo_key(svc, m["project"], addr, name)
+    studio = None
+    if m.get("slot") and svc.machines.get(m["slot"]):
+        code, exp = svc.machines.mint(m["slot"], svc.config_store.config.machines.code_minutes)
+        svc.machines.event(m["slot"], "code_made", addr, f"by workstation {name}'s enrollment")
+        studio = {"slot": m["slot"], "code": code, "code_expires": exp}
+    try:
+        svc.control.raise_alert(
+            f"machine_enrolled:{name}:{int(time.time())}", "machine_enrolled", "info",
+            f"Workstation {name} enrolled",
+            f"Workstation {name} ({m['project']}) enrolled from {hostname or '?'} at {addr or '?'} "
+            "and got its three keys. If you didn't run its installer, revoke it on Access -> "
+            "Machines.", {"project_id": m["project"]})
+    except Exception:                                            # noqa: BLE001
+        pass
+    from . import __version__
+    host = (request.headers.get("host") or "").split(":")[0]
+    router_http = f"http://{host}:{svc.config_store.config.server.port}" if host else ""
+    try:
+        from .ui.routes import kilo_block
+        kilo, _ = kilo_block(svc, router_http or "http://FOUNDRY_HOST:11435")
+    except Exception:                                            # noqa: BLE001
+        kilo = {}
+    try:
+        roles = ((svc.automation.deployed(m["project"]) or {}).get("doc") or {})             .get("settings", {}).get("roles") or {}
+    except Exception:                                            # noqa: BLE001
+        roles = {}
+    body = {"machine": name, "kind": "workstation", "project": m["project"], "keys": keys,
+            "router_version": __version__, "router_http": router_http,
+            "kilo_provider": kilo, "implementer": str(roles.get("implementer") or ""),
+            "game": {**_ws_game(svc, m["project"]), "repo_key": repo_key,
+                     "repo_key_problem": repo_why},
+            "studio": studio, "ssh_authorized_keys": authorized_keys(svc),
+            "tls": _tls(request)}
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+
 @router.post(A + "/{name}/code")
 @_guard
 async def new_machine_code(request: Request, name: str):
@@ -559,27 +790,33 @@ async def new_machine_code(request: Request, name: str):
                         headers={"Cache-Control": "no-store"})
 
 
-HOST_KEYS = ("vnc_lan", "vnc_port", "cpu_limit", "desktop_size", "gpu")
+HOST_KEYS = ("vnc_lan", "vnc_port", "cpu_limit", "desktop_size", "gpu", "place_id", "universe_id")
 
 
 @router.post(A + "/{name}/vnc")
 @router.post(A + "/{name}/host")
 @_guard
 async def machine_host_settings(request: Request, name: str):
-    """{vnc_lan?, vnc_port?, cpu_limit?, desktop_size?}: the slot host's settings (a new
-    deployed settings revision). cpu_limit reaches the slot within 5 minutes (its key-refresh
-    timer, docker update); the others when its installer runs again (New code)."""
+    """{vnc_lan?, vnc_port?, cpu_limit?, desktop_size?, gpu?, place_id? | place_link?,
+    universe_id?}: the slot's settings (a new deployed settings revision). cpu_limit reaches the
+    slot within 5 minutes (its key-refresh timer, docker update); the place and universe at its
+    next secrets pull (Studio reopen or container start) and the coordinator's next config pull;
+    the others when its installer runs again (New code)."""
     svc = _svc(request)
     m = svc.machines.get(name)
     if not m or m["kind"] != "slot":
         raise MachineError(f"no slot {name!r}", "not_found", 404)
     b = await _body(request)
     s = {k: v for k, v in _slot_settings_from(b).items() if k in HOST_KEYS}
+    for k in ("place_id", "universe_id"):
+        if k in s and s[k] < 0:
+            raise MachineError(f"{k}: a Roblox id (0 = none)")
     if not s:
         raise MachineError("one of " + ", ".join(HOST_KEYS))
     rev = svc.automation.put_slot(m["project"], m["slot"], s, _actor(),
                                   note=f"Access → Machines: {name} host settings")
     svc.machines.event(name, "vnc_changed" if set(s) <= {"vnc_lan", "vnc_port"}
+                       else "place_changed" if set(s) <= {"place_id", "universe_id"}
                        else "host_settings", _addr(),
                        ", ".join(f"{k}={v}" for k, v in s.items()))
     from .secrets_api import slot_settings
@@ -605,10 +842,12 @@ async def revoke_machine(request: Request, name: str):
     if not svc.machines.get(name):
         raise MachineError(f"no machine {name!r}", "not_found", 404)
     svc.db.execute("UPDATE machines SET code_hash=NULL WHERE name=?", (name,))
+    m = svc.machines.get(name)
+    names = set(ws_key_names(name)) if m["kind"] == "workstation" else {name}
 
     def mutate(raw):
         for c in raw.get("clients") or []:
-            if c.get("name") == name:
+            if c.get("name") in names:
                 c["enabled"] = False
     svc.config_store.save(mutate)
     svc.machines.event(name, "revoked", _addr())
@@ -627,8 +866,10 @@ async def delete_machine(request: Request, name: str, remove_slot: bool = True):
         svc.automation.put_slot(m["project"], m["slot"], None, _actor(),
                                 note=f"Access → Machines: slot {m['slot']} removed")
 
+    names = set(ws_key_names(name)) if m["kind"] == "workstation" else {name}
+
     def mutate(raw):
-        raw["clients"] = [c for c in raw.get("clients") or [] if c.get("name") != name]
+        raw["clients"] = [c for c in raw.get("clients") or [] if c.get("name") not in names]
     svc.config_store.save(mutate)
     svc.machines.remove(name)
     svc.machines.event(name, "deleted", _addr())
@@ -689,9 +930,11 @@ async def enroll(request: Request):
     except MachineError as e:
         return _err(e)
     name = m["name"]
+    hostname = re.sub(r"[^A-Za-z0-9_.-]", "", str(b.get("hostname") or ""))[:64]
+    if m["kind"] == "workstation":
+        return _enroll_workstation(request, svc, m, addr, hostname)
     key = client_keys.generate_key()
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    hostname = re.sub(r"[^A-Za-z0-9_.-]", "", str(b.get("hostname") or ""))[:64]
     entry = {"name": name, "key_hash": client_keys.hash_key(key),
              "key_hint": client_keys.hint(key), "scopes": ["secrets"],
              "projects": [m["project"]] if m["project"] else [],
@@ -812,6 +1055,70 @@ async def workstation_ssh(request: Request):
             pass
     return JSONResponse({"ok": True, "status": status, "fingerprint": fingerprint(key),
                          "slots": slot_hosts(svc)}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/v1/foundry/control/workstation-active")
+async def workstation_active(request: Request):
+    """{project, name, release?} from a coordinator (orchestration key), every minute ->
+    {active, holder}. The first coordinator to ask holds the project; another one stays on
+    standby until Make active (LINUX_WORKSTATION_PLAN W4). `release` steps down (Export)."""
+    svc = _svc(request)
+    try:
+        b = await _body(request)
+        project = str(b.get("project") or "").strip()
+        name = str(b.get("name") or "").strip()[:64]
+        if not project:
+            raise MachineError("project: the project this coordinator runs")
+    except MachineError as e:
+        return _err(e)
+    c = client_auth.current()
+    client = str(c.get("client_id") or "")
+    allowed = c.get("projects") or []
+    if allowed and project not in allowed:
+        return _err(MachineError(f"this key may not run project {project!r}", "forbidden", 403))
+    if b.get("release") is True:
+        done = svc.machines.release(project, client)
+        if done:
+            svc.machines.event(name or client, "workstation_released", _addr(), project)
+        return {"active": False, "released": done, "holder": svc.machines.active(project)}
+    before = svc.machines.active(project)
+    active, holder = svc.machines.claim(project, client, name, _addr())
+    if active and (before is None or before["client"] != client):
+        svc.machines.event(name or client, "workstation_active", _addr(), project)
+    if not active:
+        try:
+            svc.control.raise_alert(
+                f"workstation_standby:{project}:{client}", "workstation_standby", "warning",
+                f"{name or client} is on standby for {project}",
+                f"{name or client} ({_addr() or '?'}) wants to run {project}, but "
+                f"{holder.get('name') or holder.get('client')} holds it, so it starts no sprints. "
+                "To move the project, press Make active on Access -> Machines.",
+                {"project_id": project})
+        except Exception:                                        # noqa: BLE001
+            pass
+    return {"active": active, "holder": {k: holder.get(k) for k in
+                                         ("client", "name", "addr", "last_ts")}}
+
+
+@router.post(A + "/active")
+@_guard
+async def make_workstation_active(request: Request):
+    """{project, client}: this workstation runs the project's sprints from its next check-in
+    (within a minute); the old holder goes on standby. {project, client, forget: true} drops a
+    workstation from the list."""
+    svc = _svc(request)
+    b = await _body(request)
+    project, client = str(b.get("project") or ""), str(b.get("client") or "")
+    if b.get("forget") is True:
+        if not svc.machines.forget_claim(project, client):
+            raise MachineError(f"no workstation {client!r} for {project!r}", "not_found", 404)
+        svc.machines.event(client, "workstation_forgotten", _addr(), project)
+        return {"ok": True, "claims": svc.machines.claims(project)}
+    if not svc.machines.make_active(project, client):
+        raise MachineError(f"no workstation {client!r} has asked to run {project!r}",
+                           "not_found", 404)
+    svc.machines.event(client, "workstation_made_active", _addr(), f"{project} by {_actor()}")
+    return {"ok": True, "claims": svc.machines.claims(project)}
 
 
 @router.get("/v1/foundry/secrets/authorized-keys")

@@ -374,6 +374,16 @@ def run(a, blender_args: list) -> int:
 
 LOCAL = "local"                        # the pool's name for this PC
 LOCAL_EXE = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+
+
+def default_local_exe() -> str:
+    """This PC's Blender when blender.local_exe is empty: the Windows install path, or on Linux
+    (LINUX_WORKSTATION_PLAN W3) `blender` on the PATH, else /opt/blender/blender (the
+    workstation installer's and the slot image's place)."""
+    if os.name == "nt":
+        return LOCAL_EXE
+    import shutil
+    return shutil.which("blender") or "/opt/blender/blender"
 POOL_POLL_S = 5
 
 
@@ -483,7 +493,7 @@ def _remember(cfg_path: str, wid: str) -> None:
 def _run_local(a, cfg: dict, repo: str, args: list, w: dict, job) -> int:
     """This PC as a pool worker: the local Blender, in the worktree itself (the outputs are
     already where they belong), with the same journal as a slot run."""
-    exe = str(w.get("exe") or cfg.get("local_exe") or LOCAL_EXE)
+    exe = str(w.get("exe") or cfg.get("local_exe") or default_local_exe())
     if not os.path.isfile(exe):
         log(f"this PC's Blender is not at {exe} (setting blender.local_exe)")
         return 2
@@ -674,6 +684,9 @@ def _journal(cfg: dict, repo: str, args: list, rc: int, t0: float, marks: dict, 
 
 # what a sprint may not run while its Blender is on a slot (Kilo bash rules, kilo_config)
 LOCAL_BLENDER = ("*blender.exe*", "*Blender Foundation*")
+# the same on a Linux workstation: `blender` itself and its usual places (the drop-in's own path,
+# ~/.foundry-blender/..., never matches these)
+LOCAL_BLENDER_POSIX = ("blender *", "* blender *", "*/opt/blender/*", "*/bin/blender *")
 
 
 def blender_slot(profile) -> str:
@@ -742,7 +755,8 @@ def deny_rules(profile) -> list:
     pool (the drop-in runs it then)."""
     if not pooled(profile):
         return []
-    return [{"permission": "bash", "pattern": p, "action": "deny"} for p in LOCAL_BLENDER]
+    pats = LOCAL_BLENDER if os.name == "nt" else LOCAL_BLENDER_POSIX
+    return [{"permission": "bash", "pattern": p, "action": "deny"} for p in pats]
 
 
 def wrapper_dir() -> str:
@@ -808,7 +822,7 @@ def _prepare_pool(profile, state_dir: str, task_id: str, run_id: str) -> dict:
     workers, notes = [], []
     for w in pool(profile):
         if w["id"] == LOCAL:
-            workers.append({**w, "exe": str(bl.get("local_exe") or LOCAL_EXE)})
+            workers.append({**w, "exe": str(bl.get("local_exe") or default_local_exe())})
             continue
         s = conf.get(w["id"])
         if not s:
@@ -832,7 +846,7 @@ def _prepare_pool(profile, state_dir: str, task_id: str, run_id: str) -> dict:
                str(profile.workspace)),
            "library": str(bl.get("library", "C:/Roblox/AssetLibrary") or ""),
            "pool": workers, "pool_wait_seconds": int(bl.get("pool_wait_seconds") or 600),
-           "local_exe": str(bl.get("local_exe") or LOCAL_EXE),
+           "local_exe": str(bl.get("local_exe") or default_local_exe()),
            "task": str(task_id or ""), "run_id": str(run_id or ""), **journal_settings(profile)}
     _write(cfg_path, json.dumps(cfg, indent=1))
     _write_dropin(cmd_path, cfg_path, cfg["workspace"], state_dir)

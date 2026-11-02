@@ -2037,14 +2037,30 @@ async def kilo_provider_config(request: Request):
     with each persona's effective context/output limits and modalities (Kilo
     sizes compaction from these, not from /v1/models). Disabled personas are
     included, marked, so the block doesn't change when you enable one."""
-    from ..facade.ollama_api import persona_meta
-    from ..kilo_roles import display_name
     svc = _svc(request)
     cfg = svc.config_store.config
     base = request.query_params.get("base_url") or (
         f"http://{cfg.server.host if cfg.server.host not in ('0.0.0.0', '::', '') else 'FOUNDRY_HOST'}"
         f":{cfg.server.port}")
-    prefix = request.query_params.get("prefix", "Foundry-Kilo")
+    block, explain = kilo_block(svc, base, request.query_params.get("prefix", "Foundry-Kilo"))
+    if request.query_params.get("explain") in ("1", "true"):
+        # Kilo's config schema rejects unknown keys, so the explanation is a
+        # separate envelope, never part of the block itself.
+        return {"config": block, "limits": explain,
+                "policy": "Strict personas: context = the smallest of the persona's declared "
+                          "context_window and the known window of every model in its ordered "
+                          "chain (a fallback pin can serve any request); output = the persona's "
+                          "max_output_tokens capped by that. Models with no known window don't "
+                          "lower it. An already-saved kilo.jsonc is not updated by changing a "
+                          "persona: regenerate and merge it."}
+    return block
+
+
+def kilo_block(svc, base: str, prefix: str = "Foundry-Kilo") -> tuple[dict, dict]:
+    """(the Kilo provider block, the per-persona limits explanation); also what a new
+    workstation's enrollment hands its installer (machines.py)."""
+    from ..facade.ollama_api import persona_meta
+    from ..kilo_roles import display_name
     models = {}
     explain = {}
     for p in svc.personas.list():
@@ -2082,17 +2098,7 @@ async def kilo_provider_config(request: Request):
         # provider. And helpers may not start helpers of their own.
         "enabled_providers": ["foundry"],
         "subagent_depth": 1}
-    if request.query_params.get("explain") in ("1", "true"):
-        # Kilo's config schema rejects unknown keys, so the explanation is a
-        # separate envelope, never part of the block itself.
-        return {"config": block, "limits": explain,
-                "policy": "Strict personas: context = the smallest of the persona's declared "
-                          "context_window and the known window of every model in its ordered "
-                          "chain (a fallback pin can serve any request); output = the persona's "
-                          "max_output_tokens capped by that. Models with no known window don't "
-                          "lower it. An already-saved kilo.jsonc is not updated by changing a "
-                          "persona: regenerate and merge it."}
-    return block
+    return block, explain
 
 
 @router.get("/admin/api/profiles")

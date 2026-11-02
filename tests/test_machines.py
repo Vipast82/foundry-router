@@ -150,6 +150,26 @@ def test_vnc_settings_from_the_add_form_and_the_vnc_button(app, client):
     assert "vnc_changed" in ev
 
 
+def test_place_and_universe_from_the_settings_dialog(app, client):
+    _deployed(app)
+    svc = _svc(app)
+    _add(client)
+    slot = lambda: svc.automation.deployed("animaluprising")["doc"]["settings"]["slots"]["slot-2"]
+    r = client.post("/admin/api/machines/slot-2/host", json={"place_id": "333", "universe_id": "444"})
+    assert r.status_code == 200, r.text
+    assert slot()["place_id"] == 333 and slot()["universe_id"] == 444
+    assert slot()["host"] == "studio@192.168.0.52"          # the rest of the slot is kept
+    r = client.post("/admin/api/machines/slot-2/host", json={
+        "place_link": "roblox-studio:1+launchmode:edit+task:EditPlace+placeId:555+universeId:666"})
+    assert r.status_code == 200, r.text
+    assert slot()["place_id"] == 555 and slot()["universe_id"] == 666
+    assert client.post("/admin/api/machines/slot-2/host", json={"universe_id": "abc"}).status_code == 400
+    assert client.post("/admin/api/machines/slot-2/host", json={"place_id": -1}).status_code == 400
+    listed = [m for m in client.get("/admin/api/machines").json()["machines"] if m["name"] == "slot-2"][0]
+    assert listed["settings"]["place_id"] == 555
+    assert "place_changed" in [x["event"] for x in svc.machines.events(5)]
+
+
 def test_vnc_password_counts_only_when_the_slot_can_read_it(app, client):
     _deployed(app)
     svc = _svc(app)

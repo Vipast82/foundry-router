@@ -2,6 +2,93 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.176.0 — Linux main workstation: installer, enrollment, Export/Import, one active workstation (W3-W5); slot place field
+
+2026-11-01. Plan: `docs/plans/LINUX_WORKSTATION_PLAN.md` W3-W5 (approved; built with the
+recommended answers; the build notes in the plan fill in the details). Guide:
+`docs/INSTALL_WORKSTATION.md`. Victor: "GO ahead and plan everything and then build it".
+
+- **Access → Machines → Add a workstation** (machines.py): a workstation is a new machine kind.
+  - Its one-time code is traded once at `/v1/foundry/enroll` for three keys of its own, stored
+    hashed on the router:
+    - `<name>`: inference + orchestration;
+    - `<name>-kilo`: inference + media;
+    - `<name>-relay`: operator.
+  - The same answer also carries the router's Kilo provider block (`routes.kilo_block`, now
+    shared), the implementer, and the game's clone settings.
+  - "A Studio here" adds a Studio slot `<name>-studio` on the same IP and hands its code to the
+    installer.
+  - Revoke and Delete cover all three keys.
+- **New project settings (Workspace):**
+  - `workspace.clone_url`;
+  - `workspace.repo_key_secret`: a secret in the game's group, an ssh deploy key or an https
+    token, handed over once at enrollment;
+  - `workspace.single_workstation`, on.
+- **`install/workstation.sh`** (Debian 13 / Ubuntu 24.04):
+  - the packages (Node 22, Kilo 7.8.8, rokit, Blender 4.5.12 with checksums);
+  - a `foundry` user (uid ≥ 1001, so the Studio image keeps 1000), everything under
+    `/srv/foundry`;
+  - enrollment, the release at the router's version, a venv;
+  - `foundry_client workstation apply` (keys into the secret store, client.toml, the repo key);
+  - the game clone, then `workstation profile` (project.toml from the release example with this
+    machine's paths, a first kilo.jsonc);
+  - optionally `--import`, and the Studio slot installer for `<name>-studio`;
+  - the systemd service (linger), apply-kilo-config, doctor.
+  - `--import-only FILE` imports onto an installed workstation.
+- **`install/create-workstation-lxc.sh`:** makes the Proxmox LXC (8 cores, 32 GB, 120 GB,
+  nesting + keyctl, optional iGPU) and runs the installer inside it.
+- **The client's secret store** (D-L5): `client.secret_store` = auto | keyring | file (Settings
+  → Watchdog). `file` is a mode-600 JSON file; `auto` uses the OS keyring when one works, else the
+  file. The Secrets tab says which.
+- **Export / Import** (`foundry_client workstation export|import`, foundry_client/move.py), in
+  the router backup's encrypted format:
+  - **What travels:** the coordinator's state (SQLite copied consistently; no logs, backups,
+    repair worktrees, ssh key or Windows credential files), project.toml, every kilo.jsonc, and
+    a git bundle of the commits not on the remote plus every local branch tip.
+  - **What it refuses:** to run while the coordinator runs, or with uncommitted changes to
+    tracked files (it lists them).
+  - **The old workstation steps down:** the coordinator is switched off in client.toml and the
+    router hold is released, unless `--keep-active`.
+  - **Import:** rewrites the old paths in any separator style, also inside the state DB (FTS
+    tables skipped); recreates branches and track worktrees; turns Windows-only MCP servers off
+    in kilo.jsonc and lists them.
+- **One active workstation per game (W4):**
+  - `POST /v1/foundry/control/workstation-active`: the first coordinator to check in holds the
+    game, and another one is recorded on standby (with a warning alert).
+  - `foundry_coordinator/workstation_gate.py` checks before the first tick and every minute.
+    The engine skips a game on standby (that engine hunk already shipped in v0.172.0/v0.173.0,
+    inert until now).
+  - **It fails open:** no router, an older router, an error, or `single_workstation = false`
+    all keep the game running.
+  - Machines has a **Which workstation runs each game** card with **Make active** and Forget.
+- **Blender on Linux:** the pool's `local` worker defaults to `blender` on the PATH or
+  `/opt/blender/blender`, and the Kilo deny rules have a Linux set. The drop-in was already a
+  shell script there.
+- **Slot settings dialog:** a place id or link and a universe id. They reach the slot at its next
+  secrets pull (Studio reopen or container start) and the coordinator at its next config pull.
+- **Tests:**
+  - `tests/test_workstations.py` (5);
+  - `tests/test_workstation_client.py` (9, including an export → import round trip with a
+    never-pushed track branch);
+  - `tests/coordinator/test_workstation_gate.py` (4);
+  - a test in `tests/test_machines.py`.
+  - Related suites: 360 pass.
+- **Dry run:** `install/workstation.sh --skip-tools --no-studio --no-start` in a fresh
+  `debian:trixie` container against a local test router, with the release from a scratch clone.
+  - **Passed:** the `foundry` user (uid 1001), enrollment, the release and venv, all five secrets
+    in a mode-600 file, client.toml, the game clone, project.toml and kilo.jsonc with
+    `/srv/foundry` paths, and a reused code refused.
+  - **It found and fixed:** a code file without a final newline ended the script, and
+    `foundry_client` was missing from pyproject's packages, so a pip install could not import
+    it.
+  - **Not run here (they need a real LXC):** the Node/Kilo/rokit/Blender downloads, the Studio
+    slot step and the systemd service.
+- **To use it:**
+  - rebuild the router;
+  - set `workspace.clone_url` (and `workspace.repo_key_secret` for a private repo);
+  - add a workstation on Machines, then follow docs/INSTALL_WORKSTATION.md.
+  - Your Windows PC keeps the game: it checks in first, so a new workstation starts on standby.
+
 ## v0.175.0 — build replay R4: re-run a journal entry on a slot (ships off)
 
 2026-11-01. Plan: `docs/plans/BUILD_RERUN_PLAN.md` (built with the recommended answers). Build
