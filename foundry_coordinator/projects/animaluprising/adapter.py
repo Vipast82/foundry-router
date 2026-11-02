@@ -321,7 +321,10 @@ class AnimalUprisingAdapter(GenericAdapter):
         Returns the plan's workspace-relative path ('' = already listed)."""
         rel = _plan_rel(spec.task_id)
         full = os.path.join(self.p.workspace, rel)
-        with open(full, encoding="utf-8", newline="") as f:
+        # 2026-11-02 GF-LOBBY1: a stray cp1252 byte (0x97) in the plan's Notes made the strict
+        # UTF-8 read fail, so every approved grant was lost. Bytes that are not UTF-8 pass
+        # through unchanged (surrogateescape on read and write).
+        with open(full, encoding="utf-8", errors="surrogateescape", newline="") as f:
             text = f.read()
         # 2026-10-29 GF-SAVE1: a mostly-LF plan with three CRLF lines was split on "\r\n",
         # the heading was never a line of its own and every scope grant failed. Split on
@@ -346,10 +349,10 @@ class AnimalUprisingAdapter(GenericAdapter):
                     return ""
         why = re.sub(r"\s+", " ", reason or "").strip()[:200]
         lines.insert(last + 1, (f"- `{path}` -- {why}" if why else f"- `{path}`") + cr)
-        with open(full, "w", encoding="utf-8", newline="") as f:
+        with open(full, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
             f.write(nl.join(lines))
         if path not in self._parse_plan(spec.task_id, rel, nl.join(lines)).scope:
-            with open(full, "w", encoding="utf-8", newline="") as f:
+            with open(full, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
                 f.write(text)
             raise AdapterError(f"{rel}: done_check does not read {path} from the edited "
                                f"file list; nothing changed")

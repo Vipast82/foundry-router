@@ -314,3 +314,25 @@ def test_the_always_approved_classes_are_on_the_allow_list():
         assert SC.rule_for(P, "HK-STORE1", p) is None, p
     assert SC.rule_pattern({"path": "tests/checks/{task_}_check.lua"}, "GF-SEC1") == \
         "tests/checks/GF_SEC1_check.lua"
+
+
+def test_the_au_grant_works_on_a_plan_with_a_stray_cp1252_byte(tmp_path):
+    """2026-11-02 GF-LOBBY1: its plan's Notes held a cp1252 0x97 (an em dash pasted from
+    Windows). grant_scope read the plan as strict UTF-8, every scope grant failed, the
+    approved files never reached the file list and the session's edits stayed denied."""
+    from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
+    from tests.coordinator.test_au_review_evidence import (DONE_CHECK_STUB, PLAN, PLAN_REL, T,
+                                                           _profile, _write)
+    ws = tmp_path / "au"
+    ws.mkdir()
+    _write(ws, "tools/guard/done_check.py", DONE_CHECK_STUB)
+    _write(ws, PLAN_REL, PLAN)
+    p = ws / PLAN_REL
+    p.write_bytes(p.read_bytes() + b"\nNote: lobby \x97 ready check\n")
+    a = AnimalUprisingAdapter(_profile(ws), str(tmp_path / "state"))
+    spec = a.describe(T)
+    assert a.grant_scope(spec, "tests/GateRunner.lua", "rate limit") == PLAN_REL
+    blob = p.read_bytes()
+    assert b"- `tests/GateRunner.lua` -- rate limit" in blob
+    assert b"lobby \x97 ready check" in blob                 # the stray byte kept as it was
+    assert "tests/GateRunner.lua" in a.describe(T).scope

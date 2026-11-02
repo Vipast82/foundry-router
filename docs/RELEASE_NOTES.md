@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.5 — scope grants survive a non-UTF-8 byte in the plan
+
+2026-11-02 06:2x. GF-LOBBY1's plan Notes held one cp1252 byte, 0x97 (an em dash pasted from
+Windows). The AU adapter's `grant_scope` read the plan as strict UTF-8, so all five approved
+scope grants (Net.lua, RateLimit.spec, EntryAdapter, EntryRoot, ReadyCheckNegative) failed
+and never reached the file list, and the session's edits stayed denied. The Lead found the
+cause, but its repair candidate was rejected when validation timed out. That validation
+also stalled the coordinator for about 16 minutes (see the follow-up).
+
+- **`AnimalUprisingAdapter.grant_scope`:** reads and writes the plan with
+  `errors="surrogateescape"`, so bytes that aren't UTF-8 pass through unchanged and the
+  grant line is still added.
+- Test: `tests/coordinator/test_revamp_scope.py`
+  (`test_the_au_grant_works_on_a_plan_with_a_stray_cp1252_byte`; fails on v0.181.4 with
+  UnicodeDecodeError).
+
 ## v0.181.4 — approval frames include the plan's own sub-folder globs
 
 2026-11-02 05:0x. After v0.181.3, AS-P10's visual approval answered "no frame matches
