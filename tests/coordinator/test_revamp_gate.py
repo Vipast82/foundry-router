@@ -815,6 +815,24 @@ def test_au_template_master_order_close_row_and_summary(tmp_path):
     assert "error" in CT.build(adapter, spec, ctx)
 
 
+def test_au_template_skips_master_order_when_it_has_no_line_for_the_sprint(tmp_path):
+    """2026-11-01: audio sprints wrote "MASTER_ORDER" into their plans (the CLOSE duties name
+    it); MASTER_ORDER names them only in a paragraph, so every templated closeout failed and
+    fell back to a CLOSE session on Strata."""
+    from foundry_coordinator.projects.animaluprising import closeout_template as CT
+    plan = ("# UI-03\n- [x] 1. Build\n- [ ] 2. CLOSE: summary, STATE row, MASTER_ORDER\n")
+    root, spec, adapter, ctx = _au_spec(tmp_path, plan_text=plan)
+    (root / "docs" / "progress" / "STATE.md").write_text("| UI-02 | DONE | d | n |\n")
+    (root / "docs" / "MASTER_ORDER.md").write_text("Batch note: UI-03 and UI-04 have plans.\n")
+    (root / "docs" / "progress" / "_SUMMARY_TEMPLATE.md").write_text(
+        "# <ID>\n## What shipped\n## Evidence\n## Risks and follow-ups\n")
+    out = CT.build(adapter, spec, ctx)
+    assert "error" not in out and "docs/MASTER_ORDER.md" not in out["files"]
+    assert "docs/progress/UI-03_SUMMARY.md" in out["files"]
+    (root / "docs" / "MASTER_ORDER.md").write_text("1. UI-03 OPEN\n2. UI-03 again TODO\n")
+    assert "more than one" in CT.build(adapter, spec, ctx)["error"]
+
+
 def test_au_template_finish_requires_done_check_pass(tmp_path):
     from types import SimpleNamespace
     from foundry_coordinator.projects.animaluprising import closeout_template as CT

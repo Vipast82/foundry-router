@@ -3340,8 +3340,12 @@ class Coordinator:
             return "done" if st.get("head") == head else "none"
         if self._held(P, t, "closeout"):
             return "wait"
-        if self._acquire(P, t, self._close_locks(P, t, self._session_locks(P, t)),
-                         writer=True):
+        # the templated closeout is coordinator work with no model call: it never waits for
+        # the local model's `gpu` unit (2026-11-01: AS-A08 sat CLOSING behind AS-A19's Strata
+        # turn just to write its summary from a template)
+        locks = [r for r in self._close_locks(P, t, self._session_locks(P, t))
+                 if r.split("#", 1)[0] != "gpu"]
+        if self._acquire(P, t, locks, writer=True):
             return "wait"
 
         def failed(why: str) -> str:

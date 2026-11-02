@@ -117,8 +117,14 @@ def master_order(text: str, spec) -> tuple:
     lines = text.split(eol)
     hit = [i for i, ln in enumerate(lines) if re.search(r"\b%s\b" % re.escape(t), ln)
            and re.search(r"\b(?:%s)\b" % STATUS_WORDS, ln)]
+    if not hit:
+        # 2026-11-01: the CLOSE duties say "MASTER_ORDER status line if the plan lists it", so
+        # sessions write the word into their plans; a sprint MASTER_ORDER names only in a
+        # paragraph (the audio batch) has no status line to flip: nothing to update, not a
+        # failure (every audio closeout fell back to a CLOSE session on Strata)
+        return text, "no MASTER_ORDER status line for the sprint (nothing to update)"
     if len(hit) != 1:
-        return None, "no single MASTER_ORDER status line for the sprint"
+        return None, "more than one MASTER_ORDER status line for the sprint"
     i = hit[0]
     lines[i] = re.sub(r"\b(?:%s)\b" % STATUS_WORDS, status, lines[i], count=1)
     return eol.join(lines), "updated the MASTER_ORDER status line"
@@ -167,7 +173,8 @@ def build(adapter, spec, ctx: dict) -> dict:
             new, why = master_order(mo, spec)
             if new is None:
                 return {"error": why}
-            files["docs/MASTER_ORDER.md"] = new
+            if new != mo:
+                files["docs/MASTER_ORDER.md"] = new
             notes.append(why)
     if plan:
         new, why = close_row(plan, ctx)

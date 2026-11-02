@@ -1160,6 +1160,7 @@ def test_close_locks_drop_blender_and_give_back_held_units_and_idle_slots(game):
     src = open(os.path.join(os.path.dirname(engine_mod.__file__), "engine.py"), encoding="utf-8").read()
     body = src[src.index("def _closeout_template"):src.index("def ", src.index("def _closeout_template") + 10)]
     assert "_close_locks(" in body                              # the templated closeout uses it
+    assert 'split("#", 1)[0] != "gpu"' in body                  # and never waits for the model
 
 
 def test_a_frontier_sprint_that_fell_to_a_busy_local_model_waits_for_the_gpu(game):

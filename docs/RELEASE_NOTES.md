@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.1 — audio closeouts write themselves again; a templated closeout never waits for Strata
+
+2026-11-01 22:5x. Victor: "AS-A08 says closing but nothing seems to be running".
+
+- **`closeout_template.master_order`:** a sprint MASTER_ORDER has no status line for is
+  "nothing to update", not a failure. Two or more lines is still refused.
+  - **What happened:** sessions write "MASTER_ORDER" into their plans, because the CLOSE
+    duties name it. MASTER_ORDER lists the audio batch in a paragraph, with no line per sprint.
+  - **Effect:** every audio sprint's templated closeout failed (AS-A01, A07, A13, A19, E10,
+    P9) and fell back to a CLOSE session on Strata, one at a time.
+- **`engine` templated closeout:** it takes no `gpu` unit. The template is coordinator work with
+  no model call. AS-A08 sat CLOSING behind AS-A19's Strata turn only to write its summary.
+- Tests: `test_revamp_gate.py`
+  (`test_au_template_skips_master_order_when_it_has_no_line_for_the_sprint`) and
+  `test_engine.py` (the templated closeout drops `gpu`).
+
 ## v0.180.0 — move a running track to another Studio slot; a track's Kilo folder reloads itself
 
 2026-11-01 22:4x. Victor: "split them". All 8 Blender tracks were started on slot-1, so their
