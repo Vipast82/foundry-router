@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.3 — Settings: list settings (approval.rules, verify.checks) take a JSON list
+
+2026-11-02. The pilot's `approval.rules` (the existing visual rule plus the AS-P10 asset rule)
+could not be saved: the Settings page checked every table field as a JSON object and showed "A JSON
+object" for the list. The router itself always accepted a list (`schema.check`).
+
+- `automation.html` `parseField`: a table field whose default is a list takes a JSON list of
+  objects ("A JSON list of objects" otherwise); the others still take a JSON object.
+- Reaches the page with a router rebuild. The coordinator is unchanged (no deploy needed).
+- Tests: `tests/test_automation_ui.py` (runs the page's parser in node: a list passes for a list
+  field, an object and a list of non-objects are refused, object fields unchanged).
+
 ## v0.179.2 — the templated closeout takes no Blender unit either
 
 2026-11-01 21:2x. After v0.179.1 AS-D08 still waited in CLOSING for a Blender unit while holding

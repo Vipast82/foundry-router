@@ -1377,7 +1377,19 @@ function parseField(t, f) {
     return {v: n};
   }
   if (f.type === "str") return {v: t.value};
-  try { const o = JSON.parse(t.value || "{}"); if (!o || typeof o !== "object" || Array.isArray(o)) return {err: "A JSON object, e.g. {\"name\": \"value\"}."}; return {v: o}; }
+  // a table whose default is a list (approval.rules, verify.checks) takes a JSON list of
+  // objects; the others a JSON object (2026-11-02: the list form was refused in the page)
+  const asList = Array.isArray(f.default);
+  try {
+    const o = JSON.parse(t.value || (asList ? "[]" : "{}"));
+    if (asList) {
+      if (!Array.isArray(o) || o.some(x => !x || typeof x !== "object" || Array.isArray(x)))
+        return {err: "A JSON list of objects, e.g. [{\"name\": \"value\"}]."};
+      return {v: o};
+    }
+    if (!o || typeof o !== "object" || Array.isArray(o)) return {err: "A JSON object, e.g. {\"name\": \"value\"}."};
+    return {v: o};
+  }
   catch (e) { return {err: "Not valid JSON."}; }
 }
 function validateField(t) {

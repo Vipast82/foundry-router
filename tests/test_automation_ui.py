@@ -212,3 +212,25 @@ def test_every_settings_row_has_an_error_slot_so_a_saved_draft_never_reports_a_p
     assert '`<div class="err" role="alert" hidden></div>`}</div>`;\n' in src.split('data-sf="slots"')[1][:3000]
     loop = src.split("const saveSoon = debounce(")[1].split("}, 500);")[0]
     assert "if (!err) continue;" in loop
+
+
+def test_list_tables_take_a_json_list_in_the_settings_page():
+    """approval.rules / verify.checks default to a list: the Settings page must take a JSON list
+    of objects there (2026-11-02: it refused the pilot's rule list as 'not a JSON object')."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    import pytest
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    html = Path(__file__).resolve().parents[1] / "foundry_router" / "ui" / "static" / "automation.html"
+    js = ("const fs=require('fs');const h=fs.readFileSync(process.argv[1],'utf8');"
+          "eval(h.slice(h.indexOf('function parseField('),h.indexOf('function validateField(')));"
+          "const t=v=>({value:v});const L={type:'table',default:[]},O={type:'table',default:{}};"
+          "console.log(JSON.stringify([parseField(t('[{\"a\":1},{\"b\":2}]'),L).err||'ok',"
+          "parseField(t('{\"a\":1}'),L).err?'err':'ok',parseField(t('[1]'),L).err?'err':'ok',"
+          "parseField(t('{\"a\":1}'),O).err||'ok',parseField(t('[{\"a\":1}]'),O).err?'err':'ok']))")
+    out = subprocess.run([node, "-e", js, str(html)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == '["ok","err","err","ok","err"]'
