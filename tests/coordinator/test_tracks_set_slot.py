@@ -112,3 +112,34 @@ def test_workstation_only_sprints_never_go_on_a_slot(tmp_path):
     with pytest.raises(TrackError, match="workstation"):
         c.tracks.set_slot(P, "blender", "slot-1")
     c.tracks.create(P, "audio", ["A1"], actor="victor", slot="slot-1")   # not listed: fine
+
+
+def test_a_track_sprints_plan_needs_join_the_track_before_its_session(tmp_path):
+    """2026-11-02 S54: the audio-local track started with [studio] before S54 wrote its plan
+    (`## Needs: studio, audio`); Media_Gen's audio tools stayed denied and the session stopped
+    BLOCKED. Before the session starts, the plan's missing needs join the track and its
+    kilo.jsonc is rewritten (reloaded at the session start); `studio` never joins a track
+    without a Studio slot."""
+    from types import SimpleNamespace
+    from foundry_coordinator import services as SV
+    c, P, _ = env(tmp_path)
+    _two_slots(P)
+    c.tracks.create(P, "audio", ["B1"], actor="victor", slot="slot-1")
+    c.tracks.start(P, "audio", "victor")
+    row = c.store.track("game", "audio")
+    TP = c.tracks.track_project(P, row)
+    spec = SimpleNamespace(data={}, tags=[], spec="## Needs\n- studio\n- audio\n\n## Files\n")
+    t = c.store.task("game", "B1")
+    assert SV.widen_track_needs(c, TP, t, spec) == ["audio"]
+    row = c.store.track("game", "audio")
+    assert "audio" in row["needs"] and row["data"]["kilo_reload"] is True
+    assert [e for e in c.store.events("game", 50) if e["kind"] == "track_needs_widened"]
+    assert SV.widen_track_needs(c, TP, t, spec) == []                    # once
+    # an unbound track never gains studio from a plan
+    c.tracks.create(P, "plain", ["B2"], actor="victor")
+    c.tracks.start(P, "plain", "victor")
+    TP2 = c.tracks.track_project(P, c.store.track("game", "plain"))
+    added = SV.widen_track_needs(c, TP2, c.store.task("game", "B2"), spec)
+    assert "studio" not in added and "studio" not in c.store.track("game", "plain")["needs"]
+    # the main checkout is never touched
+    assert SV.widen_track_needs(c, P, t, spec) == []

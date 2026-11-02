@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.14 — a track sprint's plan needs join its track before the session
+
+2026-11-02 18:2x. The audio-local track (AS-AI1, then S54) started with needs `[studio]`, before
+S54 wrote its plan. The plan says `## Needs: studio, audio`, but the track's kilo.jsonc still
+denied Media_Gen's audio tools. S54's session stopped BLOCKED ("Audio generation needs
+Media_Gen, which is off for this session"), and the Lead's re-check changed nothing. The
+assets-local track hit the same problem on 2026-10-28, and an operator fixed it with
+`tracks set-needs`.
+
+- `services.widen_track_needs()` runs in `services.blocks()`, before every implementer
+  session. Needs a track sprint's plan declares and its track lacks join the track through
+  `tracks.set_needs`. That rewrites the kilo.jsonc and flags the reload, which the session start
+  applies. A `track_needs_widened` event is recorded.
+- `studio` never joins a track without a Studio slot, so its sessions never reach the
+  workstation's Studio. The main checkout is never touched.
+- Test: `test_a_track_sprints_plan_needs_join_the_track_before_its_session`.
+
 ## v0.181.13 — a main checkout freed mid-tick goes to the sprint first in the queue
 
 2026-11-02 16:3x. GF-COS1 completed partway through a tick. GF-QUEEN1 and AS-G07b come earlier

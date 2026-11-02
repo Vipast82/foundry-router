@@ -271,9 +271,46 @@ def waiting(c, P, t: dict) -> Optional[str]:
     return None
 
 
+def widen_track_needs(c, P, t: dict, spec=None) -> list[str]:
+    """A track sprint's plan may declare needs its track lacks: the track's needs (and so its
+    kilo.jsonc MCP allow-list) were set when the track started, before the sprint wrote its
+    plan. 2026-11-02 S54 (audio-local, needs [studio]): its plan says `## Needs: studio,
+    audio`, Media_Gen's audio tools stayed denied and the session stopped BLOCKED; the same
+    happened to the assets-local track on 2026-10-28. Before the session starts, the missing
+    needs join the track (set_needs flags the Kilo reload the session start applies).
+    `studio` never joins a track without a Studio slot: its sessions would reach the
+    workstation's Studio. Returns the needs added."""
+    try:
+        if not c.tracks.is_track(P):
+            return []
+        name = (getattr(P.profile, "__dict__", {}) or {}).get("track")
+        main = c.tracks.main_of(P)
+        row = c.store.track(main.id, name) if name else None
+        if row is None:
+            return []
+        declared = needs_of({}, spec) if spec is not None else []
+        have = list(row.get("needs") or [])
+        slot = (row.get("data") or {}).get("slot")
+        add = [n for n in declared if n not in have and (n != "studio" or slot)]
+        if not add:
+            return []
+        c.tracks.set_needs(main, name, have + add,
+                           f"coordinator ({t['task_id']}'s plan needs {', '.join(add)})")
+        c.store.event(P.id, t["task_id"], "track_needs_widened",
+                      detail={"track": name, "added": add, "needs": have + add})
+        return add
+    except Exception as e:                                        # noqa: BLE001
+        try:
+            c.log(f"{P.id}/{t.get('task_id')}: track needs check failed: {type(e).__name__}: {e}")
+        except Exception:                                         # noqa: BLE001
+            pass
+        return []
+
+
 def blocks(c, P, t: dict, spec=None) -> bool:
     """Called before an implementer session starts. True = a needed service is missing (the
     task waits, nothing started or charged). Never fails the task."""
+    widen_track_needs(c, P, t, spec)
     needs = needs_of(t, spec)
     data = t.get("data") or {}
     if (data.get("needs") or []) != needs and needs:
