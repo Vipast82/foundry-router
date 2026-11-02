@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.180.6 — self-heal ends sessions their task no longer follows
+
+2026-11-02 00:4x. Twelve main sprints sat behind the landing drain for an hour. Four prep
+entries waited on "session ses_e659b746 (implementer) of AS-F30 is open". That session was
+an implement turn cut off by last night's forced Kilo restart. Kilo still reported it busy,
+2.2 hours later. Since then AS-F30 had been completed and reopened by a Lead repair, and was
+READY with no session of its own. Nothing ever ended such a session, and
+`prep_queue.safe_point` asks Kilo, so the landing waited for it. The same restart left three
+more leftovers (AS-A08, F29, J06; those tasks are COMPLETE).
+
+- **`selfheal.dead_sessions`, rule `orphan_session`:** an implementer session that is not
+  the task's `session_id` or its `closeout_session` is aborted in Kilo (best effort) and
+  ended with outcome `self_heal_orphan` once nothing has touched it for 30 minutes (or for
+  the dead-session grace, if longer). The task itself is not touched. The task's own
+  session stays under the `dead_session` rule.
+- Test: `tests/coordinator/test_selfheal.py`
+  (`test_an_implementer_session_the_task_no_longer_follows_is_ended`; fails on v0.180.5).
+
 ## v0.180.5 — the gate names a commit Rojo cannot serve and hands it to the sprint
 
 2026-11-02 00:3x. AS-H07 wrote 38 animation clips as rbx_xml text but named them `.rbxm`,

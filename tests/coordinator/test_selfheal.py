@@ -114,6 +114,45 @@ def test_a_live_or_busy_session_is_left_alone(tmp_path):
     assert c.store.task("game", "T1")["state"] == S.IMPLEMENTING
 
 
+def test_an_implementer_session_the_task_no_longer_follows_is_ended(tmp_path):
+    """2026-11-02 replay: the forced Kilo restart left AS-F30's turn 'busy' for 2 h after the
+    task moved on (reopened, READY, no session). Nothing ended it and prep_queue.safe_point,
+    asking Kilo, held every landing behind it. The sweep ends it after 30 quiet minutes; the
+    task's own session and its CLOSE session are never touched."""
+    from foundry_coordinator import prep_queue
+    c, P, clk, client, _, _ = game(tmp_path)
+    old = client.start_session(directory=P.profile.workspace, title="x", persona="p",
+                               agent="code", metadata={}, permissions=[])
+    client.sessions[old]["pending"] = False                      # Kilo: busy, forever
+    c.store.add_session(old, "game", "T1", "r0", "implementer", "implement", 1, "kilo", "p")
+    c.store.update_session(old, status="prompted", prompt_ts=clk())
+    c.store.add_session("ses_close", "game", "T1", "r1", "implementer", "closeout", 2, "kilo", "p")
+    c.store.update_session("ses_close", status="prompted", prompt_ts=clk())
+    c.store.update_task("game", "T1", state=S.READY, session_id=None)
+    c.store.merge_data("game", "T1", closeout_session="ses_close")
+    ok, why = prep_queue.safe_point(c, P)
+    assert not ok and old in why                                 # the replayed hold
+    clk.advance(600)
+    assert selfheal.dead_sessions(c, P) == []                    # 10 min: left alone
+    clk.advance(1300)
+    acts = selfheal.dead_sessions(c, P)
+    assert [a["rule"] for a in acts] == ["orphan_session"]
+    assert acts[0]["evidence"]["session_id"] == old and acts[0]["evidence"]["task_state"] == S.READY
+    assert c.store.session(old)["status"] == "ended"
+    assert c.store.session(old)["outcome"] == "self_heal_orphan"
+    assert c.store.session("ses_close")["status"] == "prompted"  # its CLOSE session: kept
+    assert c.store.task("game", "T1")["state"] == S.READY        # the task is not touched
+    assert old not in prep_queue.safe_point(c, P)[1]
+    # the task's own session is the engine's (dead_session rule), never an orphan
+    c.store.add_session("ses_now", "game", "T1", "r2", "implementer", "implement", 3, "kilo", "p")
+    c.store.update_session("ses_now", status="prompted", prompt_ts=clk())
+    c.store.update_task("game", "T1", state=S.IMPLEMENTING, session_id="ses_now")
+    clk.advance(4000)
+    assert not [a for a in selfheal.dead_sessions(c, P) if a["rule"] == "orphan_session"]
+    assert c.store.session("ses_now")["status"] != "ended" or \
+        c.store.session("ses_now")["outcome"] != "self_heal_orphan"
+
+
 # ------------------------------------------------------------------ 2 stuck cases
 
 def test_a_case_with_no_live_call_for_30_min_is_cancelled(lead_env):

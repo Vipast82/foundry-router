@@ -12,6 +12,10 @@ lists them). No model call is made here.
                     Lead call is failed uncounted, so the Lead starts a new call
                     (lead ses_e7f5e8ca1 died at 23:07 while the store said `created`;
                     case rc-f24672b33aef5998 waited for hours)
+    1b orphan_session an implementer session the task no longer follows (not its
+                    session_id / closeout_session), untouched 30 min: aborted in Kilo and
+                    ended; the task is not touched (v0.180.6: the forced Kilo restart's
+                    leftover AS-F30 turn held every prep landing for an hour)
   2 stuck_case      an open Lead case with no live call and no progress for
                     self_heal_stuck_case_minutes: cancelled with a note; the task then
                     follows the automation default (the engine detaches the case)
@@ -188,7 +192,14 @@ def dead_sessions(c, P) -> list[dict]:
             continue
         sid, tid = sess["session_id"], sess["task_id"]
         t = c.store.task(P.id, tid)
-        if t is None or t["state"] in S.TERMINAL:
+        if t is None:
+            continue
+        if sess["role"] == "implementer" and sid not in _task_sessions(t):
+            rec = _orphan_session(c, P, t, sess, now)
+            if rec:
+                out.append(rec)
+            continue
+        if t["state"] in S.TERMINAL:
             continue
         case, act, directory = None, None, P.profile.workspace
         if sess["role"] == "lead":
@@ -263,6 +274,44 @@ def dead_sessions(c, P) -> list[dict]:
                             "error": str(st.error or "")[:300],
                             "store_status": sess["status"]}))
     return out
+
+
+ORPHAN_QUIET_S = 1800
+
+
+def _task_sessions(t: dict) -> set:
+    """The sessions the engine still follows for a task: its session and its CLOSE session."""
+    d = t.get("data") or {}
+    return {x for x in (t.get("session_id"), d.get("closeout_session")) if x}
+
+
+def _orphan_session(c, P, t: dict, sess: dict, now: float) -> Optional[dict]:
+    """2026-11-02: the forced Kilo restart left 4 implementer turns (AS-A08, F29, F30, J06)
+    'busy' in Kilo while their tasks moved on with new sessions. Nothing ended them, and the
+    reopened AS-F30's leftover held every prep landing (prep_queue.safe_point asks Kilo) for
+    an hour while 12 main sprints waited on the drain. A session the engine no longer
+    follows, untouched for ORPHAN_QUIET_S, is aborted in Kilo (best effort) and ended."""
+    sid, tid = sess["session_id"], t["task_id"]
+    marks = [sess.get("created_ts"), sess.get("prompt_ts")]
+    grace = float(_setting(P, "self_heal_dead_session_minutes") or 0) * 60
+    quiet = now - max(float(x or 0) for x in marks)
+    if quiet < max(ORPHAN_QUIET_S, grace) or not _allowed(c, P, tid):
+        return None
+    Pt = c.tracks.project_for(P, t)
+    aborted = []
+    for d in dict.fromkeys([Pt.profile.workspace, P.profile.workspace]):
+        try:
+            P.client.abort(sid, directory=d)
+            aborted.append(d)
+            break
+        except Exception:                                        # noqa: BLE001
+            continue
+    c._end_session(Pt, sid, "self_heal_orphan")
+    return _record(c, P, tid, "orphan_session",
+                   "ended an implementer session the task no longer follows (aborted in Kilo)",
+                   {"session_id": sid, "task_state": t["state"],
+                    "task_session": t.get("session_id") or "", "store_status": sess["status"],
+                    "quiet_min": int(quiet // 60), "aborted": bool(aborted)})
 
 
 # ------------------------------------------------------------------ 2 stuck Lead cases
