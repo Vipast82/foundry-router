@@ -1614,6 +1614,16 @@ class Coordinator:
                 return self._session_failed(P, t, "Kilo did not admit the prompt within "
                                             "the admission window; a fresh session resumes "
                                             "from recorded state", phase, free=True)
+            if self._stalled_dead(P, t, sid, s):
+                # 2026-11-01: a forced Kilo restart cut 4 turns mid-reply (AS-A08, F29, F30,
+                # J06). Kilo ran them no more, but their unfinished reply read as "busy", so
+                # they held the Strata unit and 3 Blender units until the 4-hour timeout.
+                P.client.abort(sid, directory=directory)
+                self._end_session(P, sid, "stalled")
+                return self._session_failed(P, t, "Kilo stopped running the session's turn "
+                                            "(an unfinished reply with no turn running, e.g. "
+                                            "after a Kilo restart); a fresh session resumes "
+                                            "from recorded state", phase, free=True)
             from . import infra
             if infra.kilo_retry(self, P, t, sid, s, phase):
                 return None              # 5 min of Kilo "retry": stopped as a free infra wait
@@ -7200,6 +7210,24 @@ class Coordinator:
             return not self.studio_calls.active(P, tid)
         except Exception:                                         # noqa: BLE001
             return False
+
+    def _stalled_dead(self, P: Project, t: dict, sid: str, s) -> bool:
+        """True when Kilo has reported the session's turn as stalled (an unfinished reply it
+        no longer runs: SessionState.stalled) continuously for [limits]
+        infra_retry_abort_seconds (300), as the Lead's _stall rule. The first stalled poll
+        records when; any non-stalled poll clears it."""
+        pid, tid = P.id, t["task_id"]
+        mark = (t.get("data") or {}).get("stall_since") or {}
+        if not getattr(s, "stalled", False):
+            if mark:
+                self.store.merge_data(pid, tid, stall_since=None)
+            return False
+        now = self.clock()
+        if not isinstance(mark, dict) or mark.get("session") != sid:
+            self.store.merge_data(pid, tid, stall_since={"session": sid, "ts": now})
+            return False
+        limit = int(P.profile.limit("infra_retry_abort_seconds", 300) or 0)
+        return bool(limit) and now - float(mark.get("ts") or now) >= limit
 
     def _release_session(self, P: Project, t: dict) -> None:
         pid, tid = P.id, t["task_id"]

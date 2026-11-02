@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.179.6 — a session whose turn Kilo stopped running ends after 5 minutes, not 4 hours
+
+2026-11-01 22:1x. A forced Kilo restart (to load the slot tracks' Studio MCP) cut four turns
+mid-reply: AS-A08, AS-F29, AS-F30 and AS-J06. Kilo no longer ran them, but each unfinished reply
+read as "busy". The sessions kept the Strata unit and three Blender units, so AS-F04 and every
+audio sprint waited behind them, until the 4-hour session timeout.
+
+- **`engine._stalled_dead`:** the Kilo adapter already marks such a turn `stalled` (an
+  unfinished reply that is not in Kilo's busy/retry list). The engine now records when that
+  started; continuously stalled for `[limits] infra_retry_abort_seconds` (300) means the
+  session is aborted and the sprint retries for free from its recorded state, as the Lead
+  already did for its own sessions. Any live poll clears the mark.
+- Test: `tests/coordinator/test_engine.py`
+  (`test_a_stalled_turn_ends_the_session_after_the_infra_window`; fails on v0.179.5).
+
 ## v0.179.5 — version strings
 
 v0.179.4 shipped its fix but left both `__version__` strings at 0.179.3, so the coordinator

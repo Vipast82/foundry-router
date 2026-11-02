@@ -554,6 +554,40 @@ def test_idle_unadmitted_prompt_recovers_before_session_timeout(game):
     assert c.store.task("game", "T1")["data"]["free_retry"] is True
 
 
+def test_a_stalled_turn_ends_the_session_after_the_infra_window(game):
+    """2026-11-01: a forced Kilo restart cut 4 turns mid-reply; their unfinished replies read
+    as busy and held the Strata unit and 3 Blender units until the 4-hour timeout."""
+    tmp, _, _, prof = game
+    from foundry_coordinator.adapters.base import SessionState
+
+    class Cut(ScriptedClient):
+        stalled = True
+
+        def state(self, sid, *, directory, since_ts):
+            if self.stalled:
+                return SessionState(status="busy", stalled=True)
+            return SessionState(status="busy")
+
+    client = Cut(write_ok("src/a.txt"))
+    c = coordinator(tmp, [prof], {"game": client})
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "game", "T1") == S.IMPLEMENTING)
+    sid = c.store.task("game", "T1")["session_id"]
+    c.tick()
+    mark = c.store.task("game", "T1")["data"]["stall_since"]
+    assert mark["session"] == sid and _state(c, "game", "T1") == S.IMPLEMENTING
+    client.stalled = False                                       # a live turn again: cleared
+    c.tick()
+    assert not c.store.task("game", "T1")["data"].get("stall_since")
+    client.stalled = True
+    c.tick()
+    c.store.merge_data("game", "T1", stall_since={"session": sid, "ts": c.clock() - 301})
+    c.tick()
+    assert _state(c, "game", "T1") == S.CHANGES_REQUIRED
+    assert c.store.session(sid)["outcome"] == "stalled"
+    assert c.store.task("game", "T1")["data"]["free_retry"] is True
+
+
 def test_pause_resume_cancel(game):
     tmp, _, _, prof = game
 
