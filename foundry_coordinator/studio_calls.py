@@ -644,6 +644,12 @@ class StudioCalls:
         if not pend.get("track") and self.c._acquire(P, t, self._run_locks(P)):
             return False                          # another task holds Studio: wait
         # the workstation's studio.lock says nothing about a slot (each slot has its own)
+        if self._slot(P) is None:
+            from . import studio_reserve
+            why = studio_reserve.blocks(self.c, P)
+            if why:
+                self.c._note(P, t, f"scripted Studio gate waits: {why}")
+                return False
         if self._slot(P) is None and not self._studio_lock_free(P, t):
             return False
         head = P.ws.head()

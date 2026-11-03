@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.21 — owner Studio reservation (studio-reserve / studio-release)
+
+2026-11-02. For Victor's GF-RT4 two-account test, the operator reserved the workstation's Studio
+by hand: an AU `studio.lock` line plus holds on the main sprints. The line named no process, so
+AU's lock tool called it stale after 30 minutes and a session broke it. A track merge's Studio
+batch then ran on the owner's Studio while he was in Play (PRE-PLAY verify hit Play mode, then
+"no TEST window"). It went red and reopened two finished sprints (S54, AS-AI1) as repairs.
+
+- `foundry_coordinator/studio_reserve.py`: the reservation lives in the coordinator store
+  (`meta studio_reserved:<project>`: by, reason, since, until), so no lock tool can judge it
+  stale. While active:
+  - `studio_calls` starts no Studio run on the workstation; slot-bound tracks are not affected;
+  - `tracks/resources.admit_studio` gives no merge the Studio lease;
+  - `engine._start_implementation` starts no main-checkout session;
+  - main tasks that were writing are held with owner `studio_reserve:<project>`. The self-repair
+    sweep resumes them once the reservation is released or expires (a registered hold owner).
+- CLI: `studio-reserve PROJECT [--minutes N] [--reason] [--by]` (default 120 minutes, at most 24
+  hours) and `studio-release PROJECT`. Both write events (`studio_reserved` / `studio_released`).
+- Tests: `tests/coordinator/test_studio_reserve.py`.
+
 ## v0.181.20 — LightingStyle cannot be set by game scripts (skill correction)
 
 2026-11-02 18:5x. During Victor's GF-RT4 live test, the published TEST server logged

@@ -29,6 +29,7 @@ Commands
   resume PROJECT TASK
   cancel PROJECT TASK --reason TEXT
   pause-project PROJECT [--note]  /  resume-project PROJECT
+  studio-reserve PROJECT [--minutes N] [--reason]  /  studio-release PROJECT
   unblock PROJECT TASK --resolution TEXT [--reset-attempts]
   approve PROJECT TASK --kind KIND --by NAME [--note]     a human approval
   reject PROJECT TASK --by NAME --finding TEXT [...]      send back with findings
@@ -344,6 +345,7 @@ def _state_dir(a) -> str:
 _WRITING = {("unblock", None), ("approve", None), ("reject", None), ("answer", None),
             ("resume", None), ("pause", None), ("cancel", None), ("decision", None),
             ("pause-project", None), ("resume-project", None), ("queue", "approve"),
+            ("studio-reserve", None), ("studio-release", None),
             ("tracks", "start"), ("tracks", "stop"), ("tracks", "merge"),
             ("tracks", "set-max-agents"), ("frontier", "request"), ("frontier", "return"),
             ("prep", "add"), ("prep", "remove"), ("prep", "move"), ("prep", "run-now")}
@@ -754,6 +756,12 @@ def main(argv=None, clients=None, foundry=None) -> int:
                            help="hold expiry: the sweep resumes the task after this long")
     x = sub.add_parser("resume"); x.add_argument("project"); x.add_argument("task")
     x = sub.add_parser("pause-project"); x.add_argument("project"); x.add_argument("--note", default="")
+    x = sub.add_parser("studio-reserve", help="reserve the workstation's Studio for the owner: no "
+                       "Studio run, merge batch or main session starts until it ends (slots unaffected)")
+    x.add_argument("project"); x.add_argument("--minutes", type=float, default=120)
+    x.add_argument("--reason", default=""); x.add_argument("--by", default="operator")
+    x = sub.add_parser("studio-release", help="end an owner Studio reservation; held main tasks resume")
+    x.add_argument("project"); x.add_argument("--by", default="operator")
     x = sub.add_parser("resume-project"); x.add_argument("project")
     x = sub.add_parser("unblock"); x.add_argument("project"); x.add_argument("task")
     x.add_argument("--resolution", required=True); x.add_argument("--reset-attempts", action="store_true")
@@ -1330,6 +1338,16 @@ def _dispatch(a, c: Coordinator) -> int:
         c.resume(a.project, a.task)
     elif a.cmd == "cancel":
         c.cancel(a.project, a.task, a.reason)
+    elif a.cmd == "studio-reserve":
+        from . import studio_reserve
+        r = studio_reserve.reserve(c, a.project, a.minutes, a.reason, a.by)
+        print(f"{studio_reserve.note(r)}; held: {', '.join(r['held']) or 'none'}")
+        return 0
+    elif a.cmd == "studio-release":
+        from . import studio_reserve
+        had = studio_reserve.release(c, a.project, a.by)
+        print("released" if had else "no reservation was active")
+        return 0
     elif a.cmd == "pause-project":
         s.set_project_paused(a.project, True, a.note)
     elif a.cmd == "resume-project":

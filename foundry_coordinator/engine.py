@@ -26,6 +26,7 @@ from . import states as S
 from . import training_hook
 from . import handoff
 from . import selfheal
+from . import studio_reserve  # noqa: F401  (registers the studio_reserve hold owner)
 from . import build_journal, skills_install
 from .adapters import Project
 from .adapters.base import (FAIL, PASS, UNKNOWN, SessionState, VerificationResult,
@@ -750,6 +751,15 @@ class Coordinator:
         from . import services                     # Team Lead 5: the sprint's needs are up
         if services.blocks(self, P, t, spec):
             return                                 # "waiting for <service>": no lock, no attempt
+        if not self.tracks.is_track(P):
+            from . import studio_reserve
+            why = studio_reserve.blocks(self, P)
+            if why:
+                held = set(self.store.holds(P.id, t["task_id"]))
+                give = [r for r in self._workspace_locks(P) + self._session_locks(P, t) if r in held]
+                if give:
+                    self.store.release(P.id, t["task_id"], give)
+                return self._note(P, t, f"waiting: {why}")
         landing = self._landing_drain(P)
         if landing:
             # 2026-11-01 AS-V04: a sprint between sessions may have left its own tool-written

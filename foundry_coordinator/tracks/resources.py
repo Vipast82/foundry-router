@@ -295,6 +295,13 @@ class ResourceManager:
             return True, "already held"
         why = self.studio_in_use(P)
         if not why:
+            try:
+                from .. import studio_reserve
+                r = studio_reserve.get(self.store, P.id, self.clock())
+                why = studio_reserve.note(r) if r else ""
+            except Exception:                                     # noqa: BLE001
+                why = ""
+        if not why:
             why = self.main_pending(P)
             since = self._wait_since.get((owner, "studio"))
             prio = float(self.setting(P, "merge_studio_priority_minutes") or 20)
