@@ -427,3 +427,27 @@ def test_preflight_holds_a_session_on_a_persona_the_kilo_key_may_not_use(monkeyp
     # an unreachable router is not a grant problem (the router probe owns that)
     P.foundry.persona_info = lambda persona, client="": (_ for _ in ()).throw(OSError("down"))
     assert infra.persona_grant_problem(P, "Foundry-Kilo-Haiku") == ""
+
+
+def test_a_busy_local_model_never_uses_an_attempt():
+    """2026-11-03 HK-ASSET1: ten 'strata serves the main stream only' refusals exhausted
+    infra_retry_max and then spent real attempts; contention is never charged."""
+    data = {"infra_failures": 0}
+    events = []
+    store = SimpleNamespace(
+        task=lambda pid, tid: {"task_id": tid, "data": dict(data)},
+        merge_data=lambda pid, tid, **kv: data.update(kv),
+        event=lambda pid, tid, kind, detail=None: events.append(kind))
+    c = SimpleNamespace(store=store, clock=time.time, _note=lambda *a, **k: None)
+    P = SimpleNamespace(id="g", profile=SimpleNamespace(automation={"infra_retry_max": 2}))
+    why = ("session ended with an error: backend 'strata' serves the main stream only and 1 "
+           "session(s) are active (Foundry-Kilo-Lead-Manager)")
+    orig_auto, orig_sched = infra.auto_get, infra._schedule
+    infra.auto_get = lambda P, k: {"infra_retry_max": 2}.get(k)
+    infra._schedule = lambda c, P, t, why, kind: {"retry_at": time.time() + 60}
+    try:
+        for _ in range(6):
+            assert infra.session_failure(c, P, {"task_id": "T"}, why, False) is True
+    finally:
+        infra.auto_get, infra._schedule = orig_auto, orig_sched
+    assert "infra_retry_exhausted" not in events and data["infra_failures"] == 6

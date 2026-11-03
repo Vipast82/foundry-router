@@ -213,6 +213,15 @@ def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
         c.store.event(P.id, t["task_id"], "local_fallback_gpu", detail={
             "until": c.clock() + LOCAL_FALLBACK_S, "why": why[:200]})
     _schedule(c, P, t, why, "session")
+    if sig == "local_busy":
+        # 2026-11-03 HK-ASSET1: the one local stream was held by other sprints' sessions that
+        # fell to it while the Claude API sat at its daily cap; ten refusals in a row used up the
+        # free retries and then real attempts (5 of 6). The model is busy, not broken: waiting
+        # for it never costs an attempt.
+        if not free:
+            c.store.event(P.id, t["task_id"], "infra_free_retry", detail={
+                "signature": sig, "n": n, "why": why[:300], "never_exhausts": True})
+        return True
     if sig and lim and n > lim:
         c.store.event(P.id, t["task_id"], "infra_retry_exhausted", detail={
             "failures": n, "limit": lim, "why": why[:300]})

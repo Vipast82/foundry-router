@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.36 — a busy local model never costs a sprint an attempt
+
+A session that ends with the router's `local_busy` refusal ("backend 'strata' serves the main stream only and N session(s) are active") is always a free retry after the usual backoff, however many times in a row. Other infrastructure failures still become charged attempts after `infra_retry_max`.
+
+Why: on 2026-11-03 the Claude API reached its daily spend cap, and sessions of Claude personas and the Lead fell to the one local stream. HK-ASSET1, a local-model sprint, was refused ten times in a row, used up its free retries, and then spent real attempts (5 of 6) on contention, not on its work. Test: `tests/coordinator/test_infra_outages.py::test_a_busy_local_model_never_uses_an_attempt`.
+
 ## v0.181.35 — STATE and decision-log conflicts merge without a Lead session
 
 A track rebase whose conflicts touch only `docs/memory/**`, `docs/progress/STATE.md`, `docs/progress/state/DECISIONS.md` or `docs/progress/state/KNOWN_ISSUES.md` now resolves itself and keeps both sides. In the three logs, a table row that both sides changed (same first cell) appears once, as the track's version; rows only one side added are all kept. Conflicts in any other file still abort and open the usual decision and Lead repair. `docs/design/ASSET_LEDGER.md` is not covered, because a duplicated asset row would break `ledger.py check`.
