@@ -1370,6 +1370,21 @@ class LeadManager:
         self._ready[P.id] = (now, out)
         return [dict(r) for r in out]
 
+    def _expected(self, P, s: Optional[dict] = None) -> list:
+        """The models the lead may be served by: [lead_manager] expected_models, or, when
+        that list is empty, the lead persona's strict route chain as Foundry reports it.
+        2026-11-03: the owner moved the lead persona from Opus to Sonnet in the router and
+        the profile list still named Opus, so every lead call was discarded as a mismatch."""
+        s = s or self.settings(P)
+        e = list(s["expected_models"] or [])
+        if e:
+            return e
+        known = self._routes.get(P.id)
+        if known is None:
+            self.readiness(P)
+            known = self._routes.get(P.id)
+        return [str(k.get("model") or "") for k in known or [] if k.get("model")]
+
     def _readiness(self, P) -> list[dict]:
         s = self.settings(P)
         out: list[dict] = []
@@ -1378,7 +1393,8 @@ class LeadManager:
             out.append({"name": name, "ok": bool(ok), "cls": cls, "detail": str(detail)[:500],
                         "blocking": bool(blocking) and not ok})
 
-        persona, expected = s["persona"], list(s["expected_models"])
+        persona, expected = s["persona"], list(s["expected_models"] or [])
+        follow = not expected
         res("lead_manager_enabled", s["enabled"],
             "[lead_manager] enabled" if s["enabled"] else "[lead_manager] enabled = false")
         F = getattr(P, "foundry", None)
@@ -1444,6 +1460,10 @@ class LeadManager:
         else:
             self._routes[P.id] = [dict(r) for r in routes if isinstance(r, dict)]
             models = [str(r.get("model") or "") for r in routes if isinstance(r, dict)]
+            if follow:
+                # expected_models empty: the lead follows its persona's strict chain
+                # (persona_strict above still has to pass)
+                expected = list(models)
             # an ordered, non-empty subset of the chain: a route is down for now
             # (Foundry reports only reachable routes): transient, not a config error
             it = iter(expected)
@@ -1464,7 +1484,9 @@ class LeadManager:
                    f"{expected[len(models):]} are down; the primary routes serve the lead)"
                    if tail_down else
                    " (an ordered subset: the missing route is down; retried later)"
-                   if subset else ""), cls="transient" if subset else "config")
+                   if subset else "")
+                + (" (expected_models empty: the lead follows the persona's route chain)"
+                   if follow else ""), cls="transient" if subset else "config")
             local = [f"{r.get('backend')}/{r.get('model')}" for r in routes
                      if isinstance(r, dict) and str(r.get("source") or "") == "local"]
             ok_local = bool(self.settings(P).get("allow_local_route"))
@@ -2769,7 +2791,7 @@ class LeadManager:
     def _served_check(self, P, sid: str, persona: str, directory: str) -> tuple[str, str, list]:
         """('ok'|'mismatch'|'unverifiable', detail, served models)."""
         s = self.settings(P)
-        expected = list(s["expected_models"])
+        expected = self._expected(P, s)
         kilo_models = []
         try:
             for m in P.client.transcript(sid, directory=directory) or []:
@@ -2796,6 +2818,9 @@ class LeadManager:
                                     f"pending in Foundry's ledger"), models
         if not models:
             return "unverifiable", "Foundry recorded no served call for the session", []
+        if not expected:
+            return "unverifiable", ("expected_models is empty and the persona's route chain "
+                                    "is unknown"), models
         bad = [m for m in models if m not in expected]
         if bad:
             return "mismatch", (f"served by {models}; {bad} not in expected_models "
@@ -2994,7 +3019,8 @@ class LeadManager:
         verdict, detail, models = self._served_check(P, sid, s["persona"], ws)
         self._act(case, "served_model", status="done" if verdict == "ok" else "failed",
                   result=detail, detail={"op_key": key, "served_models": models,
-                                         "expected": s["expected_models"], "verdict": verdict})
+                                         "expected": self._expected(P, s),
+                                         "verdict": verdict})
         if verdict == "unverifiable":
             # Foundry could not tell which route served the call: the finished
             # session and its report are HELD (not discarded, never paid again);
@@ -3016,7 +3042,7 @@ class LeadManager:
                 P, t, self.case(case["case_id"]), "served_model_mismatch",
                 f"The lead persona {s['persona']} was {detail}. The call was aborted and "
                 f"its report discarded (fail closed, no fallback). Fix the persona's route "
-                f"chain so it is served only by {s['expected_models']}, or change "
+                f"chain so it is served only by {self._expected(P, s)}, or change "
                 f"[lead_manager] expected_models; should the case then retry?")
         self._save(case["case_id"], lead_model=",".join(models))
         if (case.get("validation") or {}).get("served_mismatch_deferrals"):
@@ -4809,7 +4835,7 @@ class LeadManager:
                              "bash (anything else, and " + ", ".join(READ_ONLY_BASH_DENY) + ")",
                              "external_directory", "_secrets"]},
                "helpers": [], "served_model": "", "lead_session": "", "persona": s["persona"],
-               "expected_models": list(s["expected_models"])}
+               "expected_models": self._expected(P, s)}
         c = self.active_case(P.id, task_id)
         if c is None:
             allc = self.cases(P.id, task_id)

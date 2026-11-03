@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.30 — the Lead can follow its persona's route chain (`expected_models = []`)
+
+`[lead_manager] expected_models` may now be empty. When it is, the Lead's readiness check and
+its after-call served-model check use the lead persona's strict route chain as the router
+reports it, instead of a second list kept in the profile. Persona strictness is still required,
+and a call served outside that chain is still a mismatch. A named list pins the lead as before.
+
+Why: on 2026-11-03 the lead persona moved from Opus to Sonnet in the router to save API spend.
+The profile still listed Opus, so readiness failed and every Lead call on MAP-3 was discarded as a
+served-model mismatch. The validation test that rejected an empty list now checks that duplicates
+are rejected and that an empty list loads.
+
 ## v0.181.29 — Sonnet 5.5 cache reads priced at $0.10 per million
 
 `usage.ANTHROPIC_API_PRICES`: Claude Sonnet 5.5 cache reads are 0.05x input ($0.10/MTok, Anthropic

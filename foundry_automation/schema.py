@@ -68,7 +68,8 @@ LEAD_WRITE_TIMEOUT_MINUTES = 90            # lead_timeout_minutes default with w
 LEAD_MANAGER_DEFAULTS = {
     "enabled": False,
     "persona": "Foundry-Kilo-Lead-Manager",
-    "expected_models": ["claude-opus-5-5"],   # ordered route chain; first = primary route
+    "expected_models": ["claude-opus-5-5"],   # ordered route chain; first = primary route;
+                                              # [] = follow the persona's strict route chain
     "agent": "lead",                          # Kilo agent of the lead session (read-only tools)
     "kilo_client": "kilo",                    # Foundry client name of Kilo's worker key (its
                                               # grant of the lead persona is what readiness checks)
@@ -446,9 +447,6 @@ def lead_manager_table(path: str, raw) -> dict:
         # a write-access lead edits, tests and commits: its unset timeout is 90 min
         out["lead_timeout_minutes"] = max(int(out["lead_timeout_minutes"]),
                                           LEAD_WRITE_TIMEOUT_MINUTES)
-    if not out["expected_models"]:
-        raise SettingsError(f"{path}: lead_manager.expected_models must name the route chain "
-                            f"(first = the primary route)", "lead_manager.expected_models")
     if len(set(out["expected_models"])) != len(out["expected_models"]):
         raise SettingsError(f"{path}: lead_manager.expected_models has duplicates",
                             "lead_manager.expected_models")
@@ -782,7 +780,9 @@ TABLES_BY_NAME = {t.table: t for t in TABLES}
 _LM_DESC = {
     "enabled": "The lead sprint manager: last automated recovery tier before the operator.",
     "persona": "Lead persona.",
-    "expected_models": "Ordered route chain the lead persona must be served by (first = primary).",
+    "expected_models": ("Ordered route chain the lead persona must be served by (first = "
+                        "primary). Empty = follow the lead persona's strict route chain in the "
+                        "router."),
     "agent": "Kilo agent of the lead session.",
     "kilo_client": "Foundry client name of Kilo's worker key.",
     "repair_agent": "Kilo agent of a coordinator repair session (empty = client.agent).",

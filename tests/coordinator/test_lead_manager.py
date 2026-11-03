@@ -212,10 +212,14 @@ def test_profile_lead_manager_defaults_and_validation(tmp_path):
     assert p.lead_manager_on() is False and p.lead_setting("max_diagnoses") == 3
     assert p.lead_setting("kilo_client") == "kilo"
     for bad in ('[lead_manager]\nbogus = 1\n', '[lead_manager]\nmax_diagnoses = -1\n',
-                '[lead_manager]\nexpected_models = []\n', '[lead_manager]\nsupervisor = "auto"\n',
+                '[lead_manager]\nexpected_models = ["a", "a"]\n',
+                '[lead_manager]\nsupervisor = "auto"\n',
                 f'[lead_manager]\nreviewer = "{LEAD}"\n', '[lead_manager]\nenabled = "yes"\n'):
         with pytest.raises(ProfileError):
             load(str(write_profile(tmp_path, "g", root, extra=bad)))
+    # 2026-11-03: an empty list is valid (the lead follows its persona's route chain)
+    p = load(str(write_profile(tmp_path, "g", root, extra='[lead_manager]\nexpected_models = []\n')))
+    assert p.lead_setting("expected_models") == []
 
 
 def test_example_profile_documents_lead_manager_disabled():
