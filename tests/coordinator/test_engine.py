@@ -1615,3 +1615,41 @@ def test_a_dropped_dependency_does_not_hold_back_a_ready_sprint_at_its_start(gam
     assert c._unmet_start_deps(P, c.store.task("game", "T2")) == []
     c._start_implementation(P, c.store.task("game", "T2"))
     assert c.store.task("game", "T2")["state"] == S.IMPLEMENTING
+
+
+def test_owner_inbox_drops_mid_sprint_are_not_the_sessions(tmp_path):
+    """PT-3 2026-11-03 replay: the owner's concept-art chat dropped images into
+    assets/source/incoming/ of the main checkout while PT-3 verified; unrelated_preserved
+    blamed the session. [automation] owner_inbox folders are the owner's."""
+    root, _ = make_repo(tmp_path, "inb", [T1])
+    prof = write_profile(tmp_path, "inb", root, extra='''
+[automation]
+owner_inbox = ["inbox/**"]
+''')
+
+    def work(ctx):
+        return {"writes": {"src/a.txt": "OK"}, "commit": "T1: x",
+                "run": [[sys.executable, "-c",
+                         "from pathlib import Path; Path('inbox/map').mkdir(parents=True); "
+                         "Path('inbox/map/MAP-3D-D.png').write_text('png')"]]}
+    c = coordinator(tmp_path, [prof], {"inb": work})
+    c.approve("inb", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "inb", "T1") == S.COMPLETE)
+
+
+def test_a_new_file_outside_the_inbox_still_fails_unrelated_preserved(tmp_path):
+    root, _ = make_repo(tmp_path, "inc", [T1])
+    prof = write_profile(tmp_path, "inc", root, extra='''
+[automation]
+owner_inbox = ["inbox/**"]
+''')
+
+    def work(ctx):
+        return {"writes": {"src/a.txt": "OK"}, "commit": "T1: x",
+                "run": [[sys.executable, "-c",
+                         "from pathlib import Path; Path('stray.txt').write_text('x')"]]}
+    c = coordinator(tmp_path, [prof], {"inc": work})
+    c.approve("inc", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c, "inc", "T1") == S.CHANGES_REQUIRED)
+    f = c.store.history("inc", "T1")[-1]["evidence"]["findings"]
+    assert any("new uncommitted files outside the task: stray.txt" in x for x in f)

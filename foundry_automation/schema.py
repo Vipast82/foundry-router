@@ -312,6 +312,9 @@ AUTOMATION_DEFAULTS: dict = {
     # whose Studio checks measure frames or performance run their Studio work on the
     # workstation (main, or an unbound track whose merge runs the Studio batch)
     "workstation_only_sprints": [],
+    # 2026-11-03 PT-3: the owner's concept-art chat drops images into an inbox folder of the
+    # main checkout mid-sprint; they are the owner's deliveries, never a session's stray files
+    "owner_inbox": [],
     "track_append_safe": ["docs/progress/STATE.md", "docs/progress/state/**",
                           "docs/progress/STATE_ARCHIVE*.md", "docs/MASTER_ORDER.md",
                           "docs/design/ASSET_LEDGER.md", "docs/memory/**",
@@ -971,6 +974,9 @@ _AUTO_DESC = {
                                 "frames or performance: never placed on a track bound to a "
                                 "Studio slot (the slots render in software, ~36 fps). They run "
                                 "on main or on an unbound track (Studio checked at its merge).",
+    "owner_inbox": "Folders (globs, e.g. assets/source/incoming/**) where the owner drops "
+                   "deliveries (concept art, references) into the main checkout at any time. "
+                   "New uncommitted files there are never counted against a running sprint.",
     "track_append_safe": "Shared files two sprints may both change without being serial "
                          "(append-only ledgers the rebase merges row by row).",
     "self_heal": "Self-repair sweep (every minute): ends dead sessions, cancels stuck Lead "

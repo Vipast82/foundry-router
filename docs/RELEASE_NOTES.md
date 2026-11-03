@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.40 — owner inbox folders: deliveries mid-sprint are never a session's stray files
+
+New `[automation] owner_inbox` setting (globs; default empty; shown with the other automation settings). These are folders where the owner drops deliveries into the main checkout at any time. AU uses it for the ChatGPT concept-art inbox `assets/source/incoming/**`. A new uncommitted file there no longer fails a running sprint's `coordinator.unrelated_preserved` check. On 2026-11-03 the concept-art chat saved map images there while PT-3 verified, and PT-3 went back to CHANGES_REQUIRED for files it never wrote. Stray files anywhere else still fail.
+
+Tests: `tests/coordinator/test_engine.py::test_owner_inbox_drops_mid_sprint_are_not_the_sessions`, `::test_a_new_file_outside_the_inbox_still_fails_unrelated_preserved`. Takes effect after the coordinator restart, once the project sets the folder.
+
 ## v0.181.39 — scope never blames a sprint for an operator chat's commits
 
 The owner's concept-art chat (Claude Code) committed map-concept docs and the MAP-5 plan straight to master while PT-3 ran (`docs: map concept order ...`, `plans: MAP-5 ...`). PT-3's scope check counted those files as PT-3's. It failed twice and went to a recovery decision. A commit whose message carries a `Co-Authored-By: Claude ...` trailer comes from an operator chat, because sprint sessions never write one. Unless its subject carries this sprint's own prefix, its files are now left out of the sprint's scope, review and memory checks, the same as another sprint's commits or a prep landing. New: `Workspace.operator_commits(base, head)`.

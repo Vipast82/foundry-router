@@ -2451,6 +2451,15 @@ class Coordinator:
         new_dirty = [p for _, p in dirty if p not in baseline and p not in in_scope_dirty
                      and not (intermediate and (p in inter or p in pending_task))
                      and not matches_any(p, managed)]
+        # 2026-11-03 PT-3: the owner's concept-art images landed in assets/source/incoming/
+        # while it verified; [automation] owner_inbox folders are the owner's, never the session's
+        try:
+            from . import automation as _A
+            inbox = [str(x) for x in (_A.get(P, "owner_inbox") or []) if x]
+        except Exception:                                         # noqa: BLE001
+            inbox = []
+        if inbox:
+            new_dirty = [p for p in new_dirty if not matches_any(p, inbox)]
         add("unrelated_preserved", FAIL if touched or new_dirty else PASS,
             "; ".join(x for x in (
                 ("pre-existing uncommitted changes were modified: " + ", ".join(touched[:8]))
