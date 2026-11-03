@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.37 — control center: show or hide each task state in the task picker
+
+The single "Show cancelled" box beside the Task picker is now a **States ▾** dropdown. It has a tick box for every state the project's tasks are in, each with its count, active states listed first, plus **All**, **Active only** and **None** buttons. The summary reads `States (shown/total)` while something is hidden. The task being viewed always stays in the list. The choice is saved with the page's display settings (`hiddenStates`, default: only CANCELLED hidden, as before) and now survives a reload. The old `showCancelled` flag was dropped on every load, because saved preferences keep only keys the defaults know. The panel flips to the right edge in a narrow window.
+
+Owner request 2026-11-03: "can we have another filter option to not show completed too, have a tick box for each of the types to show / not show". Test: `tests/test_control_ui_behavior.py::test_task_picker_state_filter_persists_and_counts`. Takes effect after the router rebuild.
+
 ## v0.181.36 — a busy local model never costs a sprint an attempt
 
 A session that ends with the router's `local_busy` refusal ("backend 'strata' serves the main stream only and N session(s) are active") is always a free retry after the usual backoff, however many times in a row. Other infrastructure failures still become charged attempts after `infra_retry_max`.

@@ -542,3 +542,30 @@ console.log(JSON.stringify({
     src = _script()
     assert '$("#task-state").innerHTML = t ? taskStatePill(t) : "";' in src
     assert '["Coordinator", t ? `${taskStatePill(t)} phase' in src
+
+
+def test_task_picker_state_filter_persists_and_counts(tmp_path):
+    """2026-11-03 Victor: a tick box per task state in the picker (hide COMPLETE, QUEUED ...).
+    The choice survives a reload (deepMerge keeps only default keys, so the old showCancelled
+    flag never did); the default still hides only CANCELLED; the list shows each state's count."""
+    s = _script()
+    prefs = between(s, "const PREF_KEY", "function loadPrefs")
+    flt = between(s, "const ACTIVE_STATES", "function setHiddenStates")
+    out = run_js(tmp_path, prefs + """
+const els = {"#state-filter-list": {innerHTML: ""}, "#state-filter-sum": {textContent: ""}};
+const $ = sel => els[sel];
+""" + flt + """
+const fresh = migratePrefs(null).hiddenStates;
+const kept = migratePrefs({v: 4, hiddenStates: ["COMPLETE", "QUEUED"]}).hiddenStates;
+const all = [{state: "COMPLETE"}, {state: "COMPLETE"}, {state: "QUEUED"}, {state: "IMPLEMENTING"},
+             {state: "<b>"}];
+renderStateFilter(all, new Set(["COMPLETE"]));
+console.log(JSON.stringify({fresh, kept, list: els["#state-filter-list"].innerHTML,
+                            sum: els["#state-filter-sum"].textContent}));
+""")
+    assert out["fresh"] == ["CANCELLED"] and out["kept"] == ["COMPLETE", "QUEUED"]
+    lst = out["list"]
+    assert lst.index("IMPLEMENTING") < lst.index("COMPLETE")          # active states first
+    assert 'data-state="COMPLETE" >' in lst and 'data-state="QUEUED" checked' in lst
+    assert '<span class="sf-n">2</span>' in lst and "<b>" not in lst  # counts, escaped
+    assert out["sum"] == "States (3/5)"

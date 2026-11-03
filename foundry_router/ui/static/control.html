@@ -72,6 +72,15 @@ textarea { resize:vertical; width:100%; font-family:var(--code-font); font-size:
 code, pre, .mono { font-family:var(--code-font); font-size:calc(var(--fs) - 1px); }
 a { color:var(--accent); }
 .dim { color:var(--dim); } .nw { white-space:nowrap; } .spacer { flex:1; }
+.state-filter { position:relative; }
+.state-filter > summary { cursor:pointer; list-style:none; color:var(--dim); padding:2px 8px; border:1px solid var(--line-2); border-radius:6px; white-space:nowrap; }
+.state-filter > summary::-webkit-details-marker { display:none; }
+.state-filter > summary::after { content:" \25BE"; }
+.state-filter[open] > summary { color:var(--fg); border-color:var(--accent); }
+.state-filter .sf-panel { position:absolute; z-index:50; top:calc(100% + 4px); left:0; min-width:220px; background:var(--panel); border:1px solid var(--line-2); border-radius:8px; padding:8px; box-shadow:0 6px 18px rgba(0,0,0,.35); }
+.state-filter .sf-quick { display:flex; gap:4px; margin-bottom:6px; }
+.state-filter .sf-row { display:flex; align-items:center; gap:6px; padding:2px 0; white-space:nowrap; }
+.state-filter .sf-row .sf-n { margin-left:auto; color:var(--dim); font-family:var(--num-font); }
 .pill { display:inline-block; padding:0 7px; border-radius:9px; font-size:11px; line-height:18px;
         border:1px solid var(--line-2); white-space:nowrap; vertical-align:middle; }
 .pill.ok { color:var(--ok); border-color:var(--ok); background:var(--ok-bg); }
@@ -411,7 +420,17 @@ body.noanim * { animation:none !important; transition:none !important; }
   <div class="grp">
     <label class="sr" for="sel-project">Project</label><select id="sel-project" title="Project"></select>
     <label class="sr" for="sel-task">Task</label><select id="sel-task" title="Task"></select>
-    <label class="dim" title="Cancelled sprints are kept (history, reviews, training captures) but hidden from this list unless ticked"><input type="checkbox" id="chk-show-cancelled"> Show cancelled</label>
+    <details id="state-filter" class="state-filter" title="Which task states the Task list shows (cancelled sprints are kept, only hidden)">
+      <summary id="state-filter-sum">States</summary>
+      <div class="sf-panel">
+        <div class="sf-quick">
+          <button type="button" class="btn" data-sf="all">All</button>
+          <button type="button" class="btn" data-sf="active">Active only</button>
+          <button type="button" class="btn" data-sf="none">None</button>
+        </div>
+        <div id="state-filter-list"></div>
+      </div>
+    </details>
     <span id="task-state"></span>
   </div>
   <div class="grp">
@@ -545,6 +564,8 @@ const DEFAULT_PREFS = {
   showAssistantText: true, showApprovals: true, showDiagnostics: false, collapseCompleted: true,
   collapseLong: true, longLines: 14, exportThinking: false,
   followCoordinator: true, followScroll: true, historyPageSize: 200,
+  // task picker: states hidden from the list (2026-11-03 Victor: a tick box per state)
+  hiddenStates: ["CANCELLED"],
   events: {text: true, reasoning: true, tool: true, retry: true, compaction: true, file: true, step: false, agent: true},
   sidebar: {order: SECTIONS.slice(), hidden: [], collapsed: ["search", "capabilities", "actions"]},
   showDisabledMcp: true, showTokenDetails: true, showTiming: true, showTodo: true, showCapabilities: true, showHelpers: true, showLanes: true,
@@ -3835,11 +3856,13 @@ function renderTaskSelect() {
   const projects = [...new Set([...[...S.tasks.values()].map(t => t.project_id), ...Object.keys(S.projectStatus || {})])].sort();
   if (!S.project && projects.length) S.project = projects[0];
   $("#sel-project").innerHTML = projects.map(p => `<option ${p === S.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option>(no projects reported)</option>";
-  // 2026-10-28 Victor: cancelled sprints out of the picker by default (kept, never deleted)
-  const showCancelled = !!P.showCancelled;
-  const box = $("#chk-show-cancelled"); if (box) box.checked = showCancelled;
-  const tasks = [...S.tasks.values()].filter(t => t.project_id === S.project &&
-      (showCancelled || t.state !== "CANCELLED" || t.task_id === S.task))
+  // 2026-10-28 Victor: cancelled sprints out of the picker by default (kept, never deleted);
+  // 2026-11-03 Victor: a tick box per state (hide COMPLETE, QUEUED ...). The task being viewed
+  // always stays in the list.
+  const hidden = new Set(P.hiddenStates || []);
+  const all = [...S.tasks.values()].filter(t => t.project_id === S.project);
+  renderStateFilter(all, hidden);
+  const tasks = all.filter(t => !hidden.has(t.state) || t.task_id === S.task)
     .sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0));
   if (!S.task || !tasks.find(t => t.task_id === S.task)) {
     const active = tasks.find(t => ["IMPLEMENTING", "CLOSING", "VERIFYING", "REVIEWING", "AWAITING_HUMAN"].includes(t.state)) || tasks[0];
@@ -3860,10 +3883,50 @@ function selectTask(p, t) {
 }
 $("#sel-project").onchange = e => { S.project = e.target.value; S.task = ""; renderTaskSelect(); selectTask(S.project, S.task); };
 $("#sel-task").onchange = e => selectTask(S.project, e.target.value);
-if ($("#chk-show-cancelled")) $("#chk-show-cancelled").onchange = e => {
-  P.showCancelled = e.target.checked; savePrefs();
-  renderTaskSelect();
+// state filter: one tick box per state present in the project, with counts
+const ACTIVE_STATES = ["IMPLEMENTING", "VERIFYING", "REVIEWING", "CLOSING", "CHANGES_REQUIRED",
+                       "BLOCKED", "AWAITING_HUMAN", "READY", "PAUSED"];
+function renderStateFilter(all, hidden) {
+  const counts = {};
+  for (const t of all) counts[t.state] = (counts[t.state] || 0) + 1;
+  const states = Object.keys(counts).sort((a, b) =>
+    (ACTIVE_STATES.indexOf(a) + 1 || 99) - (ACTIVE_STATES.indexOf(b) + 1 || 99) || a.localeCompare(b));
+  const list = $("#state-filter-list");
+  if (list) list.innerHTML = states.map(st => `<label class="sf-row"><input type="checkbox" data-state="${esc(st)}" ${hidden.has(st) ? "" : "checked"}> ${esc(st)}<span class="sf-n">${counts[st]}</span></label>`).join("")
+    || `<div class="dim">no tasks</div>`;
+  const shown = states.filter(st => !hidden.has(st)).reduce((n, st) => n + counts[st], 0);
+  const sum = $("#state-filter-sum");
+  if (sum) sum.textContent = hidden.size && states.some(st => hidden.has(st))
+    ? `States (${shown}/${all.length})` : "States";
+}
+function setHiddenStates(list) {
+  P.hiddenStates = [...new Set(list)]; savePrefs(); renderTaskSelect();
+}
+if ($("#state-filter-list")) $("#state-filter-list").onchange = e => {
+  const st = e.target && e.target.dataset ? e.target.dataset.state : "";
+  if (!st) return;
+  const hidden = new Set(P.hiddenStates || []);
+  if (e.target.checked) hidden.delete(st); else hidden.add(st);
+  setHiddenStates([...hidden]);
 };
+for (const b of document.querySelectorAll("#state-filter [data-sf]")) b.onclick = () => {
+  const present = [...new Set([...S.tasks.values()].filter(t => t.project_id === S.project).map(t => t.state))];
+  const mode = b.dataset.sf;
+  setHiddenStates(mode === "all" ? [] : mode === "none" ? present
+    : present.filter(st => !ACTIVE_STATES.includes(st)));
+};
+if ($("#state-filter")) $("#state-filter").addEventListener("toggle", e => {
+  const panel = e.target.querySelector(".sf-panel");   // keep it inside a narrow window
+  if (!panel || !e.target.open) return;
+  panel.style.left = "0"; panel.style.right = "auto";
+  if (panel.getBoundingClientRect().right > window.innerWidth - 8) {
+    panel.style.left = "auto"; panel.style.right = "0";
+  }
+});
+document.addEventListener("click", e => {            // close the panel on an outside click
+  const d = $("#state-filter");
+  if (d && d.open && !d.contains(e.target)) d.open = false;
+});
 
 /* ======================================================================== boot */
 let graphTimer = null;
