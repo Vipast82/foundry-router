@@ -78,6 +78,29 @@ def router_probe(P) -> list[str]:
     return [f"router={base}/health"]
 
 
+def persona_grant_problem(P, persona: str) -> str:
+    """Why the router will refuse the Kilo client this persona ('' = granted or unknown).
+    2026-11-03: HK-COPY1 / HK-DATA1 were routed to Foundry-Kilo-Haiku, which the `kilo` key
+    may not use; each session died on its first call (403, config), opened a Lead case, and
+    the Lead's resume started the same refused session again."""
+    fn = getattr(getattr(P, "foundry", None), "persona_info", None)
+    if not persona or not callable(fn):
+        return ""
+    lm = getattr(P.profile, "lead_manager", None) or {}
+    client = str((lm.get("kilo_client") if isinstance(lm, dict) else "") or "kilo")
+    try:
+        info = fn(persona, client=client)
+    except Exception:                                             # noqa: BLE001
+        return ""                       # unreachable router: the router probe reports it
+    if isinstance(info, dict) and info.get("exists") is False:
+        return f"persona {persona} does not exist in the router"
+    if isinstance(info, dict) and info.get("client_allowed") is False:
+        return (f"client {client!r} may not use persona {persona} "
+                f"({info.get('reason') or 'not granted'}): route the role to a granted persona "
+                f"or grant it in the router's Access page")
+    return ""
+
+
 def preflight(c, P, persona: str) -> list[dict]:
     """The failing infra checks ([] = ready). Cached for CACHE_SECONDS per project
     so a waiting task doesn't re-probe every tick."""
@@ -106,6 +129,9 @@ def preflight(c, P, persona: str) -> list[dict]:
             why = f"Kilo config unreadable: {e}"
         if why:
             bad.append({"name": "kilo.persona", "detail": str(why)[:300]})
+    grant = persona_grant_problem(P, persona) if not bad else ""
+    if grant:
+        bad.append({"name": "router.persona_grant", "detail": grant[:300]})
     for spec in [*router_probe(P), *(auto_get(P, "preflight_endpoints") or [])]:
         name, url = _endpoint(spec)
         why = check_endpoint(url)

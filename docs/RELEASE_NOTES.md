@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.33 — a session never starts on a persona the Kilo key may not use
+
+Before an implementer session starts, the infra preflight asks the router whether the Kilo client (`[lead_manager] kilo_client`, default `kilo`) may use the session's persona (`/v1/foundry/personas/<persona>/routes?client=`). If it may not, or the persona does not exist, the sprint waits in preflight with the reason (no session, no attempt used, no Lead case) and starts as soon as the role is routed to a granted persona or the grant is added. An unreachable router is left to the router health probe.
+
+Why: on 2026-11-03 HK-COPY1 and HK-DATA1 were routed to Foundry-Kilo-Haiku, which the `kilo` key may not use. Each session died on its first call (403, config) and opened a Lead case. The Lead's resume then started the same refused session again, so the Lead calls looped. Test: `tests/coordinator/test_infra_outages.py::test_preflight_holds_a_session_on_a_persona_the_kilo_key_may_not_use`.
+
 ## v0.181.32 — a never-started sprint can move from one track to another
 
 `tracks start <project> <new track> <sprint>` now accepts a sprint that is queued on another running (or planned) track, as long as it never started: state QUEUED or READY, attempt 0, no session, and not that track's current sprint. The sprint leaves its old track and that track's chain is relinked: the sprint that followed it now follows the one before it. Its own plan dependencies stay; only the old chain link is dropped. Events: `moved_off_track` and `moved_to_track`. A started or current sprint still refuses to move.

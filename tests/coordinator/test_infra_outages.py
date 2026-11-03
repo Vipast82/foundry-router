@@ -401,3 +401,29 @@ def test_a_lead_waiting_on_the_workspace_lock_says_so_and_starts_once_free(lead_
     case = lm.step(P, task(e), case)
     assert P.client.starts                                      # the lead call started
     assert not (case.get("validation") or {}).get("lead_waiting")
+
+
+def test_preflight_holds_a_session_on_a_persona_the_kilo_key_may_not_use(monkeypatch):
+    """2026-11-03 HK-COPY1: a refused persona must wait in preflight (no session, no
+    attempt, no Lead case), not die on its first call and loop through the Lead."""
+    monkeypatch.setattr(infra, "check_endpoint", lambda url, timeout=3.0: "")
+    monkeypatch.setattr(infra, "auto_get", lambda P, k: {"preflight": True}.get(k, []))
+    seen = []
+
+    def info(persona, client=""):
+        seen.append((persona, client))
+        return {"exists": True, "client_allowed": persona != "Foundry-Kilo-Haiku",
+                "reason": "client 'kilo' may not use model"}
+    prof = SimpleNamespace(foundry={}, workspace=".", automation={},
+                           lead_manager={"kilo_client": "kilo"})
+    P = SimpleNamespace(id="g", profile=prof, client=None, adapter=None,
+                        foundry=SimpleNamespace(url="", persona_info=info))
+    c = SimpleNamespace(clock=time.time)
+    bad = infra.preflight(c, P, "Foundry-Kilo-Haiku")
+    assert [b["name"] for b in bad] == ["router.persona_grant"]
+    assert "may not use persona Foundry-Kilo-Haiku" in bad[0]["detail"]
+    assert seen == [("Foundry-Kilo-Haiku", "kilo")]
+    assert infra.preflight(c, P, "Foundry-Kilo-Research") == []
+    # an unreachable router is not a grant problem (the router probe owns that)
+    P.foundry.persona_info = lambda persona, client="": (_ for _ in ()).throw(OSError("down"))
+    assert infra.persona_grant_problem(P, "Foundry-Kilo-Haiku") == ""
