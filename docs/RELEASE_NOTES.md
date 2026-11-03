@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.44 — a settings revision that only changes live fields applies while sessions run
+
+The coordinator applied every router revision only at a "safe point" with no live session. With a main sprint and a parallel track running, that point rarely comes. On 2026-11-03, revision 20 (`automation.context_ceiling_pct` 63 → 85) stayed pending for 20 minutes, and the old 121k ceiling went on handing S56 off. A revision whose every change is a field the schema marks `apply = live` (read on each use) now applies at once. A change to a `next_session` or `restart` field (role rules, client URL, ...) still waits for the safe point or restart, as before.
+
+Test: `tests/coordinator/test_config_pull.py::test_a_live_only_revision_applies_while_sessions_run`. Takes effect after the coordinator restart.
+
 ## v0.181.43 — a context ceiling below a fresh session's startup context stops handing off
 
 An operator set `[automation] context_ceiling_pct` to 63 (router revision 19). On Claude's 191,808-token usable window that is a 120.8k handoff ceiling. On 2026-11-03 a fresh S55 session reached it within about 30 s of starting, just from reloading its plan and files. It was handed off, and the next session started over the ceiling again: six handoffs and 6 of 8 sessions in 8 minutes. A session over the ceiling within `CEILING_FAST_S` (180 s) of its start counts toward a streak. After `CEILING_FAST_MAX` (2) such handoffs in a row, the ceiling is skipped for that task's later sessions (event `context_ceiling_skipped`, with a note to raise the setting). The wrap-up stop near the window still applies. The AU value is now 85 (router revision 20, 163k).

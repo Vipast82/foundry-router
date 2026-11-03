@@ -163,6 +163,18 @@ class ConfigPuller:
 
     # ------------------------------------------------------------------ safe point
 
+    def _live_only(self, pid: str, body: dict) -> bool:
+        """Every change from the applied revision to `body` is a field the schema marks
+        apply=live (read on each use, safe while sessions run)."""
+        prev = (self._applied.get(pid) or self.cached(pid) or {}).get("doc")
+        if pid in self._fresh or not isinstance(prev, dict):
+            return False
+        try:
+            changes = D.diff(prev, body.get("doc") or {})
+        except Exception:                                        # noqa: BLE001
+            return False
+        return bool(changes) and all(ch.get("apply") == "live" for ch in changes)
+
     def busy(self, pid: str) -> str:
         """Why now is not a safe point for this project ("" = safe)."""
         q = self.store.q
@@ -215,6 +227,11 @@ class ConfigPuller:
         if not body:
             return "current"
         why = self.busy(pid)
+        if why and self._live_only(pid, body):
+            # 2026-11-03: revision 20 (context_ceiling_pct only) sat "waiting for a safe
+            # point" while a main sprint and a track were always live; a revision whose every
+            # change is an apply=live field takes effect now
+            why = ""
         if why:
             self._report(pid, body, "pending", f"waiting for a safe point: {why}")
             return "pending"

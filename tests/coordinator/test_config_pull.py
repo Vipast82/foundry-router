@@ -249,3 +249,27 @@ def test_kilo_config_refuses_broken_jsonc(tmp_path):
 
 def test_document_format_constant():
     assert D.empty("x")["format"] == FORMAT
+
+
+def test_a_live_only_revision_applies_while_sessions_run(tmp_path):
+    """2026-11-03: revision 20 (only automation.context_ceiling_pct) sat 'waiting for a safe
+    point' while a main sprint and a track were always live; the 63% ceiling kept handing
+    S56 off. A revision whose every change is an apply=live field applies at once."""
+    c, f, _ = _setup(tmp_path)
+    P = c.projects["game"]
+    doc = _doc(c)
+    f.deploy(doc, 1)
+    cp = ConfigPuller(c)
+    assert cp.sync("game", force=True) == "applied"
+    _live_session(c)
+    doc2 = copy.deepcopy(doc)
+    doc2["settings"].setdefault("automation", {})["context_ceiling_pct"] = 85
+    f.deploy(doc2, 2)
+    assert cp.sync("game", force=True) == "applied"
+    from foundry_coordinator.automation import get as auto_get
+    assert auto_get(P, "context_ceiling_pct") == 85
+    # a change that is not apply=live still waits for the safe point
+    doc3 = copy.deepcopy(doc2)
+    doc3["role_rules"]["implementer"]["edit_paths"]["allow"] = ["src/**"]
+    f.deploy(doc3, 3)
+    assert cp.sync("game", force=True) == "pending"
