@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.41 — a Studio gate with no Luau file under test checks the default pair too
+
+The scripted Studio gate tests a sprint's own changed files, and PRE-PLAY proves that Studio loaded HEAD by hashing the Luau files among them. On 2026-11-03 PT-3's only in-scope changes were four concept PNGs, which a Lead repair had committed. PRE-PLAY had nothing to hash ("no hash map for the files under test"), and the run stopped as stale Rojo, which the auto-heal restart cannot fix. When none of the files is Luau, `tests/RegressionIndex.lua` and `tests/GateRunner.lua` now go first, the same pair a sprint with no changed files already gets.
+
+Test: `tests/coordinator/test_studio_calls.py::test_gate_files_without_a_luau_file_add_the_default_pair`. Takes effect after the coordinator restart.
+
 ## v0.181.40 — owner inbox folders: deliveries mid-sprint are never a session's stray files
 
 New `[automation] owner_inbox` setting (globs; default empty; shown with the other automation settings). These are folders where the owner drops deliveries into the main checkout at any time. AU uses it for the ChatGPT concept-art inbox `assets/source/incoming/**`. A new uncommitted file there no longer fails a running sprint's `coordinator.unrelated_preserved` check. On 2026-11-03 the concept-art chat saved map images there while PT-3 verified, and PT-3 went back to CHANGES_REQUIRED for files it never wrote. Stray files anywhere else still fail.

@@ -635,6 +635,21 @@ def test_gate_files_put_studio_loaded_sources_before_asset_exports():
     assert sc._files(P, {"task_id": "X", "data": {}}, "h" * 40) == SC.DEFAULT_FILES
 
 
+def test_gate_files_without_a_luau_file_add_the_default_pair():
+    """2026-11-03 PT-3: its only in-scope changes were four concept PNGs; PRE-PLAY had no
+    Luau file to hash and the run stopped as stale Rojo (an auto-heal that cannot help)."""
+    pngs = [f"assets/source/incoming/maps/MAP-{i}.png" for i in range(4)]
+    ws = SimpleNamespace(changed_files=lambda base, head: pngs + ["docs/progress/PT-3_x.md"])
+    P = SimpleNamespace(ws=ws)
+    sc = SC.StudioCalls.__new__(SC.StudioCalls)
+    got = sc._files(P, {"task_id": "PT-3", "data": {"task_base": "b" * 40}}, "h" * 40)
+    assert got == SC.DEFAULT_FILES + pngs
+    # a Luau file among them: the list is left as it was
+    ws.changed_files = lambda base, head: pngs + ["src/server/A.lua"]
+    assert sc._files(P, {"task_id": "PT-3", "data": {"task_base": "b" * 40}}, "h" * 40) \
+        == ["src/server/A.lua"] + pngs
+
+
 def test_gate_files_keep_only_the_tasks_own_scope_when_another_sprint_committed_in_between():
     """2026-11-01 MV2-CL1: AS-P8 committed 150 assets/exports paths in the main checkout between
     MV2-CL1's sessions; the gate tested them and MV2-CL1 stopped on another sprint's files."""

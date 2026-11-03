@@ -541,7 +541,15 @@ class StudioCalls:
         # assets/exports/*.fbx); sorted and capped at 200 they were all exports, so PRE-PLAY
         # had no Studio-loaded file to verify ("no hash map for the files under test") and
         # the gate looped as a stale-Rojo stop. Studio-loaded files go first.
-        return sorted(files, key=_studio_rank)[:MAX_GATE_FILES] or list(DEFAULT_FILES)
+        files = sorted(files, key=_studio_rank)[:MAX_GATE_FILES]
+        # 2026-11-03 PT-3: its only in-scope changes were four PNGs (owner concept art a
+        # Lead repair committed); PRE-PLAY had no Luau file to hash ("no hash map for the
+        # files under test") and the run stopped as stale Rojo. Without a Luau file the
+        # gate also verifies the default ones.
+        if files and not any(_studio_rank(f) == 0 for f in files):
+            files = list(DEFAULT_FILES) + [f for f in files if f not in DEFAULT_FILES]
+            files = files[:MAX_GATE_FILES]
+        return files or list(DEFAULT_FILES)
 
     def _studio_lock_free(self, P, t: dict) -> bool:
         """AU's studio.lock: free, or this task's own idle session left it behind (the
