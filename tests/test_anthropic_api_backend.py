@@ -66,7 +66,7 @@ def test_config_metering_and_menus_treat_it_as_paid_claude_not_a_subscription():
 def test_cost_uses_anthropic_rates_with_cached_tokens():
     # Sonnet 5.5: 156k context, 155k read from cache, 1k written (1h), 400 out
     c = anthropic_api_cost("claude-sonnet-5-5", 156000, 155000, 400, "1h")
-    assert abs(c - (1000 * 4.0 + 155000 * 0.20 + 400 * 10.0) / 1e6) < 1e-9
+    assert abs(c - (1000 * 4.0 + 155000 * 0.10 + 400 * 10.0) / 1e6) < 1e-9
     assert anthropic_api_cost("claude-sonnet-5-5", 1000, 0, 0, "5m") == pytest.approx(0.0025)
     # an unknown model is priced as Opus 5.5 (the conservative side)
     assert anthropic_api_cost("claude-next", 1000, 0, 0) == pytest.approx(1000 * 8.0 / 1e6)

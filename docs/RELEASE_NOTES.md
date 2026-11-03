@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.29 — Sonnet 5.5 cache reads priced at $0.10 per million
+
+`usage.ANTHROPIC_API_PRICES`: Claude Sonnet 5.5 cache reads are 0.05x input ($0.10/MTok, Anthropic
+prompt-caching page), not $0.20. Router spend for Sonnet on the `anthropic-api` backend was
+over-counted by about half of its cached share, so the spend caps tripped early.
+
 ## v0.181.28 — backend type `anthropic-api`: Claude straight from Anthropic, 1-hour cache, metered
 
 2026-11-03. The owner moved Claude work onto API credit. Through CLIProxyAPI an API key only gets
