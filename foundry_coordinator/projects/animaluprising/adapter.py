@@ -288,6 +288,7 @@ class AnimalUprisingAdapter(GenericAdapter):
         # Team Lead 5: an optional `## Needs` block (studio, blender, audio, images, gpu,
         # backend, none); the engine waits for those services before it starts a session
         from ...services import parse_needs, ref_views_in_text
+        from ...skills_preload import plan_skills
         needs = parse_needs(plan)
         # TURNAROUND_RECIPE_PLAN D3: the condensed spec below has no Needs block, so the
         # `ref_views` word travels as task data (v0.179.0; v0.171.0 never saw it for AU)
@@ -308,6 +309,9 @@ class AnimalUprisingAdapter(GenericAdapter):
                         spec=spec, scope=scope, tags=tags, deps=deps,
                         data={"tier": tier, "visual": visual, "plan": rel,
                               "close_step": _close_step(plan),
+                              # 2026-11-02: the condensed spec above drops the plan's Skills
+                              # section; the coordinator preloads these pages (skills_preload)
+                              "skills": plan_skills(plan),
                               **({"needs": needs} if needs else {}),
                               **({"ref_views": True} if ref_views else {})})
 

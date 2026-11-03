@@ -2,6 +2,29 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.23 — skill pages go into every implement and repair prompt
+
+2026-11-02 21:xx. Owner: "make sure the skills are being used". The Kilo log said they mostly were
+not. In the last 30 hours, 81 of 552 AU implement/repair sessions called the skill tool at all, and
+only a sprint's first session ever did. Repair, hand-off and local-model sessions loaded none.
+None of the 27 `roblox-*` skills installed that afternoon was ever opened (GF-LOOK1 loaded
+`au-roblox-world-building` once, in its first session). Cause: plans list their skills in a
+`## Skills` section, but AU's condensed session brief does not carry that section, so an agent saw
+the list only if it opened the plan file and read that far.
+
+- New `skills_preload`. Every implement and repair prompt (first prompt, restarts, repairs, context
+  hand-offs; not closeout) gets the SKILL.md pages of `[skills] preload_always`, followed by the
+  skills the plan names in backticks in its `## Skills` section, up to `[skills] preload_max_kb`
+  (default 24). A skill past the budget is named for the session to load with the skill tool.
+  Skills are found in the game's skill folder first (the main checkout's, for tracks), then in
+  Foundry's copy.
+- The AU adapter passes the plan's skill names as task data (`data.skills`).
+- New events: `skills_preloaded` (loaded, over_budget, missing, bytes) and `skills_preload_failed`.
+  A failure never blocks a session.
+- New settings with control-center controls: `skills.preload` (on), `skills.preload_always`,
+  `skills.preload_max_kb`.
+- Tests: `tests/coordinator/test_skills_preload.py`.
+
 ## v0.181.22 — the reviewer never demands a self-referential gate pointer
 
 2026-11-02 19:3x. GF-MUT1's code was done: GATE PASS, Lune 2078/2078, negative control 398/398,

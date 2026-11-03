@@ -1252,6 +1252,16 @@ FIELDS: list[Field] = [
     F("skills.check_seconds", "int", 300, "How often the installed skills are compared with "
       "Foundry's copy (a change to skills.install applies at once).", "fast_lane",
       "coordinator.skills_install", min=30, max=86400),
+    F("skills.preload", "bool", True, "Put skill pages into every implement and repair prompt "
+      "(skills.preload_always, then the skills the sprint plan names in its Skills section), "
+      "so a session never has to choose to load them. Off = sessions get only the plan's list.",
+      "fast_lane", "coordinator.skills_preload", "next_session"),
+    F("skills.preload_always", "list", [], "Skills every implement and repair session gets, "
+      "before the plan's own, e.g. au-luau-development, au-roblox-development.", "fast_lane",
+      "coordinator.skills_preload", "next_session", item_type="str"),
+    F("skills.preload_max_kb", "int", 24, "Most skill-page text one prompt carries; a skill "
+      "past it is named for the session to load with the skill tool. 0 = name them all.",
+      "fast_lane", "coordinator.skills_preload", "next_session", min=0, max=128),
     # the main checkout's Studio on a slot (docs/plans/LINUX_WORKSTATION_PLAN.md W2) ---------
     F("studio.main_slot", "str", "", "The MAIN sprints' Studio: empty = this PC's Studio (today); "
       "a slot id = that Studio slot, like a slot-bound track: the scripted gate runs there (its "

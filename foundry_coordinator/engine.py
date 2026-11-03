@@ -896,6 +896,7 @@ class Coordinator:
             t = self.store.task(pid, tid)
         prompt = (P.adapter.repair_prompt(spec, findings, ctx) if findings
                   else P.adapter.implement_prompt(spec, ctx))
+        prompt += self._skills_block(P, tid, spec)
         prompt += lc_extra
         if self.tracks.is_track(P) and not getattr(P.adapter, "TRACK_AWARE", False):
             # an adapter whose prompts are track-aware (AU) states this itself, at the top
@@ -1673,6 +1674,8 @@ class Coordinator:
                 prompt = (P.adapter.closeout_prompt(spec, ctx) if phase == "closeout" else
                           P.adapter.repair_prompt(spec, t["data"].get("findings") or [], ctx)
                           if t["data"].get("findings") else P.adapter.implement_prompt(spec, ctx))
+                if phase != "closeout":
+                    prompt += self._skills_block(P, tid, spec)
                 if phase != "closeout" and self._lc(P):
                     prompt += self._lc_prompt_extra(P, t, spec, t["base_sha"],
                                                     ctx.get("assignment"))
@@ -4150,6 +4153,19 @@ class Coordinator:
         return sent
 
     # ======================================================================= operator notes
+
+    def _skills_block(self, P: Project, tid: str, spec) -> str:
+        """The preloaded skill pages for an implement/repair prompt (skills_preload). Never
+        raises: a failure leaves the prompt as it was and records why."""
+        from . import skills_preload
+        try:
+            text, detail = skills_preload.block(self, P, spec)
+        except Exception as e:                                   # noqa: BLE001
+            self.store.event(P.id, tid, "skills_preload_failed", detail={"error": str(e)[:300]})
+            return ""
+        if detail["loaded"] or detail["over_budget"] or detail["missing"]:
+            self.store.event(P.id, tid, "skills_preloaded", detail=detail)
+        return text
 
     def _with_operator_notes(self, project_id: str, task_id: str, prompt: str,
                              session_id: str, memory_for: str = "") -> tuple[str, list[str]]:
