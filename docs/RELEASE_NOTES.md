@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.31 — a merge-conflict timeout never strands a finished track; stopped tracks with finished work can merge
+
+**The bug.** A track whose rebase onto the main branch conflicted opened a decision whose default was "stop this track". When nobody answered within the decision timeout, the coordinator stopped the track. `tracks merge` refused a stopped track ("already stopped"), so its work could never reach the main branch, while every one of its sprints read COMPLETE. On Animal Uprising this stranded five tracks between 2026-10-27 and 2026-11-02: name1 (GF-NAME1), backend-1 (S57a), birds (AS-D08, AS-D09, AS-D16: four flying enemies and three elites), poi (AS-F19, AS-F20, AS-F23, AS-F32: POI, merchant stop, landmarks and den quarters kits) and rt2 (GF-RT5, GF-RT6, GF-RT7, GF-LIVE2). Each stop raised a `track_work_unmerged` alert, but nothing could act on it.
+
+**Now:**
+- When every sprint of the track is COMPLETE, the timeout retries the merge (`TIMEOUT_RETRIES` = 2; each conflict may start a fresh Lead repair).
+- After those retries it keeps the branch as a **failed** track, which `tracks merge` can re-request, and raises the same alert. It never stops a track with finished work.
+- An operator still stops a track explicitly; a track with unfinished sprints still stops on the timeout as before.
+- `tracks merge` accepts a **stopped** track whose sprints are all COMPLETE and reopens its merge. A stopped track with unfinished sprints is still refused.
+
+Tests: `test_tracks_merge.py` (the timeout test now expects retries then a failed, re-requestable track; two new tests for stopped tracks) and `test_tracks_lead_repair.py` (the Lead-unavailable timeout keeps the branch).
+
 ## v0.181.30 — the Lead can follow its persona's route chain (`expected_models = []`)
 
 `[lead_manager] expected_models` may now be empty. When it is, the Lead's readiness check and

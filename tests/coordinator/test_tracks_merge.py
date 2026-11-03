@@ -2,7 +2,8 @@
 main sprint (rebase onto master, fast-forward, the project's checks on the
 merged files in the main checkout, track_merged, worktree removed; the merge
 commits are the coordinator's for the main sprint's scope checks); a rebase
-conflict opens a decision whose default stops the track; a red merge gate
+conflict opens a decision; with finished work its timeout retries the merge, then keeps the
+branch as a failed (re-requestable) track, never a stopped one; a red merge gate
 fails the track with the findings; the operator can request the merge early."""
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ def test_merge_waits_while_the_main_sprint_is_live_then_exempts_its_commits(tmp_
     assert run_until(c, lambda: c.store.task("game", "T2")["state"] == S.COMPLETE, limit=60)
 
 
-def test_conflict_opens_a_decision_whose_default_stops_the_track(tmp_path):
+def test_conflict_opens_a_decision_and_its_timeout_never_strands_finished_work(tmp_path):
     c, P, clock, root = env(tmp_path)
     c.tracks.create(P, "conf", ["C1"])
     c.tracks.start(P, "conf", "victor")
@@ -139,13 +140,26 @@ def test_conflict_opens_a_decision_whose_default_stops_the_track(tmp_path):
     assert "OK by C1" not in open(os.path.join(root, "src", "a.txt")).read()
     with pytest.raises(TrackError, match="option must be"):
         c.tracks.merger.decide(P, "conf", "something else", "victor")
-    # the timeout applies the default: stop this track
+    # 2026-11-03: C1 is COMPLETE, so the timeout retries the merge (twice) instead of
+    # stopping the track; the conflict comes back each time and reopens the decision
+    from foundry_coordinator.tracks.merge import TIMEOUT_RETRIES
+    for n in range(1, TIMEOUT_RETRIES + 1):
+        clock.t += 31 * 60
+        c.tick()
+        assert c.store.track("game", "conf")["data"]["timeout_retries"] == n
+        assert run_until(c, lambda: (c.store.track("game", "conf")["data"].get("decision") or {})
+                         .get("status") == "open", limit=6)
+        assert c.store.track("game", "conf")["state"] == "merging"
+    assert len(events(c, "track_timeout_retry")) == TIMEOUT_RETRIES
+    # then the branch is kept as a FAILED track (re-requestable), not stopped
     clock.t += 31 * 60
     c.tick()
     row = c.store.track("game", "conf")
-    assert row["state"] == "stopped" and row["data"]["decision"]["status"] == "answered"
+    assert row["state"] == "failed" and row["data"]["decision"]["status"] == "answered"
     assert row["data"]["decision"]["by"] == "coordinator (decision timeout)"
+    assert row["data"]["decision"]["answer"] == "keep the branch, no merge"
     assert os.path.isdir(row["worktree"])
+    assert c.tracks.merger.request(P, "conf", "victor")["state"] == "merging"
     # never silently: the COMPLETE sprint whose work did not merge is named in an alert
     notes = [e for e in events(c, "operator_notice")
              if e["detail"].get("category") == "track_work_unmerged"]
@@ -330,3 +344,40 @@ def test_memory_only_conflicts_are_merged_keeping_both_sides(tmp_path):
     text = f.read_text()
     assert "main note" in text and "track note" in text and "<<<<<<<" not in text
     assert g("status", "--porcelain").stdout.strip() == ""
+
+
+def test_a_stopped_track_whose_sprints_all_finished_can_still_merge(tmp_path):
+    """2026-11-03: birds, poi and rt2 were stopped with every sprint COMPLETE; `tracks merge`
+    refused them ("already stopped") and their work never reached master."""
+    c, P, clock, root = env(tmp_path)
+    c.tracks.create(P, "blender", ["B1"])
+    c.tracks.start(P, "blender", "victor")
+    # keep the main checkout busy so the finished track waits, then stop it
+    c.approve("game", "T1", [], "victor")
+    c.tick()
+    c.tick()
+    sess = c.projects["game"].client.sessions[c.store.task("game", "T1")["session_id"]]
+    sess["pending"] = False
+    assert run_until(c, lambda: c.store.task("game", "B1")["state"] == S.COMPLETE, limit=80)
+    c.tracks.stop(P, "blender", "victor", "test")
+    assert c.store.track("game", "blender")["state"] == "stopped"
+    row = c.tracks.merger.request(P, "blender", "victor")
+    assert row["state"] == "merging" and row["data"]["merge_stage"] == "wait"
+    assert "stopped" not in row["data"]
+    sess["pending"] = True
+    assert run_until(c, lambda: c.store.track("game", "blender")["state"] == "merged", limit=80)
+    assert os.path.isfile(os.path.join(root, "art", "b.txt"))
+
+
+def test_a_stopped_track_with_unfinished_sprints_stays_stopped(tmp_path):
+    c, P, clock, root = env(tmp_path)
+    c.approve("game", "T1", [], "victor")
+    c.tick()
+    c.tick()
+    sess = c.projects["game"].client.sessions[c.store.task("game", "T1")["session_id"]]
+    sess["pending"] = False
+    c.tracks.create(P, "blender", ["B1"])
+    c.tracks.start(P, "blender", "victor")
+    c.tracks.stop(P, "blender", "victor", "test")
+    with pytest.raises(TrackError, match="stopped with unfinished"):
+        c.tracks.merger.request(P, "blender", "victor")

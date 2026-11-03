@@ -103,6 +103,12 @@ DECISION_AFTER_REPAIR = "retry the merge after the Lead repair"
 DECISION_OPTIONS = (DECISION_DEFAULT, "retry the merge", "keep the branch, no merge",
                     DECISION_AFTER_REPAIR)
 TIMEOUT_ACTOR = "coordinator (decision timeout)"
+# 2026-11-03: five tracks (name1, backend-1, birds, poi, rt2) were STOPPED by this timeout with
+# every sprint COMPLETE, and a stopped track can never merge again: the finished work of 14
+# sprints sat on branches for days while the sprints read COMPLETE. With finished work the
+# timeout now retries the merge (each retry may open a fresh Lead repair), then keeps the branch
+# as a FAILED track, which the operator can re-request; it never stops the track.
+TIMEOUT_RETRIES = 2
 
 
 def _repair_running(data: dict) -> Optional[dict]:
@@ -139,10 +145,14 @@ class MergeManager:
         row = self.store.track(P.id, name)
         if row is None:
             raise TrackError(f"no track {name}")
-        if row["state"] in ("merged", "stopped"):
-            raise TrackError(f"track {name} is already {row['state']}")
+        if row["state"] == "merged":
+            raise TrackError(f"track {name} is already merged")
         open_ = [s for s in row["sprints"]
                  if (self.store.task(P.id, s) or {}).get("state") != S.COMPLETE]
+        if row["state"] == "stopped" and open_:
+            raise TrackError(f"track {name} is already stopped with unfinished sprints "
+                             f"({', '.join(open_[:4])})")
+        # a stopped track whose sprints all finished is recoverable: its work is on the branch
         if open_ and row["state"] != "failed":
             raise TrackError(f"track {name}: not finished ({', '.join(open_[:4])})")
         if open_:
@@ -152,7 +162,8 @@ class MergeManager:
         row = self.store.track(P.id, name)
         data = {k: v for k, v in row["data"].items()
                 if k not in ("conflict", "decision", "gate", "failed", "merge_wait",
-                             "gate_retries", "gate_retry_at", "merge_bg", "studio_batch")}
+                             "gate_retries", "gate_retry_at", "merge_bg", "studio_batch",
+                             "timeout_retries", "stopped")}
         data.update(merge_stage="wait", merge_requested_by=actor)
         row = self.store.update_track(P.id, name, state="merging", data=data)
         self.store.event(P.id, "", "track_merge_requested", detail={"track": name, "actor": actor})
@@ -399,15 +410,22 @@ class MergeManager:
         conflict = (row.get("data") or {}).get("conflict") or {}
         lr = conflict.get("lead_repair")
         why = (lr.get("error") if isinstance(lr, dict) else lr) or "no Lead repair"
-        text = (f"Track {row['name']} stopped by {actor} after a merge conflict: the work of "
-                f"COMPLETE sprint(s) {', '.join(done)} did NOT reach {P.profile.branch} "
+        text = (f"Track {row['name']}: the merge conflict is still unresolved ({actor}): the work "
+                f"of COMPLETE sprint(s) {', '.join(done)} did NOT reach {P.profile.branch} "
                 f"(branch {row.get('branch')} kept at {row.get('worktree')}; Lead repair: "
-                f"{str(why)[:200]}). Merge it by hand or re-run the track.")
+                f"{str(why)[:200]}). Re-request the merge (`tracks merge`) once the conflict "
+                f"is resolved, or merge it by hand.")
         self.store.event(P.id, done[-1], "operator_notice", detail={
             "text": text[:600], "alert_class": "self_repair_exhausted",
             "category": "track_work_unmerged", "track": row["name"], "unmerged_sprints": done,
             "branch": row.get("branch"), "decision": d.get("id"),
             "conflict_files": (conflict.get("files") or [])[:20]})
+
+    def _finished(self, P, row: dict) -> bool:
+        """Every sprint of the track is COMPLETE: its work exists only on the branch."""
+        sprints = list((row or {}).get("sprints") or [])
+        return bool(sprints) and all((self.store.task(P.id, s) or {}).get("state") == S.COMPLETE
+                                     for s in sprints)
 
     def decide(self, P, name: str, option: str, actor: str) -> dict:
         P = self.tm.main_of(P)
@@ -421,6 +439,17 @@ class MergeManager:
         opts = [o for o in (d.get("options") or DECISION_OPTIONS) if o in DECISION_OPTIONS]
         if option not in opts:
             raise TrackError(f"option must be one of {', '.join(opts)}")
+        if option == DECISION_DEFAULT and actor == TIMEOUT_ACTOR and self._finished(P, row):
+            n = int((row["data"] or {}).get("timeout_retries") or 0)
+            if n < TIMEOUT_RETRIES:
+                option = "retry the merge"
+                self._set(P, row, timeout_retries=n + 1)
+                self.store.event(P.id, "", "track_timeout_retry", detail={
+                    "track": name, "retry": n + 1, "of": TIMEOUT_RETRIES})
+            else:
+                self._unmerged_notice(P, self.store.track(P.id, name), actor, d)
+                option = "keep the branch, no merge"
+            row = self.store.track(P.id, name)
         d = {**d, "status": "answered", "answer": option, "by": actor, "answered_ts": self.clock()}
         self._set(P, row, decision=d)
         self.store.event(P.id, "", "track_decision", detail={"track": name, "option": option,

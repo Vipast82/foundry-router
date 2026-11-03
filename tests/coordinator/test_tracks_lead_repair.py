@@ -201,18 +201,30 @@ def test_a_lead_that_cannot_run_leaves_the_decision(env, why):
     assert not e["prompts"]
 
 
-def test_timeout_with_the_lead_unavailable_stops_the_track_and_names_unmerged_sprints(env):
+def test_timeout_with_the_lead_unavailable_keeps_finished_work_and_names_unmerged_sprints(env):
+    """2026-11-03: the timeout used to STOP the track here, and a stopped track never merged
+    again. With every sprint COMPLETE it now retries, then keeps the branch as a failed
+    (re-requestable) track; the alert still names the unmerged sprints."""
+    from foundry_coordinator.tracks.merge import TIMEOUT_RETRIES
     e = env
     e["lm"].readiness = lambda P, fresh=False: [{
         "name": "lead_route", "ok": False, "cls": "transient", "blocking": True,
         "detail": "route down"}]
     conflicting_track(e)
     tick(e)
-    d = track(e)["data"]["decision"]
-    e["c"].store.merge_track_data("game", TRACK, decision={**d, "deadline_ts": 1.0})
-    tick(e)
+    for _ in range(TIMEOUT_RETRIES + 1):
+        for _ in range(8):
+            d = track(e)["data"].get("decision") or {}
+            if d.get("status") == "open" or track(e)["state"] == "failed":
+                break
+            tick(e)
+        if track(e)["state"] == "failed":
+            break
+        e["c"].store.merge_track_data("game", TRACK, decision={**d, "deadline_ts": 1.0})
+        tick(e)
     row = track(e)
-    assert row["state"] == "stopped" and row["data"]["decision"]["answer"] == DECISION_DEFAULT
+    assert row["state"] == "failed"
+    assert row["data"]["decision"]["answer"] == "keep the branch, no merge"
     notes = [x for x in events(e, "operator_notice")
              if x["detail"].get("category") == "track_work_unmerged"]
     assert len(notes) == 1
