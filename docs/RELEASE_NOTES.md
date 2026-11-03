@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.26 — a dropped dependency stays dropped at the start check; the Claude cap survives a restart
+
+2026-11-02 23:xx, from the owner's "check to make sure all sprints and slots are correct".
+
+- **S55 deadlock.** AS-VR1 (the owner's review) waits for POL-7. A person removed it from S55's
+  deps, and v0.181.19 kept the QUEUED check from adding it back. But `_unmet_start_deps`, the
+  check a READY sprint passes before its first session, still added the plan's own "Depends on"
+  sprints. So S55 sat READY "waiting for AS-VR1 (PAUSED)". S56, S57b and the whole polish phase
+  wait for S55, and POL-7 is what AS-VR1 waits for. `_unmet_start_deps` now skips
+  `data.deps_dropped`.
+  Test: `test_a_dropped_dependency_does_not_hold_back_a_ready_sprint_at_its_start`.
+- **Claude agent cap after a restart.** The last usage reading lived only in memory. Three restarts
+  tonight erased it while every read failed (router HTTP 429), so the cap went back to the full
+  `claude_agents` (5) at 77% usage instead of `claude_agents_over` (2). Each good reading is now
+  saved (meta `claude_usage:<project>`) and used after a restart while it is under 6 hours old.
+  The `test_claude_agents_are_capped_...` test covers the restart and the age limit.
+- Operator queue fix (no code): MAP-2, MAP-3 and MAP-4 were moved right after MAP-1, ahead of PT-3,
+  S55, S56 and S57b, so the soak, art and performance passes run on the overhauled map.
+
 ## v0.181.25 — a visual sprint with no capture is told what to commit
 
 2026-11-02 22:5x. GF-LIVE2 (the soft-shutdown "updating / reconnect" overlay) is a visual sprint, and

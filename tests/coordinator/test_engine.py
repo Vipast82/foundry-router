@@ -1499,6 +1499,20 @@ def test_claude_agents_are_capped_and_the_cap_drops_at_the_usage_threshold(game)
     assert R.CLAUDE_USAGE["game"]["pct"] == 78.5           # the last reading stands
     answer.clear()
     answer.update(answer_saved)
+    # 2026-11-02: a coordinator restart (the in-memory reading gone) while reads fail keeps
+    # the last good reading from the store while it is fresh, so the cap stays down
+    R.CLAUDE_USAGE.pop("game", None)
+    answer.clear()
+    answer["routes"] = [{"backend": "meridian", "state": "unknown", "accounts": []}]
+    c._refresh_claude_usage(P)
+    assert R.CLAUDE_USAGE["game"]["pct"] == 78.5 and R.capacity(P, "claude") == 1
+    R.CLAUDE_USAGE.pop("game", None)                 # a saved reading older than 6 h is not used
+    c.store.set_meta("claude_usage:game", json.dumps({"pct": 78.5, "read_ts": 1.0}))
+    c._refresh_claude_usage(P)
+    assert R.CLAUDE_USAGE["game"].get("pct") is None and R.capacity(P, "claude") == 3
+    answer.clear()
+    answer.update(answer_saved)
+    R.CLAUDE_USAGE["game"] = {"pct": 78.5, "ts": c.clock()}
 
     # over the threshold: one unit; a second Claude sprint waits
     c.store.acquire(["claude"], "game", "OTHER")
@@ -1584,3 +1598,20 @@ def test_a_dependency_a_person_removes_is_not_put_back_from_the_task_source(game
     c.store.update_task("game", "T2", state=S.QUEUED)
     c.set_deps("game", "T2", ["T1"], "victor")
     assert not c.store.task("game", "T2")["data"].get("deps_dropped")
+
+
+def test_a_dropped_dependency_does_not_hold_back_a_ready_sprint_at_its_start(game):
+    """2026-11-02 S55: AS-VR1 was dropped (it waits for POL-7, which needs S55); the QUEUED
+    check honoured that, but the start check re-read the plan and S55 sat READY 'waiting for
+    AS-VR1 (PAUSED)' - a deadlock of the whole polish phase."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", ["T1"], "victor")                    # the source also names T1
+    c.set_deps("game", "T2", [], "victor")
+    c.store.update_task("game", "T1", state=S.PAUSED)            # held until much later
+    c.store.update_task("game", "T2", state=S.READY, started_ts=None)
+    assert c._unmet_start_deps(P, c.store.task("game", "T2")) == []
+    c._start_implementation(P, c.store.task("game", "T2"))
+    assert c.store.task("game", "T2")["state"] == S.IMPLEMENTING

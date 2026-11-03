@@ -666,8 +666,12 @@ class Coordinator:
             src = list(P.adapter.describe(t["task_id"]).deps or [])
         except Exception:                                         # noqa: BLE001
             src = []
+        # 2026-11-02 S55: AS-VR1 was dropped from its deps by a person (v0.181.19 kept the QUEUED
+        # check from adding it back), but this start check re-read it from the plan, so S55 sat
+        # READY "waiting for AS-VR1 (PAUSED)" - which waits for POL-7, which needs S55
+        dropped = set((t.get("data") or {}).get("deps_dropped") or [])
         out = []
-        for d in list(q["deps"]) + [x for x in src if x not in q["deps"]]:
+        for d in list(q["deps"]) + [x for x in src if x not in q["deps"] and x not in dropped]:
             dt = self.store.task(P.id, d)
             if dt is None or dt.get("state") in (S.FAILED, S.CANCELLED):
                 continue                     # not on the queue: the QUEUED check owns that
@@ -7368,6 +7372,7 @@ class Coordinator:
             return False
 
     CLAUDE_USAGE_EVERY_S = 120
+    CLAUDE_USAGE_KEEP_S = 6 * 3600       # a saved reading older than this is not trusted
 
     def _refresh_claude_usage(self, P: Project) -> None:
         """Read Claude's subscription usage from the router (the helper admission answer for a
@@ -7379,6 +7384,19 @@ class Coordinator:
             return
         now = self.clock()
         last = CLAUDE_USAGE.get(P.id) or {}
+        if not last:
+            # 2026-11-02: three restarts erased the in-memory reading while every read failed
+            # (HTTP 429), so the cap went back to the full claude_agents at 77% usage. The last
+            # good reading is kept in the store and used after a restart while it is fresh.
+            try:
+                saved = json.loads(self.store.meta(f"claude_usage:{P.id}") or "null")
+                if (isinstance(saved, dict) and saved.get("pct") is not None
+                        and now - float(saved.get("read_ts") or 0) < self.CLAUDE_USAGE_KEEP_S):
+                    last = {"pct": float(saved["pct"]), "ts": 0, "detail": "",
+                            "read_ts": float(saved["read_ts"])}
+                    CLAUDE_USAGE[P.id] = dict(last)
+            except Exception:                                     # noqa: BLE001
+                pass
         if now - float(last.get("ts") or 0) < self.CLAUDE_USAGE_EVERY_S:
             return
         CLAUDE_USAGE[P.id] = {**last, "ts": now}
@@ -7400,7 +7418,11 @@ class Coordinator:
             unread(f"no {cfg['backend']} window reading in the router's answer: routes {routes}")
             return
         before = last.get("pct")
-        CLAUDE_USAGE[P.id] = {"pct": pct, "ts": now, "detail": ""}
+        CLAUDE_USAGE[P.id] = {"pct": pct, "ts": now, "detail": "", "read_ts": now}
+        try:
+            self.store.set_meta(f"claude_usage:{P.id}", json.dumps({"pct": pct, "read_ts": now}))
+        except Exception:                                         # noqa: BLE001
+            pass
         over = pct >= cfg["usage_pct"]
         if before is None or (float(before) >= cfg["usage_pct"]) != over:
             from .tracks.resources import claude_capacity
