@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.20 — LightingStyle cannot be set by game scripts (skill correction)
+
+2026-11-02 18:5x. During Victor's GF-RT4 live test, the published TEST server logged
+`[MapService] map look not applied: The current thread cannot write 'LightingStyle' (lacking
+capability PluginOrOpenCloud)` at boot. That came from GF-LOOK1's work in progress, which followed
+the v0.181.16 skill. The API reference lists `Lighting.LightingStyle` as read-write with no
+security, so the v0.181.16 entry page said it can be set from scripts and marked roblox-brain's
+note ("set it in Studio") as outdated. The live server shows roblox-brain was right.
+
+- `roblox-world-building`:
+  - `LightingStyle` and `PrioritizeLightingQuality` are set in Studio or the Rojo project file
+    (`Lighting` `$properties`), never by game scripts.
+  - Other lighting is runtime-writable, applied one `pcall` per value.
+  - The roblox-brain reference note is marked correct.
+- `au-roblox-world-building`: `LightingStyle` goes in `default.project.json`.
+- `ROBLOX_SKILLS.md`: the example of a contested claim is corrected.
+- The test checks the corrected wording.
+- GF-LOOK1's plan got an operator note: set those two in `default.project.json`, and apply the
+  rest one value at a time.
+
 ## v0.181.19 — a dependency a person removes stays removed
 
 2026-11-03 00:4x. The owner moved S55 (art pass) and S57b (exploit audit) ahead of his visual

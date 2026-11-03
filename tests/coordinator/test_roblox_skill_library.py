@@ -50,9 +50,9 @@ def test_the_installer_finds_each_skill(name):
 
 
 def test_contested_api_claims_follow_the_roblox_reference():
-    """roblox-brain's lighting note says LightingStyle is not script-writable; the Roblox API
-    reference says it is (only the deprecated Technology is not). The entry page states the
-    reference's answer."""
+    """The API reference lists Lighting.LightingStyle as read-write, but a live server refused the
+    write ("lacking capability PluginOrOpenCloud", 2026-11-02, GF-LOOK1 on the TEST place):
+    roblox-brain's note (set it in Studio) was right. The entry page states what the game does."""
     wb = open(os.path.join(ROOT, "roblox-world-building", "SKILL.md"), encoding="utf-8").read()
-    assert "`Lighting.LightingStyle`" in wb and "can be set from scripts" in wb
-    assert "`Lighting.Technology` is deprecated and cannot" in wb
+    assert "`Lighting.LightingStyle`" in wb and "can NOT be set by game scripts" in wb
+    assert "PluginOrOpenCloud" in wb and "`$properties`" in wb

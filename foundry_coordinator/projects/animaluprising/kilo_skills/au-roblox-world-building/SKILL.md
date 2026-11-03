@@ -17,7 +17,7 @@ Load `au-luau-development` and `au-roblox-development` first, and the general `r
 ## Lighting and atmosphere
 
 - No game code sets `Lighting` today (only a test reads it): the game runs Roblox defaults, which is a large part of why it looks flat. Lighting set by hand in the Studio place is not in git and is lost; put it in code (a config module applied once at server start, or the project file) so Rojo and the gate see it.
-- Pick one `Lighting.LightingStyle` and keep it; add `Atmosphere`, `Sky`, and at most a few post effects (`ColorCorrectionEffect` or `ColorGradingEffect`, a light `BloomEffect`, `SunRaysEffect`). Tune per biome only through config values, not scattered literals.
+- Pick one `Lighting.LightingStyle` and keep it - set it (and `PrioritizeLightingQuality`) in `default.project.json` under `Lighting` `$properties`, never from a script (game scripts lack the capability; GF-LOOK1's server logged "cannot write 'LightingStyle'"); add `Atmosphere`, `Sky`, and at most a few post effects (`ColorCorrectionEffect` or `ColorGradingEffect`, a light `BloomEffect`, `SunRaysEffect`). Tune per biome only through config values, not scattered literals.
 - Time of day: a fixed `ClockTime` per mode is simpler to test than a running cycle. If a cycle is in scope, compute it on clients from `workspace:GetServerTimeNow()`.
 - Few local lights cast shadows. Torches and lanterns use `PointLight` with `Shadows = false` unless the plan says otherwise.
 

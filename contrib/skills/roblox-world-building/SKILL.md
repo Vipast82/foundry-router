@@ -18,8 +18,8 @@ description: Build and dress Roblox worlds - map layout and readability, parts, 
 - Break the grid on decoration: jitter yaw and scale on repeated props, bend paths. 90-degree everything reads as a greybox.
 - Dress the map edges; a bare edge is the clearest sign of an unfinished map.
 
-## Lighting (all script-writable except the legacy `Technology`)
-- `Lighting.LightingStyle` (`Soft` = stylized, `Realistic` = naturalistic) and `PrioritizeLightingQuality` can be set from scripts; `Lighting.Technology` is deprecated and cannot. Put lighting in code or the project file so it is versioned, not only in the place file.
+## Lighting
+- `Lighting.LightingStyle` (`Soft` stylized, `Realistic`) and `PrioritizeLightingQuality` can NOT be set by game scripts: a live server refuses the write ("lacking capability PluginOrOpenCloud") though the API reference says read-write. Set them in Studio or the Rojo project file (`Lighting` `$properties`). `Technology` is deprecated. All other lighting below is runtime-writable: keep it in versioned code, one `pcall` per value.
 - Start: `ClockTime` 9-10 or 15-17 for long warm shadows; `Atmosphere` Density ~0.1-0.3 (higher turns a small map into fog), low Haze; `ColorCorrection` tint near white (it multiplies the whole frame); a mild Bloom; sparing SunRays.
 - Fully flat cartoon look is a different recipe (no shadows, white ambient); pick one look and keep it.
 - Few local lights cast shadows. A day/night cycle is computed on clients from `workspace:GetServerTimeNow()`.
@@ -41,6 +41,6 @@ Captures from fixed views at desktop and phone sizes, part and triangle counts b
 
 ## References
 - `references/building.md` - MCP build mode, assets, acceptance, map review (roblox-brain).
-- `references/lighting.md` - Lighting, Atmosphere, post effects (roblox-brain; its note that LightingStyle is not script-writable is outdated - it is).
+- `references/lighting.md` - Lighting, Atmosphere, post effects (roblox-brain; its note that style and quality are set in Studio, not by scripts, is correct).
 - `references/world-building-quick.md` - parts, Terrain, CSG/GeometryService, ProceduralModel, EditableMesh, effects (EL4CTEO).
 - `references/map-design-notes.md` - layout, landmarks, water and building rules of thumb (Foundry, after SyphoDev's research).

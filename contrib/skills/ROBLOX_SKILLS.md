@@ -22,7 +22,7 @@ the project skill first; it names the general skills it builds on, and it wins w
   SyphoDev's free Roblox skills are summarised in Foundry's own words with credit. Each folder's
   `references/THIRD_PARTY_NOTICES.md` carries the licences.
 - Where sources disagree, the entry page follows the current Roblox API reference and says so (for
-  example: `Lighting.LightingStyle` is script-writable, `Lighting.Technology` is not).
+  example: `Lighting.LightingStyle` reads as read-write in the API reference but a running game cannot write it (PluginOrOpenCloud capability) - the entry page says so, measured on a live server).
 
 ## Which skill for which task
 | Task | Load |
