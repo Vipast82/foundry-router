@@ -278,7 +278,7 @@ class InternalPool(BackendPool):
 
     # -- resolution --------------------------------------------------------------------
 
-    def _candidates(self, model: str) -> list[BackendState]:
+    def _candidates(self, model: str, every: bool = False) -> list[BackendState]:
         """Backends serving `model`, best-first: healthy by priority, then
         unhealthy-but-past-cooldown as a last resort (a live request is as good
         a retry probe as any)."""
@@ -297,7 +297,7 @@ class InternalPool(BackendPool):
         from ..request_context import backend_pin
         pin = backend_pin()
         if pin == "*first":
-            return out[:1]
+            return out if every else out[:1]
         if pin:
             return [s for s in out if s.config.name == pin]
         return out
@@ -315,7 +315,15 @@ class InternalPool(BackendPool):
         cands = self._candidates(model)
         if not cands:
             return None
-        c = cands[0].config
+        return self._info(cands[0].config)
+
+    def backend_infos(self, model: str) -> list[dict]:
+        """Every backend serving `model`, best-first (a `*first` pin does not cut the list;
+        a named pin still does). The strict route budget-checks each one, so a paid API at
+        its spend cap hands the same model to a subscription backend that serves it."""
+        return [self._info(s.config) for s in self._candidates(model, every=True)]
+
+    def _info(self, c) -> dict:
         # api_key rides along for the guardrails' authenticated quota check —
         # backend_info is internal plumbing, never serialized to the UI.
         return {"name": c.name, "type": c.type, "url": c.url, "api_key": c.api_key,

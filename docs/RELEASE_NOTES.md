@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.34 — a capped paid API hands a strict persona's model to the subscription backend that serves it
+
+A strict persona checked the spend caps only against the best-ranked backend of each model in its chain. When the paid `anthropic` API reached its daily spend cap, the persona moved to its next model even though Meridian (priority 90, Claude Max subscription) serves the same Claude model.
+
+Now, unless the persona or its helper route pins a backend explicitly, each backend serving the model is budget-checked in priority order. The first allowed one is pinned for that request, still with no failover beyond it. Under the cap the higher-priority paid API serves as before. The request log shows `<model> via <backend> (<first backend>: <why denied>)`. New pool method: `backend_infos(model)`.
+
+Why: on 2026-11-03 the $25 daily cap was reached around 04:00 local with ChatGPT at 96% of its weekly window, so every Claude role (Lead, implementers, reviewers) fell to the single local Qwen stream while Meridian sat unused. Test: `tests/test_strict_routing.py::test_a_capped_paid_api_hands_the_same_model_to_the_subscription_backend`. Takes effect after the router rebuild.
+
 ## v0.181.33 — a session never starts on a persona the Kilo key may not use
 
 Before an implementer session starts, the infra preflight asks the router whether the Kilo client (`[lead_manager] kilo_client`, default `kilo`) may use the session's persona (`/v1/foundry/personas/<persona>/routes?client=`). If it may not, or the persona does not exist, the sprint waits in preflight with the reason (no session, no attempt used, no Lead case) and starts as soon as the role is routed to a granted persona or the grant is added. An unreachable router is left to the router health probe.

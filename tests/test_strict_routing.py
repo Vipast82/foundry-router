@@ -215,3 +215,59 @@ def test_disconnect_cancels_backend_task(strict):
         await asyncio.wait_for(cancelled.wait(), 1)
         return True
     assert asyncio.run(run())
+
+
+def test_a_capped_paid_api_hands_the_same_model_to_the_subscription_backend(app, client):
+    """2026-11-03: the anthropic API hit the $25 daily cap and strict personas fell to the
+    next MODEL (ChatGPT at its weekly cap, then the one local stream) although Meridian
+    serves the same Claude model by subscription."""
+    svc = app.state.services
+    hits = []
+
+    def route(req: httpx.Request):
+        hits.append(req.url.host)
+        if req.url.path.endswith("/messages"):
+            return httpx.Response(200, json={
+                "content": [{"type": "text", "text": "from-" + req.url.host}],
+                "stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 2}})
+        if "quota" in req.url.path or "usage" in req.url.path:
+            return httpx.Response(200, json={})
+        return _chat_ok("x", "local")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(route))
+    pool = InternalPool([
+        BackendConfig(name="api", type="anthropic-api", url="http://api-host", api_key="k",
+                      priority=110),
+        BackendConfig(name="sub", type="anthropic-compatible", url="http://sub-host",
+                      priority=90),
+        BackendConfig(name="llama", type="openai-compatible", url="http://llm-host",
+                      flavor="llamacpp")], BackendPoolConfig(), http, svc.db)
+    for name, models in (("api", ["claude-x"]), ("sub", ["claude-x"]), ("llama", ["qwen-local"])):
+        s = pool.backends[name]
+        s.healthy = s.ever_checked = True
+        s.models = list(models)
+    real, svc.pool = svc.pool, pool
+    svc.config_store.config.agent_brain.direct_stream = False
+    g = svc.config_store.config.guardrails
+    old_cap = g.daily_spend_cap_usd
+    g.daily_spend_cap_usd = 3.0
+    svc.db.execute("INSERT INTO request_log (ts, est_cost_usd) VALUES (datetime('now'), 3.5)")
+    try:
+        svc.personas.upsert("Kilo-Claude", execution_mode="direct", routing="strict",
+                            model_allowlist=["claude-x", "qwen-local"],
+                            pinned_models=["claude-x", "qwen-local"])
+        r = _ask(client, "Kilo-Claude")
+        assert r.status_code == 200, r.text
+        assert r.json()["message"]["content"] == "from-sub-host"
+        assert "api-host" not in hits and "llm-host" not in hits
+        row = svc.db.query("SELECT guardrail_events FROM request_log ORDER BY id DESC LIMIT 1")
+        ev = json.loads(row[0]["guardrail_events"])
+        assert any("claude-x via sub" in e for e in ev), ev
+        # under the cap the paid API (higher priority) serves it as before
+        g.daily_spend_cap_usd = None
+        hits.clear()
+        r = _ask(client, "Kilo-Claude")
+        assert r.json()["message"]["content"] == "from-api-host"
+    finally:
+        g.daily_spend_cap_usd = old_cap
+        svc.pool = real

@@ -64,6 +64,11 @@ class BackendPool:  # interface — see internal.InternalPool for the implementa
         (name/type/url) — guardrails use `type` to spot subscription backends."""
         raise NotImplementedError
 
+    def backend_infos(self, model: str) -> list[dict]:
+        """Every backend serving `model`, best-first (default: only the best one)."""
+        info = self.backend_info(model)
+        return [info] if info else []
+
     async def loaded_models(self) -> set[str]:
         """Models currently resident in VRAM across ollama backends (cached).
         Empty for pools/backends that can't report it."""

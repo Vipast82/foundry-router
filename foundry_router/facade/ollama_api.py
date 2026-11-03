@@ -2062,18 +2062,37 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                   ("no model in its allowlist is reachable "
                                    f"({', '.join(map(str, allow)) or 'allowlist is empty'})"))
         resets, paused = [], []
+        # 2026-11-03: the paid API hit its daily spend cap and every strict persona dropped
+        # to its next MODEL (ChatGPT at its weekly cap, then the one local stream), although
+        # Meridian serves the same Claude model by subscription. Without an explicit backend
+        # pin, each backend serving the model is budget-checked in priority order and the
+        # first allowed one is pinned for this request (still no failover beyond it).
+        explicit = bool((_route_pin or {}).get("backend") or (persona.get("backend") or "").strip())
+        infos_of = getattr(svc.pool, "backend_infos", None)
         for cand in cands:
-            v = await svc.guardrails.check_paid_call(
-                cand, svc.pool.backend_info(cand), svc.registry.get(cand),
-                RequestGuardState(), eff)
-            if v.allowed:
-                model_id = cand
+            infos = ([svc.pool.backend_info(cand)] if explicit or not callable(infos_of)
+                     else (infos_of(cand) or [svc.pool.backend_info(cand)]))
+            first_why = ""
+            for info in infos:
+                v = await svc.guardrails.check_paid_call(
+                    cand, info, svc.registry.get(cand), RequestGuardState(), eff)
+                if v.allowed:
+                    model_id = cand
+                    if info and info is not infos[0]:
+                        _rc.pin_backend(info.get("name"))
+                        route_notes.append(f"{cand} via {info.get('name')} "
+                                           f"({infos[0].get('name')}: {first_why})")
+                    break
+                first_why = first_why or str(v.reason)
+                logger.record_guardrail(f"denied {cand}"
+                                        + (f" on {info.get('name')}" if info and len(infos) > 1
+                                           else "") + f": {v.reason}")
+                if getattr(v, "retry_after", None):
+                    resets.append(v.retry_after)
+                paused.append(getattr(v, "code", "") == "paused")
+            if model_id is not None:
                 break
-            logger.record_guardrail(f"denied {cand}: {v.reason}")
-            denials.append(f"{cand}: {v.reason}")
-            if getattr(v, "retry_after", None):
-                resets.append(v.retry_after)
-            paused.append(getattr(v, "code", "") == "paused")
+            denials.append(f"{cand}: {first_why}")
         if model_id is None:
             # Every candidate stopped by a pause switch: say so, so an automated
             # client waits for a human rather than for a budget reset.
