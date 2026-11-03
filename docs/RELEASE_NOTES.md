@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.35 — STATE and decision-log conflicts merge without a Lead session
+
+A track rebase whose conflicts touch only `docs/memory/**`, `docs/progress/STATE.md`, `docs/progress/state/DECISIONS.md` or `docs/progress/state/KNOWN_ISSUES.md` now resolves itself and keeps both sides. In the three logs, a table row that both sides changed (same first cell) appears once, as the track's version; rows only one side added are all kept. Conflicts in any other file still abort and open the usual decision and Lead repair. `docs/design/ASSET_LEDGER.md` is not covered, because a duplicated asset row would break `ledger.py check`.
+
+Why: on 2026-11-03 the copy1 and rt2 merges conflicted only in STATE.md (each side added its own sprint row), and each cost a Lead repair session, run on the local model while the Claude API was at its daily cap. Test: `tests/coordinator/test_tracks_merge.py::test_state_table_conflicts_merge_rows_without_duplicates`.
+
 ## v0.181.34 — a capped paid API hands a strict persona's model to the subscription backend that serves it
 
 A strict persona checked the spend caps only against the best-ranked backend of each model in its chain. When the paid `anthropic` API reached its daily spend cap, the persona moved to its next model even though Meridian (priority 90, Claude Max subscription) serves the same Claude model.

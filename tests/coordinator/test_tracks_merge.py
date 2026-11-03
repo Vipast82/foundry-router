@@ -381,3 +381,34 @@ def test_a_stopped_track_with_unfinished_sprints_stays_stopped(tmp_path):
     c.tracks.stop(P, "blender", "victor", "test")
     with pytest.raises(TrackError, match="stopped with unfinished"):
         c.tracks.merger.request(P, "blender", "victor")
+
+
+def test_state_table_conflicts_merge_rows_without_duplicates(tmp_path):
+    """2026-11-03 copy1 / rt2: each side added its sprint's row to docs/progress/STATE.md and
+    the merge needed a Lead repair session. Rows from both sides are kept; a row both sides
+    changed appears once (the track's); a conflict in any other file still aborts."""
+    import subprocess
+    from foundry_coordinator.tracks.merge import _resolve_memory_conflicts, union_safe
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(tmp_path), *a], capture_output=True, text=True)
+    g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (tmp_path / "docs" / "progress").mkdir(parents=True)
+    f = tmp_path / "docs" / "progress" / "STATE.md"
+    head = "| Sprint | Status |\n|---|---|\n| S1 | DONE |\n| X | open |\n"
+    f.write_text(head)
+    g("add", "-A"); g("commit", "-qm", "base")
+    g("checkout", "-qb", "track")
+    f.write_text(head.replace("| X | open |", "| X | track view |") + "| T9 | DONE |\n")
+    g("commit", "-qam", "track row")
+    g("checkout", "-q", "main")
+    f.write_text(head.replace("| X | open |", "| X | main view |") + "| M7 | DONE |\n")
+    g("commit", "-qam", "main row")
+    g("checkout", "-q", "track")
+    assert g("rebase", "main").returncode != 0
+    assert _resolve_memory_conflicts(str(tmp_path), "rebase") is True
+    text = f.read_text()
+    assert "| M7 | DONE |" in text and "| T9 | DONE |" in text and "<<<<<<<" not in text
+    assert text.count("| X |") == 1 and "| X | track view |" in text
+    assert g("status", "--porcelain").stdout.strip() == ""
+    assert union_safe("docs\progress\STATE.md") and not union_safe("docs/design/ASSET_LEDGER.md")

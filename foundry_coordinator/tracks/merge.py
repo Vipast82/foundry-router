@@ -53,6 +53,38 @@ DECISION_DEFAULT = "stop this track"
 # new sections, never a real disagreement (2026-10-28 backend-1/S57a: CONVENTIONS.md stopped
 # the merge and the decision timeout applied "stop this track")
 MEMORY_PREFIX = "docs/memory/"
+# 2026-11-03: the copy1 and rt2 merges conflicted only in docs/progress/STATE.md (each side
+# added its own sprint row) and each cost a Lead repair session. These row/section logs keep
+# both sides too; a table row both sides changed keeps the track's row (the track's sprint
+# wrote it), never two copies.
+UNION_FILES = ("docs/progress/STATE.md", "docs/progress/state/DECISIONS.md",
+               "docs/progress/state/KNOWN_ISSUES.md")
+
+
+def union_safe(path: str) -> bool:
+    p = path.replace("\\", "/")
+    return p.startswith(MEMORY_PREFIX) or p in UNION_FILES
+
+
+def union_rows(text: str) -> str:
+    """union_text, but a markdown table row (`| key | ...`) present on both sides of a hunk
+    appears once: the second side's (theirs) version."""
+    import re
+    nl = "\r\n" if "\r\n" in text else "\n"
+
+    def key(line: str) -> str:
+        m = re.match(r"^\|\s*([^|]+?)\s*\|", line)
+        k = m.group(1) if m else ""
+        return "" if set(k) <= set("-: ") else k
+
+    def merge(m) -> str:
+        ours = m.group(1).rstrip("\r\n").splitlines()
+        theirs = m.group(2).rstrip("\r\n").splitlines()
+        tkeys = {key(x) for x in theirs if key(x)}
+        ours = [x for x in ours if not (key(x) and key(x) in tkeys)]
+        return nl.join(ours + theirs) + nl
+    return re.sub(r"<<<<<<< [^\r\n]*\r?\n(.*?)(?:\|\|\|\|\|\|\| [^\r\n]*\r?\n.*?)?=======\r?\n"
+                  r"(.*?)>>>>>>> [^\r\n]*\r?\n", merge, text, flags=re.S)
 
 
 def union_text(text: str) -> str:
@@ -73,14 +105,15 @@ def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50) -> bool:
                                          check=False).stdout.splitlines() if l.strip()]
         if not files:
             return True
-        if not all(f.replace("\\", "/").startswith(MEMORY_PREFIX) for f in files):
+        if not all(union_safe(f) for f in files):
             return False
         for f in files:
             p = os.path.join(wt, f)
             with open(p, encoding="utf-8", newline="") as fh:
                 text = fh.read()
             with open(p, "w", encoding="utf-8", newline="") as fh:
-                fh.write(union_text(text))
+                fh.write(union_text(text) if f.replace("\\", "/").startswith(MEMORY_PREFIX)
+                         else union_rows(text))
             _git(wt, "add", "--", f, check=False)
         if how == "rebase":
             r = _git(wt, "-c", "core.editor=true", "rebase", "--continue", check=False)
