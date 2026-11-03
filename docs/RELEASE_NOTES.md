@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.32 — a never-started sprint can move from one track to another
+
+`tracks start <project> <new track> <sprint>` now accepts a sprint that is queued on another running (or planned) track, as long as it never started: state QUEUED or READY, attempt 0, no session, and not that track's current sprint. The sprint leaves its old track and that track's chain is relinked: the sprint that followed it now follows the one before it. Its own plan dependencies stay; only the old chain link is dropped. Events: `moved_off_track` and `moved_to_track`. A started or current sprint still refuses to move.
+
+Why: on 2026-11-03 HK-COPY1 and HK-DATA1 waited hours behind HK-ASSET1 on one local-model track, and AS-F26 waited behind AS-E11b, while Claude agents and four of the five Blender pool jobs sat idle. No command could split them. Tests: `tests/coordinator/test_tracks_move.py`.
+
 ## v0.181.31 — a merge-conflict timeout never strands a finished track; stopped tracks with finished work can merge
 
 **The bug.** A track whose rebase onto the main branch conflicted opened a decision whose default was "stop this track". When nobody answered within the decision timeout, the coordinator stopped the track. `tracks merge` refused a stopped track ("already stopped"), so its work could never reach the main branch, while every one of its sprints read COMPLETE. On Animal Uprising this stranded five tracks between 2026-10-27 and 2026-11-02: name1 (GF-NAME1), backend-1 (S57a), birds (AS-D08, AS-D09, AS-D16: four flying enemies and three elites), poi (AS-F19, AS-F20, AS-F23, AS-F32: POI, merchant stop, landmarks and den quarters kits) and rt2 (GF-RT5, GF-RT6, GF-RT7, GF-LIVE2). Each stop raised a `track_work_unmerged` alert, but nothing could act on it.

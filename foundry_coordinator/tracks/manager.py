@@ -324,7 +324,7 @@ class TrackManager:
             except Exception as e:                                # noqa: BLE001
                 raise TrackError(f"sprint {s}: {e}") from None
             t = self.store.task(P.id, s)
-            if t and t["state"] not in S.TERMINAL and not self._movable(P, t):
+            if t and t["state"] not in S.TERMINAL and not self._movable(P, t)                     and not self._movable_from_track(P, t):
                 where = self.store.task_track(P.id, s) or "the main checkout"
                 raise TrackError(f"sprint {s} is already {t['state']} on {where}"
                                  + (" (started; only a never-started sprint moves)"
@@ -470,6 +470,42 @@ class TrackManager:
                 and int(t.get("attempt") or 0) == 0 and int(t.get("sessions") or 0) == 0
                 and not t.get("session_id"))
 
+    def _movable_from_track(self, P, t: dict) -> str:
+        """The running/planned track a never-started sprint waits on ('' = none). 2026-11-03:
+        HK-COPY1 / HK-DATA1 waited hours behind HK-ASSET1 on one local track and AS-F26 behind
+        AS-E11b, while agents and the Blender pool sat idle; no command could split them."""
+        old = self.store.task_track(P.id, t["task_id"])
+        if not old or t.get("state") not in (S.QUEUED, S.READY):
+            return ""
+        if int(t.get("attempt") or 0) or int(t.get("sessions") or 0) or t.get("session_id"):
+            return ""
+        row = self.store.track(P.id, old)
+        if not row or row["state"] not in ("planned", "running"):
+            return ""
+        if row.get("current_sprint") == t["task_id"] and row["state"] == "running":
+            return ""
+        return old
+
+    def _detach(self, P, old: str, sid: str, actor: str) -> list:
+        """Take a never-started sprint off its track: the track's next sprint now follows the
+        one before it. Returns the chain deps the sprint had from that track."""
+        row = self.store.track(P.id, old)
+        seq = list(row["sprints"])
+        i = seq.index(sid)
+        before = seq[i - 1] if i > 0 else ""
+        after = seq[i + 1] if i + 1 < len(seq) else ""
+        if after:
+            deps = [d for d in ((self.store.queue_entry(P.id, after) or {}).get("deps") or [])
+                    if d != sid]
+            if before and before not in deps:
+                deps.append(before)
+            self.c.set_deps(P.id, after, sorted(deps), actor)
+        seq.pop(i)
+        self.store.update_track(P.id, old, sprints=seq)
+        self.store.event(P.id, sid, "moved_off_track", detail={
+            "track": old, "relinked": after, "to_follow": before, "actor": actor})
+        return [before] if before else []
+
     def start(self, P, name: str, actor: str = "operator") -> dict:
         """Queue the track's sprints on it (a chain: each depends on the one
         before) and mark it running."""
@@ -485,9 +521,14 @@ class TrackManager:
             if not t:
                 self.c.approve(P.id, s, [prev] if prev else [], actor,
                                note=f"on track {name}", track=name)
-            elif self._movable(P, t):
-                # its own deps stay; the track chain adds the sprint before it
-                old = list((self.store.queue_entry(P.id, s) or {}).get("deps") or [])
+            elif self._movable(P, t) or self._movable_from_track(P, t):
+                # its own deps stay; the track chain adds the sprint before it (a sprint
+                # moved from another track drops that track's chain link)
+                src = self._movable_from_track(P, t)
+                chain = self._detach(P, src, s, actor) if src else []
+                own = set(getattr(P.adapter.describe(s), "deps", None) or []) if src else set()
+                old = [d for d in ((self.store.queue_entry(P.id, s) or {}).get("deps") or [])
+                       if d not in chain or d in own]
                 deps = sorted(set(old) | ({prev} if prev else set()))
                 with self.store.tx():
                     if t["state"] == S.READY:
