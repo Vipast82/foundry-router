@@ -87,6 +87,18 @@ POLICY_ACTOR = "policy"
 POLICY_REF = "policy:"
 POLICY_WINDOW_SECONDS = 86400.0
 
+def budget_epoch(trow) -> Optional[float]:
+    """When a task's budget starts: a merge repair or an operator reopen gives it fresh
+    attempts, so only ledger rows from then on count (the earlier rows stay as history).
+    2026-11-03 HK-ASSET1: reopened by the local2 merge repair, its first session already
+    counted the 6 attempts of the original sprint and it went straight to a Lead case."""
+    d = (trow or {}).get("data") if isinstance(trow, dict) else None
+    d = d if isinstance(d, dict) else {}
+    marks = [x.get("ts") for x in (d.get("repair"), d.get("reopened")) if isinstance(x, dict)]
+    marks = [float(m) for m in marks if isinstance(m, (int, float)) and m]
+    return max(marks) if marks else None
+
+
 # effective_limits key -> (counter, profile limit key, default max)
 LIMITS = {
     "ordinary": ("attempt_ordinary", "max_attempts", 3),
@@ -1312,9 +1324,14 @@ class Obligations:
         n = lim["used"] - lim["authorized"]
         return self.authorize(P.id, _tid(t), counter, n, reason, actor, decision_id) if n > 0 else 0
 
-    def counters(self, project, task) -> dict:
-        rows = self.store.q("SELECT counter, SUM(delta) AS n FROM budget_ledger WHERE "
-                            "project_id=? AND task_id=? GROUP BY counter", (project, task))
+    def counters(self, project, task, since: Optional[float] = None) -> dict:
+        if since:
+            rows = self.store.q("SELECT counter, SUM(delta) AS n FROM budget_ledger WHERE "
+                                "project_id=? AND task_id=? AND ts >= ? GROUP BY counter",
+                                (project, task, float(since)))
+        else:
+            rows = self.store.q("SELECT counter, SUM(delta) AS n FROM budget_ledger WHERE "
+                                "project_id=? AND task_id=? GROUP BY counter", (project, task))
         return {r["counter"]: int(r["n"] or 0) for r in rows}
 
     def ledger(self, project, task) -> list[dict]:
@@ -1324,7 +1341,7 @@ class Obligations:
     def effective_limits(self, P, t) -> dict:
         task = _tid(t)
         trow = t if isinstance(t, dict) else (self.store.task(P.id, task) or {"data": {}})
-        c = self.counters(P.id, task)
+        c = self.counters(P.id, task, since=budget_epoch(trow))
         out = {}
         for key, (counter, lim_key, default) in LIMITS.items():
             if key == "guided_extra":

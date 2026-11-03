@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.42 — a merge repair or an operator reopen really gets fresh attempts
+
+`repair_reopen` (a red merge Studio batch puts a COMPLETE sprint back on main) and `reopen` (an operator re-queues a CANCELLED sprint) promised "fresh attempts", but they only zeroed the task row. The budget ledger, which enforces the limits, still summed every attempt and session since the task began. On 2026-11-03 the local2 merge reopened HK-ASSET1. Its first repair session made "7 implementation attempts used (max 7)", so it went straight to a Lead case (twice: 15:57 and 18:12). Effective limits now count only ledger rows from the task's latest repair or reopen (`budget_epoch`: `data.repair.ts`, `data.reopened.ts`, which `reopen` now records). Earlier rows stay as history, and authorizations before the epoch no longer count.
+
+Tests: `tests/coordinator/test_repair_fresh_budget.py`. Takes effect after the coordinator restart, including for tasks reopened by a merge repair before it.
+
 ## v0.181.41 — a Studio gate with no Luau file under test checks the default pair too
 
 The scripted Studio gate tests a sprint's own changed files, and PRE-PLAY proves that Studio loaded HEAD by hashing the Luau files among them. On 2026-11-03 PT-3's only in-scope changes were four concept PNGs, which a Lead repair had committed. PRE-PLAY had nothing to hash ("no hash map for the files under test"), and the run stopped as stale Rojo, which the auto-heal restart cannot fix. When none of the files is Luau, `tests/RegressionIndex.lua` and `tests/GateRunner.lua` now go first, the same pair a sprint with no changed files already gets.

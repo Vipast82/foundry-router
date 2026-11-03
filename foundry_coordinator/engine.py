@@ -260,7 +260,8 @@ class Coordinator:
                                    session_id=None, phase=None, base_sha=None, head_sha=None,
                                    reviewed_sha=None, review_id=None, verification_id=None,
                                    closeout_id=None, next_action=None, started_ts=None,
-                                   data={**keep, "reopened": {"by": approver, "reason": reason}})
+                                   data={**keep, "reopened": {"by": approver, "reason": reason,
+                                                              "ts": self.clock()}})
             entry = self.store.approve(project_id, task_id, deps, approver, reason, track=track)
         return entry
 
