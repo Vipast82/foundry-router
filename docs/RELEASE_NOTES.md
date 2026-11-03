@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.43 — a context ceiling below a fresh session's startup context stops handing off
+
+An operator set `[automation] context_ceiling_pct` to 63 (router revision 19). On Claude's 191,808-token usable window that is a 120.8k handoff ceiling. On 2026-11-03 a fresh S55 session reached it within about 30 s of starting, just from reloading its plan and files. It was handed off, and the next session started over the ceiling again: six handoffs and 6 of 8 sessions in 8 minutes. A session over the ceiling within `CEILING_FAST_S` (180 s) of its start counts toward a streak. After `CEILING_FAST_MAX` (2) such handoffs in a row, the ceiling is skipped for that task's later sessions (event `context_ceiling_skipped`, with a note to raise the setting). The wrap-up stop near the window still applies. The AU value is now 85 (router revision 20, 163k).
+
+Test: `tests/coordinator/test_revamp_infra.py::test_a_ceiling_below_the_startup_context_stops_handing_off`. Takes effect after the coordinator restart.
+
 ## v0.181.42 — a merge repair or an operator reopen really gets fresh attempts
 
 `repair_reopen` (a red merge Studio batch puts a COMPLETE sprint back on main) and `reopen` (an operator re-queues a CANCELLED sprint) promised "fresh attempts", but they only zeroed the task row. The budget ledger, which enforces the limits, still summed every attempt and session since the task began. On 2026-11-03 the local2 merge reopened HK-ASSET1. Its first repair session made "7 implementation attempts used (max 7)", so it went straight to a Lead case (twice: 15:57 and 18:12). Effective limits now count only ledger rows from the task's latest repair or reopen (`budget_epoch`: `data.repair.ts`, `data.reopened.ts`, which `reopen` now records). Earlier rows stay as history, and authorizations before the epoch no longer count.

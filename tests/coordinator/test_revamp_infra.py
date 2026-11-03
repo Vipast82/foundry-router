@@ -181,3 +181,27 @@ def test_a_blocked_report_over_the_ceiling_is_an_ordinary_stop():
     assert infra.over_ceiling(P, s, {"status": "DONE"}) is None
     assert infra.over_ceiling(P, s, {"status": "NOT DONE"}).startswith("context ceiling")
     assert infra.over_ceiling(P, SimpleNamespace(context=1000), {"status": "NOT DONE"}) is None
+
+
+def test_a_ceiling_below_the_startup_context_stops_handing_off(tmp_path):
+    """2026-11-03 S55: context_ceiling_pct 63 put the ceiling below a fresh session's own
+    startup context; every session was handed off within ~30 s (6 of 8 sessions spent).
+    After CEILING_FAST_MAX quick handoffs in a row the ceiling is skipped for the task."""
+    from foundry_coordinator.engine import CEILING_FAST_MAX
+    clock = Clock()
+    n = []
+
+    def script(ctx):
+        n.append(ctx["prompt"])
+        if len(n) <= CEILING_FAST_MAX + 1:
+            return {"final": "```coordinator-report\n" + json.dumps(
+                {"status": "NOT DONE", "summary": "part of S55"}) + "\n```",
+                    "context": 170000}
+        return good(ctx)
+    k = FlakyKilo(script, down=False)
+    c = env(tmp_path, k, clock)
+    for _ in range(30):
+        c.tick()
+    assert len(events(c, "context_handoff")) == CEILING_FAST_MAX
+    assert len(events(c, "context_ceiling_skipped")) == 1
+    assert c.store.task("game", "T1")["state"] == S.COMPLETE

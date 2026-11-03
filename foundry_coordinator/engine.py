@@ -38,6 +38,8 @@ from .profile import matches_any
 from .store import Store
 
 REVIEW_ERRORS_BEFORE_BLOCK = 3
+CEILING_FAST_S = 180     # a session over the context ceiling this soon after it started ...
+CEILING_FAST_MAX = 2     # ... this many times in a row: the ceiling is skipped for the task
 REVIEW_MAX_TOKENS_CAP = 16000      # a review cut at max_tokens retries with 2x room up to this
 INVALID_REVIEWS_BEFORE_BLOCK = 2
 
@@ -1200,8 +1202,30 @@ class Coordinator:
         from . import infra
         infra.session_ok(self, P, tid)
         srow = self.store.session(t["session_id"]) if t.get("session_id") else None
-        handoff = infra.over_ceiling(P, s, rep, persona=str((srow or {}).get("persona") or "")) \
-            or self._context_wrapup_handoff(t, rep)
+        ceil_handoff = infra.over_ceiling(P, s, rep,
+                                          persona=str((srow or {}).get("persona") or ""))
+        # 2026-11-03 S55: [automation] context_ceiling_pct 63 put the Claude ceiling (120.8k)
+        # below a fresh session's own startup context; each session was handed off within
+        # ~30 s and the next one started over it again (6 of 8 sessions spent). A session
+        # that reached the ceiling within CEILING_FAST_S of its start is a ceiling it cannot
+        # work under: after CEILING_FAST_MAX such handoffs in a row the ceiling is skipped
+        # for that session (the wrap-up stop near the window still applies).
+        fast = bool(ceil_handoff) and srow is not None and \
+            (self.clock() - float(srow.get("created_ts") or 0)) < CEILING_FAST_S
+        streak = int((t["data"] or {}).get("ceiling_fast_streak") or 0)
+        new_streak = streak + 1 if fast else None
+        if ceil_handoff and fast and streak >= CEILING_FAST_MAX:
+            new_streak = streak               # stays skipped for this task's later sessions
+            self.store.event(pid, tid, "context_ceiling_skipped", session_id=t["session_id"],
+                             detail={"context": getattr(s, "context", None), "streak": streak,
+                                     "why": "the ceiling is below a fresh session's startup "
+                                            "context; lower context or raise "
+                                            "[automation] context_ceiling_pct"})
+            self._note(P, t, "context ceiling skipped: below a fresh session's startup "
+                             "context (raise [automation] context_ceiling_pct)")
+            ceil_handoff = None
+        self.store.merge_data(pid, tid, ceiling_fast_streak=new_streak)
+        handoff = ceil_handoff or self._context_wrapup_handoff(t, rep)
         if (t["data"] or {}).get("context_wrapup"):
             self.store.merge_data(pid, tid, context_wrapup=None)
         if handoff:
