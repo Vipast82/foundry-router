@@ -136,9 +136,12 @@ class GuardrailEngine:
         is_subscription = is_meridian or bool((backend_info or {}).get("subscription"))
         # A subscription is never metered: its registry price (if research
         # matched one) is a list price, not money this call spends.
-        is_metered = not is_subscription and bool(model_meta and (
-            (model_meta.get("cost_per_1k_input") or 0) > 0
-            or (model_meta.get("cost_per_1k_output") or 0) > 0))
+        # An "anthropic-api" backend is metered by definition (an API key billed per
+        # token); its price lives in usage.ANTHROPIC_API_PRICES, not the registry row
+        # (that row is per model name and shared with Meridian, which is free).
+        is_metered = not is_subscription and (backend_type == "anthropic-api" or bool(
+            model_meta and ((model_meta.get("cost_per_1k_input") or 0) > 0
+                            or (model_meta.get("cost_per_1k_output") or 0) > 0)))
         if not is_subscription and not is_metered:
             return Verdict(True)  # local models are free — no checks
 

@@ -98,7 +98,7 @@ def supported_levels(model_id: str, caps=None, backend_type: str = "") -> list[s
     gated on the discovered `thinking` capability, then shaped by the family
     lookup (a thinking-capable but unrecognized family gets on/off only)."""
     name = model_id or ""
-    if backend_type == "anthropic-compatible":
+    if backend_type in ("anthropic-compatible", "anthropic-api"):
         return ["off", "low", "medium", "high", "max"]
     if backend_type == "openai-compatible":
         # openai-dialect servers (llama.cpp / Unsloth / vLLM / OpenAI) don't
@@ -131,7 +131,7 @@ def think_value(effort, model_id: str, caps=None, backend_type: str = ""):
     norm = normalize(effort)
     if norm is None:
         return None
-    if norm is False and backend_type in ("openai-compatible", "anthropic-compatible"):
+    if norm is False and backend_type in ("openai-compatible", "anthropic-compatible", "anthropic-api"):
         # An explicit OFF always goes through for these: turning thinking off
         # is harmless on a model that can't think (llama.cpp/vLLM get the
         # enable_thinking=false template kwarg only for local flavors; Claude

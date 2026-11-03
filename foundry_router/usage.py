@@ -638,11 +638,48 @@ class MeridianUsage:
 # Metered cost + per-request logging (unchanged behavior)                     #
 # --------------------------------------------------------------------------- #
 
+ANTHROPIC_API_PRICES = {
+    # USD per 1M tokens: (input, output, cache read). Anthropic first-party rates
+    # (2026-10); cache writes are 1.25x input (5-minute TTL) or 2x (1-hour TTL).
+    "claude-fable-5-1": (10.0, 50.0, 0.25), "claude-fable-5": (10.0, 50.0, 1.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.20), "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4-8": (5.0, 25.0, 0.50), "claude-opus-4-7": (5.0, 25.0, 0.50),
+    "claude-opus-4-6": (5.0, 25.0, 0.50),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.20), "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-4-6": (3.0, 15.0, 0.30),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-haiku-4-5": (1.0, 5.0, 0.10),
+}
+
+
+def anthropic_api_cost(model: str, prompt_tokens: int, cached_tokens: int,
+                       completion_tokens: int, cache_ttl: str = "1h") -> float:
+    """Cost of one call on an "anthropic-api" backend (2026-11-03). prompt_tokens is
+    the whole context (fresh + cache read + cache write, _anthropic_usage); with the
+    router's automatic caching every uncached prompt token is written to the cache,
+    so it is priced at the write rate (a slight over-estimate for the fresh tail).
+    An unknown model is priced as Opus 5.5 (the conservative side)."""
+    base = (model or "").split("@")[0]
+    pin, pout, pread = ANTHROPIC_API_PRICES.get(base) or next(
+        (v for k, v in ANTHROPIC_API_PRICES.items() if base.startswith(k)),
+        ANTHROPIC_API_PRICES["claude-opus-5-5"])
+    write = pin * (2.0 if cache_ttl == "1h" else 1.25)
+    cached = max(0, min(int(cached_tokens or 0), int(prompt_tokens or 0)))
+    fresh = max(0, int(prompt_tokens or 0) - cached)
+    return (fresh * write + cached * pread + int(completion_tokens or 0) * pout) / 1e6
+
+
 def estimate_cost_usd(meta: Optional[dict], prompt_tokens: int,
-                      completion_tokens: int) -> float:
+                      completion_tokens: int, cached_tokens: int = 0,
+                      binfo: Optional[dict] = None, model: str = "") -> float:
     """Metered cost from registry fields; 0 for subscription (Meridian) and
     local models, whose cost fields are NULL — subscription consumption is
-    tracked in tokens via log_subscription_usage instead."""
+    tracked in tokens via log_subscription_usage instead. A call served by an
+    "anthropic-api" backend (binfo) is priced from Anthropic's own rates with its
+    cached tokens: the registry row is per model name and shared with Meridian."""
+    if (binfo or {}).get("type") == "anthropic-api":
+        return anthropic_api_cost(model or (meta or {}).get("model_id") or "", prompt_tokens,
+                                  cached_tokens, completion_tokens,
+                                  (binfo or {}).get("cache_ttl") or "1h")
     if not meta:
         return 0.0
     cin = meta.get("cost_per_1k_input") or 0.0

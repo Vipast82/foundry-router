@@ -1768,10 +1768,65 @@ def _conversation_key(model: str, messages: list) -> str:
     return f"foundry-{h[:32]}"
 
 
+class AnthropicAPIProtocol(AnthropicProtocol):
+    """Anthropic's own Messages API with an API key (backend type "anthropic-api",
+    2026-11-03): metered per token, so the router does what Meridian's SDK did -
+    and what the current API requires:
+
+      * auth is `x-api-key` only (a Bearer header would be read as an OAuth token);
+        no Meridian headers, no forwarded client headers;
+      * prompt caching: a breakpoint on the last system block (covers tools +
+        system) and top-level automatic caching for the growing conversation,
+        both with the backend's `cache_ttl` ("1h" survives a Studio gate wait);
+      * thinking is adaptive (the 5.5 models reject a budget_tokens block); depth
+        is `output_config.effort`;
+      * no temperature / top_p / top_k (rejected by the current API) and no forced
+        tool_choice (rejected on the 5.5 models: degraded to auto).
+    """
+
+    cache_ttl = "1h"
+
+    def _headers(self, messages: Optional[list] = None, model: str = "") -> dict:
+        h = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+        if self.api_key:
+            h["x-api-key"] = self.api_key
+        return h
+
+    def _payload(self, model, messages, tools, options, max_tokens, think, fmt) -> dict:
+        p = super()._payload(model, messages, tools, options, max_tokens, think, fmt)
+        if "thinking" in p:
+            p["thinking"] = {"type": "adaptive"}
+        for k in ("temperature", "top_p", "top_k"):
+            p.pop(k, None)
+        tc = p.get("tool_choice")
+        if tc and tc.get("type") in ("any", "tool"):
+            p["tool_choice"] = {k: v for k, v in tc.items()
+                                if k == "disable_parallel_tool_use"} | {"type": "auto"}
+        ttl = self.cache_ttl if self.cache_ttl in ("5m", "1h") else "1h"
+        mark = {"type": "ephemeral", "ttl": ttl}
+        if isinstance(p.get("system"), str) and p["system"].strip():
+            p["system"] = [{"type": "text", "text": p["system"], "cache_control": dict(mark)}]
+        p["cache_control"] = dict(mark)
+        return p
+
+    async def list_models(self) -> list[str]:
+        r = await self.client.get(f"{self.url}/v1/models", params={"limit": 1000},
+                                  headers=self._headers(), timeout=15)
+        r.raise_for_status()
+        out = [m["id"] for m in (r.json().get("data") or []) if isinstance(m, dict) and m.get("id")]
+        if not out:
+            raise ProtocolError("model list endpoint returned no usable entries")
+        return out
+
+    async def server_metrics(self) -> Optional[dict]:
+        return None                      # api.anthropic.com has no /health or /metrics
+
+
 PROTOCOLS = {
     "ollama": OllamaProtocol,
     "openai-compatible": OpenAIProtocol,
     "anthropic-compatible": AnthropicProtocol,
+    "anthropic-api": AnthropicAPIProtocol,
 }
 
 

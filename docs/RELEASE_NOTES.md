@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.28 — backend type `anthropic-api`: Claude straight from Anthropic, 1-hour cache, metered
+
+2026-11-03. The owner moved Claude work onto API credit. Through CLIProxyAPI an API key only gets
+the 5-minute prompt cache: CLIProxyAPI's 1-hour upgrade is for Claude Code sign-ins only. Every
+Studio check longer than 5 minutes therefore re-wrote a 150k-token context. The router also counted
+those calls as a free subscription (`est_cost_usd` 0), so no spend cap could apply.
+
+- New backend `type: anthropic-api` (`url: https://api.anthropic.com`, `api_key: ${ANTHROPIC_API_KEY}`).
+  `pool/protocols.AnthropicAPIProtocol` speaks the Messages API directly:
+  - auth is `x-api-key` only, with no Meridian headers and no forwarded client headers;
+  - prompt caching is placed by the router: a breakpoint on the last system block plus top-level
+    automatic caching, both with the backend's `cache_ttl` (`"1h"` by default, or `"5m"`);
+  - thinking is adaptive (the 5.5 models reject `budget_tokens`), with depth set by
+    `output_config.effort`;
+  - no temperature, top_p or top_k, and forced tool_choice is degraded to auto;
+  - models are discovered from `/v1/models`.
+- Metered, not a subscription. `guardrails` counts it as metered, so `guardrails.daily_spend_cap_usd`
+  and `weekly_spend_cap_usd` apply. `usage.anthropic_api_cost` prices each call from Anthropic's
+  rates (`ANTHROPIC_API_PRICES`), with cache-read and cache-write (1.25x / 2x) tokens. The model
+  registry row is not used for this, because it is shared with Meridian, which is free.
+  `budget.is_paid`, the thinking menu and registry tiers know the type.
+- Setup → Backends has an "Anthropic API (Claude, pay per token)" template. The key is typed there
+  and stored as the provider key `ANTHROPIC_API_KEY`, never in config.yaml.
+- Tests: `tests/test_anthropic_api_backend.py`.
+
+To use it: rebuild the router, add the backend from Setup (paste the key there), give it a
+higher `priority` than cliproxyapi and meridian, set the spend caps, then remove `api-keys.claude`
+from CLIProxyAPI's config.
+
 ## v0.181.27 — Claude through CLIProxyAPI (an API key) is judged by Claude's windows, not ChatGPT's
 
 2026-11-02 23:xx. The owner added a Claude API key to CLIProxyAPI (`api-keys.claude`) and asked

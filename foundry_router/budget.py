@@ -160,7 +160,7 @@ def account_of(backend_cfg, model: str) -> str:
 def is_paid(backend_cfg) -> bool:
     from .facade.ollama_api import _LOCAL_OPENAI_FLAVORS
     t = getattr(backend_cfg, "type", "")
-    if t == "anthropic-compatible" or getattr(backend_cfg, "is_subscription", False):
+    if t in ("anthropic-compatible", "anthropic-api") or getattr(backend_cfg, "is_subscription", False):
         return True
     return t == "openai-compatible" and getattr(backend_cfg, "effective_flavor", None) \
         not in _LOCAL_OPENAI_FLAVORS

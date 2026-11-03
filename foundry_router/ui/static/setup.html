@@ -316,6 +316,9 @@ BIND.secrets = m => {
 const TEMPLATES = {
   meridian: {label: "Meridian (Claude subscription)", name: "meridian", type: "anthropic-compatible", port: 3456, path: "",
              key: "MERIDIAN_API_KEY", extra: {helpers_allowed: 0}, help: "The Meridian bridge on your network."},
+  anthropic: {label: "Anthropic API (Claude, pay per token)", name: "anthropic", type: "anthropic-api",
+              url: "https://api.anthropic.com", key: "ANTHROPIC_API_KEY", extra: {cache_ttl: "1h"},
+              help: "Claude straight from Anthropic with an API key (sk-ant-...), billed per token. Foundry places the prompt-cache markers itself (1-hour cache) and counts the cost, so the daily / weekly spend caps apply."},
   cliproxy: {label: "CLIProxyAPI (ChatGPT subscription)", name: "cliproxy", type: "openai-compatible", port: 8317, path: "/v1",
              key: "CLIPROXY_API_KEY", mgmt: "CLIPROXY_MGMT_KEY", extra: {flavor: "cliproxyapi"},
              help: "Your own CLIProxyAPI instance. The management key lets Foundry read ChatGPT's 5 h / weekly usage."},
@@ -366,7 +369,8 @@ BIND.backends = m => {
   const fill = () => {
     const x = t();
     $("#bk-name", m).value = x.name;
-    $("#bk-url", m).placeholder = `http://192.168.0.40:${x.port}${x.path}`;
+    $("#bk-url", m).placeholder = x.url || `http://192.168.0.40:${x.port}${x.path}`;
+    if (x.url && !$("#bk-url", m).value) $("#bk-url", m).value = x.url;
     $("#bk-keyrow", m).style.display = x.key === undefined ? "none" : "";
     $("#bk-keyvar", m).style.display = x.key ? "none" : "";
     $("#bk-keyname", m).textContent = x.key ? `(${x.key})` : "";

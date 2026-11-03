@@ -2628,7 +2628,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             if binfo and binfo.get("type") == "anthropic-compatible":
                 svc.meridian_usage.note_successful_call(binfo["url"])
             cost = 0.0 if _flat_rate(binfo) else estimate_cost_usd(
-                svc.registry.get(model_id), res.prompt_tokens, res.completion_tokens)
+                svc.registry.get(model_id), res.prompt_tokens, res.completion_tokens,
+                cached_tokens=getattr(res, "cached_tokens", 0) or 0, binfo=binfo,
+                model=model_id)
             logger.record_model_call(model_id, backend, res.prompt_tokens,
                                      res.completion_tokens, cost)
             telemetry.record_call(
@@ -2934,7 +2936,9 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                         if _btype == "anthropic-compatible":
                             svc.meridian_usage.note_successful_call(binfo0.get("url"))
                         cost = 0.0 if _flat_rate(binfo0) else estimate_cost_usd(
-                            svc.registry.get(model_id), pt, ct)
+                            svc.registry.get(model_id), pt, ct,
+                            cached_tokens=getattr(res, "cached_tokens", 0) or 0,
+                            binfo=binfo0, model=model_id)
                         logger.record_model_call(model_id, backend_name, pt, ct, cost)
                         # The wait for a backend stream / queue slot is Foundry's
                         # time: sent_at, ttft and wall start at the real send.

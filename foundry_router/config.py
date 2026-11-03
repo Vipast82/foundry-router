@@ -216,7 +216,10 @@ class BackendConfig(BaseModel):
     name: str
     # `type` is required (§4.3): three different wire protocols, and e.g.
     # Meridian would silently fail if spoken to in Ollama protocol.
-    type: Literal["ollama", "anthropic-compatible", "openai-compatible"]
+    # "anthropic-api" (2026-11-03): Anthropic's own Messages API with an API key
+    # (https://api.anthropic.com) - metered per token, never a subscription window;
+    # the router places the prompt-cache markers itself (cache_ttl).
+    type: Literal["ollama", "anthropic-compatible", "openai-compatible", "anthropic-api"]
     url: str
     api_key: Optional[str] = None
     priority: int = 100
@@ -292,6 +295,10 @@ class BackendConfig(BaseModel):
     management_url: Optional[str] = None
     # Per-backend override of subscription_usage.limit_pct.
     usage_limit_pct: Optional[float] = None
+    # Prompt-cache lifetime the router asks for on an "anthropic-api" backend:
+    # "1h" (writes cost 2x input, reads 0.1x; survives long tool waits such as a
+    # Studio gate) or "5m" (writes 1.25x). Ignored by other backend types.
+    cache_ttl: Literal["5m", "1h"] = "1h"
 
     @property
     def is_subscription(self) -> bool:
@@ -309,6 +316,8 @@ class BackendConfig(BaseModel):
             return self.flavor
         if self.type == "anthropic-compatible":
             return "meridian"         # the only anthropic-compatible server Foundry targets
+        if self.type == "anthropic-api":
+            return "anthropic"
         return "ollama" if self.type == "ollama" else "openai"
 
 
@@ -1144,7 +1153,7 @@ def _m4_helpers_on_backends(raw: dict) -> list[str]:
     if not shipped:
         return []
     def is_paid(c) -> bool:                          # budget.is_paid, without its imports
-        return (c.type == "anthropic-compatible" or c.is_subscription
+        return (c.type in ("anthropic-compatible", "anthropic-api") or c.is_subscription
                 or (c.type == "openai-compatible"
                     and c.effective_flavor not in ("llamacpp", "vllm", "unsloth")))
     set_on = []

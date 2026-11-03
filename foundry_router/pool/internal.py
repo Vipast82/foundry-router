@@ -159,6 +159,10 @@ class InternalPool(BackendPool):
                                                  meridian_agent=getattr(b, "meridian_agent", None),
                                                  meridian_session_affinity=bool(
                                                      getattr(b, "meridian_session_affinity", False))))
+        for b in backends:
+            st = self.backends.get(b.name)
+            if st is not None and b.type == "anthropic-api":
+                st.protocol.cache_ttl = getattr(b, "cache_ttl", "1h") or "1h"
         self._listeners: list[Callable[[], None]] = []
         self._health_task: Optional[asyncio.Task] = None
         self._loaded: set[str] = set()   # VRAM-resident models, cached (see loaded_models)
@@ -322,7 +326,8 @@ class InternalPool(BackendPool):
                 "meridian_profile": getattr(c, "meridian_profile", None),
                 "management_key": getattr(c, "management_key", None),
                 "management_url": getattr(c, "management_url", None),
-                "usage_limit_pct": getattr(c, "usage_limit_pct", None)}
+                "usage_limit_pct": getattr(c, "usage_limit_pct", None),
+                "cache_ttl": getattr(c, "cache_ttl", None)}
 
     async def loaded_models(self) -> set[str]:
         """Union of models resident in VRAM across healthy ollama backends,

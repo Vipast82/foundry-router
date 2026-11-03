@@ -279,7 +279,7 @@ class Services:
                     if s.config.type == "ollama":
                         fields.update(relative_cost_tier="free",
                                       cost_per_1k_input=0.0, cost_per_1k_output=0.0)
-                    elif s.config.type == "anthropic-compatible":
+                    elif s.config.type in ("anthropic-compatible", "anthropic-api"):
                         # Per-tier cost (Haiku<Sonnet<Opus<Fable) so ranking can
                         # prefer the cheaper Claude tier; plus a conservative
                         # context ceiling so oversized requests are gated before
