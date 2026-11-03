@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.45 — a settings revision reaches running tracks
+
+Each track runs with a copy of the project profile taken when the track starts (its own worktree, branch, locks and slot). `config_pull` applies a router revision to the main profile in place, but the track copies kept the old values. On 2026-11-03, revision 20 raised `context_ceiling_pct` to 85: S57b on main handed off at 163k, while HK-TEST2 on track test2 still handed off at the old 63% (144.5k). After a config apply, every cached track profile now takes the main profile's values again (`TracksManager.refresh_track_profiles`), keeping its track-specific fields, including a slot set later.
+
+Test: `tests/coordinator/test_track_profile_refresh.py`. Takes effect after the coordinator restart.
+
 ## v0.181.44 — a settings revision that only changes live fields applies while sessions run
 
 The coordinator applied every router revision only at a "safe point" with no live session. With a main sprint and a parallel track running, that point rarely comes. On 2026-11-03, revision 20 (`automation.context_ceiling_pct` 63 → 85) stayed pending for 20 minutes, and the old 121k ceiling went on handing S56 off. A revision whose every change is a field the schema marks `apply = live` (read on each use) now applies at once. A change to a `next_session` or `restart` field (role rules, client URL, ...) still waits for the safe point or restart, as before.

@@ -129,6 +129,10 @@ class TrackManager:
         changed max_agents: then the router wins and the stored value is dropped.
         Before 0.144.3 every re-apply of the same revision reset the cap to 1, and a
         track sprint waited for a writer slot forever (2026-10-27, GF-NAME1)."""
+        try:
+            self.refresh_track_profiles(P)
+        except Exception:                                         # noqa: BLE001
+            pass
         key = f"max_agents:{P.id}"
         new_v = self._doc_max_agents(new_doc)
         if new_v is not None and new_v != self._doc_max_agents(prev_doc):
@@ -247,15 +251,9 @@ class TrackManager:
         if hit is not None:
             return hit
         prof = P.profile
-        tp = dataclasses.replace(
-            prof, workspace=row["worktree"], branch=row["branch"],
-            resources=needs_locks(row.get("needs") or []),
-            publish={"mode": "none"},
-            fast_lane={**(prof.fast_lane or {}), "enabled": False})
-        tp.__dict__["track"] = row["name"]
-        tp.__dict__["main_workspace"] = prof.workspace
-        # 2026-10-31: a track bound to a Studio slot has Studio (in the slot)
-        tp.__dict__["slot"] = str((row.get("data") or {}).get("slot") or "")
+        tp = dataclasses.replace(prof, **self._track_fields(prof, row))
+        tp.__dict__.update(self._track_extras(prof, row))
+        tp.__dict__["_track_row"] = dict(row)
         try:
             adapter = load_adapter(tp, self.c.state_dir)
         except Exception as e:                                    # noqa: BLE001
@@ -264,6 +262,43 @@ class TrackManager:
                      ws=Workspace(row["worktree"]))
         self._projects[key] = TP
         return TP
+
+    @staticmethod
+    def _track_fields(prof, row: dict) -> dict:
+        return {"workspace": row["worktree"], "branch": row["branch"],
+                "resources": needs_locks(row.get("needs") or []),
+                "publish": {"mode": "none"},
+                "fast_lane": {**(prof.fast_lane or {}), "enabled": False}}
+
+    @staticmethod
+    def _track_extras(prof, row: dict) -> dict:
+        # 2026-10-31: a track bound to a Studio slot has Studio (in the slot)
+        return {"track": row["name"], "main_workspace": prof.workspace,
+                "slot": str((row.get("data") or {}).get("slot") or "")}
+
+    def refresh_track_profiles(self, P) -> int:
+        """A router revision updated P's profile in place (config_pull); each cached
+        track Project holds a copy taken when the track started, so it gets the main
+        profile's new values again (its own workspace, branch, locks and slot kept).
+        2026-11-03: revision 20 raised context_ceiling_pct to 85 on main, while HK-TEST2 on
+        track test2 kept handing off at the old 63% (144.5k)."""
+        n = 0
+        for key, TP in list(self._projects.items()):
+            if key[0] != P.id:
+                continue
+            tp = TP.profile
+            row = tp.__dict__.get("_track_row") or {}
+            if not row:
+                continue
+            fresh = dataclasses.replace(P.profile, **self._track_fields(P.profile, row))
+            fresh.__dict__.update(self._track_extras(P.profile, row))
+            fresh.__dict__["_track_row"] = row
+            slot = tp.__dict__.get("slot")             # a later set-slot keeps its value
+            tp.__dict__.update(fresh.__dict__)
+            if slot is not None:
+                tp.__dict__["slot"] = slot
+            n += 1
+        return n
 
     def forget_project(self, P, name: str) -> None:
         for k in [k for k in self._projects if k[0] == P.id and k[1] == name]:
