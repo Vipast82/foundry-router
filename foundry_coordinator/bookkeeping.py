@@ -113,9 +113,19 @@ def agent_files(P, t: dict, base: str, head: str, prep: tuple = ()) -> Optional[
     git can't say (callers then treat every changed file as the agent's)."""
     mine = commits(t)
     tid = str(t.get("task_id") or "")
+    # 2026-11-03 PT-3: the owner's concept-art chat committed docs/design files to master
+    # mid-sprint ("docs: ...", "plans: MAP-5 ..."); scope blamed PT-3 twice and it went to a
+    # decision. A commit from an operator's Claude Code chat (Co-Authored-By: Claude trailer)
+    # that does not carry this sprint's own prefix is never the session's change.
+    try:
+        fn = getattr(P.ws, "operator_commits", None)
+        operator = set(fn(base, head) or ()) if callable(fn) else set()
+    except Exception:                                             # noqa: BLE001
+        operator = set()
     try:
         others = {sha for sha, subj in P.ws.commits(base, head)
-                  if other_sprint(subj, tid) or prep_commit(subj, prep)}
+                  if other_sprint(subj, tid) or prep_commit(subj, prep)
+                  or (sha in operator and sprint_owner(subj) != tid)}
     except Exception:                                             # noqa: BLE001
         others = set()
     if not mine and not others:

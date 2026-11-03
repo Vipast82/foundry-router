@@ -131,6 +131,20 @@ class Workspace:
                            capture_output=True, text=True, timeout=60)
         return r.stdout.strip() if r.returncode == 0 else None
 
+    def operator_commits(self, base: str, head: str) -> set:
+        """Commits in base..head made from an operator's Claude Code chat: their message has
+        a `Co-Authored-By: Claude ...` trailer, which sprint sessions never write."""
+        if base == head:
+            return set()
+        out = self.run("log", "--format=%H%x1f%(trailers:key=Co-Authored-By,valueonly,"
+                              "separator=%x1e)", f"{base}..{head}")
+        res = set()
+        for line in out.splitlines():
+            sha, _, who = line.partition("\x1f")
+            if any(w.strip().lower().startswith("claude") for w in who.split("\x1e")):
+                res.add(sha.strip())
+        return res
+
     def commit_files(self, base: str, head: str) -> list[tuple[str, list[str]]]:
         """[(sha, [files])] for each commit in base..head (newest first)."""
         if base == head:

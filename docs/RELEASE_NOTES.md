@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.39 — scope never blames a sprint for an operator chat's commits
+
+The owner's concept-art chat (Claude Code) committed map-concept docs and the MAP-5 plan straight to master while PT-3 ran (`docs: map concept order ...`, `plans: MAP-5 ...`). PT-3's scope check counted those files as PT-3's. It failed twice and went to a recovery decision. A commit whose message carries a `Co-Authored-By: Claude ...` trailer comes from an operator chat, because sprint sessions never write one. Unless its subject carries this sprint's own prefix, its files are now left out of the sprint's scope, review and memory checks, the same as another sprint's commits or a prep landing. New: `Workspace.operator_commits(base, head)`.
+
+Tests: `tests/coordinator/test_scope_operator_commits.py`. Takes effect after the coordinator restart.
+
 ## v0.181.38 — the Lead accepts the spend-cap failover to Meridian
 
 At the API's daily spend cap the router denies the paid `anthropic` route and serves the same Claude model on Meridian (v0.181.34). The Lead's after-call served-model check compared each served (backend, model) against the persona's route chain, where Meridian is not listed, and discarded the session as a mismatch. HK-ASSET1's recovery case was deferred that way on 2026-11-03. A served route on another backend now passes when its model is one the chain serves from a non-local source and the router recorded a denial in that session (its own failover). A backend with no denial behind it, or a local model off the chain, is still a mismatch.
