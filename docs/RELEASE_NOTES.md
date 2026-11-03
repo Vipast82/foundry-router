@@ -2,6 +2,23 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.22 — the reviewer never demands a self-referential gate pointer
+
+2026-11-02 19:3x. GF-MUT1's code was done: GATE PASS, Lune 2078/2078, negative control 398/398,
+suite 48/48 and every code finding resolved. Each of its last four reviews still raised a major
+finding: its evidence summary's "Gate head: <sha>" line no longer named the gate bound to the
+reviewed commit. Every commit that corrected the line ran a newer gate, so the line was stale again
+at the next review. The review budget ran out, the Lead's extension cap (2 a day) was spent, and the
+sprint was parked by a timeout default.
+
+- `review.SYSTEM`: a document's pointer to a check run, gate or commit that is out of date only
+  because later commits re-ran the check is at most minor, when the packet's mechanical checks bind
+  a passing run to the reviewed commit. A document is never required to name the final commit or
+  run of the review reading it.
+- GF-MUT1 was unblocked with a reset, and its summary now points to `au.gate_bound_to_head`
+  instead of a sha.
+- Test: `test_the_reviewer_never_demands_a_self_referential_gate_pointer`.
+
 ## v0.181.21 — owner Studio reservation (studio-reserve / studio-release)
 
 2026-11-02. For Victor's GF-RT4 two-account test, the operator reserved the workstation's Studio

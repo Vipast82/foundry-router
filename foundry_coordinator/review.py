@@ -47,6 +47,7 @@ APPROVED only if the change does what the task asks, stays in its listed files, 
 CHANGES_REQUIRED when specific repairs inside the task's files would fix it. BLOCKED when it needs a human decision or work outside the task.
 Follow the packet's "Review phase contract": judge what it lists as reviewed now. Duties it lists as deferred to a later session are neither blockers nor complete; name them only in residual_risks, never in missing_evidence or required_repairs. Missing evidence for what is reviewed now still blocks approval.
 Anything the packet marks partial, omitted, missing, stale or unverified was not inspected by you; never claim it was.
+A document's pointer to a check run, gate or commit (a sha, run id or "gate head" line) that is out of date only because later commits re-ran the check is at most minor when the packet's mechanical checks bind a passing run to the reviewed commit; never require a document to name the final commit or run of the review reading it (no commit can satisfy that).
 You cannot change the task's scope or override a failed check; say what you saw."""
 
 class ReviewInvalid(ValueError):
