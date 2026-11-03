@@ -452,6 +452,17 @@ class Coordinator:
                     self.store.event(pid, t["task_id"], "error", detail={"error": str(e)[:500]})
                     self.log(f"{pid}/{t['task_id']}: {type(e).__name__}: {e}")
                 after = self.store.task(pid, t["task_id"])
+                # 2026-11-02 22:12: AS-V12 completed; MAP-1 (next in the queue) only went
+                # QUEUED -> READY in its step, and S53 (two places later, already READY) took the
+                # freed checkout in the same tick. A main sprint that became READY this tick
+                # wants the lane like one told to wait: a later never-started sprint waits for it
+                try:
+                    if (after and before[0] != S.READY and after["state"] == S.READY
+                            and not after.get("started_ts")
+                            and not self.tracks.is_track(self.tracks.project_for(P, after))):
+                        self._lane_yielded.setdefault(pid, []).append(t["task_id"])
+                except Exception as e:                            # noqa: BLE001
+                    self.log(f"{pid}/{t['task_id']}: lane order note failed: {e}")
                 try:
                     if after:
                         self._live_tests(self.tracks.project_for(P, after), after)

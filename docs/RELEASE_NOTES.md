@@ -2,6 +2,24 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.24 — a sprint that becomes READY this tick keeps its place in line
+
+2026-11-02 22:12. AS-V12 completed. MAP-1 is next in the queue (position 197): the owner's map fixes,
+which the operator had moved ahead of S53. In the same tick, MAP-1's step only took it from QUEUED to
+READY. S53 (position 199, already READY) stepped right after, found the main checkout free and
+started. v0.181.13 made a never-started sprint wait for an earlier sprint *told to wait* this tick.
+A sprint that only became READY this tick had not been told anything, so it did not count.
+
+- `engine.tick`: a main (non-track) sprint that becomes READY in its step this tick, and has never
+  started, is recorded like one told to wait. A later never-started main sprint then waits for it
+  ("waiting for MAP-1 (earlier in the queue) ..."), and the queue order decides on the next tick.
+- No hold was kept. The operator held S53 behind MAP-1, but a paused sprint keeps the main
+  checkout lock, so MAP-1 waited on S53's lock (a deadlock). S53 had also already committed to
+  master. The hold was ended; S54 (started before) took the checkout meanwhile. Order now: S54,
+  S53, MAP-1. Do not hold a started main sprint behind a never-started one.
+- Test: `test_a_sprint_that_becomes_ready_this_tick_keeps_its_place_in_line` (without the fix, the
+  later sprint starts).
+
 ## v0.181.23 — skill pages go into every implement and repair prompt
 
 2026-11-02 21:xx. Owner: "make sure the skills are being used". The Kilo log said they mostly were

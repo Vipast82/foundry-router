@@ -1541,6 +1541,29 @@ def test_a_checkout_freed_mid_tick_goes_to_the_earlier_waiting_sprint(game):
     assert "earlier in the queue" not in (c.store.task("game", "T1")["next_action"] or "")
 
 
+def test_a_sprint_that_becomes_ready_this_tick_keeps_its_place_in_line(tmp_path):
+    """2026-11-02 22:12: AS-V12 completed; MAP-1 (earlier in the queue) only went QUEUED ->
+    READY in its step, and S53 (later, already READY) took the freed checkout in the same tick.
+    A main sprint that became READY this tick goes first on the next tick."""
+    a = {"id": "A", "title": "Earlier", "spec": "Write src/a.txt.", "scope": ["src/a.txt"]}
+    b = {"id": "B", "title": "Later", "spec": "Write src/b.txt.", "scope": ["src/b.txt"]}
+    root, _ = make_repo(tmp_path, "game", [a, b])
+    prof = write_profile(tmp_path, "game", root)
+    c = coordinator(tmp_path, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "A", [], "victor")
+    c.approve("game", "B", [], "victor")
+    c.store.update_task("game", "A", state=S.QUEUED, started_ts=None)   # its deps just finished
+    c.store.update_task("game", "B", state=S.READY, started_ts=None)
+    c.tick()
+    ta, tb = c.store.task("game", "A"), c.store.task("game", "B")
+    assert ta["state"] == S.READY, ta["next_action"]
+    assert tb["state"] == S.READY and not c.store.holds("game", "B")
+    assert "waiting for A (earlier in the queue)" in (tb["next_action"] or "")
+    c.tick()                                                    # next tick: A takes the lane
+    assert c.store.task("game", "A")["state"] != S.READY, c.store.task("game", "A")["next_action"]
+    assert c.store.task("game", "B")["state"] == S.READY
+
+
 def test_a_dependency_a_person_removes_is_not_put_back_from_the_task_source(game):
     """2026-11-02 S55/S57b: the owner moved them ahead of his review and the beta; the operator
     removed AS-VR1 / GF-BETA1 from their deps, and the readiness check put them straight back from
