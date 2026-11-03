@@ -1733,6 +1733,15 @@ Change no code or test file in this session; if one needs changing, stop and rep
         status = "ok"
         if not present and (required or spec.data.get("visual")):
             status = "missing"
+            if not required:
+                # 2026-11-02 GF-LIVE2: a visual sprint whose plan names no frame got "0 files
+                # committed, 0 required ..., 0 missing" three attempts running; the session read
+                # it as nothing missing and the Lead was called. Say what is needed.
+                notes.insert(0, f"VISUAL SPRINT WITH NO CAPTURE: commit at least one screenshot "
+                                f"under {d}/ of the screen(s) the acceptance lines describe "
+                                f"(the check prints `CAPTURE_READY {d}/<name>_<WxH>.png "
+                                f"runtime=playtest`); the plan names no frame file, so any "
+                                f"name is accepted, but none may be absent")
         out = [evidence_item(f"{t} evidence captures", path=d + "/", revision=revision,
                              text=body, status=status, truncated=cut, priority=2,
                              note="; ".join(notes))]

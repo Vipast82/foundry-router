@@ -224,6 +224,19 @@ def test_required_and_missing_captures_are_explicit(repo):
     assert "1 missing" in caps["note"]
 
 
+def test_a_visual_sprint_without_any_capture_is_told_what_to_commit(repo):
+    """2026-11-02 GF-LIVE2: a visual sprint whose plan names no frame got '0 files committed,
+    0 required ..., 0 missing' and read it as nothing missing, three attempts running."""
+    a, w, base = repo["a"], repo["w"], repo["base"]
+    spec = a.describe_at(T, base, w)
+    spec.scope = [s for s in spec.scope if not s.lower().endswith(".png")]
+    spec.data["visual"] = True
+    caps = a._capture_evidence(spec, base, w, "", 4000)[0]
+    assert caps["status"] == "missing"
+    assert caps["note"].startswith("VISUAL SPRINT WITH NO CAPTURE")
+    assert f"docs/evidence/{T}/" in caps["note"] and "CAPTURE_READY" in caps["note"]
+
+
 def test_missing_log_and_captures_at_an_earlier_commit_are_explicit(repo):
     a, w, code = repo["a"], repo["w"], repo["base"]
     items = a.review_evidence(a.describe_at(T, code, w), code, w)

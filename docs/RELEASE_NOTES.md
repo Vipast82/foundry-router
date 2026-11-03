@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.25 — a visual sprint with no capture is told what to commit
+
+2026-11-02 22:5x. GF-LIVE2 (the soft-shutdown "updating / reconnect" overlay) is a visual sprint, and
+its plan names no frame file. Three attempts running, the review packet's capture item read
+"missing: 0 files committed, 0 required by the plan's file list / acceptance lines, 0 missing". The
+session took that as nothing missing. The repeat check then opened a recovery decision and called
+the Lead.
+
+- AU adapter `_capture_evidence`: when a visual sprint has no capture at all and the plan names
+  none, the note starts with "VISUAL SPRINT WITH NO CAPTURE". It says to commit at least one
+  screenshot of the screen(s) the acceptance lines describe under `docs/evidence/<id>/` (the
+  `CAPTURE_READY` line), with any name accepted.
+- Test: `test_a_visual_sprint_without_any_capture_is_told_what_to_commit`.
+
 ## v0.181.24 — a sprint that becomes READY this tick keeps its place in line
 
 2026-11-02 22:12. AS-V12 completed. MAP-1 is next in the queue (position 197): the owner's map fixes,
