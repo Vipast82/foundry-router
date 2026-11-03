@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.38 — the Lead accepts the spend-cap failover to Meridian
+
+At the API's daily spend cap the router denies the paid `anthropic` route and serves the same Claude model on Meridian (v0.181.34). The Lead's after-call served-model check compared each served (backend, model) against the persona's route chain, where Meridian is not listed, and discarded the session as a mismatch. HK-ASSET1's recovery case was deferred that way on 2026-11-03. A served route on another backend now passes when its model is one the chain serves from a non-local source and the router recorded a denial in that session (its own failover). A backend with no denial behind it, or a local model off the chain, is still a mismatch.
+
+Tests: `tests/coordinator/test_lead_follow_persona.py` (failover accepted, no-denial mismatch, local model refused). Takes effect after the coordinator restart.
+
 ## v0.181.37 — control center: show or hide each task state in the task picker
 
 The single "Show cancelled" box beside the Task picker is now a **States ▾** dropdown. It has a tick box for every state the project's tasks are in, each with its count, active states listed first, plus **All**, **Active only** and **None** buttons. The summary reads `States (shown/total)` while something is hidden. The task being viewed always stays in the list. The choice is saved with the page's display settings (`hiddenStates`, default: only CANCELLED hidden, as before) and now survives a reload. The old `showCancelled` flag was dropped on every load, because saved preferences keep only keys the defaults know. The panel flips to the right edge in a narrow window.

@@ -23,14 +23,37 @@ def _lead():
     return lm
 
 
-def _project(served):
+def _project(served, denied=0):
     info = {"exists": True, "enabled": True, "strict": True, "client_allowed": True,
             "client": "kilo", "routes": CHAIN}
     return NS(id="au", client=NS(transcript=lambda sid, directory="": []),
               foundry=NS(persona_info=lambda persona, client="": info,
                          served_models=lambda sid: {
                              "served_models": sorted({m for _, m in served}), "pending": 0,
+                             "denied": denied,
                              "routes": [{"backend": b, "model": m} for b, m in served]}))
+
+
+def test_the_spend_cap_failover_to_meridian_is_accepted():
+    # 2026-11-03 HK-ASSET1: anthropic denied at the daily cap, same Sonnet served on Meridian
+    lm = _lead()
+    v, why, _ = lm._served_check(_project([("meridian", "claude-sonnet-5-5")], denied=3),
+                                 "ses1", "Foundry-Kilo-Lead-Manager", "/ws")
+    assert v == "ok", why
+
+
+def test_another_backend_without_a_router_denial_is_still_a_mismatch():
+    lm = _lead()
+    v, why, _ = lm._served_check(_project([("meridian", "claude-sonnet-5-5")]),
+                                 "ses1", "Foundry-Kilo-Lead-Manager", "/ws")
+    assert v == "mismatch" and "not routes of the persona's chain" in why
+
+
+def test_a_failover_never_admits_a_local_model_off_the_chain():
+    lm = _lead()
+    v, why, _ = lm._served_check(_project([("ollama", "qwen3.8-flash-next-iq3_s")], denied=2),
+                                 "ses1", "Foundry-Kilo-Lead-Manager", "/ws")
+    assert v == "mismatch", why
 
 
 def test_an_empty_list_is_valid_in_the_settings():

@@ -2844,6 +2844,15 @@ class LeadManager:
         chain = {(str(k.get("backend") or ""), str(k.get("model") or "")):
                  str(k.get("source") or "") for k in known}
         unknown = [f"{b}/{m}" for b, m in served_routes if (b, m) not in chain]
+        # 2026-11-03 HK-ASSET1: the paid API hit its daily cap; the router denied the chain's
+        # anthropic route and served the same Claude model on Meridian (v0.181.34). The lead's
+        # work was thrown away as a mismatch. Another backend is accepted for a model that the
+        # chain serves from a non-local source, but only when the router recorded a denial in
+        # the session (a failover it chose), never a backend picked out of the blue.
+        remote_models = {m for (_, m), src in chain.items() if src not in ("local", "", "unknown")}
+        failover = isinstance(r, dict) and int(r.get("denied") or 0) > 0
+        if unknown and failover:
+            unknown = [x for x in unknown if x.split("/", 1)[-1] not in remote_models]
         local = [f"{b}/{m}" for b, m in served_routes if (b, m) in chain and
                  chain[(b, m)] in ("local", "", "unknown")]
         # 2026-10-29 AS-REG1: Claude hit its cutoff, the lead's calls stepped down to the local
