@@ -325,6 +325,13 @@ class CliproxyUsage:
                 out["note"] = f"usage unavailable ({snap['error']}) — refused (fail_closed)"
                 return out
         if best is None:
+            # 2026-11-02: Claude through an API key (api-keys.claude in CLIProxyAPI's config)
+            # has no signed-in account and never a usage window: it is billed per token, so
+            # fail_closed (meant for an unreadable plan window) must not refuse it forever.
+            signed_in = [a for a in snap.get("accounts") or [] if a.get("provider") == provider]
+            if provider == "claude" and not signed_in:
+                out["note"] = f"{provider}: no signed-in account (API key: no usage window)"
+                return out
             out["note"] = f"{provider}: no usage reading yet"
             if closed:
                 out["available"] = False

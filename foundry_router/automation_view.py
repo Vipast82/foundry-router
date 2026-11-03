@@ -82,12 +82,15 @@ def _meridian_windows(q: dict) -> dict:
     return out
 
 
-def _cliproxy_windows(snap: dict) -> dict:
+def _cliproxy_windows(snap: dict, provider: Optional[str] = None) -> dict:
     """The account the router can still use decides: per window, the lowest
-    reading among accounts that are signed in and not disabled."""
+    reading among accounts that are signed in and not disabled (only `provider`'s
+    accounts when given: codex = ChatGPT, claude = Claude Code sign-ins)."""
     best: dict = {}
     for a in snap.get("accounts") or []:
         if not isinstance(a, dict) or a.get("disabled") or a.get("unavailable"):
+            continue
+        if provider and str(a.get("provider") or "codex").lower() != provider:
             continue
         age = a.get("age_s")
         for w in a.get("windows") or []:
@@ -122,7 +125,7 @@ def normalize_usage(backends: Iterable[dict], meridian: Iterable[dict] = (),
         sub = bool(b.get("subscription")) or fam in ("claude", "chatgpt")
         row = {"backend": name, "family": fam, "enabled": b.get("enabled", True) is not False,
                "healthy": b.get("healthy"), "subscription": sub,
-               "models": list(b.get("models") or []),
+               "models": list(b.get("models") or []), "priority": b.get("priority"),
                "cutoff_pct": _pct(cutoffs.get(name)) if cutoffs.get(name) is not None
                else (default_cutoff if sub else None),
                "windows": {}, "note": ""}
@@ -132,6 +135,10 @@ def normalize_usage(backends: Iterable[dict], meridian: Iterable[dict] = (),
         elif name in cli:
             c = cli[name]
             row["windows"] = _cliproxy_windows(c)
+            # 2026-11-02: one CLIProxyAPI serves ChatGPT (sign-in, 5-hour/weekly windows) and
+            # Claude (an API key: no window). The router gates each model by its own
+            # provider's windows (cliproxy_usage.model_status); the dry run must as well.
+            row["provider_windows"] = {p: _cliproxy_windows(c, p) for p in ("codex", "claude")}
             if not c.get("ok", True) or c.get("configured") is False:
                 row["note"] = c.get("error") or "usage not readable"
         if sub:
@@ -159,6 +166,66 @@ def persona_of(doc: dict, role: str) -> str:
     return cur if isinstance(cur, str) else ""
 
 
+def _pool_order(be: str, model: str, usage: dict) -> list:
+    """Backends that serve `model`, the pool's order: highest priority first (the
+    route's own backend first among equals). Just `be` when no other lists it."""
+    others = [n for n, u in usage.items()
+              if n != be and isinstance(u, dict) and model in (u.get("models") or ())]
+    if not others:
+        return [be]
+    prio = lambda n: float((usage.get(n) or {}).get("priority") or 0)   # noqa: E731
+    return sorted([be] + others, key=lambda n: (-prio(n), n != be))
+
+
+def _provider_windows(u: dict, model: str) -> dict:
+    """The windows that gate `model` on this backend: its provider's on a
+    CLIProxyAPI backend (ChatGPT's never gate Claude), else the backend's."""
+    pw = u.get("provider_windows")
+    if not pw:
+        return u.get("windows") or {}
+    return pw.get(_provider_of(model) or "codex") or {}
+
+
+def _provider_of(model: str):
+    from .cliproxy_usage import provider_of
+    return provider_of(model)
+
+
+def _backend_check(be: str, model: str, policy: dict, usage: dict) -> tuple:
+    """(ok, reason) for `model` on backend `be` the way the budget gate sees it."""
+    pol = policy.get(be) or {}
+    u = usage.get(be)
+    if u is None:
+        return False, f"backend {be!r} is not in the pool"
+    if pol.get("enabled") is False or not u.get("enabled", True):
+        return False, "backend turned off"
+    if u.get("healthy") is False:
+        return False, "backend unhealthy"
+    if u.get("models") and model not in u["models"]:
+        return False, f"{be} does not serve {model}"
+    cutoff = pol.get("cutoff_pct", u.get("cutoff_pct"))
+    over, unknown = [], []
+    windows = _provider_windows(u, model)
+    if u.get("subscription") and cutoff is not None:
+        for k in WINDOW_KEYS:
+            w = windows.get(k) or {}
+            if w.get("used_pct") is None:
+                unknown.append(w.get("label") or k)
+            elif w["used_pct"] >= float(cutoff):
+                over.append(f"{w.get('label') or k} {w['used_pct']:g}% ≥ cutoff {float(cutoff):g}%")
+    if over:
+        return False, "; ".join(over)
+    # Claude through CLIProxyAPI with no signed-in Claude account is an API key: billed
+    # per token, never a window, so fail_closed does not refuse it (cliproxy_usage agrees)
+    claude_api_key = (bool(u.get("provider_windows")) and _provider_of(model) == "claude"
+                      and not windows)
+    if unknown and (pol.get("fail_closed") or u.get("fail_closed")) and not claude_api_key:
+        return False, f"usage unknown ({', '.join(unknown)}) and the backend fails closed"
+    if unknown:
+        return True, "usage unknown (" + ", ".join(unknown) + "): allowed, not fail-closed"
+    return True, "under cutoff" if u.get("subscription") else "local, no cutoff"
+
+
 def dry_run(doc: dict, role: str, usage: dict) -> dict:
     """Walk the role's route chain the way the budget gate does: the first
     enabled route on an enabled, healthy backend whose 5-hour and weekly
@@ -178,40 +245,26 @@ def dry_run(doc: dict, role: str, usage: dict) -> dict:
             hop.update(outcome="not_reached", reason="an earlier route serves the call")
             hops.append(hop)
             continue
-        pol = policy.get(be) or {}
-        u = usage.get(be)
-        cutoff = pol.get("cutoff_pct", (u or {}).get("cutoff_pct"))
         if rt.get("enabled") is False:
             hop["reason"] = "route turned off"
         elif not be:
             hop["reason"] = f"no backend lists {model} right now"
-        elif u is None:
-            hop["reason"] = f"backend {be!r} is not in the pool"
-        elif pol.get("enabled") is False or not u.get("enabled", True):
-            hop["reason"] = "backend turned off"
-        elif u.get("healthy") is False:
-            hop["reason"] = "backend unhealthy"
-        elif u.get("models") and model not in u["models"]:
-            hop["reason"] = f"{be} does not serve {model}"
         else:
-            over = []
-            unknown = []
-            if u.get("subscription") and cutoff is not None:
-                for k in WINDOW_KEYS:
-                    w = (u.get("windows") or {}).get(k) or {}
-                    if w.get("used_pct") is None:
-                        unknown.append(w.get("label") or k)
-                    elif w["used_pct"] >= float(cutoff):
-                        over.append(f"{w.get('label') or k} {w['used_pct']:g}% ≥ cutoff {float(cutoff):g}%")
-            if over:
-                hop["reason"] = "; ".join(over)
-            elif unknown and (pol.get("fail_closed") or u.get("fail_closed")):
-                hop["reason"] = f"usage unknown ({', '.join(unknown)}) and the backend fails closed"
-            else:
-                hop["outcome"] = "chosen"
-                hop["reason"] = ("usage unknown (" + ", ".join(unknown) + "): allowed, not fail-closed"
-                                 if unknown else "under cutoff" if u.get("subscription") else "local, no cutoff")
-                chosen = hop
+            # 2026-11-02: a persona stores model names only; the pool serves a model from
+            # every backend that lists it, highest priority first, and fails over. The
+            # dry run tries the same backends in the same order.
+            reasons = []
+            for cand in _pool_order(be, model, usage):
+                ok, why = _backend_check(cand, model, policy, usage)
+                if ok:
+                    hop.update(outcome="chosen", backend=cand,
+                               reason=why if cand == be else f"{why} (served by {cand}; "
+                               f"{be}: {'; '.join(reasons) or 'lower priority'})")
+                    chosen = hop
+                    break
+                reasons.append(why if cand == be else f"{cand}: {why}")
+            if chosen is not hop:
+                hop["reason"] = "; ".join(reasons) or f"backend {be!r} is not in the pool"
         hops.append(hop)
     if not routes:
         summary = f"{persona or 'no persona'} has no routes"
@@ -346,7 +399,11 @@ def seed_document(personas: list, backends: list, role_personas: dict, cutoffs: 
     rules come from the config store and replace `settings`/`role_rules`;
     `role_personas` (what recent sessions ran with) is only a hint for roles
     the settings don't bind yet."""
-    models_by_backend = {b["name"]: list(b.get("models") or []) for b in backends if b.get("name")}
+    # the pool's order (2026-11-02): enabled first, then highest priority, so a model two
+    # backends serve is shown on the one the pool calls first
+    ordered = sorted((b for b in backends if b.get("name")),
+                     key=lambda b: (b.get("enabled", True) is False, -float(b.get("priority") or 0)))
+    models_by_backend = {b["name"]: list(b.get("models") or []) for b in ordered}
     pmap = {}
     for p in personas or []:
         name = p.get("virtual_name") or p.get("name")

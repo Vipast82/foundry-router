@@ -932,12 +932,19 @@ function cutoffOf(be) {
   if (p && p.cutoff_pct !== undefined && p.cutoff_pct !== null) return Number(p.cutoff_pct);
   const u = S.usage[be]; return u && u.cutoff_pct != null ? Number(u.cutoff_pct) : null;
 }
-function famOf(be) { const u = S.usage[be]; if (u) return u.family; const s = String(be).toLowerCase();
+// 2026-11-02: one CLIProxyAPI backend serves ChatGPT (plan windows) and Claude (an API key,
+// no window): a model is judged by its own provider's windows, as the router does
+function provOf(model) { const m = String(model || "").toLowerCase();
+  return /claude|opus|sonnet|haiku|fable/.test(m) ? "claude" : /gpt|codex|^o\d/.test(m) ? "codex" : null; }
+function famOf(be, model) { const u = S.usage[be];
+  if (u && u.provider_windows && provOf(model) === "claude") return "claude";
+  if (u) return u.family; const s = String(be).toLowerCase();
   return /meridian|claude|anthropic/.test(s) ? "claude" : /cliproxy|chatgpt|codex/.test(s) ? "chatgpt" : /llama|ollama|strata|local/.test(s) ? "local" : "other"; }
-function isOver(be) {
+function isOver(be, model) {
   const u = S.usage[be], c = cutoffOf(be);
   if (!u || !u.subscription || c === null) return false;
-  return ["5h", "weekly"].some(k => { const w = (u.windows || {})[k]; return w && w.used_pct != null && w.used_pct >= c; });
+  const win = (u.provider_windows && model) ? (u.provider_windows[provOf(model) || "codex"] || {}) : (u.windows || {});
+  return ["5h", "weekly"].some(k => { const w = win[k]; return w && w.used_pct != null && w.used_pct >= c; });
 }
 function beOff(be) { const p = (doc().backends || {})[be]; const u = S.usage[be]; return (p && p.enabled === false) || (u && u.enabled === false); }
 function ubar(w, cutoff, label) {
@@ -990,7 +997,7 @@ function nowLine(r) {
   return `<div class="now" data-now="${esc(r.id)}" title="${esc(sk.map(h => `#${h.position} ${h.model}: ${h.reason}`).join("\n"))}">Now: <b class="mono">${esc(d.chosen.model)}</b> on ${esc(d.chosen.backend)}${sk.length ? ` <span class="hint" style="margin:0">· skipped ${sk.map(h => `#${h.position} (${esc(h.reason)})`).join(", ")}</span>` : ""}${d.chosen.reason && /unknown/.test(d.chosen.reason) ? ` <span class="pill warn">usage unknown</span>` : ""}</div>`;
 }
 function routeRow(persona, rt, k, n, primary) {
-  const fam = famOf(rt.backend), off = rt.enabled === false || beOff(rt.backend), over = isOver(rt.backend);
+  const fam = famOf(rt.backend, rt.model), off = rt.enabled === false || beOff(rt.backend), over = isOver(rt.backend, rt.model);
   const role = k === primary ? "primary" : "fallback";
   const why = rt.enabled === false ? " · turned off" : beOff(rt.backend) ? " · backend off" : over ? " · over cutoff" : "";
   const pa = esc(persona);
@@ -1207,16 +1214,16 @@ function graphSvg() {
   });
   personas.forEach((p, i) => {
     const rs = (((d.personas || {})[p] || {}).routes || []);
-    const primary = rs.findIndex(x => x.enabled !== false && !beOff(x.backend) && !isOver(x.backend));
+    const primary = rs.findIndex(x => x.enabled !== false && !beOff(x.backend) && !isOver(x.backend, x.model));
     nodes += node(xs[1], ys[1](i), p, `${rs.length} route${rs.length === 1 ? "" : "s"}`, (d.personas || {})[p] ? "" : "off");
     rs.forEach((rt, k) => {
       const mi = mIdx[rt.backend + "|" + rt.model];
-      const dead = rt.enabled === false || beOff(rt.backend) || isOver(rt.backend);
+      const dead = rt.enabled === false || beOff(rt.backend) || isOver(rt.backend, rt.model);
       edges += edge(xs[1] + NW, ys[1](i) + NH / 2, xs[2], ys[2](mi) + NH / 2, (k === primary ? "" : "fb") + (dead ? " off" : ""), `${p} route #${k + 1}: ${rt.model}${dead ? " (unavailable)" : k === primary ? " (first choice now)" : " (fallback)"}`);
     });
   });
   models.forEach((m, i) => {
-    const dead = beOff(m.backend) || isOver(m.backend), fam = famOf(m.backend);
+    const dead = beOff(m.backend) || isOver(m.backend, m.model), fam = famOf(m.backend, m.model);
     nodes += node(xs[2], ys[2](i), m.model, m.backend, dead ? "off" : "", fam);
     edges += edge(xs[2] + NW, ys[2](i) + NH / 2, xs[3], ys[3](bes.indexOf(m.backend)) + NH / 2, dead ? "off" : "", `${m.model} runs on ${m.backend}`);
   });

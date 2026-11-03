@@ -85,6 +85,20 @@ def test_unreadable_usage_is_open_by_default_and_closed_with_fail_closed(cpa, su
     assert _status(cpa)["available"]                           # readable and under -> fine
 
 
+def test_a_claude_api_key_is_never_refused_by_fail_closed(cpa, su):
+    """2026-11-02: Claude through an API key in CLIProxyAPI has no signed-in Claude account
+    and never a usage window; fail_closed (for an unreadable plan window) must not refuse it.
+    A ChatGPT model with no account stays refused."""
+    su.fail_closed = True
+    cpa.cliproxy_usage._cache.clear()
+    USAGE["files"] = [codex_account(10, 10)]                  # ChatGPT signed in, Claude by key
+    st = _status(cpa, model="claude-sonnet-5-5", info=cpa.pool.backend_info("gpt-5.5"))
+    assert st["available"] and "API key" in st["note"]
+    cpa.cliproxy_usage._cache.clear()
+    USAGE["files"] = []
+    assert not _status(cpa)["available"]                       # gpt with no account: refused
+
+
 def test_near_the_cutoff_bypasses_the_cache(cpa, su):
     su.limit_pct = 95
     USAGE["files"] = [codex_account(40, 10)]

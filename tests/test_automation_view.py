@@ -105,6 +105,35 @@ def test_dry_run_off_route_off_backend_unknown_and_fail_closed():
     assert r["chosen"] is None and "pause" in r["summary"]
 
 
+def test_claude_through_cliproxy_is_gated_by_claude_windows_and_the_pool_order():
+    """2026-11-02: the owner moved Claude work to an API key in CLIProxyAPI. The dry run said
+    every Claude route on cliproxyapi was skipped at 'weekly 96% >= cutoff 95%' (ChatGPT's
+    window), and showed each model on the first backend in list order, not the pool's."""
+    status = [dict(s) for s in STATUS]
+    status[0]["priority"], status[1]["priority"], status[2]["priority"] = 90, 100, 50
+    status[1]["models"] = ["gpt-6.1-sol", "claude-sonnet-5-5", "claude-opus-5-5"]
+    u = av.normalize_usage(status, MERIDIAN, CLIPROXY, {"meridian": 95, "cliproxyapi": 95})
+    assert u["cliproxyapi"]["provider_windows"]["claude"] == {}
+    assert u["cliproxyapi"]["provider_windows"]["codex"]["weekly"]["used_pct"] == 96.0
+    r = av.dry_run(_doc(), "implementer", u)            # route 1 lists claude on meridian
+    assert r["chosen"]["backend"] == "cliproxyapi" and r["chosen"]["model"] == "claude-sonnet-5-5"
+    assert "served by cliproxyapi" in r["chosen"]["reason"]
+    # fail_closed never refuses an API key (no Claude sign-in, no window)
+    d = _doc()
+    d["backends"]["cliproxyapi"]["fail_closed"] = True
+    assert av.dry_run(d, "implementer", u)["chosen"]["backend"] == "cliproxyapi"
+    # GPT on the same backend is still gated by ChatGPT's window
+    d = _doc()
+    d["personas"]["P-Impl"]["routes"] = [{"backend": "cliproxyapi", "model": "gpt-6.1-sol",
+                                          "enabled": True}]
+    r = av.dry_run(d, "implementer", u)
+    assert r["chosen"] is None and "weekly 96%" in r["hops"][0]["reason"]
+    # the page shows a model on the backend the pool calls first
+    seed = av.seed_document([{"virtual_name": "P", "pinned_models": '["claude-opus-5-5"]'}],
+                            status, {}, {})
+    assert seed["personas"]["P"]["routes"][0]["backend"] == "cliproxyapi"
+
+
 def test_dry_run_draft_cutoff_beats_live_cutoff_and_unknown_role():
     d = _doc()
     d["backends"]["meridian"]["cutoff_pct"] = 99

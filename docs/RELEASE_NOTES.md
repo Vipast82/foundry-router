@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.27 — Claude through CLIProxyAPI (an API key) is judged by Claude's windows, not ChatGPT's
+
+2026-11-02 23:xx. The owner added a Claude API key to CLIProxyAPI (`api-keys.claude`) and asked
+for the sprint roles to move off Meridian onto it. The Automation page's Routing tab could not
+show or deploy that correctly:
+
+- A persona stores model names only (`pinned_models`). The pool serves a model from every backend
+  that lists it, highest `priority` first, with failover. The page put each model on the first
+  backend in list order, so "claude-sonnet-5-5 on cliproxyapi" and "on meridian" collapsed into
+  one route on Meridian.
+- The dry run ("Now: ...") and the route rows judged every model on cliproxyapi by its ChatGPT
+  windows. Every Claude route there showed "skipped (weekly 96% ≥ cutoff 95%)", although the
+  router's own gate (`cliproxy_usage.model_status`) checks each model by its provider's windows.
+
+Changes:
+- `automation_view.normalize_usage`: CLIProxyAPI rows carry `provider_windows` (codex / claude)
+  and the backend `priority`.
+- `automation_view.dry_run`: tries the backends that serve a model in the pool's order
+  (priority, failover). Each is judged by the model's own provider windows. A Claude API key (no
+  signed-in Claude account) is never refused by `fail_closed`.
+- `seed_document`: shows a model on the backend the pool calls first (enabled, then priority).
+- Automation page: route rows and the overview use the model's provider for "over cutoff" and
+  the family label.
+- `cliproxy_usage.model_status`: `fail_closed` no longer refuses a Claude model when no Claude
+  account is signed in (an API key: billed per token, no window). A ChatGPT model with no
+  account is still refused.
+- Tests: `test_claude_through_cliproxy_is_gated_by_claude_windows_and_the_pool_order`,
+  `test_a_claude_api_key_is_never_refused_by_fail_closed`.
+
+To make Claude calls use the API key: give `cliproxyapi` a higher `priority` than `meridian`
+(Setup → backend list, e.g. meridian 90). Meridian then stays as failover. The router needs a
+rebuild for the page changes. Set a spend limit in the Anthropic Console: the router has no
+dollar cap for a per-token key behind CLIProxyAPI (it counts it as a subscription).
+
 ## v0.181.26 — a dropped dependency stays dropped at the start check; the Claude cap survives a restart
 
 2026-11-02 23:xx, from the owner's "check to make sure all sprints and slots are correct".
