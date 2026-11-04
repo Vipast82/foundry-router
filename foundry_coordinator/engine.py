@@ -823,6 +823,8 @@ class Coordinator:
                              writer=True)
         if held:
             return
+        if not self.tracks.is_track(P):
+            self._mark_lane_yields(P, self.store.task(P.id, t["task_id"]) or t)
         if infra.preflight_blocks(self, P, t, P.profile.persona("implementer", tid)):
             self.store.release(pid, tid)
             return
@@ -7252,7 +7254,11 @@ class Coordinator:
             # a sprint whose attempts were reset keeps its place (unblock: queue_ts)
             q = float(((x.get("data") or {}).get("queue_ts")) or 0)
             s = float(x.get("started_ts") or 0)
-            return min(v for v in (q, s) if v) if (q or s) else 0.0
+            base = min(v for v in (q, s) if v) if (q or s) else 0.0
+            # a sprint that gave the checkout to another while it was out on a real stop
+            # rejoins behind it (lane_line_ts, set by _mark_lane_yields)
+            y = float(((x.get("data") or {}).get("lane_line_ts")) or 0)
+            return max(base, y) if base else base
 
         cur = self.store.task(P.id, t["task_id"]) or t
         mine = line_ts(cur) or float("inf")
@@ -7272,6 +7278,35 @@ class Coordinator:
             if ots < best_ts:
                 best, best_ts = o["task_id"], ots
         return best
+
+    def _mark_lane_yields(self, P: Project, t: dict) -> None:
+        """`t` takes the main checkout. Every other started main sprint that is out of the
+        lane on a real stop (not one the coordinator ends in minutes) gives its place: it
+        rejoins the line just behind `t`. 2026-11-03: AS-F24 (started 19:49) blocked on a
+        Studio sync; MAP-5 started at 20:08 and committed work in progress; AS-F24 came back
+        and, still earliest, took the checkout first, so its Lune leg ran red on MAP-5's
+        half-done specs and the two sprints blocked each other."""
+        if self.tracks.is_track(P):
+            return
+        mark = max(self.clock(), float(t.get("started_ts") or 0)) + 1.0
+        for o in self.store.tasks(P.id):
+            if o["task_id"] == t["task_id"] or not o.get("started_ts"):
+                continue
+            if o["state"] in self.MAIN_IN_FLIGHT or o["state"] in (S.COMPLETE, S.CANCELLED,
+                                                                   S.FAILED):
+                continue
+            if self._main_pause_is_automatic(P, o):
+                continue
+            try:
+                if self.tracks.project_for(P, o) is not P:
+                    continue
+            except Exception:                                     # noqa: BLE001
+                continue
+            if float(((o.get("data") or {}).get("lane_line_ts")) or 0) >= mark:
+                continue
+            self.store.merge_data(P.id, o["task_id"], lane_line_ts=mark)
+            self.store.event(P.id, o["task_id"], "lane_place_given", detail={
+                "to": t["task_id"], "state": o["state"], "rejoin_ts": mark})
 
     def _main_pause_is_automatic(self, P: Project, o: dict) -> bool:
         """A stop the coordinator itself ends in minutes keeps the sprint's place in the main

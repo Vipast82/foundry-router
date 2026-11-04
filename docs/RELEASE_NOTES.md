@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.46 — a sprint back from a real stop rejoins behind the one that took the main checkout
+
+One started sprint at a time holds the main checkout, and the earliest started goes first. On 2026-11-03, AS-F24 (started 19:49) blocked on a Studio sync with its Lead case deferred. MAP-5 took the checkout at 20:08 and committed work in progress. When AS-F24 came back, it was still the earliest started, so it took the checkout ahead of MAP-5. Its Lune leg then ran red on MAP-5's half-done MapV2 specs, and the two sprints blocked each other: AS-F24 had to be granted MAP-5's spec files. Now, when a sprint takes the main checkout, every other started main sprint that is out on a real stop (not an automatic one: a scheduled auto-heal, a decision that answers itself in minutes, a working Lead case, model visual approval) gets `lane_line_ts`, a place just behind it (event `lane_place_given`). It rejoins behind the sprint whose work is on master, which finishes first.
+
+Test: `tests/coordinator/test_engine.py::test_a_sprint_back_from_a_real_stop_rejoins_behind_the_one_that_took_the_checkout`. Takes effect after the coordinator restart.
+
 ## v0.181.45 — a settings revision reaches running tracks
 
 Each track runs with a copy of the project profile taken when the track starts (its own worktree, branch, locks and slot). `config_pull` applies a router revision to the main profile in place, but the track copies kept the old values. On 2026-11-03, revision 20 raised `context_ceiling_pct` to 85: S57b on main handed off at 163k, while HK-TEST2 on track test2 still handed off at the old 63% (144.5k). After a config apply, every cached track profile now takes the main profile's values again (`TracksManager.refresh_track_profiles`), keeping its track-specific fields, including a slot set later.

@@ -1653,3 +1653,34 @@ owner_inbox = ["inbox/**"]
     assert run_until(c, lambda: _state(c, "inc", "T1") == S.CHANGES_REQUIRED)
     f = c.store.history("inc", "T1")[-1]["evidence"]["findings"]
     assert any("new uncommitted files outside the task: stray.txt" in x for x in f)
+
+
+def test_a_sprint_back_from_a_real_stop_rejoins_behind_the_one_that_took_the_checkout(game):
+    """2026-11-03: AS-F24 (started 19:49) blocked on a Studio sync; MAP-5 started at 20:08 and
+    committed work in progress; AS-F24 came back and, still the earliest started, took the
+    checkout first. Its Lune leg ran red on MAP-5's half-done specs and the two blocked each
+    other. A sprint out on a real stop when another takes the checkout rejoins behind it."""
+    tmp, _, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/b.txt")})
+    P = c.projects["game"]
+    for tid in ("T1", "T2"):
+        c.approve("game", tid, [], "victor")
+    c.clock = lambda: 500.0
+    # T1 started first, then left the lane on a real stop (a Lead case waiting on Studio)
+    c.store.update_task("game", "T1", state=S.BLOCKED, started_ts=100.0,
+                        blocker="lead recovery: DEFERRED", data={})
+    c.store.update_task("game", "T2", state=S.READY, started_ts=490.0)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    c._mark_lane_yields(P, c.store.task("game", "T2"))           # T2 takes the checkout
+    assert [e for e in c.store.events("game", 50) if e["kind"] == "lane_place_given"]
+    # T1 comes back READY; T2 (between sessions, CHANGES_REQUIRED) keeps the checkout
+    c.store.update_task("game", "T1", state=S.READY, blocker=None)
+    c.store.update_task("game", "T2", state=S.CHANGES_REQUIRED)
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T1")) == "T2"
+    assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
+    # an automatic stop (auto-heal retry) keeps the place: no yield is recorded
+    c.store.update_task("game", "T1", state=S.BLOCKED, blocker="auto-heal 1/2 (rojo_stale): x",
+                        data={"auto_heal": {"retry_at": 999.0}, "lane_line_ts": None})
+    c.store.update_task("game", "T2", state=S.READY)
+    c._mark_lane_yields(P, c.store.task("game", "T2"))
+    assert not (c.store.task("game", "T1")["data"] or {}).get("lane_line_ts")
