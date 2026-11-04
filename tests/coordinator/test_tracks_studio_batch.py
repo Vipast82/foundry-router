@@ -346,3 +346,40 @@ def test_a_merge_missing_new_files_in_studio_reloads_rojo_before_retrying(env, m
     calls.clear()
     c.tracks.merger._tooling_fault(P, track(c), "merge gate: runner lock held")
     assert calls == []
+
+
+@pytest.mark.parametrize("batch_on", [True, False])
+def test_a_track_with_no_studio_run_owed_merges_without_a_gate_line(env, tmp_path, monkeypatch,
+                                                                    batch_on):
+    """2026-11-04 GF-OPS1 (tier A, Open Cloud only, track gpt-7): its sprint checks left
+    GATE/BOOT/EVIDENCE to the merge gate, but it had no suite of its own and no regression
+    row mapped to the merged files, so the batch planned nothing and the gate went red on
+    'no GATE line' forever. With the batch on and nothing owed, those rows waive; with the
+    batch switched off the merge gate keeps its old verdict."""
+    from foundry_coordinator import studio_calls as SC
+    from foundry_coordinator.adapters.base import VerificationResult
+    (tmp_path / "fake_runner_none.py").write_text(
+        "def merge_regression(repo, files):\n    return ''\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    real = SC.settings
+    monkeypatch.setattr(SC, "settings", lambda P: {**real(P), "runner_module": "fake_runner_none"})
+    c, P, clock, root, pf = env([{"result": "PASS"}],
+                                automation="" if batch_on else "merge_studio_batch = false\n")
+    orig = P.adapter.verify
+
+    def verify(spec, phase, revision, base=None):
+        out = list(orig(spec, phase, revision, base))
+        out.append(VerificationResult("au.done_check.GATE", "FAIL", True, "", "no GATE line",
+                                      revision))
+        return out
+    build_track(c, P)
+    monkeypatch.setattr(P.adapter, "verify", verify)
+    want = "merged" if batch_on else "failed"
+    assert run_until(c, lambda: track(c)["state"] == want, limit=20), track(c)["state"]
+    gate = track(c)["data"]["gate"]
+    if batch_on:
+        assert gate["waived_no_studio_run"] == ["au.done_check.GATE"]
+        assert gate["result"] == "PASS" and run_args(pf) == []
+        assert events(c, "track_studio_batch_no_rows")
+    else:
+        assert gate["waived_no_studio_run"] == [] and gate["result"] == "FAIL"

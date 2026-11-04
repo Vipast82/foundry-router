@@ -168,6 +168,8 @@ class MergeManager:
         self.c = tm.c
         self.store = tm.store
         self.clock = tm.clock
+        # (project, track) -> covered sprints the last batch plan found no Studio run for
+        self._studio_free: dict = {}
 
     # ------------------------------------------------------------------ requests
 
@@ -648,9 +650,16 @@ class MergeManager:
         # with a batch planned those checks are owed to it, never a red merge gate
         plan = self._batch_plan(P, row)
         owed = [r for r in bad if plan and _studio_owned(r.check)]
-        bad = [r for r in bad if r not in owed]
+        # 2026-11-04 GF-OPS1 (tier A, Open Cloud only, on track gpt-7): its sprint checks
+        # left GATE/BOOT/EVIDENCE to this gate, but no suite of its own and no regression
+        # row maps to the merged files, so no Studio run is ever planned and the gate went
+        # red on a GATE line nothing could write. No Studio run owed -> those rows waive.
+        free = [] if plan else self._studio_free.get((P.id, row["name"])) or []
+        waived = [r for r in bad if free and _studio_owned(r.check)]
+        bad = [r for r in bad if r not in owed and r not in waived]
         rec = {"head": head, "result": FAIL if bad else PASS, "verification_id": vid,
                "owed_to_studio_batch": [r.check for r in owed],
+               "waived_no_studio_run": [r.check for r in waived],
                "checks": {r.check: r.result for r in results}, "studio": False,
                "findings": failed_findings([r for r in bad if r.result == FAIL])[:20]}
         if bad and all(r.result == UNKNOWN for r in bad):
@@ -758,6 +767,7 @@ class MergeManager:
         built Studio-free) share ONE full regression on the merged result at the end,
         run as the track's last sprint (`covers` names them): one full regression per
         merge, never one per asset."""
+        self._studio_free.pop((P.id, row["name"]), None)
         if not self._batch_on(P):
             return []
         fn = getattr(P.profile, "studio_calls_task", None)
@@ -796,6 +806,7 @@ class MergeManager:
                              "req": {"suites": [], "regression": reg, "tier": tier,
                                      "rerun": "failed", "files": files or list(DEFAULT_FILES)}})
             else:
+                self._studio_free[(P.id, row["name"])] = list(bare)
                 self.store.event(P.id, "", "track_studio_batch_no_rows", detail={
                     "track": row["name"], "covers": bare,
                     "why": "no regression row maps to the merged files"})

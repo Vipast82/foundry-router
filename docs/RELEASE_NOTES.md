@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.48 — a track merge with no Studio run owed no longer fails on the Studio-only rows
+
+On 2026-11-04, GF-OPS1 (tier A, Open Cloud only) finished on track gpt-7, and its merge gate went red: `au.done_check.GATE: FAIL no 'GATE GF-OPS1 PASS|FAIL' line`. A track sprint leaves GATE, BOOT and EVIDENCE to the merge gate. The gate only excuses them when it plans a Studio batch. GF-OPS1 had no Studio suite of its own, and no regression row mapped to its merged files (`track_studio_batch_no_rows`), so no batch was planned and nothing could ever write that line. When the batch is on and finds no Studio run to make for the covered sprints, the merge gate now waives those Studio-only rows and records them in `gate.waived_no_studio_run`. With the batch switched off, the gate keeps its old verdict.
+
+Test: `tests/coordinator/test_tracks_studio_batch.py::test_a_track_with_no_studio_run_owed_merges_without_a_gate_line`. Takes effect after the coordinator restart; then retry the gpt-7 merge.
+
 ## v0.181.47 — a stray non-UTF-8 byte in an evidence log no longer fails the templated closeout
 
 On 2026-11-04, HK-REG1's templated closeout failed with `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa7 in position 470864`. Its evidence log held a cp1252 section sign that a tool had printed. `closeout_template.finish` read the log as strict UTF-8 to append the done-check block, so the closeout fell back to a 10-minute CLOSE session on the local model. The AU closeout template now reads its files with `errors="surrogateescape"`, and the engine's `_write_and_commit` writes them back the same way. A stray byte passes through unchanged, and valid text is written exactly as before.
