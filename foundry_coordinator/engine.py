@@ -3517,7 +3517,9 @@ class Coordinator:
             path = os.path.join(P.profile.workspace, *rel.split("/"))
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8", newline="") as f:
+                # surrogateescape: bytes a template read the same way are written back
+                # unchanged (a non-UTF-8 byte in an evidence log)
+                with open(path, "w", encoding="utf-8", newline="", errors="surrogateescape") as f:
                     f.write(str(content))
             except OSError as e:
                 return "", f"cannot write {rel}: {e}"

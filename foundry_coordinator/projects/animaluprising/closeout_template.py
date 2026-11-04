@@ -26,8 +26,12 @@ def status_word(spec) -> str:
 
 
 def _read(root: str, rel: str):
+    # surrogateescape: a stray non-UTF-8 byte (a cp1252 "§" a tool printed into an
+    # evidence log) passes through to the writer unchanged instead of failing the
+    # templated closeout (2026-11-04 HK-REG1: 0xa7 at byte 470864)
     try:
-        with open(os.path.join(root, *rel.split("/")), encoding="utf-8", newline="") as f:
+        with open(os.path.join(root, *rel.split("/")), encoding="utf-8", newline="",
+                  errors="surrogateescape") as f:
             return f.read()
     except OSError:
         return None
@@ -197,7 +201,7 @@ def finish(adapter, spec, ctx: dict) -> dict:
         return {"error": "done_check did not pass after the templated closeout: "
                          + ("; ".join(bad) or "no verdict")}
     try:
-        with open(final.evidence, encoding="utf-8") as f:
+        with open(final.evidence, encoding="utf-8", errors="surrogateescape") as f:
             out = f.read()
     except OSError:
         out = final.detail or ""

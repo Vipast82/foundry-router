@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.47 — a stray non-UTF-8 byte in an evidence log no longer fails the templated closeout
+
+On 2026-11-04, HK-REG1's templated closeout failed with `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa7 in position 470864`. Its evidence log held a cp1252 section sign that a tool had printed. `closeout_template.finish` read the log as strict UTF-8 to append the done-check block, so the closeout fell back to a 10-minute CLOSE session on the local model. The AU closeout template now reads its files with `errors="surrogateescape"`, and the engine's `_write_and_commit` writes them back the same way. A stray byte passes through unchanged, and valid text is written exactly as before.
+
+Test: `tests/coordinator/test_revamp_gate.py::test_au_template_finish_keeps_a_non_utf8_byte_in_the_evidence_log`. Takes effect after the coordinator restart.
+
 ## v0.181.46 — a sprint back from a real stop rejoins behind the one that took the main checkout
 
 One started sprint at a time holds the main checkout, and the earliest started goes first. On 2026-11-03, AS-F24 (started 19:49) blocked on a Studio sync with its Lead case deferred. MAP-5 took the checkout at 20:08 and committed work in progress. When AS-F24 came back, it was still the earliest started, so it took the checkout ahead of MAP-5. Its Lune leg then ran red on MAP-5's half-done MapV2 specs, and the two sprints blocked each other: AS-F24 had to be granted MAP-5's spec files. Now, when a sprint takes the main checkout, every other started main sprint that is out on a real stop (not an automatic one: a scheduled auto-heal, a decision that answers itself in minutes, a working Lead case, model visual approval) gets `lane_line_ts`, a place just behind it (event `lane_place_given`). It rejoins behind the sprint whose work is on master, which finishes first.

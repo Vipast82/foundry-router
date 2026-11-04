@@ -852,6 +852,31 @@ def test_au_template_finish_requires_done_check_pass(tmp_path):
     assert "did not pass" in CT.finish(adapter, spec, ctx)["error"]
 
 
+def test_au_template_finish_keeps_a_non_utf8_byte_in_the_evidence_log(tmp_path):
+    """2026-11-04 HK-REG1: the evidence log held a cp1252 section-sign byte (0xa7) at
+    470864; finish() read it as strict UTF-8, raised UnicodeDecodeError and the closeout
+    fell back to a CLOSE session. The byte now passes through to the written file unchanged."""
+    from types import SimpleNamespace
+    from foundry_coordinator.projects.animaluprising import closeout_template as CT
+    root, spec, adapter, ctx = _au_spec(tmp_path)
+    log = tmp_path / "dc.log"
+    log.write_bytes(b"DONE-CHECK UI-03 PASS\n")
+    res = [SimpleNamespace(check="au.done_check", result="PASS", detail="DONE-CHECK UI-03 PASS",
+                           evidence=str(log))]
+    adapter._done_check = lambda spec_, phase, rev: res
+    raw = b"GATE UI-03 PASS \xa7 7.2\r\n"
+    ev = root / "docs" / "progress" / "UI-03_EVIDENCE_RAW.log"
+    ev.write_bytes(raw)
+    out = CT.finish(adapter, spec, ctx)
+    text = out["files"]["docs/progress/UI-03_EVIDENCE_RAW.log"]
+    # what the engine's writer does with it (_write_and_commit)
+    with open(ev, "w", encoding="utf-8", newline="", errors="surrogateescape") as f:
+        f.write(text)
+    data = ev.read_bytes()
+    assert data.startswith(raw) and b"=== DONE-CHECK UI-03" in data
+    assert data.rstrip().endswith(b"DONE-CHECK UI-03 PASS")
+
+
 def test_a_refused_early_review_is_tried_once_per_head(env):
     e = env([GREEN])
     calls = []
