@@ -1224,6 +1224,37 @@ def test_a_gpu_unit_held_past_the_local_fallback_window_is_released_for_a_waiter
         FL.is_local_primary = orig
 
 
+def test_a_track_sprint_sent_back_by_review_goes_before_a_new_sprint(game):
+    """v0.181.61 (Victor 2026-11-05 "Yes, fixes first"): on a track, a new sprint starts
+    while the last one waits for its visual approval (deps_accept_pending); when review
+    sends that one back, the new sprint no longer starts ahead of its fix round."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    t2 = c.store.task("game", "T2")
+    # main checkout: no track, nothing changes
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED)
+    assert c._track_fix_round_pending(P, t2) == ""
+    # both on track vr-a: T1's fix round goes first
+    c.store.x("UPDATE queue SET track='vr-a' WHERE project_id='game'")
+    assert c._track_fix_round_pending(P, t2) == "T1"
+    c.store.update_task("game", "T2", state=S.READY)
+    c.store.merge_data("game", "T2", deps_dropped=["T1"])     # not a plan dependency here
+    c._start_implementation(P, c.store.task("game", "T2"))
+    t2 = c.store.task("game", "T2")
+    assert t2["state"] == S.READY and "T1's fix round" in (t2["next_action"] or "")
+    # T1 back at work (or done): T2 may start
+    c.store.update_task("game", "T1", state=S.IMPLEMENTING)
+    assert c._track_fix_round_pending(P, t2) == ""
+    # [automation] track_fixes_first = false turns it off
+    from foundry_coordinator import automation
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED)
+    automation.set_live(P, "track_fixes_first", False)
+    assert c._track_fix_round_pending(P, t2) == ""
+
+
 def test_a_short_decision_wait_keeps_the_sprints_gpu_unit(game):
     """2026-11-01 AS-A02: it stopped 3 minutes for a decision with a timeout default, gave up
     Strata, and AS-A10 took it for a whole turn. A decision that answers itself soon keeps the

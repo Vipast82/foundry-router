@@ -682,6 +682,27 @@ class Coordinator:
                 out.append(f"{d} ({dt['state']})")
         return out
 
+    def _track_fix_round_pending(self, P: Project, t: dict) -> str:
+        """Another sprint of this sprint's track waiting for a fix round (CHANGES_REQUIRED),
+        or ''. A track works in one folder. With deps_accept_pending, the next sprint starts
+        while the last one waits for its visual approval. When review sent that one back,
+        its fix waited for the whole new sprint: VR-AS02/03 (2026-11-05) waited hours
+        behind VR-AS03/04 (Victor: "Yes, fixes first"). [automation] track_fixes_first."""
+        track = self.store.task_track(P.id, t["task_id"])
+        if not track:
+            return ""
+        from .automation import get as auto_get
+        try:
+            if not auto_get(P, "track_fixes_first"):
+                return ""
+        except Exception:                                         # noqa: BLE001
+            pass
+        rows = self.store.q(
+            "SELECT t.task_id FROM tasks t JOIN queue q ON q.project_id=t.project_id AND "
+            "q.task_id=t.task_id WHERE t.project_id=? AND q.track=? AND t.task_id != ? AND "
+            "t.state=? ORDER BY q.position", (P.id, track, t["task_id"], S.CHANGES_REQUIRED))
+        return rows[0]["task_id"] if rows else ""
+
     def _dep_satisfied(self, P: Project, dt: dict) -> bool:
         if not dt:
             return False
@@ -713,6 +734,10 @@ class Coordinator:
                 # 2026-10-29 AS-R7: an operator unblock moved it BLOCKED -> READY (skipping
                 # the QUEUED dep check) and it started before AS-P5, which its plan needs
                 return self._note(P, t, "waiting for " + ", ".join(wait))
+            fix = self._track_fix_round_pending(P, t)
+            if fix:
+                return self._note(P, t, f"waiting for {fix}'s fix round (a sprint sent back "
+                                        f"by review goes before a new one on this track)")
         lim = P.profile
         free = bool(t["data"].get("free_retry"))
         attempt = t["attempt"] + (0 if free else 1)

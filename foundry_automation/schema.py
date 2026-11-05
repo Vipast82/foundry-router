@@ -241,6 +241,9 @@ AUTOMATION_DEFAULTS: dict = {
     "scope_unlisted_default": "deny",
     # 2026-10-29: one started main-checkout sprint at a time (tracks run beside it)
     "main_one_sprint_at_a_time": True,
+    # 2026-11-05 (Victor: "Yes, fixes first"): on a track, a sprint sent back by review
+    # (CHANGES_REQUIRED) runs before a new sprint of that track starts
+    "track_fixes_first": True,
     # 2026-10-29: rewording rewrote master's history 4x in a night (22:20, 22:47, 01:00,
     # 01:57) and orphaned every branch cut from it (prep landings, tracks); off by default
     "reword_commits": False,
@@ -886,6 +889,7 @@ _AUTO_DESC = {
                                  "sprints wait until it is complete, blocked or paused (parallel "
                                  "tracks are not affected). Interleaving sprints in one checkout "
                                  "staled each other's captures, gates and scope checks.",
+    "track_fixes_first": "On a track, a sprint sent back by review (changes required) goes before a new sprint of that track starts. Off: the next sprint may start while an earlier one waits for its fix round.",
     "scope_unlisted_default": "Recommended answer of a scope decision for a path the "
                               "allow-list doesn't cover.",
     "decision_timeout_minutes": "Product decisions apply their recommended option after this "

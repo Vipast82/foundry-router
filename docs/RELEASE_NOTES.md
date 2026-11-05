@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.61 — on a track, a sprint sent back by review goes before a new sprint
+
+A track works in one folder, one sprint at a time. With `deps_accept_pending`, the next sprint starts while the last one waits for its visual or asset approval. When review then sent that one back (CHANGES_REQUIRED), its fix round waited until the whole new sprint finished. On 2026-11-05 VR-AS02 and VR-AS03 waited hours behind VR-AS03 and VR-AS04, and no VR-AS sprint completed for 10 hours. A sprint starting for the first time on a track now waits while another sprint of that track has a fix round pending. The setting is `[automation] track_fixes_first`, on by default and shown on the Automation settings page. The main checkout is unaffected (`main_one_sprint_at_a_time` already applies there).
+
+Test: `tests/coordinator/test_engine.py::test_a_track_sprint_sent_back_by_review_goes_before_a_new_sprint`.
+
 ## v0.181.60 — a GPU unit held past its local-fallback window is released for a waiter
 
 When a frontier sprint's model falls back to the busy local model (`local_busy`), the sprint queues for `gpu` for `LOCAL_FALLBACK_S` (`local_fallback_until`). A session that starts inside that window takes `gpu` and kept it for the whole session, even after the window ended and the frontier served the sprint again. On 2026-11-05 BAL-1 started a session at 07:32 while the Claude API was out of credit. It still held `gpu` at 08:50, served by Claude through Meridian, and VR-AS02's local closeout on the vr-a track waited 75 minutes behind it. When a sprint now waits for `gpu` held by a frontier sprint, and that sprint is not local-primary and its fallback window has ended, the unit is released (`local_fallback_gpu_released`) and the waiter takes it. A live window or a local-primary holder keeps the unit.
