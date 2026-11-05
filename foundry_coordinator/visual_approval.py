@@ -370,6 +370,8 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
     """One fail-closed approval attempt; the caller rechecks artifact hashes."""
     if not enabled(P) or rule.kind != "visual" or P.foundry is None:
         return
+    if _inconclusive_waiting(c, P, t):
+        return
     if str(getattr(rule, "rubric", "") or "").lower() == "asset":
         from . import asset_judge                    # v0.167.0: 3D model sprints
         return asset_judge.step(c, P, t, spec, rule, revision)
@@ -554,10 +556,57 @@ def _uncertain(c, P, t: dict, revision: str, arts: dict, actor: str, fingerprint
         c.store.update_task(pid, tid, next_action="visual review inconclusive; one structured "
                             "retry at the current revision")
         return
+    waits, wait_s = _inconclusive_policy(P)
+    if waits and tries < 1 + waits and callable(getattr(c.store, "merge_data", None)):
+        # Review-until-clean mode: an inconclusive answer is no review. VR-AS01 2026-11-05
+        # was accepted unreviewed when the Claude route was down and the local fallback
+        # twice returned no valid verdict. Try again later, when a stronger route may be back.
+        cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+        unc = dict(cur.get("visual_uncertain") or {})
+        unc[fingerprint[:16]] = tries + 1
+        until = c.clock() + wait_s
+        c.store.merge_data(pid, tid, visual_uncertain=unc, visual_retry_after=until)
+        c.store.event(pid, tid, "visual_approval_deferred", detail={
+            "revision": revision, "why": findings[:4], "wait": tries, "of": waits,
+            "retry_in_s": wait_s, "actor": actor})
+        c.store.update_task(pid, tid, next_action=f"visual review inconclusive ({actor}); "
+                            f"re-review in {wait_s // 60} min (wait {tries} of {waits})")
+        return
+    if waits:
+        c.store.event(pid, tid, "visual_owner_items", detail={
+            "revision": revision, "items": ["visual review stayed inconclusive after "
+                                            f"{waits} deferred re-reviews"] + findings[:9]})
     _accept_with_notes(c, P, t, revision, arts, actor,
                        [f"inconclusive after one structured retry: {f}" for f in findings[:10]]
                        or ["inconclusive after one structured retry"],
                        "(inconclusive after one structured retry)")
+
+
+def _inconclusive_policy(P) -> tuple:
+    """([approval] visual_inconclusive_retries, visual_inconclusive_wait_s). Only in the
+    review-until-clean mode (visual_rounds_max set): defaults 6 waits of 30 minutes. 0
+    retries keeps the old rule (accept with notes after the one structured retry)."""
+    cfg = (getattr(getattr(P, "profile", None), "raw", None) or {}).get("approval") or {}
+    if "visual_rounds_max" not in cfg:
+        return 0, 0
+    try:
+        return (max(0, int(cfg.get("visual_inconclusive_retries", 6))),
+                max(60, int(cfg.get("visual_inconclusive_wait_s", 1800))))
+    except (TypeError, ValueError):
+        return 6, 1800
+
+
+def _inconclusive_waiting(c, P, t: dict) -> bool:
+    """True while a deferred re-review (see _uncertain) is not due yet."""
+    d = dict((_task(c.store, P.id, t["task_id"], t) or {}).get("data") or {})
+    until = float(d.get("visual_retry_after") or 0)
+    if not until:
+        return False
+    if c.clock() < until:
+        return True
+    if callable(getattr(c.store, "merge_data", None)):
+        c.store.merge_data(P.id, t["task_id"], visual_retry_after=None)
+    return False
 
 
 JUDGE_PERSONA = "Foundry-Kilo-Vision-Deep"

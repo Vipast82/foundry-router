@@ -447,3 +447,37 @@ def test_visual_judge_is_a_known_profile_role():
     assert "visual_judge" in PROFILE_ROLES
     roles = {"implementer": "I", "visual_judge": "Foundry-Kilo-Visual-Review"}
     assert roles_table("p.toml", roles) == roles
+
+
+def test_an_inconclusive_review_waits_and_retries_instead_of_accepting():
+    """v0.181.59: VR-AS01 (2026-11-05) was accepted unreviewed. The Claude route was down
+    and the local fallback twice returned no valid verdict. In review-until-clean mode
+    (visual_rounds_max) an inconclusive review now waits [approval]
+    visual_inconclusive_wait_s and tries again, up to visual_inconclusive_retries times;
+    only then is it accepted, with an owner item."""
+    cfg = {"visual_rounds_max": 8, "visual_inconclusive_retries": 2,
+           "visual_inconclusive_wait_s": 600}
+    arts = {"docs/evidence/VR-AS01/a.png": "x"}
+    now = [1000.0]
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(0, cfg, [])
+    c.clock = lambda: now[0]
+    c.store.update_task = lambda *a, **k: None
+    # the first inconclusive answer: the one immediate structured retry (unchanged)
+    VA._uncertain(c, P, t, "rev", arts, "model:r/qwen", "f" * 64, 0, ["no valid verdict"])
+    assert not appr and c.store.data["visual_uncertain"]["f" * 16] == 1
+    # the structured retry also inconclusive: deferred, not accepted
+    VA._uncertain(c, P, t, "rev", arts, "model:r/qwen", "f" * 64, 1, ["no valid verdict"])
+    assert not appr and c.store.data["visual_retry_after"] == 1600.0
+    assert VA._inconclusive_waiting(c, P, t) is True
+    now[0] = 1700.0
+    assert VA._inconclusive_waiting(c, P, t) is False
+    VA._uncertain(c, P, t, "rev", arts, "model:r/qwen", "f" * 64, 2, ["no valid verdict"])
+    assert not appr and c.store.data["visual_uncertain"]["f" * 16] == 3
+    # out of waits: accepted with notes and an owner item
+    VA._uncertain(c, P, t, "rev", arts, "model:r/qwen", "f" * 64, 3, ["no valid verdict"])
+    assert len(appr) == 1 and any(k == "visual_owner_items" for k, _ in ev)
+    # without visual_rounds_max the old rule holds
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(0, {}, [])
+    c.clock = lambda: 0.0
+    VA._uncertain(c, P, t, "rev", arts, "model:r", "f" * 64, 1, ["x"])
+    assert len(appr) == 1

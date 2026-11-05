@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.59 — an inconclusive visual review waits and tries again instead of passing
+
+A screenshot or asset review that returned no valid verdict got one immediate structured retry. If that was also inconclusive, the frames were accepted with notes. On 2026-11-05 the Claude API route was down and the visual reviewer fell back to the local model. That model twice returned no valid verdict for VR-AS01's three heroes, so the sprint was approved with no real review.
+
+In review-until-clean mode (`[approval] visual_rounds_max` set), an inconclusive answer after the structured retry now waits `[approval] visual_inconclusive_wait_s` (default 1800). It then reviews again, up to `visual_inconclusive_retries` times (default 6). Each wait is logged as `visual_approval_deferred`, with the model that answered. Only after the last wait is the review accepted with notes, together with a `visual_owner_items` event. Without `visual_rounds_max`, the old rule applies.
+
+Test: `tests/coordinator/test_visual_model_approval.py::test_an_inconclusive_review_waits_and_retries_instead_of_accepting`.
+
 ## v0.181.58 — a usage-budget refusal pauses until the reset it names
 
 When every model of a persona's route is denied by the router's usage budget, the refusal says when the budget resets ("... resets in 2h 25m"). The coordinator ignored that in two places:
