@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.64 — persona and role-override changes apply without a coordinator restart
+
+The coordinator pulls the router's deployed automation settings and, until now, applied a revision in place only when no session of the project was live, unless every change was an `apply=live` field. Persona settings (`roles.*`, `role_overrides.*`) and other `apply=next_session` fields therefore waited for a moment with no live session. A busy project like AU never has one. On 2026-11-05, rev 24 moved the vr-b track (VR-AS20..43) from ChatGPT, which was out of usage, to Claude. The revision stayed `pending` and took effect only after a coordinator restart. A revision whose every change is `apply=live` or `apply=next_session` now applies at once. Existing sessions pick up a new persona on their next prompt: every prompt path binds the persona before sending. Changes that reload Kilo (`role_rules.*`) or move Studio (`studio.*`, `slots.*`), and restart-scoped keys, still wait for a safe point as before.
+
+Test: `tests/coordinator/test_config_pull.py::test_a_persona_override_applies_while_sessions_run`.
+
 ## v0.181.63 — a local-fallback hold ends when a probe finds the frontier answering
 
 When a frontier sprint's model fell to the busy local model (`local_busy`), the sprint was held for the GPU for an hour (`local_fallback_until`, `LOCAL_FALLBACK_S`). The hold cleared early only when another sprint with the same persona was visibly served by the frontier. On 2026-11-05 Claude stopped answering while the router host's disk was full. BAL-1 got the hold and, the only Claude sprint running, waited behind the local model after Claude worked again. During a hold, the coordinator now sends one tiny call ("Reply with OK.", 16 tokens) through the sprint's implementer persona, at most every `[limits] local_fallback_probe_seconds` (default 600; 0 = off). When a non-local route answers (the backend's route source is not `local`), the hold is cleared and the sprint starts there. A sprint already holding a GPU unit is never probed. Events: `local_fallback_probe`, `local_fallback_cleared`.

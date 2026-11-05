@@ -12,8 +12,11 @@ of each project (GET /v1/foundry/control/config, orchestration key):
     sides changed goes to the router and is logged (`config_local_drift`
     event, `conflicts`); then validated with the same profile loader as a
     TOML file, and applied in place (the live Profile object is updated, so
-    every module sees the new values on its next read) -- but only when no
-    session of that project is live; until then it is reported `pending`;
+    every module sees the new values on its next read). A revision whose every
+    change is apply=live or apply=next_session (personas, role overrides, limits)
+    applies at once; one that also reloads Kilo (role_rules), moves Studio
+    (studio., slots.) or is restart-scoped waits until no session of that project
+    is live, and is reported `pending` until then;
   * restart-scoped keys (schema `apply: restart`: client.url, supervisor,
     repair_root ...) are NOT applied in place: the live value stays, the
     revision is cached, a `restart_coordinator` client request is written
@@ -49,6 +52,9 @@ from .adapters.foundry import FoundryError
 from .profile import ProfileError, from_raw
 
 LIVE_SESSION_MAX_AGE_S = 24 * 3600
+# applied in place even while sessions run (see ConfigPuller._live_only)
+LIVE_SAFE_APPLY = ("live", "next_session")
+WAIT_FOR_SAFE_POINT_PREFIXES = ("role_rules.", "studio.", "slots.")
 
 
 def restart_paths(prev: Optional[dict], doc: dict) -> list[str]:
@@ -164,8 +170,13 @@ class ConfigPuller:
     # ------------------------------------------------------------------ safe point
 
     def _live_only(self, pid: str, body: dict) -> bool:
-        """Every change from the applied revision to `body` is a field the schema marks
-        apply=live (read on each use, safe while sessions run)."""
+        """Every change from the applied revision to `body` is safe to apply while sessions
+        run: a field the schema marks apply=live (read on each use) or apply=next_session
+        (read when a session starts or is prompted -- personas and role overrides; every
+        prompt binds its persona first). Changes that reload Kilo (role_rules) or move
+        Studio (studio., slots.) still wait for a safe point, and restart-scoped ones too.
+        2026-11-05: rev 24 (vr-b persona) sat pending for good -- AU always has a live
+        session -- and only a coordinator restart applied it."""
         prev = (self._applied.get(pid) or self.cached(pid) or {}).get("doc")
         if pid in self._fresh or not isinstance(prev, dict):
             return False
@@ -173,7 +184,10 @@ class ConfigPuller:
             changes = D.diff(prev, body.get("doc") or {})
         except Exception:                                        # noqa: BLE001
             return False
-        return bool(changes) and all(ch.get("apply") == "live" for ch in changes)
+        return bool(changes) and all(
+            ch.get("apply") in LIVE_SAFE_APPLY
+            and not str(ch.get("path", "")).startswith(WAIT_FOR_SAFE_POINT_PREFIXES)
+            for ch in changes)
 
     def busy(self, pid: str) -> str:
         """Why now is not a safe point for this project ("" = safe)."""

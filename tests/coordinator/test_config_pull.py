@@ -273,3 +273,34 @@ def test_a_live_only_revision_applies_while_sessions_run(tmp_path):
     doc3["role_rules"]["implementer"]["edit_paths"]["allow"] = ["src/**"]
     f.deploy(doc3, 3)
     assert cp.sync("game", force=True) == "pending"
+
+
+def test_a_persona_override_applies_while_sessions_run(tmp_path):
+    """2026-11-05: rev 24 moved vr-b (role_overrides.vr_gpt.implementer, apply=next_session)
+    to Claude while ChatGPT was out of usage; it sat pending because AU always has a live
+    session, and only a coordinator restart applied it. Persona and role-override changes
+    apply at once (every prompt binds its persona first); role_rules still waits."""
+    c, f, _ = _setup(tmp_path)
+    P = c.projects["game"]
+    doc = _doc(c)
+    f.deploy(doc, 1)
+    cp = ConfigPuller(c)
+    assert cp.sync("game", force=True) == "applied"
+    _live_session(c)
+    doc2 = copy.deepcopy(doc)
+    doc2["settings"].setdefault("role_overrides", {})["vr_gpt"] = {
+        "tasks": ["T9"], "implementer": "Foundry-Kilo-Claude-Test"}
+    f.deploy(doc2, 2)
+    assert cp.sync("game", force=True) == "applied"
+    assert P.profile.persona("implementer", "T9") == "Foundry-Kilo-Claude-Test"
+    # and back again, still with the session live
+    doc3 = copy.deepcopy(doc2)
+    doc3["settings"]["role_overrides"]["vr_gpt"]["implementer"] = "Foundry-Kilo-GPT-Test"
+    f.deploy(doc3, 3)
+    assert cp.sync("game", force=True) == "applied"
+    assert P.profile.persona("implementer", "T9") == "Foundry-Kilo-GPT-Test"
+    # a role_rules change (Kilo reload) still waits for the safe point
+    doc4 = copy.deepcopy(doc3)
+    doc4["role_rules"]["implementer"]["edit_paths"]["allow"] = ["src/**"]
+    f.deploy(doc4, 4)
+    assert cp.sync("game", force=True) == "pending"

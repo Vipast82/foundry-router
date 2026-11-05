@@ -12,8 +12,10 @@ A field:
              local    machine bootstrap or a secret's env-var name: TOML only,
                       never sent to or accepted by the router
              router   the router-wide document (_router)
-  apply      live          the coordinator's next safe point (no live session)
-             next_session  the next session / Kilo agent start
+  apply      live          at once, read on each use (sessions may be running)
+             next_session  at once in the coordinator, used from the next session start
+                           or prompt; role_rules (Kilo reload), studio.* and slots.*
+                           still wait for a safe point (no live session)
              restart       a coordinator restart
   component  which code reads it (for the GUI's "used by")
   role_binding  the role whose persona this field names (C2 role editor)
