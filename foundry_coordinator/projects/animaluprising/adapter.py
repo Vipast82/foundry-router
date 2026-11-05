@@ -54,6 +54,22 @@ VERIFY_ROWS = ("COMMITS", "CLEAN", "SCOPE", "TEST", "GATE", "BOOT", "EVIDENCE", 
 CLOSEOUT_ROWS = VERIFY_ROWS + ("PLAN", "SUMMARY", "PATHS", "API", "STATE")
 # rows only a Studio gate can satisfy: a track sprint leaves them to the merge gate
 STUDIO_ROWS = ("GATE", "BOOT", "EVIDENCE")
+_STEP_ROW = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*\[( |x|X|~|-|/)\]\s*(.*)$")
+
+
+def unticked_build_steps(plan: str) -> list:
+    """The plan's "## Steps" rows still unticked, except its last row (the CLOSE row, which
+    only the closeout ticks). 2026-11-04 POL-2/POL-3: a BUILD was approved with its fix
+    steps unticked and open High findings; the fallback CLOSE session then ticked them."""
+    rows, inside = [], False
+    for ln in (plan or "").splitlines():
+        if ln.startswith("## "):
+            inside = ln[3:].strip().lower().startswith("steps")
+            continue
+        m = _STEP_ROW.match(ln) if inside else None
+        if m:
+            rows.append((m.group(1) in " ~/", m.group(2).strip()))
+    return [text for open_, text in rows[:-1] if open_]
 # 2026-10-28 (audit A): evidence, project memory and plan files. A HEAD whose difference
 # from the gate's HEAD touches only these keeps the gate bound (gate.ps1 -Finish: same rule)
 GATE_NONCODE_PATHS = ("docs/progress/**", "docs/memory/**", ".plan/**")
@@ -929,6 +945,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
         pid, tid = self.p.id, spec.task_id
         jobs = [lambda: track(pid, tid, "done_check",
                               lambda: self._done_check(spec, phase, revision))]
+        if phase == "verify":
+            jobs.append(lambda: [self._plan_steps(spec, revision, ws)])
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             # tier C has no gate (§30): its proof is the empty src/tests diff in done_check
             jobs += [lambda: track(pid, tid, "gate binding",
@@ -953,6 +971,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
         pid, tid = self.p.id, spec.task_id
         jobs = [lambda: track(pid, tid, "done_check",
                               lambda: self._done_check(spec, phase, revision, skip=STUDIO_ROWS))]
+        if phase == "verify":
+            jobs.append(lambda: [self._plan_steps(spec, revision, ws)])
         if phase == "verify" and spec.data.get("tier") in ("A", "B"):
             jobs.append(lambda: self._lune(spec, revision))
         out = [r for rows in _concurrently(jobs) for r in rows]
@@ -1178,6 +1198,36 @@ Change no code or test file in this session; if one needs changing, stop and rep
                                            f"docs/evidence/{t}/*.jpg", f"docs/evidence/{t}/*.jpeg",
                                            f"docs/evidence/UI-v3/{t}/**"]
                 + list(GATE_NONCODE_PATHS))
+
+    def _plan_steps(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
+        """au.plan_steps: every BUILD step of the plan is ticked at the submitted revision
+        (the CLOSE row excepted). A sprint reaches review only with its steps done."""
+        rel = spec.data.get("plan") or f"docs/progress/{spec.task_id}_PLAN.md"
+        try:
+            if ws is not None:
+                text = ws.show_at(revision, rel)
+            else:
+                text = subprocess.run(["git", "-C", self.p.workspace, "show", f"{revision}:{rel}"],
+                                      capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=60).stdout
+        except Exception as e:                                    # noqa: BLE001
+            return VerificationResult("au.plan_steps", UNKNOWN, True, "", f"{rel}: {e}", revision)
+        if not text:
+            # no plan at this revision: done_check's PLAN row owns that failure
+            return VerificationResult("au.plan_steps", PASS, False, "",
+                                      f"{rel} not at {revision[:12]} (done_check PLAN decides)",
+                                      revision)
+        left = unticked_build_steps(text)
+        if not left:
+            return VerificationResult("au.plan_steps", PASS, True, "",
+                                      f"{rel}: every BUILD step ticked", revision)
+        return VerificationResult(
+            "au.plan_steps", FAIL, True, "",
+            f"{rel}: {len(left)} BUILD step(s) not ticked: "
+            + " | ".join(x[:120] for x in left[:5])
+            + ". Finish each step and tick it with its evidence (commit sha / evidence line). "
+              "A step you cannot finish is a BLOCKED or SCOPE_REQUEST line, never a tick.",
+            revision)
 
     def _gate_binding(self, spec: TaskSpec, revision: str, ws=None) -> VerificationResult:
         """The binding (below), kept across a restart: it reads only the revision and the

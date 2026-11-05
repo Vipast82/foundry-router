@@ -295,7 +295,7 @@ def test_verify_runs_done_check_and_both_lune_runs_together(env):
     rows = a.verify(env["spec"], "verify", env["rev"], env["rev"])
     names = [r.check for r in rows]
     assert names == ["au.done_check.COMMITS", "au.done_check.CLEAN", "au.done_check.SCOPE",
-                     "au.gate_bound_to_head", "au.lune", "au.lune_negative"]
+                     "au.plan_steps", "au.gate_bound_to_head", "au.lune", "au.lune_negative"]
     assert _by(rows)["au.lune"].result == PASS
     assert _by(rows)["au.lune_negative"].result == PASS
     starts = [c[1] for c in fake.calls]
@@ -309,7 +309,8 @@ def test_verify_track_runs_done_check_and_lune_together(env):
     fake.barrier = threading.Barrier(3, timeout=20)
     rows = a.verify_track(env["spec"], "verify", env["rev"], env["rev"])
     assert [r.check for r in rows] == ["au.done_check.COMMITS", "au.done_check.CLEAN",
-                                       "au.done_check.SCOPE", "au.lune", "au.lune_negative"]
+                                       "au.done_check.SCOPE", "au.plan_steps", "au.lune",
+                                       "au.lune_negative"]
 
 
 def test_timeouts_stay_unknown_and_keep_their_limits(env):

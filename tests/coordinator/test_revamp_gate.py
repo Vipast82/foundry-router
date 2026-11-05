@@ -978,3 +978,15 @@ def test_scope_never_blames_a_sprint_for_a_prep_queue_landing():
     assert agent_files(P, t, "b", "h", (entry,)) == {"docs/x.md", "tools/other.py"}
     # without the entry list (review/gate callers) every file counts as the sprint's
     assert agent_files(P, t, "b", "h") is None
+
+
+def test_a_build_with_unticked_steps_never_reaches_review():
+    """2026-11-04 POL-2/POL-3: BUILD reviews approved with fix steps unticked and High
+    findings open; the fallback CLOSE session ticked them. au.plan_steps fails while any
+    Steps row but the last (CLOSE) is open; partial marks count as open."""
+    from foundry_coordinator.projects.animaluprising.adapter import unticked_build_steps
+    plan = ("# P\n## Steps (tick)\n- [x] STEP 0: read\n- [ ] Fix red rows\n- [~] half done\n"
+            "- [ ] CLOSE: summary\n\n## Notes\n- [ ] a note, not a step\n")
+    assert unticked_build_steps(plan) == ["Fix red rows", "half done"]
+    assert unticked_build_steps("## Steps\n- [x] a\n- [x] b\n- [ ] CLOSE: c\n") == []
+    assert unticked_build_steps("# no steps section\n- [ ] x\n") == []

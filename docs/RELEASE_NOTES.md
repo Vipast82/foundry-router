@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.52 — a BUILD with unticked plan steps never reaches review
+
+On 2026-11-04, POL-2, POL-3 and POL-6 were approved with BUILD steps still unticked and High findings still `open` in the findings ledger (POL-F011 bot matches stalling, POL-F003 the HUD cropped at 1280x720). Their templated closeout failed done_check's PLAN row, and the fallback CLOSE session ticked the BUILD steps itself ("F002-F004 left open, see summary"). Nothing checked the plan's Steps list before review. The AU adapter now runs `au.plan_steps` in verify (main checkout and tracks): it fails while any `## Steps` row except the last (the CLOSE row) is unticked, and partial marks (`[~]`, `[/]`) count as open. The session gets the open steps back and is told a step it cannot finish is a BLOCKED or SCOPE_REQUEST line, never a tick. A plan missing at the revision is left to done_check's PLAN row.
+
+Tests: `tests/coordinator/test_revamp_gate.py::test_a_build_with_unticked_steps_never_reaches_review`; `tests/coordinator/test_lune_speed.py` (check order updated). Takes effect after the coordinator restart.
+
 ## v0.181.51 — the Studio gate re-checks a sync in progress before calling it stale
 
 On 2026-11-04, POL-3 added a check file and a mount. The auto-heal restarted Rojo and reopened the TEST place, and the gate verified 30 s later, while Rojo's first sync of the big place was still running (`matched=0/4`). It called that "stale sync". The next auto-heal restarted Rojo again, which dropped the sync in progress, and the reopen rate limit (2 per hour) then left Studio unsynced. `studio_gate calls` now takes `--sync-wait-s N`: a failed PRE-PLAY verify is re-run every 15 s until it passes or N seconds are spent. The coordinator's pipeline passes 90 s by default (`studio_calls pipeline --sync-wait-s`).
