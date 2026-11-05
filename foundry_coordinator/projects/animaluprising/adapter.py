@@ -57,6 +57,12 @@ STUDIO_ROWS = ("GATE", "BOOT", "EVIDENCE")
 _STEP_ROW = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*\[( |x|X|~|-|/)\]\s*(.*)$")
 
 
+def _is_folder_glob(entry: str, task_id: str) -> bool:
+    e = entry.replace("\\", "/").rstrip("/")
+    return e in (f"docs/evidence/{task_id}", f"docs/evidence/{task_id}/**",
+                 f"docs/evidence/{task_id}/*")
+
+
 def unticked_build_steps(plan: str) -> list:
     """The plan's "## Steps" rows still unticked, except its last row (the CLOSE row, which
     only the closeout ticks). 2026-11-04 POL-2/POL-3: a BUILD was approved with its fix
@@ -275,6 +281,17 @@ class AnimalUprisingAdapter(GenericAdapter):
                 "attempts. Never waive a check or change a baseline without observed raw runs "
                 "and a recorded scope/test decision.")
 
+    def _evidence_images(self, task_id: str, scope: list) -> bool:
+        """The plan lists its whole evidence folder (docs/evidence/<id>/**) and images are
+        in it. Victor 2026-11-04: "it should always do reviews for visuals". POL-1..6 listed
+        docs/evidence/<id>/** (no image extension), so 207 captures were never reviewed."""
+        if not any(_is_folder_glob(s, task_id) for s in scope):
+            return False
+        import glob as _glob
+        base = os.path.join(self.p.workspace, "docs", "evidence", task_id)
+        return any(_glob.iglob(os.path.join(base, "**", "*.png"), recursive=True)) or any(
+            _glob.iglob(os.path.join(base, "**", "*.jpg"), recursive=True))
+
     def _parse_plan(self, task_id: str, rel: str, plan: str) -> TaskSpec:
         """The plan text -> TaskSpec (done_check.py's own scope/tier parsing)."""
         dc = self._done_check_module()
@@ -286,7 +303,8 @@ class AnimalUprisingAdapter(GenericAdapter):
         # Tier B alone isn't visual (HK-G2 was tier B and closed DONE).
         visual = (any(s.startswith(f"docs/evidence/{task_id}/") and
                       s.lower().endswith((".png", ".jpg")) for s in scope)
-                  or "COMPLETE-PENDING-VISUAL-REVIEW" in _accept_section(plan))
+                  or "COMPLETE-PENDING-VISUAL-REVIEW" in _accept_section(plan)
+                  or self._evidence_images(task_id, scope))
         if visual:
             tags.append("visual")
         if re.search(r"(?i)\brisk:\s*high\b|\bTier:\*\*\s*A\b.*server", plan):

@@ -52,6 +52,14 @@ def _required(P, spec, rule, arts: dict) -> tuple[list[tuple[str, str, bytes]], 
             named_set.update(hits)
         else:
             named_set.add(p)
+    if not named_set:
+        # the plan lists its whole evidence folder (docs/evidence/<id>/**): every image the
+        # rule covers there is required (2026-11-04: polish captures were never reviewed)
+        folder = f"docs/evidence/{spec.task_id}"
+        if any(s.replace("\\", "/").rstrip("/") in (folder, folder + "/**", folder + "/*")
+               for s in spec.scope):
+            named_set.update(a for a in arts if a.lower().endswith(img)
+                             and a.startswith(folder + "/"))
     named = sorted(named_set)
     if not named:
         return [], "the plan names no required visual frames"
@@ -334,6 +342,30 @@ def _frames_unchanged_since(P, spec, rule, revision: str) -> bool:
     return not any(path in named or (pats and matches_any(path, pats)) for path in changed)
 
 
+BATCH_FRAMES = 10
+BATCH_BYTES = 18 * 1024 * 1024
+
+
+def _batch(P, todo: list) -> tuple:
+    """The frames this call reviews: at most [approval] visual_batch_frames (10) and
+    visual_batch_mb (18 MB) of image bytes, always at least one. 2026-11-04 POL: the polish
+    re-audit makes ~200 captures; one request with all of them would pass the model's
+    context and the API's request size. (frames, partial)."""
+    cfg = P.profile.raw.get("approval") or {}
+    try:
+        n = max(1, int(cfg.get("visual_batch_frames") or BATCH_FRAMES))
+        cap = max(1, int(float(cfg.get("visual_batch_mb") or 0) * 1024 * 1024))             if cfg.get("visual_batch_mb") else BATCH_BYTES
+    except (TypeError, ValueError):
+        n, cap = BATCH_FRAMES, BATCH_BYTES
+    out, size = [], 0
+    for f in todo:
+        if out and (len(out) >= n or size + len(f[2]) > cap):
+            break
+        out.append(f)
+        size += len(f[2])
+    return out, len(out) < len(todo)
+
+
 def step(c, P, t: dict, spec, rule, revision: str) -> None:
     """One fail-closed approval attempt; the caller rechecks artifact hashes."""
     if not enabled(P) or rule.kind != "visual" or P.foundry is None:
@@ -370,7 +402,7 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         c.store.event(pid, tid, "visual_approval_from_memory", detail={
             "revision": revision, "frames": len(frames)})
         return
-    frames = todo
+    frames, partial = _batch(P, todo)
     persona = P.profile.persona("visual_reviewer", tid)
     try:
         info = P.foundry.persona_info(persona)
@@ -384,7 +416,9 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         c.store.update_task(pid, tid, next_action="visual approval route is not verified "
                             "vision-capable for every possible model")
         return
-    fingerprint = hashlib.sha256(json.dumps([revision, arts], sort_keys=True).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps(
+        [revision, arts] + ([sorted(r for r, _, _ in frames)] if partial else []),
+        sort_keys=True).encode()).hexdigest()
     data0 = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
     tries = int((data0.get("visual_uncertain") or {}).get(fingerprint[:16]) or 0)
     key = f"visual-approval:{pid}:{tid}:{fingerprint}" + (f":retry{tries}" if tries else "")
@@ -393,6 +427,11 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         result = prior.get("result") or {}
         if prior["status"] == "done":
             actor = f"model:{persona}/{result.get('served_model') or 'unknown'}"
+            if partial and result.get("verdict") in ("approve", "uncertain"):
+                # one batch of a large set: its frames join the clean memory; the set's
+                # approval is recorded only once every frame is covered
+                remember_clean(c.store, pid, tid, [arts[r] for r, _, _ in frames])
+                return
             if result.get("verdict") == "approve" and not c._valid_approval(
                     P, t, spec, rule, revision):
                 c.store.add_approval(pid, tid, "visual", revision, arts, actor,
@@ -478,6 +517,20 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
                             "and review the current revision")
         return
     actor = f"model:{persona}/{served}"
+    if partial and verdict == "approve":
+        c.store.event(pid, tid, "visual_approval_batch", detail={
+            "revision": revision, "frames": len(frames), "left": len(todo) - len(frames)})
+        c.store.update_task(pid, tid, next_action=f"visual review: batch of {len(frames)} "
+                            f"approved; {len(todo) - len(frames)} frame(s) left")
+        return
+    if partial and verdict == "uncertain" and tries >= 1:
+        # the batch's one structured retry was also inconclusive: its frames are taken
+        # with notes (as a whole set would be) and the next batch follows
+        remember_clean(c.store, pid, tid, [arts[r] for r, _, _ in frames])
+        c.store.event(pid, tid, "visual_approval_batch", detail={
+            "revision": revision, "frames": len(frames), "left": len(todo) - len(frames),
+            "notes": findings[:5], "accepted_with_notes": True})
+        return
     if verdict == "approve":
         c.store.add_approval(pid, tid, "visual", revision, arts, actor,
                              f"model visual review {sid}; policy visual_model v1")
@@ -507,13 +560,141 @@ def _uncertain(c, P, t: dict, revision: str, arts: dict, actor: str, fingerprint
                        "(inconclusive after one structured retry)")
 
 
+JUDGE_PERSONA = "Foundry-Kilo-Vision-Deep"
+JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {"rulings": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"finding": {"type": "string"},
+                       "ruling": {"type": "string", "enum": ["real", "not_a_defect", "owner"]},
+                       "instruction": {"type": "string"}},
+        "required": ["finding", "ruling", "instruction"]}}},
+    "required": ["rulings"]}
+
+
+def _round_limits(P) -> tuple:
+    """([approval] visual_rounds_before_judge, visual_rounds_max). Victor 2026-11-04: "it
+    should go through as many reviews and fixes as needed ... and it should have a judge
+    system". Without visual_rounds_max the old policy ([fast_lane] max_vision_rounds) holds."""
+    cfg = P.profile.raw.get("approval") or {}
+    if "visual_rounds_max" not in cfg:
+        return None, None
+    try:
+        mx = max(1, int(cfg.get("visual_rounds_max") or 8))
+        before = max(1, min(mx, int(cfg.get("visual_rounds_before_judge") or 2)))
+    except (TypeError, ValueError):
+        return 2, 8
+    return before, mx
+
+
+def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
+    """A second, independent vision model rules on each finding that came back after a
+    fix round: real (fix it, with an instruction), not_a_defect, or owner. None when the
+    judge cannot run (no vision route, an error): the caller keeps the fix loop going."""
+    pid, tid = P.id, t["task_id"]
+    try:
+        persona = P.profile.persona("visual_judge", tid)
+    except Exception:                                            # noqa: BLE001
+        persona = JUDGE_PERSONA
+    if P.foundry is None:
+        return None
+    named = [r for r in arts if any(str(f).startswith(r) for f in findings)][:BATCH_FRAMES]
+    head = (f"You are the judge for a disputed visual review of project {pid}, task {tid}, "
+            f"revision {revision}. A vision reviewer raised the findings below and the sprint "
+            "has already had at least one fix round. Look at the attached frames and rule on "
+            "EACH finding: real (a defect a player would notice; give a concrete fix "
+            "instruction), not_a_defect (the frame does not show it, or it is acceptable for "
+            "the acceptance), or owner (it needs a design, art-direction or new-art decision). "
+            "Return JSON {\"rulings\": [{\"finding\", \"ruling\", \"instruction\"}]}, one "
+            "ruling per finding, in order.\n\nFindings:\n"
+            + "\n".join(f"- {f}" for f in findings[:20]))
+    parts = [{"type": "text", "text": head}]
+    for rel in named:
+        try:
+            with open(os.path.join(P.profile.workspace, rel), "rb") as fh:
+                blob = fh.read()
+        except OSError:
+            continue
+        mime = "image/png" if rel.lower().endswith(".png") else "image/jpeg"
+        parts.append({"type": "text", "text": f"Frame {rel}"})
+        parts.append({"type": "image_url", "image_url": {
+            "url": f"data:{mime};base64,{base64.b64encode(blob).decode()}"}})
+    try:
+        info = P.foundry.persona_info(persona) or {}
+        routes = info.get("routes") or []
+        if not routes or not all(r.get("vision") is True for r in routes):
+            return None
+        sid = "visual-judge-" + hashlib.sha256(
+            json.dumps([revision, findings]).encode()).hexdigest()[:20]
+        P.foundry.bind(sid, pid, tid, t.get("run_id") or "", "visual_judge", persona,
+                       parent=t.get("session_id") or "", purpose="review")
+        raw, meta = P.foundry.chat(persona, [
+            {"role": "system", "content": "You are an impartial vision judge. Rule only on "
+             "what the attached frames show."},
+            {"role": "user", "content": parts}], session_id=sid, max_tokens=3000,
+            schema=JUDGE_SCHEMA)
+    except Exception as e:                                       # noqa: BLE001
+        c.store.event(pid, tid, "visual_judge_unavailable", detail={"error": str(e)[:300]})
+        return None
+    rulings = (_answer(raw) or {}).get("rulings")
+    if not isinstance(rulings, list) or not rulings:
+        return None
+    out = []
+    for i, f in enumerate(findings[:len(rulings)]):
+        r = rulings[i] if isinstance(rulings[i], dict) else {}
+        ruling = str(r.get("ruling") or "").lower()
+        out.append({"finding": f,
+                    "ruling": ruling if ruling in ("real", "not_a_defect", "owner") else "real",
+                    "instruction": str(r.get("instruction") or "")[:400]})
+    out += [{"finding": f, "ruling": "real", "instruction": ""} for f in findings[len(out):]]
+    c.store.event(pid, tid, "visual_judge", detail={
+        "revision": revision, "persona": persona,
+        "served_model": str((meta or {}).get("served_model") or ""),
+        "rulings": [{k: str(v)[:200] for k, v in x.items()} for x in out[:20]]})
+    return out
+
+
 def _changes(c, P, t: dict, revision: str, arts: dict, actor: str, findings: list) -> None:
-    """Vision CHANGES after closeout: back into one fix round (CHANGES_REQUIRED), at
-    most [fast_lane] max_vision_rounds times per task (default 1); then accepted
-    with notes (W1.3), like the fast lane does at the gate."""
+    """Vision CHANGES after closeout: back into a fix round (CHANGES_REQUIRED). With
+    [approval] visual_rounds_max set, rounds continue until the frames are clean; from
+    visual_rounds_before_judge on, a judge model rules on each finding first; at the max
+    the rest is accepted with notes and flagged for the owner. Without it, the old policy:
+    at most [fast_lane] max_vision_rounds rounds (default 1), then accepted with notes."""
     pid, tid = P.id, t["task_id"]
     cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
     rounds = int(cur.get("visual_changes_rounds") or 0)
+    before, hard = _round_limits(P)
+    if hard is not None:
+        if rounds >= hard:
+            c.store.event(pid, tid, "visual_rounds_exhausted", detail={
+                "revision": revision, "rounds": rounds, "findings": findings[:10]})
+            _accept_with_notes(c, P, t, revision, arts, actor, findings,
+                               f"after {rounds} fix round(s): the cap; owner to review")
+            return
+        if rounds >= before:
+            rulings = _judge(c, P, t, revision, arts, findings)
+            if rulings is not None:
+                real = [x for x in rulings if x["ruling"] == "real"]
+                owner = [x for x in rulings if x["ruling"] == "owner"]
+                if not real:
+                    if owner:
+                        c.store.event(pid, tid, "visual_owner_items", detail={
+                            "revision": revision,
+                            "items": [x["finding"][:300] for x in owner]})
+                    _accept_with_notes(c, P, t, revision, arts, actor,
+                                       [f"judge {x['ruling']}: {x['finding']}" for x in rulings],
+                                       "(judge: no real defect left)")
+                    return
+                findings = [x["finding"] + (f" -- judge: {x['instruction']}"
+                                            if x["instruction"] else "") for x in real]
+        if callable(getattr(c, "reject_human", None)):
+            if callable(getattr(c.store, "merge_data", None)):
+                c.store.merge_data(pid, tid, visual_changes_rounds=rounds + 1)
+            c.store.event(pid, tid, "visual_approval_changes", detail={
+                "revision": revision, "round": rounds + 1, "of": hard,
+                "findings": findings[:10]})
+            c.reject_human(pid, tid, findings, actor)
+            return
     mx = _max_rounds(P)
     if rounds < mx and callable(getattr(c, "reject_human", None)):
         if callable(getattr(c.store, "merge_data", None)):

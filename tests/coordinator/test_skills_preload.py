@@ -80,3 +80,22 @@ def test_every_implement_session_gets_the_pages_without_choosing_to(tmp_path):
     assert "BASE RULES" in first and "WORLD RULES" in first
     ev = [e for e in c.store.events("game") if e["kind"] == "skills_preloaded"]
     assert ev and ev[0]["detail"]["loaded"] == ["au-base", "world-a"]
+
+
+def test_skills_by_sprint_id_pattern_join_the_plans_own(tmp_path):
+    """Victor 2026-11-04: asset, map and visual-fix sprints use the best matching skills even
+    when their plan forgets one; [skills] preload_by_task maps sprint id globs to skills."""
+    for n in ("au-base", "au-blender-asset", "roblox-world-building", "roblox-audio", "world-a"):
+        _skill(tmp_path, n, n.upper())
+    P = _P(tmp_path, preload_always=["au-base"], preload_max_kb=40, preload_by_task={
+        "AS-D*": ["au-blender-asset"], "AS-*": ["roblox-world-building"],
+        "AS-A*": ["roblox-audio"], "MAP-*": "roblox-world-building"})
+    spec = SimpleNamespace(task_id="AS-D05", spec="", data={"skills": ["world-a"]})
+    assert SP.wanted(P, spec) == ["au-base", "au-blender-asset", "roblox-world-building",
+                                  "world-a"]
+    assert SP.wanted(P, SimpleNamespace(task_id="AS-A30", spec="", data={"skills": []})) == [
+        "au-base", "roblox-world-building", "roblox-audio"]
+    assert SP.wanted(P, SimpleNamespace(task_id="MAP-9", spec="", data={"skills": []})) == [
+        "au-base", "roblox-world-building"]
+    assert SP.wanted(P, SimpleNamespace(task_id="POL-2", spec="", data={"skills": []})) == [
+        "au-base"]

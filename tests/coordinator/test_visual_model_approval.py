@@ -226,3 +226,175 @@ def test_approval_artifacts_list_the_frames_of_the_plans_own_subfolder_globs(tmp
     spec.scope = ["docs/evidence/AS-P10/*.png"]
     assert sorted(GenericAdapter(profile, "").approval_artifacts(
         spec, ["docs/evidence/{task}/*.png"])) == ["docs/evidence/AS-P10/compare_A.png"]
+
+
+def test_a_large_frame_set_is_reviewed_in_batches_and_approved_once_all_are_clean(tmp_path):
+    """2026-11-04 POL: the polish re-audit makes ~200 captures and one request with all of
+    them would pass the model's context and the API's request size. Frames go in batches
+    ([approval] visual_batch_frames); a batch's clean frames join the task's memory, and
+    the set's approval is recorded only once every frame is covered."""
+    rels = [f"docs/evidence/UI-02/f{i}.png" for i in range(5)]
+    arts = {}
+    for i, rel in enumerate(rels):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        blob = PNG + bytes([i])
+        p.write_bytes(blob)
+        arts[rel] = hashlib.sha256(blob).hexdigest()
+    profile = SimpleNamespace(workspace=str(tmp_path), in_workspace=lambda p: True,
+                              raw={"approval": {"visual_model": True,
+                                                "visual_batch_frames": 2}},
+                              persona=lambda role, task: "vision")
+    project = SimpleNamespace(profile=profile, id="animaluprising",
+                              ws=SimpleNamespace(head=lambda: "rev", status=lambda: []),
+                              adapter=SimpleNamespace(approval_artifacts=lambda *_: dict(arts)))
+    spec = SimpleNamespace(task_id="UI-02", scope=list(rels), spec="every frame clean")
+    rule = SimpleNamespace(artifacts=["docs/evidence/{task}/*.png"], kind="visual")
+    sent = []
+
+    def chat(persona, messages, **kw):
+        imgs = [p for p in messages[-1]["content"] if p.get("type") == "text"
+                and p["text"].startswith("Required frame ")]
+        paths = [p["text"].split(" ")[2].rstrip(",") for p in imgs]
+        sent.append(paths)
+        return json.dumps({"verdict": "approve", "frames": [
+            {"path": r, "sha256": arts[r], "image_seen": True, "subject_present": True,
+             "validity": "ok", "observation": "fine", "findings": []} for r in paths]}), \
+            {"served_model": "vision-model"}
+    project.foundry = SimpleNamespace(
+        persona_info=lambda _: {"exists": True, "enabled": True, "strict": True,
+                                "client_allowed": True,
+                                "routes": [{"model": "vision-model", "vision": True}]},
+        bind=lambda *a, **k: None, chat=chat)
+
+    class Store:
+        def __init__(self):
+            self.ops, self.appr, self.data, self.events = {}, [], {}, []
+
+        def task(self, pid, tid):
+            return {"task_id": tid, "data": dict(self.data)}
+
+        def merge_data(self, pid, tid, **kw):
+            self.data.update(kw)
+
+        def update_task(self, *a, **k):
+            pass
+
+        def op_begin(self, key, *a):
+            if key in self.ops:
+                return self.ops[key]
+            self.ops[key] = {"status": "started"}
+            return None
+
+        def op_update(self, key, status, result):
+            self.ops[key] = {"status": status, "result": result}
+
+        def session(self, sid):
+            return None
+
+        def add_session(self, *a, **k):
+            pass
+
+        def update_session(self, *a, **k):
+            pass
+
+        def event(self, pid, tid, kind, **k):
+            self.events.append(kind)
+
+        def approvals(self, pid, tid, kind=None):
+            return []
+
+        def add_approval(self, *a):
+            self.appr.append(a)
+
+    store = Store()
+    c = SimpleNamespace(store=store, clock=lambda: 100.0, _valid_approval=lambda *a: None)
+    task = {"task_id": "UI-02", "run_id": "run", "session_id": "s", "attempt": 1}
+    for _ in range(3):
+        step(c, project, task, spec, rule, "rev")
+    assert [len(b) for b in sent] == [2, 2, 1]
+    assert sorted(sum(sent, [])) == sorted(rels)          # every frame seen exactly once
+    assert store.events.count("visual_approval_batch") == 2
+    assert len(store.appr) == 1 and store.appr[0][4] == arts   # one approval, whole set
+
+
+def test_a_whole_evidence_folder_in_scope_requires_every_image_in_it(tmp_path):
+    """2026-11-04 POL: plans listed docs/evidence/<id>/** (no image extension), so their
+    captures were never required or reviewed. A whole-folder entry now requires all of them."""
+    rels = ["docs/evidence/POL-9/a.png", "docs/evidence/POL-9/world/b.png"]
+    arts = {}
+    for i, rel in enumerate(rels):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(PNG + bytes([i]))
+        arts[rel] = hashlib.sha256(PNG + bytes([i])).hexdigest()
+    project = SimpleNamespace(profile=SimpleNamespace(workspace=str(tmp_path),
+                                                      in_workspace=lambda p: True))
+    spec = SimpleNamespace(task_id="POL-9", scope=["docs/evidence/POL-9/**", "src/client/**"])
+    rule = SimpleNamespace(artifacts=["docs/evidence/{task}/**/*.png"])
+    frames, problem = _required(project, spec, rule, arts)
+    assert not problem and sorted(f[0] for f in frames) == sorted(rels)
+    spec.scope = ["src/client/**"]
+    assert "names no required" in _required(project, spec, rule, arts)[1]
+
+
+def _judge_env(rounds, cfg, rulings):
+    from foundry_coordinator import visual_approval as VA
+    events, rejected, approvals = [], [], []
+
+    class Store:
+        data = {"visual_changes_rounds": rounds}
+
+        def task(self, pid, tid):
+            return {"task_id": tid, "data": dict(self.data)}
+
+        def merge_data(self, pid, tid, **kw):
+            self.data.update(kw)
+
+        def event(self, pid, tid, kind, **kw):
+            events.append((kind, kw.get("detail")))
+
+        def add_approval(self, *a):
+            approvals.append(a)
+
+    calls = []
+
+    def chat(persona, messages, **kw):
+        calls.append(persona)
+        return json.dumps({"rulings": rulings}), {"served_model": "judge-model"}
+    P = SimpleNamespace(id="animaluprising",
+                        profile=SimpleNamespace(raw={"approval": cfg}, workspace=".",
+                                                persona=lambda role, tid: "judge"),
+                        foundry=SimpleNamespace(
+                            persona_info=lambda _: {"routes": [{"model": "j", "vision": True}]},
+                            bind=lambda *a, **k: None, chat=chat))
+    c = SimpleNamespace(store=Store(), reject_human=lambda pid, tid, f, actor: rejected.append(f))
+    t = {"task_id": "POL-9", "run_id": "r", "session_id": "s"}
+    return VA, P, c, t, events, rejected, approvals, calls
+
+
+def test_visual_fixes_loop_with_a_judge_until_clean_or_the_cap():
+    """Victor 2026-11-04: as many review and fix rounds as needed, with a judge. Before
+    visual_rounds_before_judge a finding goes straight back; after it a judge rules on each
+    finding; a real one goes back with the judge's instruction, none real is accepted, and
+    visual_rounds_max ends the loop with an owner flag."""
+    cfg = {"visual_rounds_before_judge": 2, "visual_rounds_max": 4}
+    f = ["docs/evidence/POL-9/a.png: HUD banner cropped"]
+    # round 1: straight back, no judge
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(0, cfg, [])
+    VA._changes(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"}, "model:r", f)
+    assert rej == [f] and not calls and c.store.data["visual_changes_rounds"] == 1
+    # round 3: the judge says it is real -> back with the instruction
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(2, cfg, [
+        {"finding": f[0], "ruling": "real", "instruction": "anchor the banner to the safe area"}])
+    VA._changes(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"}, "model:r", f)
+    assert calls == ["judge"] and "anchor the banner" in rej[0][0]
+    # the judge says not a defect -> accepted with notes, no further round
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(2, cfg, [
+        {"finding": f[0], "ruling": "not_a_defect", "instruction": ""}])
+    VA._changes(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"}, "model:r", f)
+    assert not rej and len(appr) == 1
+    # at the cap -> accepted with notes and flagged for the owner
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(4, cfg, [])
+    VA._changes(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"}, "model:r", f)
+    assert not rej and len(appr) == 1 and any(k == "visual_rounds_exhausted" for k, _ in ev)

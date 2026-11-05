@@ -23,7 +23,8 @@ from typing import Optional
 
 from . import skills_install
 
-DEFAULTS = {"preload": True, "preload_always": [], "preload_max_kb": 24}
+DEFAULTS = {"preload": True, "preload_always": [], "preload_max_kb": 24,
+            "preload_by_task": {}}
 
 _SECTION = re.compile(r"^#{2,3}\s+Skills\b[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)", re.M | re.S | re.I)
 _NAME = re.compile(r"`([A-Za-z0-9_-]{2,64})`")
@@ -45,6 +46,29 @@ def settings(profile) -> dict:
     except (TypeError, ValueError):
         out["preload_max_kb"] = DEFAULTS["preload_max_kb"]
     out["preload"] = out.get("preload") is not False
+    by = out.get("preload_by_task") or {}
+    clean = {}
+    if isinstance(by, dict):
+        for pat, names in by.items():
+            if isinstance(names, str):
+                names = names.replace(",", " ").split()
+            if isinstance(names, list):
+                clean[str(pat)] = [str(n).strip() for n in names
+                                   if skills_install._ok_name(str(n).strip())]
+    out["preload_by_task"] = clean
+    return out
+
+
+def task_skills(profile, task_id: str) -> list[str]:
+    """`[skills] preload_by_task`: {sprint id glob: [skills]}, every matching pattern in
+    order. Victor 2026-11-04: "make sure whatever sprints are reviewing / making assets or
+    fixing assets are using the best corresponding skills" - a plan that forgets a skill no
+    longer means the session never sees it (no AS- sprint had au-blender-asset)."""
+    import fnmatch
+    out: list[str] = []
+    for pat, names in settings(profile)["preload_by_task"].items():
+        if fnmatch.fnmatchcase(task_id, pat):
+            out += [n for n in names if n not in out]
     return out
 
 
@@ -100,6 +124,9 @@ def _shown(P, d: str) -> str:
 def wanted(P, spec) -> list[str]:
     s = settings(P.profile)
     names = list(s["preload_always"])
+    for n in task_skills(P.profile, str(getattr(spec, "task_id", "") or "")):
+        if n not in names:
+            names.append(n)
     plan = (spec.data or {}).get("skills")
     if not isinstance(plan, list):
         plan = plan_skills(spec.spec)

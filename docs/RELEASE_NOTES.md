@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.53 — every screenshot set gets reviewed, in batches, with fix rounds and a judge; skills by sprint type
+
+On 2026-11-04 the AU polish phase showed that the coordinator's visual review almost never ran. POL-1 committed 207 captures and read about 5; POL-3 and POL-4 made visual fixes with no captures; 74 completed sprints hold 1,478 captures no model ever looked at. Causes and fixes:
+
+- **A whole evidence folder counts.** A sprint was "visual" only when its plan named image files. The polish plans listed `docs/evidence/<id>/**`. A plan that lists its whole evidence folder is now visual once images are in it, and the review requires every image there (AU adapter `_evidence_images`; `visual_approval._required`).
+- **Batches.** The review sent every frame in one request, which ~200 captures would push past the model context and the API request size. Frames now go in batches of `[approval] visual_batch_frames` (10) and `visual_batch_mb` (18 MB). A clean batch joins the task's clean-frame memory, and the set's approval is recorded once every frame is covered. Each batch has its own journal key.
+- **Fix rounds and a judge** (Victor: "as many reviews and fixes as needed ... and it should have a judge system"). With `[approval] visual_rounds_max` set, review findings go back as fix rounds until the frames are clean. From `visual_rounds_before_judge` on, a second vision model (role `visual_judge`, default Foundry-Kilo-Vision-Deep) rules on each finding: real (back with its instruction), not_a_defect, or owner. When no real finding is left the set is accepted with notes; `owner` items raise `visual_owner_items`. At the max the rest is accepted with notes and flagged `visual_rounds_exhausted`. Without `visual_rounds_max` the old one-round policy holds.
+- **Skills by sprint type.** `[skills] preload_by_task` maps sprint id globs to skills that every implement/repair prompt carries with the plan's own list (Victor: "make sure ... sprints are using the best corresponding skills"; no AS- sprint ever had `au-blender-asset`).
+
+Tests: `tests/coordinator/test_visual_model_approval.py` (batches, whole-folder frames, judge loop) and `tests/coordinator/test_skills_preload.py::test_skills_by_sprint_id_pattern_join_the_plans_own`. Takes effect after the coordinator restart, plus the AU profile keys (`approval.visual_rounds_max`, `visual_rounds_before_judge`, `roles.visual_judge`, the recursive approval rule, `skills.preload_by_task`).
+
 ## v0.181.52 — a BUILD with unticked plan steps never reaches review
 
 On 2026-11-04, POL-2, POL-3 and POL-6 were approved with BUILD steps still unticked and High findings still `open` in the findings ledger (POL-F011 bot matches stalling, POL-F003 the HUD cropped at 1280x720). Their templated closeout failed done_check's PLAN row, and the fallback CLOSE session ticked the BUILD steps itself ("F002-F004 left open, see summary"). Nothing checked the plan's Steps list before review. The AU adapter now runs `au.plan_steps` in verify (main checkout and tracks): it fails while any `## Steps` row except the last (the CLOSE row) is unticked, and partial marks (`[~]`, `[/]`) count as open. The session gets the open steps back and is told a step it cannot finish is a BLOCKED or SCOPE_REQUEST line, never a tick. A plan missing at the revision is left to done_check's PLAN row.
