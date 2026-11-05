@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.49 — a sprint's own Studio suites that already passed carry over while no code changed
+
+On 2026-11-04, POL-1's audit grew to seven suites of its own (POL_1..POL_1g). The scripted gate (`studio_gate calls`) never carried a sprint's own suites, so every rerun ran all seven again. Together they ran longer than the 30-minute run budget, so the last suite was cut as UNKNOWN on every run, and the gate could never go green. Under `--rerun failed`, an own suite that passed at an earlier run on HEAD's history now carries, as long as no `src/` or `tests/` file (and no harness file) has changed since. A real code or test change still reruns every own suite.
+
+Tests: `tests/coordinator/test_studio_gate_calls.py::test_rerun_failed_carries_only_passed_untouched_regression_rows` (updated: S28 now carries after a docs-only fix) and `::test_the_sprints_own_suite_reruns_after_a_test_or_src_change`. Takes effect after the coordinator restart.
+
 ## v0.181.48 — a track merge with no Studio run owed no longer fails on the Studio-only rows
 
 On 2026-11-04, GF-OPS1 (tier A, Open Cloud only) finished on track gpt-7, and its merge gate went red: `au.done_check.GATE: FAIL no 'GATE GF-OPS1 PASS|FAIL' line`. A track sprint leaves GATE, BOOT and EVIDENCE to the merge gate. The gate only excuses them when it plans a Studio batch. GF-OPS1 had no Studio suite of its own, and no regression row mapped to its merged files (`track_studio_batch_no_rows`), so no batch was planned and nothing could ever write that line. When the batch is on and finds no Studio run to make for the covered sprints, the merge gate now waives those Studio-only rows and records them in `gate.waived_no_studio_run`. With the batch switched off, the gate keeps its old verdict.

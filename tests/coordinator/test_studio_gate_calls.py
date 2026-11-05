@@ -353,23 +353,26 @@ def test_rerun_failed_carries_only_passed_untouched_regression_rows(fakes, repo)
     # the fix lands (a docs-only commit here: no file a suite covers changes)
     (repo / "docs" / "notes.md").write_text("fixed\n", encoding="utf-8")
     commit(repo, "fix")
-    set_rules(*rules(["S28", "S46", "S04"]))
+    set_rules(*rules(["S46", "S04"]))
     h2 = host_half(repo, "R1")
     n0 = len(calls())
     rc, out = run_calls(repo, "R1", "--suites", "S28", "--regression", "subset:ui", "--rerun", "failed")
     assert rc == 0, out
     text = lines_of(repo, "R1")
     # S49 and S45 passed at h1 and nothing they cover changed: carried. S28 is the sprint's
-    # own suite (never carried), S46 failed (never carried), S04 was a SKIP (not a PASS)
+    # own suite: it passed at h1 and no src/ or tests/ file changed since, so it carries
+    # too (2026-11-04 POL-1). S46 failed (never carried), S04 was a SKIP (not a PASS)
     assert "CALL 6 CARRIED from " + h1[:12] + " PASS (S49 step 1)" in text
     assert "CALL 8 CARRIED from " + h1[:12] + " PASS (S45 step 1)" in text
     assert "PASS: GATE suite S49 - CARRIED from " + h1[:12] in text
-    assert "CALL 3 [vm=server] bridge" in text and "CALL 9 [vm=host] SKIP" in text
+    assert "PASS: GATE suite S28 - CARRIED from " + h1[:12] in text
+    assert "CALL 3 [vm=server] bridge" not in text and "CALL 9 [vm=host] SKIP" in text
     assert finish_would_pass(text)
     run = next(c for c in calls()[n0:] if ".run(" in c["args"].get("code", ""))
-    assert "S28,S46,S04" in run["args"]["code"]
+    assert "S46,S04" in run["args"]["code"] and "S28" not in run["args"]["code"]
     v2 = json.load(open(gate_file(repo, "R1", f"{h2[:12]}.calls.json")))
-    assert v2["counts"]["carried"] == 2 and v2["rows"]["S49"]["carried_from"] == h1
+    assert v2["counts"]["carried"] == 3 and v2["rows"]["S49"]["carried_from"] == h1
+    assert v2["rows"]["S28"]["carried_from"] == h1
     # --rerun all: nothing carries
     out = []
     G.main(["--repo", str(repo), "calls", "--sprint", "R1", "--regression", "subset:ui",
@@ -871,3 +874,24 @@ def test_a_red_run_on_code_the_sprints_base_never_had_is_not_a_baseline(tmp_path
     out = g.preexisting_plan(["S39", "S48", "UI_1"], "p")
     assert "S39" not in out and "S48" not in out          # C1 (flag on) skipped; B1 had them green
     assert out["UI_1"]["sprint"] == "B1"                   # red at the matching older run
+
+
+def test_the_sprints_own_suite_reruns_after_a_test_or_src_change(fakes, repo):
+    """2026-11-04 POL-1: the sprint's own suite carries only while no src/ or tests/ file
+    changed since its PASS; a code change runs it again."""
+    set_rules, calls = fakes
+    set_rules(*rules(UI))
+    host_half(repo, "R1")
+    rc, out = run_calls(repo, "R1", "--regression", "subset:ui")
+    assert rc == 0, out
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "changed.lua").write_text("return 1\n", encoding="utf-8")
+    commit(repo, "code change")
+    set_rules(*rules(["S28"]))
+    host_half(repo, "R1")
+    n0 = len(calls())
+    rc, out = run_calls(repo, "R1", "--suites", "S28", "--rerun", "failed")
+    assert rc == 0, out
+    run = next(c for c in calls()[n0:] if ".run(" in c["args"].get("code", ""))
+    assert "S28" in run["args"]["code"]
+    assert "CARRIED" not in lines_of(repo, "R1")

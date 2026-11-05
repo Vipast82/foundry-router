@@ -3910,6 +3910,28 @@ def run_calls(a, out=print, official=None, community=None, run_cmd=default_run_c
         release_lock(a.repo)
 
 
+def _own_suite_carry(g: "Gate", a, sprint: str, head: str, rows: list, sel: dict) -> dict:
+    """The sprint's own suites that passed at an earlier run on HEAD's history with no
+    src/ or tests/ file (and no harness file) changed since: carried, not re-run, under
+    rerun=failed. 2026-11-04 POL-1: seven audit suites always re-ran in full, together
+    longer than the 30-min run budget, so the last one was cut every run and the gate
+    could never go green. Any code or test change since still re-runs every own suite."""
+    if a.rerun != "failed":
+        return {}
+    own = [e["id"] for e in rows if e["id"] in sel["suites"] and not is_manual(e)]
+    if not own:
+        return {}
+    got = g.carry_plan(",".join(own), plan_rel(sprint),
+                       suffixes=Gate.CALLS_STORE_SUFFIXES).get("suite_from") or {}
+    memo: dict = {}
+    out = {}
+    for sid, v in got.items():
+        changed = g._changed_since(v, head, memo)
+        if changed is not None and not any(f.startswith(("src/", "tests/")) for f in changed):
+            out[sid] = v
+    return out
+
+
 def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
     g = Gate(a.repo, sprint, "calls", place=a.place, official=official, community=community,
              run_cmd=run_cmd, call_timeout=a.timeout, out=out, run_id=run_id)
@@ -3938,6 +3960,7 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             # only regression rows carry: the sprint's own -Suites always run
             carry = g.carry_plan(",".join(cands), plan_rel(sprint),
                                  suffixes=Gate.CALLS_STORE_SUFFIXES).get("suite_from") or {}
+    carry.update(_own_suite_carry(g, a, sprint, head, rows, sel))
     pre_existing: dict = {}
     if a.rerun != "all":
         rest = [e["id"] for e in rows if e["id"] not in sel["suites"] and not is_manual(e)
