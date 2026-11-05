@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.62 — open plan steps after a mid-sprint gate run are a free BUILD continuation
+
+v0.181.52 added `au.plan_steps`, which fails verification while any Steps row except CLOSE is unticked. Plans ask for a scripted Studio gate run in the middle of BUILD ("end the turn with the STUDIO_GATE block"). After that run, the coordinator verifies, and the only failing check was `au.plan_steps`, because the later steps were still open by design. Each such round went to CHANGES_REQUIRED and the next session cost an implementation attempt. On 2026-11-05 BAL-1 went from attempt 3 to attempt 6 in 15 minutes. When `au.plan_steps` (any `*.plan_steps` check) is the only failing required check, verification now gives the free partial-BUILD continuation, the one an idle session with open steps already gets (`build_progress_verify`). It has the same stall guard: the same open steps, or no new commit when the plan has no checklist, `BUILD_STALL_LIMIT` times in a row goes to the normal repair path (`build_progress_stalled`).
+
+Test: `tests/coordinator/test_engine.py::test_only_open_plan_steps_after_a_gate_run_is_a_free_build_continuation`.
+
 ## v0.181.61 — on a track, a sprint sent back by review goes before a new sprint
 
 A track works in one folder, one sprint at a time. With `deps_accept_pending`, the next sprint starts while the last one waits for its visual or asset approval. When review then sent that one back (CHANGES_REQUIRED), its fix round waited until the whole new sprint finished. On 2026-11-05 VR-AS02 and VR-AS03 waited hours behind VR-AS03 and VR-AS04, and no VR-AS sprint completed for 10 hours. A sprint starting for the first time on a track now waits while another sprint of that track has a fix round pending. The setting is `[automation] track_fixes_first`, on by default and shown on the Automation settings page. The main checkout is unaffected (`main_one_sprint_at_a_time` already applies there).

@@ -2149,6 +2149,39 @@ class Coordinator:
             if self._discard_early_review(P, t, head, "the revision failed its checks: "
                                           + ", ".join(r.check for r in (fails or unknown)[:6])):
                 t = self.store.task(pid, tid) or t
+        if fails and all(r.check.rsplit(".", 1)[-1] == "plan_steps" for r in fails):
+            # v0.181.62: only the plan's open BUILD steps failed. That is planned progress
+            # (a mid-sprint Studio gate run ends the turn and comes here), never a failed
+            # repair. BAL-1 (2026-11-05) spent attempts 3-6 on it. The same free continuation
+            # as an idle session's partial BUILD, with its stall guard.
+            data = dict(t["data"] or {})
+            pending = []
+            pending_fn = getattr(P.adapter, "pending_build_steps", None)
+            if callable(pending_fn):
+                try:
+                    pending = list(pending_fn(spec, head, P.ws) or [])
+                except Exception:                                 # noqa: BLE001
+                    pending = []
+            # no structured checklist: the head stands in, so a session that commits
+            # nothing new still counts as a stall
+            key = pending[:12] or [f"head:{head}"]
+            prev = data.get("build_progress")
+            stalls = (int(data.get("build_stalls") or 0) + 1) \
+                if isinstance(prev, list) and prev == key else 0
+            if stalls < self.BUILD_STALL_LIMIT:
+                findings = ["Continue the committed plan's open BUILD steps; final gate and "
+                            "review remain required."]
+                self.store.event(pid, tid, "build_progress_verify", detail={
+                    "head": head, "open_steps": pending[:12], "stalls": stalls})
+                return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {
+                    "verification_id": vid, "build_progress": True, "findings": findings,
+                    "open_steps": pending[:12]},
+                    verification_id=vid, head_sha=head,
+                    next_action="continue BUILD from committed plan",
+                    data={**data, "findings": None, "build_progress": key,
+                          "build_stalls": stalls, "free_retry": True})
+            self.store.event(pid, tid, "build_progress_stalled", detail={
+                "open_steps": pending[:12], "stalls": stalls, "head": head})
         if fails:
             findings = failed_findings(fails)
             if self._lc(P, "recovery"):

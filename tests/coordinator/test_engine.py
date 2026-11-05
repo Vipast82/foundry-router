@@ -1747,3 +1747,28 @@ def test_a_sprint_back_from_a_real_stop_rejoins_behind_the_one_that_took_the_che
     c.store.update_task("game", "T2", state=S.READY)
     c._mark_lane_yields(P, c.store.task("game", "T2"))
     assert not (c.store.task("game", "T1")["data"] or {}).get("lane_line_ts")
+
+
+def test_only_open_plan_steps_after_a_gate_run_is_a_free_build_continuation(tmp_path):
+    """v0.181.62: BAL-1 (2026-11-05) ran its Studio gate mid-sprint, as its plan says;
+    verification then failed only au.plan_steps (steps still open by design) and each round
+    cost an attempt (3 -> 6). Now it is the partial-BUILD continuation: free, with the stall
+    guard (the same open steps, or no new commit, BUILD_STALL_LIMIT times -> normal repair)."""
+    root, _ = make_repo(tmp_path, "u", [T1])
+    prof = write_profile(tmp_path, "u", root, checks='''
+[[verify.checks]]
+name = "au.plan_steps"
+command = ["python", "-c", "import sys; sys.exit(1)"]
+''')
+    c = coordinator(tmp_path, [prof], {"u": write_ok("src/a.txt")})
+    c.approve("u", "T1", [], "victor")
+    assert run_until(c, lambda: c.store.q(
+        "SELECT 1 FROM events WHERE task_id='T1' AND kind='build_progress_verify'"))
+    first = c.store.q("SELECT detail FROM events WHERE task_id='T1' AND "
+                      "kind='build_progress_verify' ORDER BY id LIMIT 1")
+    assert first
+    hist = [h for h in c.store.history("u", "T1") if h["to_state"] == S.CHANGES_REQUIRED]
+    assert hist and hist[0]["evidence"].get("build_progress") is True
+    # the same head again and again is a stall: it ends in the normal repair path
+    assert run_until(c, lambda: c.store.q(
+        "SELECT 1 FROM events WHERE task_id='T1' AND kind='build_progress_stalled'"))
