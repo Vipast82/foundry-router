@@ -7558,6 +7558,8 @@ class Coordinator:
                     self._note(P, t, f"waiting for {res} ({first} is first in line)")
                     return {"resource": res, "project_id": pid, "task_id": first}
         held = self.store.acquire(resources, pid, tid)
+        if held and self._stale_fallback_gpu(P, held):
+            held = self.store.acquire(resources, pid, tid)
         if held:
             self._note(P, t, f"waiting for {held['resource']} (held by "
                              f"{held['project_id']}/{held['task_id']})")
@@ -7592,6 +7594,35 @@ class Coordinator:
             return {"resource": "writer"}
         self._journal_locks(P, t, [r for r in resources if r not in before], "acquire")
         return None
+
+    def _stale_fallback_gpu(self, P: Project, held: dict) -> bool:
+        """`gpu` held by a frontier sprint only because its session started in a
+        local-fallback window (infra.session_failure: local_fallback_until) that has ended:
+        release it, so a local sprint waiting for the GPU can start. 2026-11-05 BAL-1 began a
+        session at 07:32 while the Claude API was down. It held `gpu` past its fallback
+        window (08:16) while Claude served it again, and VR-AS02's closeout waited 75 min."""
+        res = str(held.get("resource") or "")
+        if res.split("#", 1)[0] != "gpu" or held.get("project_id") != P.id:
+            return False
+        hid = str(held.get("task_id") or "")
+        holder = self.store.task(P.id, hid)
+        if not holder:
+            return False
+        from .fast_lane import is_local_primary
+        try:
+            if is_local_primary(P, hid):
+                return False
+        except Exception:                                         # noqa: BLE001
+            return False
+        until = float(((holder.get("data") or {}).get("local_fallback_until")) or 0)
+        if until and until > self.clock():
+            return False
+        self.store.release(P.id, hid, [res])
+        self._journal_locks(P, holder, [res], "release")
+        self.store.event(P.id, hid, "local_fallback_gpu_released", detail={
+            "resource": res, "fallback_until": until or None,
+            "why": "the local-fallback window ended; the frontier serves this sprint again"})
+        return True
 
     GPU_LINE_STATES = (S.READY, S.CHANGES_REQUIRED, S.IMPLEMENTING, S.CLOSING)
 

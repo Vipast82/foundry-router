@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.60 — a GPU unit held past its local-fallback window is released for a waiter
+
+When a frontier sprint's model falls back to the busy local model (`local_busy`), the sprint queues for `gpu` for `LOCAL_FALLBACK_S` (`local_fallback_until`). A session that starts inside that window takes `gpu` and kept it for the whole session, even after the window ended and the frontier served the sprint again. On 2026-11-05 BAL-1 started a session at 07:32 while the Claude API was out of credit. It still held `gpu` at 08:50, served by Claude through Meridian, and VR-AS02's local closeout on the vr-a track waited 75 minutes behind it. When a sprint now waits for `gpu` held by a frontier sprint, and that sprint is not local-primary and its fallback window has ended, the unit is released (`local_fallback_gpu_released`) and the waiter takes it. A live window or a local-primary holder keeps the unit.
+
+Test: `tests/coordinator/test_engine.py::test_a_gpu_unit_held_past_the_local_fallback_window_is_released_for_a_waiter`.
+
 ## v0.181.59 — an inconclusive visual review waits and tries again instead of passing
 
 A screenshot or asset review that returned no valid verdict got one immediate structured retry. If that was also inconclusive, the frames were accepted with notes. On 2026-11-05 the Claude API route was down and the visual reviewer fell back to the local model. That model twice returned no valid verdict for VR-AS01's three heroes, so the sprint was approved with no real review.

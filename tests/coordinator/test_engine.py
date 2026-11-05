@@ -1192,6 +1192,38 @@ def test_a_local_fallback_hold_clears_while_the_frontier_serves_the_same_persona
         FL.is_local_primary = orig
 
 
+def test_a_gpu_unit_held_past_the_local_fallback_window_is_released_for_a_waiter(game):
+    """v0.181.60: BAL-1 (2026-11-05) began a session at 07:32 inside a local-fallback window.
+    It held `gpu` after the window ended at 08:16 while Claude served it again, and VR-AS02's
+    local closeout waited 75 min. A waiter now releases that stale hold; a live window or a
+    local-primary holder keeps the unit."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    try:
+        FL.is_local_primary = lambda P, tid: False
+        c.store.acquire(["gpu"], "game", "T1")
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() + 600)
+        t2 = c.store.task("game", "T2")
+        assert c._acquire(P, t2, ["gpu"]) is not None              # window still open: waits
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() - 1)
+        assert c._acquire(P, t2, ["gpu"]) is None                  # window over: T2 gets it
+        assert "gpu" not in c.store.holds("game", "T1")
+        assert c.store.q("SELECT 1 FROM events WHERE task_id='T1' AND "
+                         "kind='local_fallback_gpu_released'")
+        # a local-primary holder keeps its unit
+        c.store.release("game", "T2", ["gpu"])
+        c.store.acquire(["gpu"], "game", "T1")
+        FL.is_local_primary = lambda P, tid: tid == "T1"
+        assert c._acquire(P, c.store.task("game", "T2"), ["gpu"]) is not None
+    finally:
+        FL.is_local_primary = orig
+
+
 def test_a_short_decision_wait_keeps_the_sprints_gpu_unit(game):
     """2026-11-01 AS-A02: it stopped 3 minutes for a decision with a timeout default, gave up
     Strata, and AS-A10 took it for a whole turn. A decision that answers itself soon keeps the
