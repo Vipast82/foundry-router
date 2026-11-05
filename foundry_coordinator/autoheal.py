@@ -86,7 +86,14 @@ INFRA_SIGNATURES = (
                                  # 2026-10-31 AS-J05: OfficialStudio.resolve in the container
                                  # slot ("need exactly one Studio, found 0 (open: none)")
                                  r"exactly one studio[^,\n]{0,40},? found 0|\(open: none\)|"
-                                 r"place needs (?:reopening|to be reopened)", re.I)),
+                                 r"place needs (?:reopening|to be reopened)|"
+                                 # 2026-11-04 POL-2: Roblox HTTP errors closed the TEST place
+                                 # mid-gate; the MCP said "The requested `studio_id` is not
+                                 # connected - that Roblox Studio instance may have been closed
+                                 # or its place unloaded" (`studio_id` defeats \bstudio\b)
+                                 r"studio_id`?\s+is not connected|"
+                                 r"studio instance may have been closed|"
+                                 r"its place unloaded", re.I)),
     ("studio", re.compile(r"\bstudio\b[^.\n]{0,80}(?:not connected|disconnected|not "
                           r"running|plugin[^.\n]{0,30}(?:connect|timeout)|mcp[^.\n]{0,40}"
                           r"(?:unavailable|not connected|timed out))", re.I)),

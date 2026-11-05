@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.50 — a TEST place closed mid-gate reopens Studio instead of waiting
+
+On 2026-11-04 at 03:03 UTC, Roblox HTTP errors closed POL-2's TEST place in Studio partway through its scripted gate. The gate ended with `GateRunner.run tool error: The requested \`studio_id\` is not connected - that Roblox Studio instance may have been closed or its place unloaded`. No autoheal pattern matched: in `studio_id`, the underscore defeats `studio`. So the Studio auto-reopen (`[studio] auto_reopen`, on) never ran, and the Lead deferred the case as "environment" and only waited. The `studio_reload` signature now also matches that MCP wording (`studio_id is not connected`, `Studio instance may have been closed`, `its place unloaded`), so the stop gets the same place reopen as "Place is not open".
+
+Test: `tests/coordinator/test_revamp_lead.py::test_a_place_closed_mid_gate_reopens_studio`. Takes effect after the coordinator restart.
+
 ## v0.181.49 — a sprint's own Studio suites that already passed carry over while no code changed
 
 On 2026-11-04, POL-1's audit grew to seven suites of its own (POL_1..POL_1g). The scripted gate (`studio_gate calls`) never carried a sprint's own suites, so every rerun ran all seven again. Together they ran longer than the 30-minute run budget, so the last suite was cut as UNKNOWN on every run, and the gate could never go green. Under `--rerun failed`, an own suite that passed at an earlier run on HEAD's history now carries, as long as no `src/` or `tests/` file (and no harness file) has changed since. A real code or test change still reruns every own suite.

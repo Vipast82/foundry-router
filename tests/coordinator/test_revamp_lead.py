@@ -313,6 +313,18 @@ def test_the_official_mcp_found_0_wording_reopens_studio():
     assert autoheal.infra_signature("the shop panel opens with none selected") == ""
 
 
+def test_a_place_closed_mid_gate_reopens_studio():
+    """2026-11-04 POL-2: Roblox HTTP errors closed the TEST place mid-gate; the MCP said the
+    `studio_id` was not connected, which no pattern matched, and the Lead only waited."""
+    from foundry_coordinator import autoheal
+    msg = ("scripted Studio gate: tooling: GateRunner.run for the 2 selected rows failed: "
+           "GateRunner.run tool error: The requested `studio_id` is not connected — that "
+           "Roblox Studio instance may have been closed or its place unloaded. Call "
+           "`list_roblox_studios` for the current instances")
+    assert autoheal.plan("studio_calls_error", msg) == ("studio_reload", "restart")
+    assert autoheal.infra_signature("the studio_id field in the save is not connected to UI") == ""
+
+
 def test_operator_backup_files_in_the_deploy_checkout_never_trip_the_guard(tmp_path):
     """2026-11-02 AS-D18: the operator saved project.toml.bak-2026-11-02-roblox-library in the
     live deploy checkout while the lead diagnosed; the router status changed, the guard aborted
