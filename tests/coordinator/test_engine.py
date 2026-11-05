@@ -1255,6 +1255,48 @@ def test_a_track_sprint_sent_back_by_review_goes_before_a_new_sprint(game):
     assert c._track_fix_round_pending(P, t2) == ""
 
 
+def test_a_local_fallback_hold_clears_when_a_probe_finds_the_frontier_back(game):
+    """v0.181.63 (Victor 2026-11-05 "Yes, fix it"): BAL-1 kept a one-hour local hold after
+    Claude answered again. During a hold, a tiny probe through the implementer persona (at
+    most every local_fallback_probe_seconds) clears it when a non-local route answers."""
+    from types import SimpleNamespace
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    served = ["strata"]
+    calls = []
+
+    def chat(persona, messages, **kw):
+        calls.append(persona)
+        return "OK", {"served_backend": served[0]}
+    orig_foundry = P.foundry
+    P.foundry = SimpleNamespace(
+        persona_info=lambda p: {"routes": [{"backend": "meridian", "source": "subscription"},
+                                           {"backend": "strata", "source": "local"}]},
+        chat=chat)
+    try:
+        FL.is_local_primary = lambda P, tid: False
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() + 3600)
+        # still served locally: the hold stands
+        assert any(r.split("#")[0] == "gpu" for r in c._session_locks(P, c.store.task("game", "T1")))
+        assert len(calls) == 1
+        # within the probe interval: no second call
+        served[0] = "meridian"
+        assert any(r.split("#")[0] == "gpu" for r in c._session_locks(P, c.store.task("game", "T1")))
+        assert len(calls) == 1
+        # the interval passed and the frontier answers: the hold clears
+        c.store.merge_data("game", "T1", local_fallback_probe_ts=c.clock() - 601)
+        locks = c._session_locks(P, c.store.task("game", "T1"))
+        assert not any(r.split("#")[0] == "gpu" for r in locks) and len(calls) == 2
+        assert not c.store.task("game", "T1")["data"].get("local_fallback_until")
+    finally:
+        FL.is_local_primary = orig
+        P.foundry = orig_foundry
+
+
 def test_a_short_decision_wait_keeps_the_sprints_gpu_unit(game):
     """2026-11-01 AS-A02: it stopped 3 minutes for a decision with a timeout default, gave up
     Strata, and AS-A10 took it for a whole turn. A decision that answers itself soon keeps the

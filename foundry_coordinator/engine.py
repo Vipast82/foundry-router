@@ -7483,6 +7483,8 @@ class Coordinator:
                     self.store.event(P.id, t["task_id"], "local_fallback_cleared", detail={
                         "why": "the same persona is serving other sprints on the frontier"})
                     until = 0.0
+                if until > self.clock() and self._frontier_answers(P, cur):
+                    until = 0.0
                 if until > self.clock():
                     out.append(pick_unit(self.store, P, t["task_id"], "gpu"))
                 elif self._claude_session(P, t):
@@ -7562,6 +7564,46 @@ class Coordinator:
                 "cap": claude_capacity(P)})
             self.log(f"{P.id}: Claude usage {pct:.1f}% -> Claude agent cap "
                      f"{claude_capacity(P)}")
+
+    def _frontier_answers(self, P: Project, t: dict) -> bool:
+        """While a local-fallback hold lasts (infra.session_failure: local_fallback_until),
+        at most every [limits] local_fallback_probe_seconds (600; 0 = off) send one tiny
+        call through the sprint's implementer persona. When a non-local route answers, the
+        frontier is back: the hold is cleared and the sprint starts there. 2026-11-05 BAL-1:
+        Claude stopped answering while the router host's disk was full, BAL-1 got a one-hour
+        hold on the busy local model, and it stayed after Claude worked again. Never probes
+        for a sprint that already holds a `gpu` unit (it is the local stream)."""
+        pid, tid = P.id, t["task_id"]
+        every = int(P.profile.limit("local_fallback_probe_seconds", 600) or 0)
+        if not every or P.foundry is None:
+            return False
+        if any(str(r).split("#", 1)[0] == "gpu" for r in self.store.holds(pid, tid)):
+            return False
+        data = t.get("data") or {}
+        now = self.clock()
+        if now - float(data.get("local_fallback_probe_ts") or 0) < every:
+            return False
+        self.store.merge_data(pid, tid, local_fallback_probe_ts=now)
+        try:
+            persona = P.profile.persona("implementer", tid)
+            info = P.foundry.persona_info(persona) or {}
+            local = {r.get("backend") for r in info.get("routes") or []
+                     if r.get("source") == "local"}
+            _, meta = P.foundry.chat(persona, [{"role": "user", "content": "Reply with OK."}],
+                                     max_tokens=16, timeout=90)
+            served = str((meta or {}).get("served_backend") or "")
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(pid, tid, "local_fallback_probe", detail={
+                "result": "no answer", "error": str(e)[:200]})
+            return False
+        back = bool(served) and served not in local
+        self.store.event(pid, tid, "local_fallback_probe", detail={
+            "result": "frontier answers" if back else "still local", "backend": served})
+        if back:
+            self.store.merge_data(pid, tid, local_fallback_until=None)
+            self.store.event(pid, tid, "local_fallback_cleared", detail={
+                "why": f"the implementer persona answered on {served} (probe)"})
+        return back
 
     def _frontier_serving(self, P: Project, t: dict) -> bool:
         """Another sprint whose implementer is this task's (non-local) persona has a session

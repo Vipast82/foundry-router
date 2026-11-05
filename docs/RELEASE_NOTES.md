@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.63 — a local-fallback hold ends when a probe finds the frontier answering
+
+When a frontier sprint's model fell to the busy local model (`local_busy`), the sprint was held for the GPU for an hour (`local_fallback_until`, `LOCAL_FALLBACK_S`). The hold cleared early only when another sprint with the same persona was visibly served by the frontier. On 2026-11-05 Claude stopped answering while the router host's disk was full. BAL-1 got the hold and, the only Claude sprint running, waited behind the local model after Claude worked again. During a hold, the coordinator now sends one tiny call ("Reply with OK.", 16 tokens) through the sprint's implementer persona, at most every `[limits] local_fallback_probe_seconds` (default 600; 0 = off). When a non-local route answers (the backend's route source is not `local`), the hold is cleared and the sprint starts there. A sprint already holding a GPU unit is never probed. Events: `local_fallback_probe`, `local_fallback_cleared`.
+
+Test: `tests/coordinator/test_engine.py::test_a_local_fallback_hold_clears_when_a_probe_finds_the_frontier_back`.
+
 ## v0.181.62 — open plan steps after a mid-sprint gate run are a free BUILD continuation
 
 v0.181.52 added `au.plan_steps`, which fails verification while any Steps row except CLOSE is unticked. Plans ask for a scripted Studio gate run in the middle of BUILD ("end the turn with the STUDIO_GATE block"). After that run, the coordinator verifies, and the only failing check was `au.plan_steps`, because the later steps were still open by design. Each such round went to CHANGES_REQUIRED and the next session cost an implementation attempt. On 2026-11-05 BAL-1 went from attempt 3 to attempt 6 in 15 minutes. When `au.plan_steps` (any `*.plan_steps` check) is the only failing required check, verification now gives the free partial-BUILD continuation, the one an idle session with open steps already gets (`build_progress_verify`). It has the same stall guard: the same open steps, or no new commit when the plan has no checklist, `BUILD_STALL_LIMIT` times in a row goes to the normal repair path (`build_progress_stalled`).
