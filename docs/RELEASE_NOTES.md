@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.58 — a usage-budget refusal pauses until the reset it names
+
+When every model of a persona's route is denied by the router's usage budget, the refusal says when the budget resets ("... resets in 2h 25m"). The coordinator ignored that in two places:
+- **A refusal returned to the coordinator:** it paused for the default 15 minutes whenever no Retry-After came with the refusal.
+- **A refusal Kilo kept retrying:** it was handled as a router outage. The session was aborted after about 16 minutes and a new one started 60 seconds later.
+
+On 2026-11-05 VR-AS20 and VR-AS21 hit the ChatGPT 5-hour window and restarted roughly every 17 minutes for about 2.5 hours. `infra.budget_reset_seconds()` now reads the reset time, plus a minute of slack. Both paths pause the task until then: `_on_denial` when the refusal carries no Retry-After, and `kilo_retry`, which now calls `_on_denial` with category budget. A closeout session keeps the old infra wait.
+
+Tests: `tests/coordinator/test_infra_outages.py::test_budget_reset_time_is_read_from_the_refusal_text`, `::test_a_budget_refusal_in_kilo_retry_pauses_until_the_reset`.
+
 ## v0.181.57 — visual fix rounds bring their own attempt and review budget
 
 Each visual fix round, sent back after closeout by the screenshot review, costs one attempt, one session, one closeout and one code review. AU allows 8 rounds (`[approval] visual_rounds_max`). The ordinary budget (`max_attempts`, `max_review_calls`) ran out long before that. On 2026-11-05 VR-MAP1 was parked twice on `review_budget`. The Lead escalated to Victor twice, and the timeout default stopped the task, including after the decision to close it had already been accepted. `effective_limits` now adds one attempt, session, closeout and review call per visual round the task has used, capped at `visual_rounds_max`. With no `visual_rounds_max` set, nothing changes. The ledger itself is unchanged: usage is still counted, and the extra room comes from the round count, which is bounded.

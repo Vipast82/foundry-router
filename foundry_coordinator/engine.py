@@ -2062,6 +2062,8 @@ class Coordinator:
             return self._block(P, t, f"Foundry refused the call ({cat}): {text[:300]}")
         until = None
         if cat == "budget":
+            from .infra import budget_reset_seconds
+            retry = retry or budget_reset_seconds(text)
             until = self.clock() + (retry or 900) if P.profile.limits.get(
                 "auto_resume_after_budget_reset", True) else None
         elif cat == "route":

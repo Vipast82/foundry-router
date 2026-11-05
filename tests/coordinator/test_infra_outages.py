@@ -141,6 +141,51 @@ def test_kilo_retry_stops_the_session_as_a_free_infra_wait(tmp_path):
     assert waits and waits[0]["kind"] == "session" and waits[0]["delay_s"] >= 60
 
 
+BUDGET_ERR = ("Foundry-Kilo-Sol: every model in its route was denied by the usage budget "
+              "(gpt-6.1-sol: ChatGPT plus 5-hour at 95% (limit 95%), resets in 2h 25m - use "
+              "another model or wait). This persona uses strict routing")
+
+
+class BudgetRetryKilo(BusyKilo):
+    """The session sits in Kilo's retry state on a usage-budget refusal."""
+
+    def state(self, session_id, *, directory, since_ts):
+        s = self.sessions.get(session_id)
+        if s is not None and s.get("busy"):
+            return SessionState(status="busy", retry=True, error=BUDGET_ERR)
+        return super().state(session_id, directory=directory, since_ts=since_ts)
+
+
+def test_budget_reset_time_is_read_from_the_refusal_text():
+    from foundry_coordinator.infra import budget_reset_seconds as b
+    assert b(BUDGET_ERR) == 2 * 3600 + 25 * 60 + 60
+    assert b("... denied by the usage budget (x, resets in 40m)") == 40 * 60 + 60
+    assert b("denied by the usage budget (resets in 1d 2h)") == 86400 + 7200 + 60
+    assert b("fetch failed") is None and b("denied by the usage budget") is None
+
+
+def test_a_budget_refusal_in_kilo_retry_pauses_until_the_reset(tmp_path):
+    """v0.181.58: VR-AS20/21 (2026-11-05) hit the ChatGPT 5-hour budget. Kilo retried for
+    ~16 min, the coordinator called it an outage and restarted the session after 60 s (or
+    after a default 15 min pause), again and again for 2.5 h. Now the task pauses until the
+    reset the refusal names."""
+    clock = Clock()
+    k = BudgetRetryKilo(good, [])
+    c = env(tmp_path, k, clock)
+    for _ in range(20):
+        c.tick()
+        clock.advance(31)
+        if c.store.task("game", "T1")["state"] == S.PAUSED:
+            break
+    t = c.store.task("game", "T1")
+    assert t["state"] == S.PAUSED, (t["state"], t["next_action"])
+    assert len(k.aborts) == 1
+    [a] = events(c, "kilo_retry_abort")
+    assert a["budget_reset_s"] == 2 * 3600 + 25 * 60 + 60
+    assert t["pause_until"] >= clock() + 2 * 3600
+    assert not events(c, "infra_wait")
+
+
 # ------------------------------------------------------------------ session timeout wrap-up
 
 def _commit(ws, rel, text, msg):

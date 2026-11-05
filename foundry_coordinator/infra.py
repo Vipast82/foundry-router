@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -284,6 +285,22 @@ def active_seconds(c, t: dict, now: Optional[float] = None) -> float:
     return total
 
 
+_RESETS_IN = re.compile(r"denied by the usage budget.*?resets in\s+(?:(\d+)\s*d\s*)?"
+                       r"(?:(\d+)\s*h\s*)?(?:(\d+)\s*m(?:in)?(?![a-z]))?", re.I | re.S)
+
+
+def budget_reset_seconds(text: str) -> Optional[int]:
+    """Seconds until the router's usage budget resets, read from its refusal text ("...
+    denied by the usage budget (... resets in 2h 39m ...)"), plus a minute of slack; None
+    when the text is no budget refusal or names no time."""
+    m = _RESETS_IN.search(str(text or ""))
+    if not m or not any(m.groups()):
+        return None
+    d, h, mi = (int(x or 0) for x in m.groups())
+    secs = d * 86400 + h * 3600 + mi * 60
+    return secs + 60 if secs > 0 else None
+
+
 def kilo_retry(c, P, t: dict, sid: str, s, phase: str) -> bool:
     """Kilo reports the session in "retry" (its provider call keeps failing: the
     router or the model is down). The start of a continuous retry is recorded per
@@ -308,6 +325,19 @@ def kilo_retry(c, P, t: dict, sid: str, s, phase: str) -> bool:
     held = now - float(rs.get("since") or now)
     if not limit or held < limit:
         return False
+    reset = budget_reset_seconds(err)
+    if reset and phase != "closeout":
+        # Not an outage: the router's usage budget denied every model of the route and
+        # said when it resets. Pause until then; retrying sooner only spends a session
+        # (VR-AS20/21 2026-11-05 restarted every ~17 min for 2.5 h of a ChatGPT window).
+        P.client.abort(sid, directory=P.profile.workspace)
+        c._end_session(P, sid, "budget_refusal")
+        c.store.merge_data(pid, tid, kilo_retry=None)
+        c.store.event(pid, tid, "kilo_retry_abort", session_id=sid, detail={
+            "phase": phase, "seconds": int(held), "error": err, "budget_reset_s": reset})
+        c._on_denial(P, t, {"category": "budget", "retry_after": reset}, err,
+                     t.get("state") or "IMPLEMENTING", sid)
+        return True
     why = (f"Kilo kept retrying the model call for {int(held)} s (router or model outage)"
            + (f": {err}" if err else ""))
     P.client.abort(sid, directory=P.profile.workspace)
