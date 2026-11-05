@@ -400,6 +400,21 @@ def test_visual_fixes_loop_with_a_judge_until_clean_or_the_cap():
     assert not rej and len(appr) == 1 and any(k == "visual_rounds_exhausted" for k, _ in ev)
 
 
+def test_the_judge_binds_a_role_the_router_accepts():
+    """v0.181.55: the judge bound its router session as role "visual_judge" and the router
+    answered HTTP 400 invalid_work_binding, so VR-MAP1 looped on findings no judge ruled on
+    until its review budget ran out (2026-11-05 01:13)."""
+    from foundry_router.orchestration import ROLES
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(2, {"visual_rounds_before_judge": 2,
+                                                       "visual_rounds_max": 8}, [
+        {"finding": "docs/evidence/POL-9/a.png: x", "ruling": "owner", "instruction": ""}])
+    bound = []
+    P.foundry.bind = lambda *a, **k: bound.append(a[4])
+    out = VA._judge(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"},
+                    ["docs/evidence/POL-9/a.png: x"])
+    assert out and bound and all(r in ROLES for r in bound)
+
+
 def test_visual_judge_is_a_known_profile_role():
     """v0.181.54: a profile naming [roles] visual_judge failed to load ("unknown roles") and
     the coordinator exited with code 2 on restart (2026-11-04 23:29)."""

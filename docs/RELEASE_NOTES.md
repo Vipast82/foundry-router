@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.55 — the visual judge opens its router session under a role the router accepts
+
+The judge bound its router work session as role `visual_judge`. The router's work binding only knows implementer, researcher, reviewer, deep_reviewer, visual_reviewer, image_generator, coordinator and helper, so every call failed with HTTP 400 `invalid_work_binding` (`visual_judge_unavailable` events). On 2026-11-05 VR-MAP1's frames came back three times with findings that need new art (proxy towers, box trees). No judge ever ruled them `owner`, so the sprint kept looping until its review budget ran out and the Lead asked Victor. The judge now binds as `visual_reviewer`. `[roles] visual_judge` still picks its persona.
+
+Test: `tests/coordinator/test_visual_model_approval.py::test_the_judge_binds_a_role_the_router_accepts`.
+
 ## v0.181.54 — `visual_judge` is a known profile role
 
 v0.181.53 added the `visual_judge` role (the vision model that rules on findings a fix round did not clear), but `PROFILE_ROLES` did not list it. On 2026-11-04 at 23:29 the AU profile named it, the profile failed to load ("unknown roles ['visual_judge']"), and the coordinator exited with code 2 on restart until the line was commented out. The role is now known, and the Automation settings page shows its field. It is a direct model call, so it has no role rules.

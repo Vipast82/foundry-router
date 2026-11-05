@@ -626,7 +626,9 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
             return None
         sid = "visual-judge-" + hashlib.sha256(
             json.dumps([revision, findings]).encode()).hexdigest()[:20]
-        P.foundry.bind(sid, pid, tid, t.get("run_id") or "", "visual_judge", persona,
+        # The router's work binding knows visual_reviewer, not visual_judge (that name is
+        # only the profile role that picks the persona); VR-MAP1 2026-11-05 got HTTP 400.
+        P.foundry.bind(sid, pid, tid, t.get("run_id") or "", "visual_reviewer", persona,
                        parent=t.get("session_id") or "", purpose="review")
         raw, meta = P.foundry.chat(persona, [
             {"role": "system", "content": "You are an impartial vision judge. Rule only on "
