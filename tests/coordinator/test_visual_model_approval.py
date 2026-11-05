@@ -398,3 +398,12 @@ def test_visual_fixes_loop_with_a_judge_until_clean_or_the_cap():
     VA, P, c, t, ev, rej, appr, calls = _judge_env(4, cfg, [])
     VA._changes(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"}, "model:r", f)
     assert not rej and len(appr) == 1 and any(k == "visual_rounds_exhausted" for k, _ in ev)
+
+
+def test_visual_judge_is_a_known_profile_role():
+    """v0.181.54: a profile naming [roles] visual_judge failed to load ("unknown roles") and
+    the coordinator exited with code 2 on restart (2026-11-04 23:29)."""
+    from foundry_automation.schema import PROFILE_ROLES, roles_table
+    assert "visual_judge" in PROFILE_ROLES
+    roles = {"implementer": "I", "visual_judge": "Foundry-Kilo-Visual-Review"}
+    assert roles_table("p.toml", roles) == roles

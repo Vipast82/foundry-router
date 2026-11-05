@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.54 — `visual_judge` is a known profile role
+
+v0.181.53 added the `visual_judge` role (the vision model that rules on findings a fix round did not clear), but `PROFILE_ROLES` did not list it. On 2026-11-04 at 23:29 the AU profile named it, the profile failed to load ("unknown roles ['visual_judge']"), and the coordinator exited with code 2 on restart until the line was commented out. The role is now known, and the Automation settings page shows its field. It is a direct model call, so it has no role rules.
+
+Test: `tests/coordinator/test_visual_model_approval.py::test_visual_judge_is_a_known_profile_role`.
+
 ## v0.181.53 — every screenshot set gets reviewed, in batches, with fix rounds and a judge; skills by sprint type
 
 On 2026-11-04 the AU polish phase showed that the coordinator's visual review almost never ran. POL-1 committed 207 captures and read about 5; POL-3 and POL-4 made visual fixes with no captures; 74 completed sprints hold 1,478 captures no model ever looked at. Causes and fixes:

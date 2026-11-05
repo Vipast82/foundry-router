@@ -28,8 +28,10 @@ from typing import Any, Optional
 PROFILE_SCHEMA = 1
 
 # Roles the coordinator's [roles] table accepts (profile.py).
+# visual_judge (v0.181.54): the second vision model that rules on findings a fix round did
+# not clear (visual_approval._judge); a direct call, so it has no role rules
 PROFILE_ROLES = ("implementer", "planner", "researcher", "reviewer", "deep_reviewer",
-                 "visual_reviewer", "image_generator")
+                 "visual_reviewer", "visual_judge", "image_generator")
 # Roles that carry role rules (permissions / scopes). lead, helper and
 # coordinator have no [roles] entry: their personas live in other tables
 # (see `role_binding` on the fields).
