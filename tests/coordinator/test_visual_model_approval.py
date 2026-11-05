@@ -415,6 +415,31 @@ def test_the_judge_binds_a_role_the_router_accepts():
     assert out and bound and all(r in ROLES for r in bound)
 
 
+def test_a_refused_judge_persona_falls_back_to_the_visual_reviewer():
+    """v0.181.56: the router refused the judge persona for the coordinator's key ("client
+    'coordinator' may not use model 'Foundry-Kilo-Vision-Deep'"), so no judge ruled and
+    VR-MAP1 kept looping on new-art findings. The visual reviewer's persona judges then."""
+    f = ["docs/evidence/POL-9/a.png: placeholder prop"]
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(2, {}, [
+        {"finding": f[0], "ruling": "owner", "instruction": ""}])
+    P.profile.persona = lambda role, tid: {"visual_judge": "Deep",
+                                           "visual_reviewer": "Review"}[role]
+    used = []
+
+    def chat(persona, messages, **kw):
+        used.append(persona)
+        if persona == "Deep":
+            raise RuntimeError("Foundry refused (config/model_not_allowed): client "
+                               "'coordinator' may not use model 'Deep'")
+        return json.dumps({"rulings": [{"finding": f[0], "ruling": "owner",
+                                        "instruction": ""}]}), {"served_model": "m"}
+    P.foundry.chat = chat
+    out = VA._judge(c, P, t, "rev", {"docs/evidence/POL-9/a.png": "x"}, f)
+    assert used == ["Deep", "Review"] and out[0]["ruling"] == "owner"
+    assert any(k == "visual_judge_unavailable" for k, _ in ev)
+    assert any(k == "visual_judge" and d["persona"] == "Review" for k, d in ev)
+
+
 def test_visual_judge_is_a_known_profile_role():
     """v0.181.54: a profile naming [roles] visual_judge failed to load ("unknown roles") and
     the coordinator exited with code 2 on restart (2026-11-04 23:29)."""

@@ -592,10 +592,14 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
     fix round: real (fix it, with an instruction), not_a_defect, or owner. None when the
     judge cannot run (no vision route, an error): the caller keeps the fix loop going."""
     pid, tid = P.id, t["task_id"]
-    try:
-        persona = P.profile.persona("visual_judge", tid)
-    except Exception:                                            # noqa: BLE001
-        persona = JUDGE_PERSONA
+    personas = []
+    for role, default in (("visual_judge", JUDGE_PERSONA), ("visual_reviewer", "")):
+        try:
+            name = P.profile.persona(role, tid)
+        except Exception:                                        # noqa: BLE001
+            name = default
+        if name and name not in personas:
+            personas.append(name)
     if P.foundry is None:
         return None
     named = [r for r in arts if any(str(f).startswith(r) for f in findings)][:BATCH_FRAMES]
@@ -619,24 +623,35 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
         parts.append({"type": "text", "text": f"Frame {rel}"})
         parts.append({"type": "image_url", "image_url": {
             "url": f"data:{mime};base64,{base64.b64encode(blob).decode()}"}})
-    try:
-        info = P.foundry.persona_info(persona) or {}
-        routes = info.get("routes") or []
-        if not routes or not all(r.get("vision") is True for r in routes):
-            return None
-        sid = "visual-judge-" + hashlib.sha256(
-            json.dumps([revision, findings]).encode()).hexdigest()[:20]
-        # The router's work binding knows visual_reviewer, not visual_judge (that name is
-        # only the profile role that picks the persona); VR-MAP1 2026-11-05 got HTTP 400.
-        P.foundry.bind(sid, pid, tid, t.get("run_id") or "", "visual_reviewer", persona,
-                       parent=t.get("session_id") or "", purpose="review")
-        raw, meta = P.foundry.chat(persona, [
-            {"role": "system", "content": "You are an impartial vision judge. Rule only on "
-             "what the attached frames show."},
-            {"role": "user", "content": parts}], session_id=sid, max_tokens=3000,
-            schema=JUDGE_SCHEMA)
-    except Exception as e:                                       # noqa: BLE001
-        c.store.event(pid, tid, "visual_judge_unavailable", detail={"error": str(e)[:300]})
+    raw = meta = None
+    persona = ""
+    # The configured judge first; when the router refuses it (a persona this client key
+    # may not use: VR-MAP1 2026-11-05 "may not use model 'Foundry-Kilo-Vision-Deep'") or it
+    # has no vision route, the visual reviewer's persona judges, so rulings still happen.
+    for persona in personas:
+        try:
+            info = P.foundry.persona_info(persona) or {}
+            routes = info.get("routes") or []
+            if not routes or not all(r.get("vision") is True for r in routes):
+                c.store.event(pid, tid, "visual_judge_unavailable", detail={
+                    "persona": persona, "error": "no vision route on every model"})
+                continue
+            sid = "visual-judge-" + hashlib.sha256(
+                json.dumps([revision, findings, persona]).encode()).hexdigest()[:20]
+            # The router's work binding knows visual_reviewer, not visual_judge (that name
+            # is only the profile role that picks the persona); VR-MAP1 got HTTP 400.
+            P.foundry.bind(sid, pid, tid, t.get("run_id") or "", "visual_reviewer", persona,
+                           parent=t.get("session_id") or "", purpose="review")
+            raw, meta = P.foundry.chat(persona, [
+                {"role": "system", "content": "You are an impartial vision judge. Rule only "
+                 "on what the attached frames show."},
+                {"role": "user", "content": parts}], session_id=sid, max_tokens=3000,
+                schema=JUDGE_SCHEMA)
+            break
+        except Exception as e:                                   # noqa: BLE001
+            c.store.event(pid, tid, "visual_judge_unavailable", detail={
+                "persona": persona, "error": str(e)[:300]})
+    if raw is None:
         return None
     rulings = (_answer(raw) or {}).get("rulings")
     if not isinstance(rulings, list) or not rulings:

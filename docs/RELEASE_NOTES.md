@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.56 — a refused judge persona falls back to the visual reviewer
+
+After v0.181.55 the judge reached the router, but the router refused its persona for the coordinator's client key: "client 'coordinator' may not use model 'Foundry-Kilo-Vision-Deep'". The persona is not in that key's allowed list. No judge ruled, and VR-MAP1 kept looping on findings that need new art. The judge now tries `[roles] visual_judge` first. When the router refuses it, or it lacks a vision route on every model, the `visual_reviewer` persona judges instead. Each refusal is still logged as `visual_judge_unavailable`, with the persona named. The live AU profile now names `Foundry-Kilo-Vision`, which that key allows.
+
+Test: `tests/coordinator/test_visual_model_approval.py::test_a_refused_judge_persona_falls_back_to_the_visual_reviewer`.
+
 ## v0.181.55 — the visual judge opens its router session under a role the router accepts
 
 The judge bound its router work session as role `visual_judge`. The router's work binding only knows implementer, researcher, reviewer, deep_reviewer, visual_reviewer, image_generator, coordinator and helper, so every call failed with HTTP 400 `invalid_work_binding` (`visual_judge_unavailable` events). On 2026-11-05 VR-MAP1's frames came back three times with findings that need new art (proxy towers, box trees). No judge ever ruled them `owner`, so the sprint kept looping until its review budget ran out and the Lead asked Victor. The judge now binds as `visual_reviewer`. `[roles] visual_judge` still picks its persona.
