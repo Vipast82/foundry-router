@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.57 — visual fix rounds bring their own attempt and review budget
+
+Each visual fix round, sent back after closeout by the screenshot review, costs one attempt, one session, one closeout and one code review. AU allows 8 rounds (`[approval] visual_rounds_max`). The ordinary budget (`max_attempts`, `max_review_calls`) ran out long before that. On 2026-11-05 VR-MAP1 was parked twice on `review_budget`. The Lead escalated to Victor twice, and the timeout default stopped the task, including after the decision to close it had already been accepted. `effective_limits` now adds one attempt, session, closeout and review call per visual round the task has used, capped at `visual_rounds_max`. With no `visual_rounds_max` set, nothing changes. The ledger itself is unchanged: usage is still counted, and the extra room comes from the round count, which is bounded.
+
+Test: `tests/coordinator/test_obligations.py::test_visual_fix_rounds_bring_their_own_attempt_and_review_room`.
+
 ## v0.181.56 — a refused judge persona falls back to the visual reviewer
 
 After v0.181.55 the judge reached the router, but the router refused its persona for the coordinator's client key: "client 'coordinator' may not use model 'Foundry-Kilo-Vision-Deep'". The persona is not in that key's allowed list. No judge ruled, and VR-MAP1 kept looping on findings that need new art. The judge now tries `[roles] visual_judge` first. When the router refuses it, or it lacks a vision route on every model, the `visual_reviewer` persona judges instead. Each refusal is still logged as `visual_judge_unavailable`, with the persona named. The live AU profile now names `Foundry-Kilo-Vision`, which that key allows.

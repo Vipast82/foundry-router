@@ -206,6 +206,25 @@ def _sha(text: str, n: int = 16) -> str:
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:n]
 
 
+# A visual fix round (visual_approval, after closeout) costs one more attempt, session,
+# closeout and review. Its rounds are bounded by [approval] visual_rounds_max, so each
+# round brings that room with it. 2026-11-05 VR-MAP1: 8 rounds were allowed, but the
+# ordinary budget ran out first. The sprint parked and the Lead asked Victor twice.
+VISUAL_ROUND_KEYS = ("ordinary", "sessions", "closeout", "review_calls")
+
+
+def visual_round_allowance(P, trow) -> int:
+    d = (trow or {}).get("data") if isinstance(trow, dict) else None
+    d = d if isinstance(d, dict) else {}
+    try:
+        rounds = max(0, int(d.get("visual_changes_rounds") or 0))
+        cfg = (getattr(getattr(P, "profile", None), "raw", None) or {}).get("approval") or {}
+        cap = int(cfg.get("visual_rounds_max") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return min(rounds, cap) if cap else 0
+
+
 def _tid(t) -> str:
     return t if isinstance(t, str) else str(t["task_id"])
 
@@ -1343,12 +1362,13 @@ class Obligations:
         trow = t if isinstance(t, dict) else (self.store.task(P.id, task) or {"data": {}})
         c = self.counters(P.id, task, since=budget_epoch(trow))
         out = {}
+        visual = visual_round_allowance(P, trow)
         for key, (counter, lim_key, default) in LIMITS.items():
             if key == "guided_extra":
                 from .retry_guidance import RetryGuidance
                 base = RetryGuidance.allowance(trow)
             else:
-                base = _limit(P, lim_key, default)
+                base = _limit(P, lim_key, default) + (visual if key in VISUAL_ROUND_KEYS else 0)
             used, auth = c.get(counter, 0), c.get(AUTH_PREFIX + counter, 0)
             mx = base + auth
             out[key] = {"counter": counter, "used": used, "base_max": base, "authorized": auth,

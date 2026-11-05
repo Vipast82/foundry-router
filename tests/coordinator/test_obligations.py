@@ -659,3 +659,22 @@ def test_plan_seeded_suite_labels_are_retired_when_not_a_suite(store):
     ob._retire_non_suites(P, spec())
     assert ob.get("game", "UI-01", "build.suite.S1")["status"] == "superseded"
     assert ob.get("game", "UI-01", "build.suite.S45")["status"] == "open"
+
+
+def test_visual_fix_rounds_bring_their_own_attempt_and_review_room(store):
+    """v0.181.57: a visual fix round costs an attempt, a session, a closeout and a review.
+    VR-MAP1 (2026-11-05) was allowed 8 rounds but ran out of review calls and attempts
+    first, parked, and the Lead asked Victor twice. Each round now adds one of each,
+    bounded by [approval] visual_rounds_max; without that setting nothing changes."""
+    ob = Obligations(store)
+    P = project(limits={"max_attempts": 3, "max_review_calls": 4})
+    P.profile.raw = {"approval": {"visual_rounds_max": 8}}
+    t = task_row(store, data={"visual_changes_rounds": 3})
+    lim = ob.effective_limits(P, t)
+    assert lim["review_calls"]["max"] == 7 and lim["ordinary"]["max"] == 6
+    assert lim["closeout"]["max"] == lim["closeout"]["base_max"] and lim["closeout"]["max"] >= 5
+    assert lim["review_errors"]["max"] == ob.effective_limits(project(), t)["review_errors"]["max"]
+    t9 = task_row(store, tid="UI-02", data={"visual_changes_rounds": 20})
+    assert ob.effective_limits(P, t9)["review_calls"]["max"] == 12      # capped at 8 rounds
+    assert ob.effective_limits(project(limits={"max_review_calls": 4}), t)[
+        "review_calls"]["max"] == 4                                       # no visual_rounds_max
