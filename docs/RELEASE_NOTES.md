@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.51 — the Studio gate re-checks a sync in progress before calling it stale
+
+On 2026-11-04, POL-3 added a check file and a mount. The auto-heal restarted Rojo and reopened the TEST place, and the gate verified 30 s later, while Rojo's first sync of the big place was still running (`matched=0/4`). It called that "stale sync". The next auto-heal restarted Rojo again, which dropped the sync in progress, and the reopen rate limit (2 per hour) then left Studio unsynced. `studio_gate calls` now takes `--sync-wait-s N`: a failed PRE-PLAY verify is re-run every 15 s until it passes or N seconds are spent. The coordinator's pipeline passes 90 s by default (`studio_calls pipeline --sync-wait-s`).
+
+Test: `tests/coordinator/test_studio_gate_calls.py::test_a_verify_still_syncing_is_rerun_before_it_is_called_stale`. Takes effect after the coordinator restart.
+
 ## v0.181.50 — a TEST place closed mid-gate reopens Studio instead of waiting
 
 On 2026-11-04 at 03:03 UTC, Roblox HTTP errors closed POL-2's TEST place in Studio partway through its scripted gate. The gate ended with `GateRunner.run tool error: The requested \`studio_id\` is not connected - that Roblox Studio instance may have been closed or its place unloaded`. No autoheal pattern matched: in `studio_id`, the underscore defeats `studio`. So the Studio auto-reopen (`[studio] auto_reopen`, on) never ran, and the Lead deferred the case as "environment" and only waited. The `studio_reload` signature now also matches that MCP wording (`studio_id is not connected`, `Studio instance may have been closed`, `its place unloaded`), so the stop gets the same place reopen as "Place is not open".

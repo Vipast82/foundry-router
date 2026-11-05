@@ -3910,6 +3910,9 @@ def run_calls(a, out=print, official=None, community=None, run_cmd=default_run_c
         release_lock(a.repo)
 
 
+SYNC_POLL_S = 15.0
+
+
 def _own_suite_carry(g: "Gate", a, sprint: str, head: str, rows: list, sel: dict) -> dict:
     """The sprint's own suites that passed at an earlier run on HEAD's history with no
     src/ or tests/ file (and no harness file) changed since: carried, not re-run, under
@@ -4019,6 +4022,21 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             g.checks.pop()
             g.live_verify(expect, cid="calls.verify_pre", running=running)
             pre = g.checks[-1]
+        # 2026-11-04 POL-3: the auto-heal reopened the TEST place and the gate verified 30 s
+        # later, while Rojo's first sync of the big place was still running: "stale sync",
+        # so the next auto-heal restarted Rojo (dropping that sync) and the reopen rate limit
+        # left Studio unsynced. A failed verify is re-run until it passes or the wait is spent.
+        waited, wait_s = 0.0, float(getattr(a, "sync_wait_s", 0) or 0)
+        while pre["result"] not in ("PASS", "SKIP") and waited < wait_s:
+            step = min(SYNC_POLL_S, wait_s - waited)
+            time.sleep(step)
+            waited += step
+            g.checks.pop()
+            g.live_verify(expect, cid="calls.verify_pre", running=running)
+            pre = g.checks[-1]
+        if waited:
+            g.emit(f"NOTE PRE-PLAY verify re-run for {int(waited)} s while Studio synced: "
+                   f"{pre['result']}")
         ctx["verify_pre"] = g.last_verify_text
         g.emit(f"PRE-PLAY VERIFY (GateRunner.verifyLive, Edit DM, fresh GateRunner clone, map "
                f"docs/progress/{sprint}_gate_expect.json): {pre['result']}")
@@ -4575,6 +4593,9 @@ def build_parser() -> argparse.ArgumentParser:
                         f"{RUN_BUDGET_MIN:g} otherwise)")
     s.add_argument("--group-min", dest="group_min", type=float, default=GROUP_BUDGET_MIN,
                    help="per suite group budget (a hung group becomes UNKNOWN)")
+    s.add_argument("--sync-wait-s", dest="sync_wait_s", type=float, default=0.0,
+                   help="re-run a failed PRE-PLAY verify for up to N s before calling the sync "
+                        "stale (a just-reopened place is still syncing)")
     s.add_argument("--background", action="store_true")
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="list rows, CALLs, DYNARG, bridges, manual rows and the carry plan; "

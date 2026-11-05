@@ -895,3 +895,23 @@ def test_the_sprints_own_suite_reruns_after_a_test_or_src_change(fakes, repo):
     run = next(c for c in calls()[n0:] if ".run(" in c["args"].get("code", ""))
     assert "S28" in run["args"]["code"]
     assert "CARRIED" not in lines_of(repo, "R1")
+
+
+def test_a_verify_still_syncing_is_rerun_before_it_is_called_stale(fakes, repo, monkeypatch):
+    """2026-11-04 POL-3: the gate verified 30 s after the auto-heal reopened the TEST place,
+    while Rojo's first sync was still running, and called it stale; the next auto-heal then
+    restarted Rojo and the reopen rate limit left Studio unsynced. With --sync-wait-s a failed
+    PRE-PLAY verify is re-run until it passes or the wait is spent."""
+    set_rules, calls = fakes
+    monkeypatch.setattr(G.time, "sleep", lambda s: None)
+    bad = {"tool": "execute_luau", "match": "verifyLive", "times": 2,
+           "text": "MISMATCH tests/S28_check.lua live=00000000 head=1dd2c64f\n"
+                   "VERIFY matched=0/1 mismatched=1 unresolved=0 skipped=0"}
+    off, comm = rules(UI)
+    set_rules([bad] + off, comm)
+    host_half(repo, "V2")
+    rc, out = run_calls(repo, "V2", "--regression", "subset:ui", "--sync-wait-s", "60")
+    assert rc == 0, out
+    text = lines_of(repo, "V2")
+    assert "NOTE PRE-PLAY verify re-run for 30 s while Studio synced: PASS" in text
+    assert any(".run(" in c["args"].get("code", "") for c in calls())

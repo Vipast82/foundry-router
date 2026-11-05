@@ -323,6 +323,8 @@ def run_pipeline(a, run: Callable = run_step, log: Callable = print) -> dict:
                                           "--regression", a.regression or "none", "--rerun",
                                           a.rerun, "--tier", a.tier, "--budget-min",
                                           str(a.budget_min), "--group-min", str(a.group_min)])
+    if float(getattr(a, "sync_wait_s", 0) or 0) > 0:
+        calls_cmd += ["--sync-wait-s", str(a.sync_wait_s)]
     if split_ids(a.suites):
         calls_cmd += ["--suites", ",".join(split_ids(a.suites))]
     place = getattr(a, "place", None) or gate_place()
@@ -381,6 +383,8 @@ def _pipeline_parser() -> argparse.ArgumentParser:
     p.add_argument("--group-min", dest="group_min", type=float, default=10.0)
     p.add_argument("--budget-min", dest="budget_min", type=float, default=30.0)
     p.add_argument("--host-timeout-min", dest="host_timeout_min", type=float, default=30.0)
+    # 2026-11-04 POL-3: a just-reopened place needs time for Rojo's first sync
+    p.add_argument("--sync-wait-s", dest="sync_wait_s", type=float, default=90.0)
     return ap
 
 
