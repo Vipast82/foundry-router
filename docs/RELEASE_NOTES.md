@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.66 — a local-fallback hold ends when the sprint's implementer persona changes
+
+When a frontier sprint's model fell back to the busy local model (`local_busy`), the sprint is held for the GPU for up to an hour (`local_fallback_until`). The hold ends early when another sprint with the same persona is served by the frontier, or when the v0.181.63 probe gets a non-local answer. On 2026-11-05 at 19:55, VR-AS22's last session on the Claude persona (Foundry-Kilo-Implementer) hit the busy local model just after router rev 25 moved vr-b back to ChatGPT (Foundry-Kilo-Sol). The probe then called Sol, which the router does not allow the `coordinator` client to use (`model_not_allowed`), so the hold stood and VR-AS22's closeout waited for vr-a's GPU. A hold now records the persona it was set under (`local_fallback_persona`, also in the `local_fallback_gpu` event). When the sprint's implementer persona is different, the hold ends (`local_fallback_cleared`, "the implementer persona changed").
+
+Test: `tests/coordinator/test_engine.py::test_a_local_fallback_hold_ends_when_the_implementer_persona_changes`.
+
 ## v0.181.65 — a Lead case waiting for the workspace goes before a new sprint start
 
 A Lead repair session locks the sprint's workspace (the main checkout, or a track's worktree) for its lifetime. Sprints on the same checkout queued for that lock in turn, but a waiting Lead case had no place in line. On 2026-11-05 VR-AS21's Lead case (`rc-2876e6b462617f50`) waited over an hour for the vr-b worktree while the VR-AS20 and VR-AS22 fix rounds took it in turn. Now `engine._acquire` checks before it takes a workspace lock the sprint does not hold yet. If an open Lead case of another sprint on the same checkout (same track, or both on main) is waiting for the workspace lock (`validation.lead_waiting`, cleared when the Lead session starts), the sprint waits instead ("Lead case … goes first"). A sprint already holding the workspace keeps going, and a case on another track or one not waiting for the workspace changes nothing.

@@ -1858,3 +1858,38 @@ def test_a_lead_case_waiting_for_the_workspace_goes_before_a_new_sprint_start(ga
     # a sprint already holding the workspace keeps going
     c.store.x("UPDATE recovery_cases SET state='DIAGNOSING' WHERE case_id='rc-ws'")
     assert c._acquire(P, c.store.task("game", "T2"), [ws, "studio:x"]) is None
+
+
+def test_a_local_fallback_hold_ends_when_the_implementer_persona_changes(game):
+    """v0.181.66: VR-AS22 (2026-11-05) got a local hold at 19:55 while it ran the Claude
+    persona; router rev 25 moved it to ChatGPT (Foundry-Kilo-Sol) a minute earlier. The probe
+    could not clear it (the coordinator client may not call Sol), so its closeout waited for
+    the local GPU. A hold now records its persona and ends when the persona changes."""
+    from types import SimpleNamespace
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    import foundry_coordinator.fast_lane as FL
+    orig = FL.is_local_primary
+    orig_foundry = P.foundry
+    P.foundry = SimpleNamespace(persona_info=lambda p: {"routes": []},
+                                chat=lambda *a, **k: (_ for _ in ()).throw(
+                                    RuntimeError("model_not_allowed")))
+    try:
+        FL.is_local_primary = lambda P, tid: False
+        same = P.profile.persona("implementer", "T1")
+        c.store.merge_data("game", "T1", local_fallback_until=c.clock() + 3600,
+                           local_fallback_persona=same)
+        # same persona, probe refused: the hold stands
+        assert any(r.split("#")[0] == "gpu" for r in c._session_locks(P, c.store.task("game", "T1")))
+        # the hold belongs to another persona: it ends
+        c.store.merge_data("game", "T1", local_fallback_persona="Foundry-Kilo-Old")
+        locks = c._session_locks(P, c.store.task("game", "T1"))
+        assert not any(r.split("#")[0] == "gpu" for r in locks)
+        assert not c.store.task("game", "T1")["data"].get("local_fallback_until")
+        assert c.store.q("SELECT 1 FROM events WHERE task_id='T1' AND kind='local_fallback_cleared' "
+                         "AND detail LIKE '%persona changed%'")
+    finally:
+        FL.is_local_primary = orig
+        P.foundry = orig_foundry

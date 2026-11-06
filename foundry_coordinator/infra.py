@@ -210,9 +210,15 @@ def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
         # 2026-10-30: Claude weekly 100% + ChatGPT at its cap -> GF-LOOP1 and MV2-9 fell to the
         # local model held by AS-D14 and failed a session every few minutes. The persona is
         # serving locally now: queue for `gpu` like a local sprint (engine._session_locks).
-        c.store.merge_data(P.id, t["task_id"], local_fallback_until=c.clock() + LOCAL_FALLBACK_S)
+        try:
+            persona = P.profile.persona("implementer", t["task_id"])
+        except Exception:                                         # noqa: BLE001
+            persona = ""
+        # the persona the hold belongs to: a later persona change ends it (engine._session_locks)
+        c.store.merge_data(P.id, t["task_id"], local_fallback_until=c.clock() + LOCAL_FALLBACK_S,
+                           local_fallback_persona=persona)
         c.store.event(P.id, t["task_id"], "local_fallback_gpu", detail={
-            "until": c.clock() + LOCAL_FALLBACK_S, "why": why[:200]})
+            "until": c.clock() + LOCAL_FALLBACK_S, "persona": persona, "why": why[:200]})
     _schedule(c, P, t, why, "session")
     if sig == "local_busy":
         # 2026-11-03 HK-ASSET1: the one local stream was held by other sprints' sessions that

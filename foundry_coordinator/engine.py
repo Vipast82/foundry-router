@@ -7474,6 +7474,20 @@ class Coordinator:
                 # (quota) and found it busy: wait for `gpu` instead of failing sessions
                 cur = self.store.task(P.id, t["task_id"]) or t
                 until = float(((cur.get("data") or {}).get("local_fallback_until")) or 0)
+                held_for = str(((cur.get("data") or {}).get("local_fallback_persona")) or "")
+                try:
+                    now_persona = P.profile.persona("implementer", t["task_id"])
+                except Exception:                                 # noqa: BLE001
+                    now_persona = held_for
+                if until > self.clock() and held_for and held_for != now_persona:
+                    # 2026-11-05 VR-AS22: the hold was set while the sprint ran the Claude
+                    # persona; router rev 25 moved it to ChatGPT (Sol). The hold was about the
+                    # old persona's route, and the probe could not clear it (the coordinator
+                    # client may not call Sol), so the closeout waited for the local GPU.
+                    self.store.merge_data(P.id, t["task_id"], local_fallback_until=None)
+                    self.store.event(P.id, t["task_id"], "local_fallback_cleared", detail={
+                        "why": f"the implementer persona changed ({held_for} -> {now_persona})"})
+                    until = 0.0
                 if until > self.clock() and self._frontier_serving(P, t):
                     # 2026-11-01 AS-F28: one "local busy" after a connection reset held this
                     # frontier sprint on Strata for an hour while 4 sprints with the same
