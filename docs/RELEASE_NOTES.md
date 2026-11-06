@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.68 — an asset-judge call cut off by a coordinator restart is made once more
+
+Asset-judge calls (checklist, per-candidate scoring) are journaled ops. One whose status was still `calling` when the coordinator restarted was never repeated ("outcome uncertain after restart; paid call not repeated"), and the sprint waited for a human. On 2026-11-05 the v0.181.67 deploy restarted the coordinator during VR-AS33's checklist call, and VR-AS33 sat in AWAITING_HUMAN. A judge call has no side effect besides its cost. So an op in `calling` that began before this coordinator process started (`lead.PROCESS_START`) is now made once more (`restart_retry`, event `asset_judge_restart_retry`). A call cut off a second time, or one this process is making, still waits as before.
+
+Test: `tests/coordinator/test_asset_judge.py::test_a_judge_call_cut_off_by_a_coordinator_restart_is_made_once_more`.
+
 ## v0.181.67 — the scripted Studio gate boots once when only Edit-DM rows ran fresh
 
 In `calls` mode the AU Studio gate runs boot CALLs 1-2 inside each playtest a suite group starts. When every row is carried or manual, it runs one boot-only playtest instead. A fresh run whose rows all execute in the Edit DM never started a playtest, so the boot gate never ran. `tools/gate.ps1 -Finish` (tier B needs two `PASS: BOOT counts` lines) then failed regardless of the sprint's work. On 2026-11-05 this blocked VR-AS21 twice (Lead cases `rc-2876e6b462617f50` and `rc-f37d487bf4c26613`) and hit VR-AS22's fresh tier-B runs. VR-AS21's one earlier PASS came only because every row was carried. Now, when no suite group ran the boot gate (`Gate.boot_tried`), the gate runs the same boot-only playtest after the calls lane. `_boot_only` also fills the ledger's boot evidence (`evidence.boot`). A run whose group starts a playtest still boots once per playtest, with no extra playtest.

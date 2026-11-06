@@ -364,3 +364,36 @@ def test_best_candidate_ranks_verdict_then_score_then_findings():
          ("C", {"verdict": "approve", "score": "8/10", "findings": []})]
     assert AJ.best_candidate(r)[0] == "C"
     assert AJ.best_candidate(r[:1] + [("D", {"verdict": "uncertain", "score": None})])[0] == "A"
+
+
+def test_a_judge_call_cut_off_by_a_coordinator_restart_is_made_once_more(tmp_path, monkeypatch):
+    """v0.181.68: the v0.181.67 deploy (2026-11-05 21:55) restarted the coordinator while
+    VR-AS33's asset checklist call was in flight; the sprint sat 'outcome uncertain after
+    restart; paid call not repeated' until a human cleared it. A judge call begun before this
+    process started is made once more; a second cut-off call, or one this process is making,
+    still waits."""
+    import time as _t
+    from types import SimpleNamespace
+    from foundry_coordinator import asset_judge as AJ
+    from foundry_coordinator import lead as L
+    from foundry_coordinator.store import Store
+    store = Store(str(tmp_path / "s.sqlite"))
+    events = []
+    store_event = store.event
+    c = SimpleNamespace(store=store, clock=_t.time)
+    key = "asset-checklist:game:T1:fp"
+    assert AJ._op(c, key, "game", "T1", "asset_checklist") == (None, True)    # new: go
+    store.op_update(key, "calling", {"session_id": "s1"})
+    # the same process: in flight, wait
+    monkeypatch.setattr(L, "PROCESS_START", _t.time() - 3600)
+    prior, go = AJ._op(c, key, "game", "T1", "asset_checklist")
+    assert not go and prior["status"] == "calling"
+    # a restart since the call began: made once more
+    monkeypatch.setattr(L, "PROCESS_START", _t.time() + 1)
+    assert AJ._op(c, key, "game", "T1", "asset_checklist") == (None, True)
+    assert store.op(key)["result"].get("restart_retry") is True
+    assert store.q("SELECT 1 FROM events WHERE kind='asset_judge_restart_retry'")
+    # cut off again: no third call
+    monkeypatch.setattr(L, "PROCESS_START", _t.time() + 2)
+    prior, go = AJ._op(c, key, "game", "T1", "asset_checklist")
+    assert not go and prior["status"] == "calling"

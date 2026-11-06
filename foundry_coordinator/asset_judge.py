@@ -437,7 +437,10 @@ def _call(c, P, t, key: str, sid: str, persona: str, routes, parts: list, revisi
     try:
         P.foundry.bind(sid, pid, tid, t["run_id"], "visual_reviewer", persona,
                        parent=t.get("session_id") or "", purpose="review")
-        c.store.op_update(key, "calling", {"session_id": sid})
+        was = (c.store.op(key) or {}).get("result") or {}
+        c.store.op_update(key, "calling", {"session_id": sid,
+                                           **({"restart_retry": True}
+                                              if was.get("restart_retry") else {})})
         raw, meta = P.foundry.chat(persona, [
             {"role": "system", "content": "You are a read-only, independent 3D asset judge. "
              "Judge only the attached images. Never waive gates or invent evidence. Answer "
@@ -469,6 +472,18 @@ def _op(c, key: str, pid: str, tid: str, kind: str):
     if prior["status"] == "deferred" and c.clock() >= float(
             (prior.get("result") or {}).get("retry_at") or 0):
         return None, True
+    if prior["status"] == "calling":
+        # 2026-11-05 VR-AS33: the v0.181.67 deploy restarted the coordinator while the asset
+        # checklist call was in flight; the sprint sat "outcome uncertain after restart; paid
+        # call not repeated" until a human cleared it. A judge call has no side effect but its
+        # cost, so a call this process never made (begun before it started) is made once more.
+        from .lead import PROCESS_START
+        res = dict(prior.get("result") or {})
+        if float(prior.get("created_ts") or 0) < PROCESS_START and not res.get("restart_retry"):
+            c.store.op_update(key, "calling", {**res, "restart_retry": True})
+            c.store.event(pid, tid, "asset_judge_restart_retry", detail={
+                "key": key[:120], "kind": kind})
+            return None, True
     return prior, False
 
 
