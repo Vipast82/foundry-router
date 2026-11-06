@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.71 — the reviewer knows docs/memory is not the session's to fix
+
+`docs/memory/` is the coordinator's project memory. Sessions may not edit it: they record facts as MEMORY_NOTE lines, which the coordinator commits, and a scope grant for a memory file only keeps done_check's SCOPE row green. The code reviewer was not told this. On 2026-11-06 it sent VR-AS34 back twice with required repairs such as "dedupe the docs/memory/ASSETS.md rows" and "merge the KNOWN_ISSUES row". Each time the session reported "the edit tool is denied for every path" (the memory file matched only the `edit *` deny) and went to a Lead case. The reviewer's system prompt now says docs/memory files are the coordinator's. It must never put a change to them in required_repairs or missing_evidence, never rate such a finding above minor, and mention it in residual_risks if it matters.
+
+Test: `tests/coordinator/test_review.py::test_the_reviewer_is_told_docs_memory_is_not_the_sessions_to_fix`.
+
 ## v0.181.70 — review and judge schemas go out in OpenAI's strict form
 
 The coordinator's one-shot calls (code review, visual judge, retry guidance, the launch assistant) send a JSON schema as `response_format`. OpenAI's structured outputs, which serve the ChatGPT models through CLIProxyAPI, require every object in that schema to set `additionalProperties: false`. The review schema did not, so gpt-6.1-sol refused every review with HTTP 400. On 2026-11-06 Claude's Sonnet window was used up. VR-AS21's review then fell from Claude past ChatGPT to the busy local model, and paused and retried every few minutes. `FoundryClient.chat` now sends `strict_schema(schema)`: a copy in which every object has `additionalProperties: false` and all of its properties in `required`. Claude and llama.cpp accept the same form. The schemas' field shapes are unchanged, so an optional field can still be empty or null.

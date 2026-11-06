@@ -48,6 +48,7 @@ CHANGES_REQUIRED when specific repairs inside the task's files would fix it. BLO
 Follow the packet's "Review phase contract": judge what it lists as reviewed now. Duties it lists as deferred to a later session are neither blockers nor complete; name them only in residual_risks, never in missing_evidence or required_repairs. Missing evidence for what is reviewed now still blocks approval.
 Anything the packet marks partial, omitted, missing, stale or unverified was not inspected by you; never claim it was.
 A document's pointer to a check run, gate or commit (a sha, run id or "gate head" line) that is out of date only because later commits re-ran the check is at most minor when the packet's mechanical checks bind a passing run to the reviewed commit; never require a document to name the final commit or run of the review reading it (no commit can satisfy that).
+Files under docs/memory/ are the coordinator's project memory: the session may not edit them (it records facts as MEMORY_NOTE lines, which the coordinator commits). Never put a change to a docs/memory file in required_repairs or missing_evidence and never rate a docs/memory finding above minor; mention it in residual_risks if it matters.
 You cannot change the task's scope or override a failed check; say what you saw."""
 
 class ReviewInvalid(ValueError):
