@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.70 — review and judge schemas go out in OpenAI's strict form
+
+The coordinator's one-shot calls (code review, visual judge, retry guidance, the launch assistant) send a JSON schema as `response_format`. OpenAI's structured outputs, which serve the ChatGPT models through CLIProxyAPI, require every object in that schema to set `additionalProperties: false`. The review schema did not, so gpt-6.1-sol refused every review with HTTP 400. On 2026-11-06 Claude's Sonnet window was used up. VR-AS21's review then fell from Claude past ChatGPT to the busy local model, and paused and retried every few minutes. `FoundryClient.chat` now sends `strict_schema(schema)`: a copy in which every object has `additionalProperties: false` and all of its properties in `required`. Claude and llama.cpp accept the same form. The schemas' field shapes are unchanged, so an optional field can still be empty or null.
+
+Tests: `tests/coordinator/test_strict_schema.py`.
+
 ## v0.181.69 — the answer to a sprint's BLOCKED report is its next strategy
 
 When a session reports BLOCKED with options, the coordinator opens an `implementer_blocked` decision. Victor answers it, or its timeout applies the recommended option. The next repair assignment did not use that answer as its strategy. If findings had repeated, it asked "findings repeat with no materially different strategy" at once and opened a Lead case, even though the answer was the new strategy and had not run yet. BAL-1 did this twice on 2026-11-05: at 19:43 after "reduce pad density" and at 22:36 after "weaken the castle defence". Now, when no other strategy is set, the latest answered `implementer_blocked` decision becomes the assignment's strategy for one attempt, trusted like a Lead strategy (`blocked_answers_used`, event `blocked_answer_strategy`). A repeat after that attempt escalates as before.

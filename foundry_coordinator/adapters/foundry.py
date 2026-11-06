@@ -17,6 +17,31 @@ import urllib.request
 from typing import Optional
 
 
+
+def strict_schema(schema):
+    """The schema in the strict form OpenAI's structured outputs require: every object
+    lists additionalProperties = false and has all of its properties in `required`.
+    2026-11-06 VR-AS21: with Claude's window used up, its review fell to ChatGPT
+    (gpt-6.1-sol), which refused the packet's schema with HTTP 400 ("'additionalProperties'
+    is required to be supplied and to be false"), so every review fell through to the busy
+    local model. Claude and llama.cpp accept the strict form too."""
+    import copy
+
+    def fix(node):
+        if isinstance(node, list):
+            return [fix(x) for x in node]
+        if not isinstance(node, dict):
+            return node
+        out = {k: fix(v) for k, v in node.items()}
+        props = out.get("properties")
+        t = out.get("type")
+        if isinstance(props, dict) and (t == "object" or (isinstance(t, list) and "object" in t)
+                                        or t is None):
+            out["additionalProperties"] = False
+            out["required"] = list(props.keys())
+        return out
+    return fix(copy.deepcopy(schema))
+
 class FoundryError(RuntimeError):
     pass
 
@@ -265,7 +290,8 @@ class FoundryClient:
                 "max_tokens": max_tokens, "temperature": 0}
         if schema:
             body["response_format"] = {"type": "json_schema",
-                                       "json_schema": {"name": "review", "schema": schema}}
+                                       "json_schema": {"name": "review",
+                                                       "schema": strict_schema(schema)}}
         data, headers = self._req("POST", "/v1/chat/completions", body,
                                   headers={"x-session-id": session_id} if session_id else None,
                                   timeout=timeout)
