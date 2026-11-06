@@ -5468,11 +5468,16 @@ class Coordinator:
                     "attempt": self._lc_attempt_no(P, t) + (0 if free or paid else 1)
                     if self._lc(P, "obligations") else attempt}
             from .recovery import AssignmentInvariant
+            answered = ""
+            if not strategy and not lead_a:
+                answered = self._fresh_blocked_answer(P, t)
+                if answered:
+                    strategy = answered
             try:
                 a = self.recovery.assignment(
                     P, trow, ledger=self.ledger if self._lc(P, "evidence") else None,
                     obligations=self.obligations, ws=P.ws, strategy=strategy,
-                    trusted_strategy=bool(lead_a),
+                    trusted_strategy=bool(lead_a) or bool(answered),
                     adviser=self._lc_adviser(P, tid), evidence_items=items, last_report=last,
                     spec=spec, cap=int(self._lcv(P, "prompt_cap", 6000)),
                     free=free and not lead_a)
@@ -7642,6 +7647,42 @@ class Coordinator:
             except Exception:                                     # noqa: BLE001
                 continue
         return False
+
+    def _fresh_blocked_answer(self, P: Project, t: dict) -> str:
+        """The answer to the sprint's own latest BLOCKED report (an implementer_blocked
+        decision), once: it is the new strategy for the next attempt. 2026-11-05 BAL-1 (19:43,
+        22:36): the answer ("reduce pad density", "weaken the castle defence") applied, and the
+        next assignment still asked "findings repeat with no materially different strategy"
+        and opened a Lead case, because the findings could not change before the new strategy
+        ran."""
+        pid, tid = P.id, t["task_id"]
+        try:
+            rows = self.store.q(
+                "SELECT decision_id, answer FROM decisions WHERE project_id=? AND task_id=? AND "
+                "kind='implementer_blocked' AND status='answered' ORDER BY answered_ts DESC "
+                "LIMIT 1", (pid, tid))
+        except Exception:                                         # noqa: BLE001
+            return ""
+        if not rows:
+            return ""
+        did = rows[0]["decision_id"]
+        used = list((t.get("data") or {}).get("blocked_answers_used") or [])
+        if did in used:
+            return ""
+        ans = rows[0].get("answer")
+        try:
+            ans = json.loads(ans) if isinstance(ans, str) else ans
+        except ValueError:
+            pass
+        if isinstance(ans, dict):
+            ans = ans.get("strategy") or ans.get("option") or ans.get("choice") or ""
+        text = str(ans or "").strip()
+        if not text:
+            return ""
+        self.store.merge_data(pid, tid, blocked_answers_used=(used + [did])[-10:])
+        self.store.event(pid, tid, "blocked_answer_strategy", detail={
+            "decision_id": did, "strategy": text[:300]})
+        return text
 
     def _lead_waits_for_workspace(self, P: Project, t: dict, resources: list[str],
                                   before: set) -> Optional[dict]:

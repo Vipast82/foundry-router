@@ -1893,3 +1893,24 @@ def test_a_local_fallback_hold_ends_when_the_implementer_persona_changes(game):
     finally:
         FL.is_local_primary = orig
         P.foundry = orig_foundry
+
+
+def test_a_fresh_blocked_report_answer_is_the_next_strategy_once(game):
+    """v0.181.69: BAL-1 (2026-11-05 19:43, 22:36): the answer to its BLOCKED report applied,
+    and the next assignment still asked 'findings repeat with no materially different
+    strategy' and opened a Lead case. The latest answered implementer_blocked decision is
+    the next attempt's (trusted) strategy, used once."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    P = c.projects["game"]
+    assert c._fresh_blocked_answer(P, c.store.task("game", "T1")) == ""
+    did = c.obligations.open_decision("game", "T1", "implementer_blocked", "towers win",
+                                      options=["weaken the castle", "buff enemies"],
+                                      blocks=["T1"])
+    c.store.x("UPDATE decisions SET status='answered', answer=?, answered_ts=? "
+              "WHERE decision_id=?", (json.dumps("weaken the castle"), c.clock(), did))
+    assert c._fresh_blocked_answer(P, c.store.task("game", "T1")) == "weaken the castle"
+    assert c.store.q("SELECT 1 FROM events WHERE kind='blocked_answer_strategy'")
+    # used once
+    assert c._fresh_blocked_answer(P, c.store.task("game", "T1")) == ""

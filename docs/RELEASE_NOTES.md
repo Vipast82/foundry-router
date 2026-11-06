@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.69 — the answer to a sprint's BLOCKED report is its next strategy
+
+When a session reports BLOCKED with options, the coordinator opens an `implementer_blocked` decision. Victor answers it, or its timeout applies the recommended option. The next repair assignment did not use that answer as its strategy. If findings had repeated, it asked "findings repeat with no materially different strategy" at once and opened a Lead case, even though the answer was the new strategy and had not run yet. BAL-1 did this twice on 2026-11-05: at 19:43 after "reduce pad density" and at 22:36 after "weaken the castle defence". Now, when no other strategy is set, the latest answered `implementer_blocked` decision becomes the assignment's strategy for one attempt, trusted like a Lead strategy (`blocked_answers_used`, event `blocked_answer_strategy`). A repeat after that attempt escalates as before.
+
+Test: `tests/coordinator/test_engine.py::test_a_fresh_blocked_report_answer_is_the_next_strategy_once`.
+
 ## v0.181.68 — an asset-judge call cut off by a coordinator restart is made once more
 
 Asset-judge calls (checklist, per-candidate scoring) are journaled ops. One whose status was still `calling` when the coordinator restarted was never repeated ("outcome uncertain after restart; paid call not repeated"), and the sprint waited for a human. On 2026-11-05 the v0.181.67 deploy restarted the coordinator during VR-AS33's checklist call, and VR-AS33 sat in AWAITING_HUMAN. A judge call has no side effect besides its cost. So an op in `calling` that began before this coordinator process started (`lead.PROCESS_START`) is now made once more (`restart_retry`, event `asset_judge_restart_retry`). A call cut off a second time, or one this process is making, still waits as before.
