@@ -7181,6 +7181,26 @@ class Coordinator:
         else:
             return self._note(P, t, f"lead recovery case {cid} resuming with an action the "
                                     f"engine does not apply ({kind or 'none'}); waiting")
+        if kind in ("reverify", "wait", "resume", "coordinator_repair"):
+            # v0.181.73: a case opened because the budget ran out, resumed without adding to
+            # it, stopped again at once. 2026-11-06 VR-AS04: the lead fixed the worktree and
+            # re-verified (11:47), and the same minute "21 sessions used" opened a new case.
+            # Such a resume gets the lead's own delegated extension, once per case.
+            trig = case.get("trigger") or {}
+            if isinstance(trig, str):
+                try:
+                    trig = json.loads(trig)
+                except ValueError:
+                    trig = {}
+            if str((trig or {}).get("class") or "") in ("sessions_exhausted",
+                                                        "attempts_exhausted"):
+                n = int(self.lead.settings(P).get("extra_attempts") or 1)
+                grant = self._lead_grant(P, t, case, n)
+                ev["budget_grant"] = grant["n"]
+                if not self._lc(P, "obligations") and grant["n"]:
+                    grants = dict(data.get("lead_grants") or {})
+                    grants[cid] = grant["n"]
+                    data["lead_grants"] = grants
         with self.store.tx():
             if dw_ids and self._lc(P):
                 for did in dw_ids:

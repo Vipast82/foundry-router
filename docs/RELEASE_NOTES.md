@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.73 — a budget case resumed without an extension gets the Lead's delegated one
+
+A Lead case opened because a sprint used up its sessions or attempts (`sessions_exhausted`, `attempts_exhausted`) could be resolved by a write-access fix plus `reverify`, or by `wait` / `resume`, without adding budget. The sprint then stopped again at once on the same limit and opened a new case. On 2026-11-06 VR-AS04's case `rc-1f33fe50b6ba85ef` was resumed at 11:47, and the same minute "21 sessions used" opened `rc-b1519a8aed0445b8`. `_lead_resume` now grants the Lead's own delegated extension (`[lead_manager] extra_attempts`, attempts and sessions, at most once per case; event field `budget_grant`) when it resumes such a case with reverify, wait, resume or coordinator_repair. Cases of other classes are unchanged.
+
+Test: `tests/coordinator/test_lead_manager.py::test_a_budget_case_resumed_by_reverify_gets_the_delegated_extension`.
+
 ## v0.181.72 — a sprint holding the workspace yields it to a waiting Lead case at its next attempt
 
 v0.181.65 made a sprint wait when a Lead case on the same checkout waits for the workspace, but only a sprint that did not hold the workspace yet. On a track, a sprint in fix rounds keeps the worktree lock from VERIFYING back into CHANGES_REQUIRED and the next attempt, so it never let go. On 2026-11-06 VR-AS04's Lead case (`rc-1f33fe50b6ba85ef`) waited 45 minutes for vr-a while VR-AS02 went verify -> new attempt -> verify. Now, when a sprint that holds the workspace starts a new attempt (state READY or CHANGES_REQUIRED) and such a Lead case is waiting, the sprint releases the workspace (`workspace_yielded_to_lead`) and waits. A sprint mid-attempt (IMPLEMENTING, CLOSING) keeps it.

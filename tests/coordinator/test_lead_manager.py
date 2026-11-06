@@ -1712,3 +1712,27 @@ def test_the_lead_passes_broader_selection_and_its_time_limit_to_the_gate(env):
     for bad in ({"repair_broader_select": "some"}, {"repair_broader_timeout_minutes": 0}):
         with pytest.raises(SettingsError):
             lead_manager_table("p", {**base, **bad})
+
+
+def test_a_budget_case_resumed_by_reverify_gets_the_delegated_extension(env):
+    """v0.181.73: VR-AS04 (2026-11-06): its sessions_exhausted case was resumed by a lead
+    fix + reverify, and the same minute '21 sessions used' opened a new case. A budget-class
+    case resumed without an extension gets the lead's delegated extra_attempts once."""
+    e = env
+    c, P = e["make"](extra="\nextra_attempts = 1\n")
+    c.store.update_task("game", "T1", state="BLOCKED", blocker="8 sessions used", run_id="run-1")
+    lm = LeadManager(c)
+    case = lm.open_case(P, c.store.task("game", "T1"),
+                        {"state": "BLOCKED", "reason": "8 sessions used (max 8)",
+                         "class": "sessions_exhausted"}, {})
+    c._lead_resume(P, c.store.task("game", "T1"), case, {"kind": "reverify"})
+    ev = c.store.q("SELECT detail FROM events WHERE kind='lead_resume' ORDER BY ts DESC LIMIT 1")
+    assert ev and json.loads(ev[0]["detail"]).get("budget_grant", 0) >= 1
+    # a check_failed case gets no grant
+    c.store.update_task("game", "T1", state="BLOCKED", blocker="gallery check failed")
+    case2 = lm.open_case(P, c.store.task("game", "T1"),
+                         {"state": "BLOCKED", "reason": "gallery check failed",
+                          "class": "check_failed"}, {"failed_checks": ["au.gallery"]})
+    c._lead_resume(P, c.store.task("game", "T1"), case2, {"kind": "reverify"})
+    ev = c.store.q("SELECT detail FROM events WHERE kind='lead_resume' ORDER BY ts DESC LIMIT 1")
+    assert "budget_grant" not in json.loads(ev[0]["detail"])
