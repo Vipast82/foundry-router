@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.72 — a sprint holding the workspace yields it to a waiting Lead case at its next attempt
+
+v0.181.65 made a sprint wait when a Lead case on the same checkout waits for the workspace, but only a sprint that did not hold the workspace yet. On a track, a sprint in fix rounds keeps the worktree lock from VERIFYING back into CHANGES_REQUIRED and the next attempt, so it never let go. On 2026-11-06 VR-AS04's Lead case (`rc-1f33fe50b6ba85ef`) waited 45 minutes for vr-a while VR-AS02 went verify -> new attempt -> verify. Now, when a sprint that holds the workspace starts a new attempt (state READY or CHANGES_REQUIRED) and such a Lead case is waiting, the sprint releases the workspace (`workspace_yielded_to_lead`) and waits. A sprint mid-attempt (IMPLEMENTING, CLOSING) keeps it.
+
+Test: `tests/coordinator/test_engine.py::test_a_sprint_holding_the_workspace_yields_it_to_a_waiting_lead_at_a_new_attempt`.
+
 ## v0.181.71 — the reviewer knows docs/memory is not the session's to fix
 
 `docs/memory/` is the coordinator's project memory. Sessions may not edit it: they record facts as MEMORY_NOTE lines, which the coordinator commits, and a scope grant for a memory file only keeps done_check's SCOPE row green. The code reviewer was not told this. On 2026-11-06 it sent VR-AS34 back twice with required repairs such as "dedupe the docs/memory/ASSETS.md rows" and "merge the KNOWN_ISSUES row". Each time the session reported "the edit tool is denied for every path" (the memory file matched only the `edit *` deny) and went to a Lead case. The reviewer's system prompt now says docs/memory files are the coordinator's. It must never put a change to them in required_repairs or missing_evidence, never rate such a finding above minor, and mention it in residual_risks if it matters.

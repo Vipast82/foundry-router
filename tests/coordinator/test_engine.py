@@ -1914,3 +1914,36 @@ def test_a_fresh_blocked_report_answer_is_the_next_strategy_once(game):
     assert c.store.q("SELECT 1 FROM events WHERE kind='blocked_answer_strategy'")
     # used once
     assert c._fresh_blocked_answer(P, c.store.task("game", "T1")) == ""
+
+
+def test_a_sprint_holding_the_workspace_yields_it_to_a_waiting_lead_at_a_new_attempt(game):
+    """v0.181.72: VR-AS04's Lead case (2026-11-06) waited 45 min for vr-a while VR-AS02 held
+    the worktree from VERIFYING back into a new attempt. A sprint that holds the workspace
+    and starts a new attempt (READY / CHANGES_REQUIRED) gives it back to a Lead case on the
+    same checkout that waits for it; mid-attempt (IMPLEMENTING) it keeps it."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    ws = "workspace:test-checkout"
+    from foundry_coordinator.lead import _V1
+    c.store.conn.executescript(_V1)
+    cols = [r["name"] for r in c.store.q("PRAGMA table_info(recovery_cases)")]
+    vals = {"case_id": "rc-ws2", "project_id": "game", "task_id": "T1", "state": "DIAGNOSING",
+            "created_ts": c.clock(), "deadline_ts": c.clock() + 3600,
+            "validation": json.dumps({"lead_waiting": "workspace lock held by game/T2"})}
+    keys = [k for k in vals if k in cols]
+    c.store.x(f"INSERT INTO recovery_cases ({', '.join(keys)}) VALUES "
+              f"({', '.join('?' for _ in keys)})", [vals[k] for k in keys])
+    c.store.acquire([ws], "game", "T2")
+    # mid-attempt: T2 keeps it
+    c.store.update_task("game", "T2", state=S.IMPLEMENTING)
+    assert c._acquire(P, c.store.task("game", "T2"), [ws]) is None
+    assert ws in c.store.holds("game", "T2")
+    # a new attempt: T2 gives it back and waits
+    c.store.update_task("game", "T2", state=S.CHANGES_REQUIRED)
+    held = c._acquire(P, c.store.task("game", "T2"), [ws])
+    assert held and held["case_id"] == "rc-ws2"
+    assert ws not in c.store.holds("game", "T2")
+    assert c.store.q("SELECT 1 FROM events WHERE kind='workspace_yielded_to_lead'")

@@ -7691,8 +7691,15 @@ class Coordinator:
         workspace yet. 2026-11-05: VR-AS21's Lead case waited over an hour for the vr-b
         worktree while VR-AS20 and VR-AS22 fix rounds took it in turn."""
         ws = [r for r in resources if r.startswith("workspace:") and r not in before]
-        if not ws:
+        # v0.181.72: a sprint that kept the workspace from its last attempt (fix rounds on a
+        # track hold it from VERIFYING back into CHANGES_REQUIRED) yields it too when a NEW
+        # attempt starts. 2026-11-06 VR-AS04's Lead case waited 45 min for vr-a while
+        # VR-AS02 went verify -> new attempt without ever releasing it.
+        held_ws = [r for r in resources if r.startswith("workspace:") and r in before]
+        starting = str(t.get("state") or "") in (S.READY, S.CHANGES_REQUIRED)
+        if not ws and not (held_ws and starting):
             return None
+        ws = ws or held_ws
         from .lead import OPEN_STATES
         pid, tid = P.id, t["task_id"]
         try:
@@ -7714,6 +7721,12 @@ class Coordinator:
                 continue
             if self.store.task_track(pid, r["task_id"]) != track:
                 continue
+            give_back = [x for x in held_ws if x in ws]
+            if give_back:
+                self.store.release(pid, tid, give_back)
+                self.store.event(pid, tid, "workspace_yielded_to_lead", detail={
+                    "case_id": r["case_id"], "lead_task": r["task_id"],
+                    "resources": give_back})
             return {"resource": ws[0], "project_id": pid, "task_id": r["task_id"],
                     "case_id": r["case_id"]}
         return None
