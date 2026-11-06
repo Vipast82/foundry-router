@@ -7629,6 +7629,40 @@ class Coordinator:
                 continue
         return False
 
+    def _lead_waits_for_workspace(self, P: Project, t: dict, resources: list[str],
+                                  before: set) -> Optional[dict]:
+        """A Lead case of another sprint on the same checkout (same track, or both on main)
+        that is waiting for the workspace lock goes before a sprint that does not hold the
+        workspace yet. 2026-11-05: VR-AS21's Lead case waited over an hour for the vr-b
+        worktree while VR-AS20 and VR-AS22 fix rounds took it in turn."""
+        ws = [r for r in resources if r.startswith("workspace:") and r not in before]
+        if not ws:
+            return None
+        from .lead import OPEN_STATES
+        pid, tid = P.id, t["task_id"]
+        try:
+            rows = self.store.q(
+                "SELECT case_id, task_id, validation FROM recovery_cases WHERE project_id=? "
+                "AND task_id != ? AND state IN (%s) ORDER BY created_ts"
+                % ",".join("?" * len(OPEN_STATES)), (pid, tid, *OPEN_STATES))
+        except Exception:                                         # noqa: BLE001
+            return None
+        track = self.store.task_track(pid, tid)
+        for r in rows:
+            v = r.get("validation") or {}
+            if isinstance(v, str):
+                try:
+                    v = json.loads(v)
+                except ValueError:
+                    v = {}
+            if not str((v or {}).get("lead_waiting") or "").startswith("workspace lock held"):
+                continue
+            if self.store.task_track(pid, r["task_id"]) != track:
+                continue
+            return {"resource": ws[0], "project_id": pid, "task_id": r["task_id"],
+                    "case_id": r["case_id"]}
+        return None
+
     def _acquire(self, P: Project, t: dict, resources: list[str],
                  writer: bool = False) -> Optional[dict]:
         """Take every resource (all or nothing) and, for a session that may
@@ -7657,6 +7691,11 @@ class Coordinator:
                 if first:
                     self._note(P, t, f"waiting for {res} ({first} is first in line)")
                     return {"resource": res, "project_id": pid, "task_id": first}
+        lead = self._lead_waits_for_workspace(P, t, resources, before)
+        if lead:
+            self._note(P, t, f"waiting for {lead['resource']} (Lead case {lead['case_id']} "
+                             f"for {lead['task_id']} goes first)")
+            return lead
         held = self.store.acquire(resources, pid, tid)
         if held and self._stale_fallback_gpu(P, held):
             held = self.store.acquire(resources, pid, tid)

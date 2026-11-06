@@ -1814,3 +1814,47 @@ command = ["python", "-c", "import sys; sys.exit(1)"]
     # the same head again and again is a stall: it ends in the normal repair path
     assert run_until(c, lambda: c.store.q(
         "SELECT 1 FROM events WHERE task_id='T1' AND kind='build_progress_stalled'"))
+
+
+def test_a_lead_case_waiting_for_the_workspace_goes_before_a_new_sprint_start(game):
+    """v0.181.65: VR-AS21's Lead case (2026-11-05) waited over an hour for the vr-b worktree
+    while the VR-AS20 and VR-AS22 fix rounds took it in turn. A sprint that does not hold the
+    workspace yet now yields to an open Lead case of another sprint on the same checkout that
+    waits for it; a case on another track, or one not waiting for the workspace, does not."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    ws = "workspace:test-checkout"
+    from foundry_coordinator.lead import _V1
+    c.store.conn.executescript(_V1)
+    cols = [r["name"] for r in c.store.q("PRAGMA table_info(recovery_cases)")]
+    vals = {"case_id": "rc-ws", "project_id": "game", "task_id": "T1", "state": "DIAGNOSING",
+            "created_ts": c.clock(), "deadline_ts": c.clock() + 3600,
+            "validation": json.dumps({"lead_waiting": "workspace lock held by game/T3"})}
+    keys = [k for k in vals if k in cols]
+    c.store.x(f"INSERT INTO recovery_cases ({', '.join(keys)}) VALUES "
+              f"({', '.join('?' for _ in keys)})", [vals[k] for k in keys])
+    t2 = c.store.task("game", "T2")
+    held = c._acquire(P, t2, [ws])
+    assert held and held["task_id"] == "T1" and held["case_id"] == "rc-ws"
+    assert "Lead case rc-ws" in (c.store.task("game", "T2")["next_action"] or "")
+    assert ws not in c.store.holds("game", "T2")
+    # a different track: no wait
+    c.store.x("UPDATE queue SET track='vr-b' WHERE project_id='game' AND task_id='T2'")
+    assert c._acquire(P, c.store.task("game", "T2"), [ws]) is None
+    c.store.release("game", "T2", [ws])
+    c.store.x("UPDATE queue SET track='' WHERE project_id='game' AND task_id='T2'")
+    # the Lead is not waiting for the workspace (its session started): no wait
+    c.store.x("UPDATE recovery_cases SET validation=? WHERE case_id='rc-ws'",
+              (json.dumps({"lead_waiting": None}),))
+    assert c._acquire(P, c.store.task("game", "T2"), [ws]) is None
+    c.store.release("game", "T2", [ws])
+    # a resolved case never blocks
+    c.store.x("UPDATE recovery_cases SET state='RESOLVED', validation=? WHERE case_id='rc-ws'",
+              (json.dumps({"lead_waiting": "workspace lock held by game/T3"}),))
+    assert c._acquire(P, c.store.task("game", "T2"), [ws]) is None
+    # a sprint already holding the workspace keeps going
+    c.store.x("UPDATE recovery_cases SET state='DIAGNOSING' WHERE case_id='rc-ws'")
+    assert c._acquire(P, c.store.task("game", "T2"), [ws, "studio:x"]) is None

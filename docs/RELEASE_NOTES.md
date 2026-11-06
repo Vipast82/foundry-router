@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.65 — a Lead case waiting for the workspace goes before a new sprint start
+
+A Lead repair session locks the sprint's workspace (the main checkout, or a track's worktree) for its lifetime. Sprints on the same checkout queued for that lock in turn, but a waiting Lead case had no place in line. On 2026-11-05 VR-AS21's Lead case (`rc-2876e6b462617f50`) waited over an hour for the vr-b worktree while the VR-AS20 and VR-AS22 fix rounds took it in turn. Now `engine._acquire` checks before it takes a workspace lock the sprint does not hold yet. If an open Lead case of another sprint on the same checkout (same track, or both on main) is waiting for the workspace lock (`validation.lead_waiting`, cleared when the Lead session starts), the sprint waits instead ("Lead case … goes first"). A sprint already holding the workspace keeps going, and a case on another track or one not waiting for the workspace changes nothing.
+
+Test: `tests/coordinator/test_engine.py::test_a_lead_case_waiting_for_the_workspace_goes_before_a_new_sprint_start`.
+
 ## v0.181.64 — persona and role-override changes apply without a coordinator restart
 
 The coordinator pulls the router's deployed automation settings and, until now, applied a revision in place only when no session of the project was live, unless every change was an `apply=live` field. Persona settings (`roles.*`, `role_overrides.*`) and other `apply=next_session` fields therefore waited for a moment with no live session. A busy project like AU never has one. On 2026-11-05, rev 24 moved the vr-b track (VR-AS20..43) from ChatGPT, which was out of usage, to Claude. The revision stayed `pending` and took effect only after a coordinator restart. A revision whose every change is `apply=live` or `apply=next_session` now applies at once. Existing sessions pick up a new persona on their next prompt: every prompt path binds the persona before sending. Changes that reload Kilo (`role_rules.*`) or move Studio (`studio.*`, `slots.*`), and restart-scoped keys, still wait for a safe point as before.
