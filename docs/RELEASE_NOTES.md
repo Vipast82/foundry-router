@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.74 — a track with no Studio slot takes the workstation Studio lock
+
+A track bound to a Studio slot runs its Studio work in the slot. A track that needs Studio but has no slot (vr-c, started 2026-11-05 as a fourth agent) reaches the workstation Studio through its Studio MCP servers, but its sessions took none of the main Studio's exclusive rows. vr-c's asset checks started and stopped play sessions in the workstation Studio while BAL-1 held it, and BAL-1's bot matches ended about 2 minutes in ("play session terminates by itself"). Victor chose "vr-c waits for Studio". A slot-less track whose needs include `studio` now adds the main profile's `studio:<host>` and `rojo:<port>` resources to its session locks. Its sessions wait while a main sprint holds the workstation Studio, the same as another main sprint would. Slot-bound tracks and tracks without the `studio` need are unchanged.
+
+Test: `tests/coordinator/test_tracks_manager.py::test_a_slotless_studio_track_takes_the_workstation_studio_rows`.
+
 ## v0.181.73 — a budget case resumed without an extension gets the Lead's delegated one
 
 A Lead case opened because a sprint used up its sessions or attempts (`sessions_exhausted`, `attempts_exhausted`) could be resolved by a write-access fix plus `reverify`, or by `wait` / `resume`, without adding budget. The sprint then stopped again at once on the same limit and opened a new case. On 2026-11-06 VR-AS04's case `rc-1f33fe50b6ba85ef` was resumed at 11:47, and the same minute "21 sessions used" opened `rc-b1519a8aed0445b8`. `_lead_resume` now grants the Lead's own delegated extension (`[lead_manager] extra_attempts`, attempts and sessions, at most once per case; event field `budget_grant`) when it resumes such a case with reverify, wait, resume or coordinator_repair. Cases of other classes are unchanged.

@@ -422,3 +422,19 @@ def test_a_never_started_main_sprint_moves_onto_a_track_without_cancelling(tmp_p
     c.store.update_task("game", "B1", state=S.READY, attempt=1, sessions=1)
     with pytest.raises(TrackError, match="never-started"):
         c.tracks.create(P, "blender", ["B1"], actor="victor")
+
+
+def test_a_slotless_studio_track_takes_the_workstation_studio_rows():
+    """v0.181.74: vr-c (no slot, needs studio) ran ASSET_CHECK play sessions in the
+    workstation Studio while BAL-1 held it; its sessions now take the main Studio rows.
+    A slot-bound track, or one that does not need Studio, takes none."""
+    from types import SimpleNamespace
+    from foundry_coordinator.tracks.manager import TrackManager
+    prof = SimpleNamespace(resources=["studio:victor-workstation", "rojo:34872"], fast_lane={})
+    base = {"worktree": "w", "branch": "track/x"}
+    f = TrackManager._track_fields
+    assert f(prof, {**base, "needs": ["studio", "blender"], "data": {}})["resources"] == [
+        "blender", "studio:victor-workstation", "rojo:34872"]
+    assert f(prof, {**base, "needs": ["studio", "blender"],
+                    "data": {"slot": "slot-1"}})["resources"] == ["blender"]
+    assert f(prof, {**base, "needs": ["blender"], "data": {}})["resources"] == ["blender"]

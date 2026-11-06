@@ -265,8 +265,17 @@ class TrackManager:
 
     @staticmethod
     def _track_fields(prof, row: dict) -> dict:
+        res = needs_locks(row.get("needs") or [])
+        if "studio" in (row.get("needs") or []) and                 not str((row.get("data") or {}).get("slot") or ""):
+            # v0.181.74 (Victor 2026-11-06 "vr-c waits for Studio"): a track with no Studio
+            # slot reaches the WORKSTATION Studio through its Studio MCP servers. Its sessions
+            # take the main Studio's exclusive rows (studio:<host>, rojo:<port>) like a main
+            # sprint, so they never start or stop a play session under the main sprint
+            # (BAL-1's bot matches were cut off ~2 min in by vr-c's ASSET_CHECK runs).
+            res += [r for r in (prof.resources or [])
+                    if r.split(":")[0] in ("studio", "rojo") and r not in res]
         return {"workspace": row["worktree"], "branch": row["branch"],
-                "resources": needs_locks(row.get("needs") or []),
+                "resources": res,
                 "publish": {"mode": "none"},
                 "fast_lane": {**(prof.fast_lane or {}), "enabled": False}}
 
