@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.67 — the scripted Studio gate boots once when only Edit-DM rows ran fresh
+
+In `calls` mode the AU Studio gate runs boot CALLs 1-2 inside each playtest a suite group starts. When every row is carried or manual, it runs one boot-only playtest instead. A fresh run whose rows all execute in the Edit DM never started a playtest, so the boot gate never ran. `tools/gate.ps1 -Finish` (tier B needs two `PASS: BOOT counts` lines) then failed regardless of the sprint's work. On 2026-11-05 this blocked VR-AS21 twice (Lead cases `rc-2876e6b462617f50` and `rc-f37d487bf4c26613`) and hit VR-AS22's fresh tier-B runs. VR-AS21's one earlier PASS came only because every row was carried. Now, when no suite group ran the boot gate (`Gate.boot_tried`), the gate runs the same boot-only playtest after the calls lane. `_boot_only` also fills the ledger's boot evidence (`evidence.boot`). A run whose group starts a playtest still boots once per playtest, with no extra playtest.
+
+Tests: `tests/coordinator/test_studio_gate_calls.py::test_edit_only_fresh_row_still_records_both_boot_pass_lines`, `::test_a_row_that_plays_still_boots_once_per_playtest_only`.
+
 ## v0.181.66 — a local-fallback hold ends when the sprint's implementer persona changes
 
 When a frontier sprint's model fell back to the busy local model (`local_busy`), the sprint is held for the GPU for up to an hour (`local_fallback_until`). The hold ends early when another sprint with the same persona is served by the frontier, or when the v0.181.63 probe gets a non-local answer. On 2026-11-05 at 19:55, VR-AS22's last session on the Claude persona (Foundry-Kilo-Implementer) hit the busy local model just after router rev 25 moved vr-b back to ChatGPT (Foundry-Kilo-Sol). The probe then called Sol, which the router does not allow the `coordinator` client to use (`model_not_allowed`), so the hold stood and VR-AS22's closeout waited for vr-a's GPU. A hold now records the persona it was set under (`local_fallback_persona`, also in the `local_fallback_gpu` event). When the sprint's implementer persona is different, the hold ends (`local_fallback_cleared`, "the implementer persona changed").

@@ -1334,6 +1334,7 @@ class Gate:
         self._mcp_fail = 0
         self.last_verify_text = ""
         self.boot_text = ""                  # the first green boot pair (ledger evidence)
+        self.boot_tried = False              # some playtest ran the boot gate (pass or fail)
 
     # ---- clients ----------------------------------------------------------------
     def _connect(self, kind: str) -> M.McpClient:
@@ -2329,6 +2330,7 @@ class Gate:
             return att
         self.emit(f"PLAYTEST {g['label']} started (fresh solo playtest, player in world)")
         try:
+            self.boot_tried = True
             for b in boot:                                  # boot gate per playtest (H1)
                 text, err = self.vm(b["kind"], b["payload"], f"CALL {b['n']} boot [{g['label']}]")
                 ok, why = boot_ok(text, err)
@@ -3788,6 +3790,8 @@ def _boot_only(g: "Gate") -> None:
                + one_line((sink[-1] if sink else {}).get("detail") or "?"))
         return
     g.checks.extend(sink)
+    g.boot_tried = True
+    results = []
     try:
         for b in boot:
             text, err = g.vm(b["kind"], b["payload"], f"CALL {b['n']} boot [boot-only]")
@@ -3797,7 +3801,10 @@ def _boot_only(g: "Gate") -> None:
             if not ok:
                 g.add(check("regression.boot", "UNKNOWN" if err else "FAIL", f"CALL {b['n']}: {why}"))
                 return
+            results.append(flatten_value(text))
         g.add(check("regression.boot", "PASS", "boot gate PASS (boot-only playtest)"))
+        if getattr(g, "lines", None) is not None and not getattr(g, "boot_text", ""):
+            g.boot_text = "\n".join(results)              # the ledger's boot evidence
     finally:
         g.stop_playtest()
 
@@ -4058,6 +4065,13 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
         if exec_rows:
             ctx.update(_calls_lane(g, exec_rows, disp, total, rows, carry,
                                    start + budget * 60, budget))
+            if not g.boot_tried:
+                # 2026-11-05 VR-AS21/22: every fresh row ran in the Edit DM, so no group
+                # started a playtest and the boot gate never ran; -Finish needs both boot PASS
+                # lines. Boot once in a playtest of its own, as the all-carried path does.
+                g.emit("NOTE no suite group started a playtest (Edit-only rows): boot CALLs 1-2 "
+                       "run in a boot-only playtest")
+                _boot_only(g)
         else:
             g.emit(f"R1 plan: nothing to run in Studio (every row carried or manual) -> {total} "
                    f"CALLs (boot 1-2 only)")

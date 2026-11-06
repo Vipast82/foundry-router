@@ -915,3 +915,36 @@ def test_a_verify_still_syncing_is_rerun_before_it_is_called_stale(fakes, repo, 
     text = lines_of(repo, "V2")
     assert "NOTE PRE-PLAY verify re-run for 30 s while Studio synced: PASS" in text
     assert any(".run(" in c["args"].get("code", "") for c in calls())
+
+
+def test_edit_only_fresh_row_still_records_both_boot_pass_lines(fakes, repo, lock_dir):
+    """v0.181.67: VR-AS21/22 (2026-11-05) ran only Edit-DM rows fresh. No suite group started
+    a playtest, so boot CALLs 1-2 never ran and gate.ps1 -Finish failed on 0 boot PASS lines
+    (the one earlier PASS worked only because every row was carried). A fresh run whose groups
+    never booted now runs one boot-only playtest, and the ledger keeps the boot evidence."""
+    set_rules, calls = fakes
+    set_rules(*rules(["S45"]))
+    head = host_half(repo, "C7")
+    rc, out = run_calls(repo, "C7", "--regression", "S45")
+    assert rc == 0, out
+    text = lines_of(repo, "C7")
+    ls = text.splitlines()
+    assert sum(1 for x in ls if x.startswith("PASS: BOOT counts")) == 2
+    assert any("boot-only playtest" in x for x in ls)
+    assert finish_would_pass(text)
+    v = json.load(open(gate_file(repo, "C7", f"{head[:12]}.calls.json")))
+    assert v["result"] == "PASS" and "PASS: BOOT counts" in v["evidence"]["boot"]
+    boots = [c for c in calls() if "boot()" in c["args"].get("code", "")]
+    assert len(boots) == 2                                   # one server + one client, once
+
+
+def test_a_row_that_plays_still_boots_once_per_playtest_only(fakes, repo, lock_dir):
+    """v0.181.67 keeps the per-playtest boot: a run whose group started a playtest gets no
+    extra boot-only playtest."""
+    set_rules, calls = fakes
+    set_rules(*rules(UI))
+    host_half(repo, "C8")
+    rc, out = run_calls(repo, "C8", "--regression", "subset:ui")
+    assert rc == 0, out
+    ls = lines_of(repo, "C8").splitlines()
+    assert not any("boot-only playtest" in x for x in ls)
