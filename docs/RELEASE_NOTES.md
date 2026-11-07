@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.81 — a slot Blender job has a time limit
+
+On 2026-11-07 two of VR-AS29's Blender jobs on slot-1, a `render_views.py` and a `mesh_report.py` for COS-TORTOISE-SHELL-SHIELD, hung for 7 h 42 min at 0% CPU. Together they held both of the slot's pool locks. From about 09:30 every other track's Blender run waited `pool_wait_seconds` (600 s) and exited 75 ("busy"). VR-AS31 and VR-AS37 parked on it, and VR-AS29 itself completed at 11:37 with other runs. Nothing ended a slot Blender job: when the coordinator side gave up, the remote `bash` and Blender kept running and kept the lock. The slot script now runs Blender under `timeout --kill-after=30 <max_job_seconds>`. A job past the limit is stopped, its lock is freed, and the log says so (exit 124, or 137 after the kill). The new setting `[blender] max_job_seconds` (default 3600, 0 = no limit) is in the Automation UI beside `pool_wait_seconds`. It reaches the drop-in's settings for both a single slot and the pool, and the build-replay rerun path uses it too.
+
+Test: `tests/coordinator/test_build_journal.py::test_a_slot_blender_job_has_a_time_limit_that_frees_its_lock`.
+
 ## v0.181.80 — a router with a full database never costs a sprint an attempt
 
 On 2026-11-07 at about 05:45 the router's own database filled. Every model call answered `database or disk is full` (code `backend_error`), and every session of every AU sprint ended at its first call. None of the infra signatures matched the error, so each failure was an ordinary failed attempt. In eight minutes nine sprints (PT-5, VR-AS06, 07, 21, 29, 31, 37, 38, 40) used their whole attempt budgets and opened lead cases. The router's `/health` kept answering ok throughout. A new `router_storage` signature (`database or disk is full`, `No space left on device`, `database is locked`, `disk I/O error`) joins `local_busy` in `infra.NEVER_EXHAUSTS`: its failures wait for the infra backoff and never cost an attempt, however many come in a row.

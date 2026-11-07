@@ -1216,6 +1216,10 @@ FIELDS: list[Field] = [
     F("blender.pool_wait_seconds", "int", 600, "Blender pool: how long a run waits when every "
       "worker is busy, then exits 75 (busy).", "fast_lane", "coordinator.slot_blender",
       "next_session", min=10, max=7200),
+    F("blender.max_job_seconds", "int", 3600, "Blender on a slot: a job running longer than this "
+      "is stopped, which frees its pool lock (0 = no limit). 2026-11-07: two hung jobs held "
+      "slot-1's locks for 7 h 42 min.", "fast_lane", "coordinator.slot_blender", "next_session",
+      min=0, max=86400),
     F("blender.local_exe", "str", "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe",
       "Blender pool: this PC's Blender, used when `local` is a pool worker (keep it the same "
       "build as the slots').", "fast_lane", "coordinator.slot_blender", "next_session"),

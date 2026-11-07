@@ -158,7 +158,8 @@ def run(profile, state_dir: str, pid: str, tid: str, run_id: str, new_id: str, p
         library = ""
     marks["library"] = time.time()
     script = SB.remote_script(BRANCH.split("/", 1)[1], wait, 0, args, library=bool(library),
-                              job=1, jobs=int(slot.get("jobs") or 1))
+                              job=1, jobs=int(slot.get("jobs") or 1),
+                              max_seconds=int(bl.get("max_job_seconds", SB.MAX_JOB_SECONDS) or 0))
     proc = subprocess.Popen(slots.exec_argv(slot, ["bash", "-c", script], interactive=True),
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, creationflags=SB._NO_WINDOW)

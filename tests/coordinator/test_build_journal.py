@@ -158,6 +158,15 @@ def test_remote_script_marks_the_end_of_blender():
     assert s.index("rc=$?") < s.index("blender exit $rc") < s.index("exit $rc\n")
 
 
+def test_a_slot_blender_job_has_a_time_limit_that_frees_its_lock():
+    s = SB.remote_script("run-1", 600, 0, ["-b", "--version"])
+    assert f"timeout --kill-after=30 {SB.MAX_JOB_SECONDS} blender" in s
+    assert "ran past" in s and s.index("rc=$?") < s.index("ran past")
+    assert "timeout --kill-after" not in SB.remote_script("run-1", 600, 0, ["-b"], max_seconds=0)
+    assert "timeout --kill-after=30 900 blender" in SB.remote_script("r", 600, 0, ["-b"],
+                                                                      max_seconds=900)
+
+
 def test_tee_streams_and_keeps_tail_keys_and_marks(capsys):
     stream = io.BytesIO(b"foundry-blender: running on slot with 14 threads: blender -b\n"
                         b"Blender 4.5\nmesh_report: FAIL tris\n"

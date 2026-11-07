@@ -37,6 +37,11 @@ import time
 from typing import Optional
 
 BUSY_EXIT = 75                       # the slot's Blender stayed busy for --wait seconds
+# 2026-11-07: two VR-AS29 Blender jobs hung on slot-1 for 7 h 42 min at 0% CPU and held both
+# pool locks; every other track's Blender run waited 600 s and exited 75. A job is now ended
+# after [blender] max_job_seconds (0 = no limit), which frees its lock.
+MAX_JOB_SECONDS = 3600
+TIMEOUT_EXIT = 124                   # GNU timeout: the job ran past max_job_seconds
 SEND_CAP = 512 * 1024 * 1024         # uncommitted changes sent at most (bytes)
 BACK_CAP = 4 * 1024 * 1024 * 1024    # outputs taken back at most (bytes)
 CONFIG = os.path.join(".foundry", "blender.json")
@@ -181,7 +186,8 @@ fi
 
 
 def remote_script(run_id: str, wait: int, threads: int, blender_args: list,
-                  library: bool = False, job: int = 1, jobs: int = 1) -> str:
+                  library: bool = False, job: int = 1, jobs: int = 1,
+                  max_seconds: int = MAX_JOB_SECONDS) -> str:
     """The one script the slot runs (bash, in the container). `run_id` is [A-Za-z0-9._-].
     BLENDER_POOL_PLAN P1: job N of a slot's `jobs` has its own lock, checkout and marker, and
     Blender gets the slot's CPU divided by the jobs; every job holds the library lock shared
@@ -237,8 +243,11 @@ fi
 touch "$M"; sleep 1
 cd "$W"
 echo "foundry-blender: running on $(hostname) job $J of {jobs} with $T threads: blender {quoted}" >&2
-blender {quoted} 1>&2
+{f"timeout --kill-after=30 {int(max_seconds)} " if int(max_seconds or 0) > 0 else ""}blender {quoted} 1>&2
 rc=$?
+if [ "$rc" = {TIMEOUT_EXIT} ] || [ "$rc" = 137 ]; then
+    echo "foundry-blender: blender ran past {int(max_seconds or 0)} s and was stopped (the job's lock is free again)" >&2
+fi
 echo "foundry-blender: blender exit $rc" >&2
 find . \\( -path ./.git -o -name __pycache__ \\) -prune -o -type f -newer "$M" -print0 \\
     | tar --null -T - -cf -
@@ -575,7 +584,8 @@ def _run_slot(a, cfg: dict, repo: str, blender_args: list, slot: dict, job: int,
         library = ""
     marks["library"] = time.time()
     script = remote_script(run_id, a.wait, a.threads, blender_args, library=bool(library),
-                           job=job, jobs=jobs)
+                           job=job, jobs=jobs,
+                           max_seconds=int(cfg.get("max_job_seconds", MAX_JOB_SECONDS) or 0))
     p = subprocess.Popen(slots.exec_argv(slot, ["bash", "-c", script], interactive=True),
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE if journal else None,
@@ -800,6 +810,8 @@ def prepare(profile, state_dir: str, task_id: str = "", run_id: str = "") -> Opt
            # B2b: the asset library on this PC (setting blender.library; empty = none)
            "library": str(((getattr(profile, "raw", None) or {}).get("blender") or {})
                           .get("library", "C:/Roblox/AssetLibrary") or ""),
+           "max_job_seconds": int(((getattr(profile, "raw", None) or {}).get("blender") or {})
+                                  .get("max_job_seconds", MAX_JOB_SECONDS) or 0),
            **{k: s.get(k) for k in ("host", "container", "au_push_url")}}
     # build replay (docs/plans/BLENDER_BUILD_REPLAY_PLAN.md R1): the task the prompt is for and
     # the journal settings, read again by every run of the drop-in
@@ -846,6 +858,7 @@ def _prepare_pool(profile, state_dir: str, task_id: str, run_id: str) -> dict:
                str(profile.workspace)),
            "library": str(bl.get("library", "C:/Roblox/AssetLibrary") or ""),
            "pool": workers, "pool_wait_seconds": int(bl.get("pool_wait_seconds") or 600),
+           "max_job_seconds": int(bl.get("max_job_seconds", MAX_JOB_SECONDS) or 0),
            "local_exe": str(bl.get("local_exe") or default_local_exe()),
            "task": str(task_id or ""), "run_id": str(run_id or ""), **journal_settings(profile)}
     _write(cfg_path, json.dumps(cfg, indent=1))
