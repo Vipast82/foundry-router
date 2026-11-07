@@ -341,11 +341,68 @@ def plans_need_official_studio(worktree: str, sprints) -> bool:
     return False
 
 
+# 2026-11-07 token savings, cut 2: the roblox-docs server (27 tools, ~3.9k tokens a turn)
+# repeats a lookup robloxstudio-mcp already has (get_roblox_docs), and VR asset sessions
+# never called it. A Blender track gets it only when one of its plans names it.
+DOCS_MCP = "roblox-docs"
+DOCS_RE = re.compile(r"\broblox-docs\b|\broblox_docs\b", re.I)
+# cut 3: the generic roblox-* skills a track's plans do not name are hidden from the skill
+# list (~120 tokens each in every system prompt; no session loaded one on its own since they
+# were installed 2026-11-02). The project's own au-* skills always stay listed.
+HIDEABLE_SKILL_PREFIX = "roblox-"
+
+
+def _plans(worktree: str, sprints) -> list:
+    """(sprint id, plan text or None when unreadable) for each sprint of a track."""
+    out = []
+    for sid in sprints or []:
+        path = os.path.join(worktree, "docs", "progress", f"{sid}_PLAN.md")
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                out.append((sid, f.read()))
+        except OSError:
+            out.append((sid, None))
+    return out
+
+
+def plans_need_docs_mcp(worktree: str, sprints) -> bool:
+    """True when a plan names the roblox-docs server (an unreadable plan: True)."""
+    return any(t is None or DOCS_RE.search(t) for _, t in _plans(worktree, sprints))
+
+
+def track_skills(profile, worktree: str, sprints) -> Optional[set]:
+    """Skills a track's sessions may need: every plan's `## Skills`, the per-task preload map
+    and `[skills] preload_always`. None (hide nothing) when a plan is unreadable."""
+    from . import skills_preload as SP
+    keep: set = set()
+    for sid, text in _plans(worktree, sprints):
+        if text is None:
+            return None
+        keep.update(SP.plan_skills(text))
+        if profile is not None:
+            keep.update(SP.task_skills(profile, sid))
+    if profile is not None:
+        keep.update(SP.settings(profile)["preload_always"])
+    return keep
+
+
+def _narrow_skills(block: dict, keep: set) -> dict:
+    """The block with every allowed roblox-* skill the track does not need set to deny."""
+    sk = block.get("skill")
+    if not isinstance(sk, dict):
+        return block
+    sk = {k: ("deny" if v == "allow" and k.startswith(HIDEABLE_SKILL_PREFIX) and k not in keep
+              else v) for k, v in sk.items()}
+    return {**block, "skill": sk}
+
+
 def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
-               extra: Optional[dict] = None, official_studio: bool = True) -> dict:
+               extra: Optional[dict] = None, official_studio: bool = True,
+               docs_mcp: bool = True, skills_keep: Optional[set] = None) -> dict:
     """Pure part of `track_kilo_config`: {"text", "mcp": {name: enabled}, "blocks": {agent: block},
     "missing": [agents]}. Raises JsoncError on an unparseable source. `official_studio`
-    False keeps the official Studio MCP server off even with the `studio` need."""
+    False keeps the official Studio MCP server off even with the `studio` need; `docs_mcp`
+    False turns roblox-docs off; `skills_keep` (a set) hides the other roblox-* skills."""
     needs = SM.normalize_needs(needs)
     data = jsonc.parse(text)
     if not isinstance(data, dict):
@@ -372,15 +429,24 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
             else:
                 new = jsonc.replace_value(new, ("mcp",), {name: {"enabled": True}})
             flags[name] = True
+    if not docs_mcp and isinstance((mcp or {}).get(DOCS_MCP), dict):
+        if mcp[DOCS_MCP].get("enabled") is not False:
+            new = jsonc.replace_value(new, ("mcp", DOCS_MCP, "enabled"), False)
+        flags[DOCS_MCP] = False
     out = {"mcp": flags, "blocks": {}, "missing": []}
     rules = track_rules(role_rules, needs)
     if rules:
         agents = data.get("agent") or {}
+        # only the building agents' skill lists narrow; reviewers keep every skill
+        narrow = {RR.normalize(r, (role_rules or {}).get(r)).get("agent")
+                  for r in ("implementer", "lead")} - {"", None}
         for agent, gen in with_skill_maps(RR.agent_blocks(rules, workspace), agents,
                                           role_rules).items():
             if agent not in agents or not isinstance(agents[agent], dict):
                 out["missing"].append(agent)
                 continue
+            if skills_keep is not None and agent in narrow:
+                gen = _narrow_skills(gen, skills_keep)
             # a track's block is the generated one outright: no stale key of the main file survives
             if agents[agent].get("permission") != gen:
                 new = jsonc.replace_value(new, ("agent", agent, "permission"), gen)
@@ -434,10 +500,22 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
             on_demand = False
         if on_demand:
             official = plans_need_official_studio(wt, _attr(track, "sprints") or [])
+    docs, keep = True, None
+    if profile is not None:
+        from .automation import get as auto_get
+        sprints = _attr(track, "sprints") or []
+        try:
+            trim = bool(auto_get(profile, "track_trim_unused_tools"))
+        except Exception:                                         # noqa: BLE001
+            trim = False
+        if trim and sprints:
+            if "blender" in needs:
+                docs = plans_need_docs_mcp(wt, sprints)
+            keep = track_skills(profile, wt, sprints)
     try:
         p = track_text(text, needs, role_rules, workspace or wt,
                        extra_agents(profile, role_rules, workspace or wt),
-                       official_studio=official)
+                       official_studio=official, docs_mcp=docs, skills_keep=keep)
     except (jsonc.JsoncError, RR.RuleError) as e:
         raise KiloConfigError(f"{source}: {e}") from None
     target = os.path.join(wt, "kilo.jsonc")

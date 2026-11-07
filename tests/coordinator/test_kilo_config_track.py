@@ -168,6 +168,60 @@ def test_the_official_studio_server_is_on_only_when_a_sprint_plan_names_it(tmp_p
     assert mcp["Roblox_Studio"]["enabled"] is False                    # community jobs only
 
 
+SKILL_SOURCE = SOURCE.replace(
+    '"code": {"model": "x", "permission": {"*": "allow"}},',
+    '"code": {"model": "x", "permission": {"*": "allow", "skill": {"*": "deny", '
+    '"au-blender-asset": "allow", "au-debugging": "allow", "roblox-world-building": "allow", '
+    '"roblox-ui": "allow", "roblox-testing": "allow"}}},')
+
+
+def test_a_blender_track_drops_docs_and_skills_its_plans_do_not_name(tmp_path):
+    p = tmp_path / "kilo-skills.jsonc"
+    p.write_text(SKILL_SOURCE, encoding="utf-8")
+
+    def profile(trim):
+        class Profile:
+            workspace = str(tmp_path)
+            raw = {"role_rules": RULES, "config_pull": {"kilo_config": str(p)},
+                   "automation": {"track_trim_unused_tools": trim},
+                   "skills": {"preload_always": ["roblox-testing"]}}
+        return Profile
+
+    def track(name, needs, plans):
+        t = Track(tmp_path, needs, name)
+        t.sprints = list(plans)
+        d = os.path.join(t.worktree, "docs", "progress")
+        os.makedirs(d, exist_ok=True)
+        for sid, body in plans.items():
+            with open(os.path.join(d, f"{sid}_PLAN.md"), "w", encoding="utf-8") as f:
+                f.write(body)
+        return t
+
+    plan = {"VR-1": "# VR-1\n\n## Skills\n`au-blender-asset`, `roblox-world-building`.\n\n## Spec\nx\n"}
+    out = load(services.track_kilo_config(track("vr", ["studio", "blender"], plan),
+                                          profile=profile(True)))
+    assert out["mcp"]["roblox-docs"]["enabled"] is False               # asset track: no docs
+    sk = out["agent"]["code"]["permission"]["skill"]
+    assert sk["roblox-world-building"] == "allow"                      # the plan names it
+    assert sk["roblox-testing"] == "allow"                             # preload_always
+    assert sk["roblox-ui"] == "deny"                                   # unnamed roblox-*: hidden
+    assert sk["au-debugging"] == "allow" and sk["au-blender-asset"] == "allow"   # au-* stay
+    code = load(services.track_kilo_config(track("ui", ["studio"], plan), profile=profile(True)))
+    assert code["mcp"]["roblox-docs"]["enabled"] is True               # a code track keeps docs
+    named = {"VR-2": "Look the API up with roblox-docs first.\n"}
+    assert load(services.track_kilo_config(track("d", ["blender"], named),
+                                           profile=profile(True)))["mcp"]["roblox-docs"]["enabled"]
+    off = load(services.track_kilo_config(track("off", ["studio", "blender"], plan),
+                                          profile=profile(False)))
+    assert off["mcp"]["roblox-docs"]["enabled"] is True
+    assert off["agent"]["code"]["permission"]["skill"]["roblox-ui"] == "allow"
+    t = track("miss", ["studio", "blender"], plan)
+    t.sprints.append("VR-9")                                           # unreadable plan: hide nothing
+    miss = load(services.track_kilo_config(t, profile=profile(True)))
+    assert miss["mcp"]["roblox-docs"]["enabled"] is True
+    assert miss["agent"]["code"]["permission"]["skill"]["roblox-ui"] == "allow"
+
+
 def test_a_bad_source_or_track_changes_nothing(tmp_path):
     t = Track(tmp_path, ["studio"], "bad")
     with pytest.raises(K.KiloConfigError, match="cannot read"):

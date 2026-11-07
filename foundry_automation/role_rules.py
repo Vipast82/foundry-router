@@ -166,6 +166,13 @@ def _base(agent: str, default: str, **perms) -> dict:
 
 
 _READ_ONLY_EXTRA = [{"permission": "question", "pattern": "*", "action": "deny"}]
+# 2026-11-07 token savings: Kilo built-ins no coordinator session uses (none was called in a
+# 1,000-request sample). A tool denied outright is left out of the tool list Kilo sends, so
+# these ~7-8k tokens stop riding on every implementer and lead turn.
+UNUSED_SESSION_TOOLS = ["background_process", "schedule_wakeup", "cancel_wakeup", "cron_*",
+                        "link_pr", "board_post", "board_read", "goal", "goal_report", "suggest",
+                        "agent_manager_models", "plan_exit", "list_mcp_resources",
+                        "list_mcp_resource_templates", "read_mcp_resource"]
 
 
 def default_rules(role: str) -> dict:
@@ -180,7 +187,7 @@ def default_rules(role: str) -> dict:
                   external_directory="deny")
         r["task_agents"] = ["explore"]
         r["bash"]["deny"] = ["git tag*", "git push", "git push *"]
-        r["deny_tools"] = ["searxng_*", "crawl4ai_*"]
+        r["deny_tools"] = ["searxng_*", "crawl4ai_*"] + UNUSED_SESSION_TOOLS
         r["extra"] = copy.deepcopy(_READ_ONLY_EXTRA)
         return r
     if role == "lead":
@@ -189,6 +196,7 @@ def default_rules(role: str) -> dict:
                   external_directory="allow")
         r["task_agents"] = ["explore"]
         r["bash"]["deny"] = ["git push", "git push *"]
+        r["deny_tools"] = list(UNUSED_SESSION_TOOLS)
         r["extra"] = copy.deepcopy(_READ_ONLY_EXTRA)
         return r
     if role == "coordinator":

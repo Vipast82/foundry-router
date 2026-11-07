@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.78 — sessions stop carrying tools, docs and skills they never use
+
+Measured on 2026-11-07 from captured request bodies: a slot-track implementer turn sends 103 tool definitions (about 31.5k tokens) and a 14.3k-token system prompt before any sprint text. A session's first turn is about 80k tokens on a slot track and about 105k on vr-c and the main checkout, and that fixed start is 77% of all implementer tokens.
+
+- **Unused Kilo built-ins (about 7-8k tokens a turn).** `role_rules.UNUSED_SESSION_TOOLS` lists `background_process`, `schedule_wakeup`, `cancel_wakeup`, `cron_*`, `link_pr`, `board_post`, `board_read`, `goal`, `goal_report`, `suggest`, `agent_manager_models`, `plan_exit` and the three MCP-resource tools. It is now in the default `deny_tools` of the implementer and lead roles. None of these tools was called in a 1,000-request sample. Kilo leaves a tool denied outright out of the list it sends; the capture confirms this, since denied `webfetch` and `searxng_*` are absent. A project with its own `deny_tools` adds the list in the router's Role rules editor ("Tools always denied").
+- **roblox-docs on asset tracks (about 3.9k tokens a turn).** Its 27 tools repeat a lookup `robloxstudio-mcp` already has (`get_roblox_docs`), and VR sessions never called it. A track with the `blender` need turns it off unless one of its plans names `roblox-docs`. Code tracks keep it.
+- **Skill list (about 120 tokens a skill).** The skill tool lists every allowed skill in the system prompt; AU allows 43. For the implementer and lead agents, a track now hides the generic `roblox-*` skills none of its sprints uses: not named in a plan's `## Skills`, not in `[skills] preload_by_task` and not in `preload_always`. That is exactly the set the coordinator preloads. The project's own `au-*` skills always stay listed, and reviewer agents keep every skill. An unreadable plan hides nothing.
+
+Both track cuts follow the new `[automation] track_trim_unused_tools` (default on). They reach a track when its kilo.jsonc is rewritten (`tracks set-needs`, set-slot, start).
+
+Test: `tests/coordinator/test_kilo_config_track.py::test_a_blender_track_drops_docs_and_skills_its_plans_do_not_name`.
+
 ## v0.181.77 — the official Studio server follows every job only it does
 
 Victor (2026-11-07): the two Studio servers each do different jobs. The official `Roblox_Studio` server generates (mesh, scene, avatar, material, texture, animation), captures the screen, searches and stores Creator Store assets and images, drives navigation and user input, and runs Studio skills and Open Cloud. The community `robloxstudio-mcp` server runs playtests, runtime eval, logs, screenshots, the device simulator, profilers and rbxm import and export. v0.181.76 turned the official server on for a plan that named it or one of 15 of its tools. It now follows all 31 tools only the official server has (its `tools/list` minus the community one's), plus the phrase "official (Studio) MCP". Generic words a plan uses for other things (`skill`, `subagent`, and `multi_edit`, which is also a Kilo tool) do not count. 74 of the 395 AU plans name an official-only job; the current VR-AS plans name none.

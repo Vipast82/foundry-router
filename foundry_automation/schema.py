@@ -278,6 +278,9 @@ AUTOMATION_DEFAULTS: dict = {
     # 2026-11-07: a track gets the official Studio MCP server (36 tools, ~20.8k tokens a
     # turn) only when one of its sprint plans names it or one of its tools
     "studio_official_mcp_on_demand": True,
+    # 2026-11-07: a Blender track drops roblox-docs unless a plan names it, and a track lists only
+    # the roblox-* skills its plans name (au-* skills always stay)
+    "track_trim_unused_tools": True,
     "context_ceiling_tokens": 160000,
     # 2026-10-27: the handoff ceiling is this share of the session model's usable window
     # (Kilo limit.context - limit.output); context_ceiling_tokens when the window is unknown
@@ -925,6 +928,9 @@ _AUTO_DESC = {
     "studio_official_mcp_on_demand": "A track with the studio need gets the official Roblox_Studio "
                                      "MCP server only when one of its sprint plans names it or one "
                                      "of its tools (saves ~20k tokens a turn). Off: always on.",
+    "track_trim_unused_tools": "A Blender track turns roblox-docs off unless a plan names it, and "
+                               "a track lists only the roblox-* skills its plans name (the au-* "
+                               "skills always stay). Off: every server and skill listed.",
     "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off). "
                               "Used when the session model's window is unknown.",
     "context_ceiling_pct": "Hand off at this percentage of the session model's usable window "
