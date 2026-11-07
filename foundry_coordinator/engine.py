@@ -3951,6 +3951,12 @@ class Coordinator:
             # its prior findings and decisions remain in the audit trail.
             if data.get("build_progress"):
                 data["free_retry"] = True
+            # The self-repair ladder starts over with the operator's fresh budget: the
+            # old steps stay in the event trail, but they no longer make the first
+            # repeat after the unblock park the sprint (VR-AS04/VR-AS21 2026-11-06
+            # re-parked on "lead repair and different approach used" with rounds left).
+            from .decision_policy import LOG_KEY as _SR_LOG
+            data.pop(_SR_LOG, None)
         if lc_on and str(resolution or "").strip() and \
                 project_id in self.projects and self._lead_on(self.projects[project_id]):
             # the operator's resolution IS the materially different strategy for the

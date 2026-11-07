@@ -429,6 +429,19 @@ def test_an_unblock_with_reset_resets_every_budget_counter(tmp_path):
         assert lims[key]["remaining"] == lims[key]["base_max"], key
 
 
+def test_an_unblock_with_reset_starts_the_self_repair_ladder_over(tmp_path):
+    from foundry_coordinator.decision_policy import LOG_KEY, repair_log
+    c, P, clk, *_ = game(tmp_path)
+    used = [{"step": s, "ts": clk.t} for s in ("lead_repair", "different_approach")]
+    c.store.merge_data("game", "T1", **{LOG_KEY: used})
+    c.store.transition("game", "T1", S.BLOCKED, {"blocker": "parked"}, blocker="parked")
+    c.unblock("game", "T1", "more rounds", reset_attempts=False)
+    assert len(repair_log(c.store.task("game", "T1"), clk.t)) == 2      # a plain unblock keeps it
+    c.store.transition("game", "T1", S.BLOCKED, {"blocker": "parked"}, blocker="parked")
+    c.unblock("game", "T1", "more rounds", reset_attempts=True)
+    assert repair_log(c.store.task("game", "T1"), clk.t) == []
+
+
 # ------------------------------------------------------------------ bounds / settings
 
 def test_actions_per_task_per_day_are_capped_with_a_digest_entry(tmp_path):

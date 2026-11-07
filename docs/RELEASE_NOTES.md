@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.75 — an unblock with a reset starts the self-repair ladder over
+
+The self-repair ladder for a timed-out automation decision is lead repair, then a different approach, then one frontier session, then a park. It counts the steps from the task's self-repair log over a rolling 24 hours. An operator unblock with `--reset-attempts` gave a fresh attempt budget but kept that log. The first findings repeat after the unblock then went straight to "exhausted" and parked the sprint again. On 2026-11-06 Victor chose "more rounds" for VR-AS04 and VR-AS21. Each parked again within about an hour with "lead repair and different approach used; no frontier persona available", while 2 of their 8 visual rounds were still unused. An unblock with a reset now clears `self_repair_log`, so the ladder starts over with the new budget. The old steps stay in the `self_repair` events. A plain unblock without a reset keeps the log.
+
+Test: `tests/coordinator/test_selfheal.py::test_an_unblock_with_reset_starts_the_self_repair_ladder_over`.
+
 ## v0.181.74 — a track with no Studio slot takes the workstation Studio lock
 
 A track bound to a Studio slot runs its Studio work in the slot. A track that needs Studio but has no slot (vr-c, started 2026-11-05 as a fourth agent) reaches the workstation Studio through its Studio MCP servers, but its sessions took none of the main Studio's exclusive rows. vr-c's asset checks started and stopped play sessions in the workstation Studio while BAL-1 held it, and BAL-1's bot matches ended about 2 minutes in ("play session terminates by itself"). Victor chose "vr-c waits for Studio". A slot-less track whose needs include `studio` now adds the main profile's `studio:<host>` and `rojo:<port>` resources to its session locks. Its sessions wait while a main sprint holds the workstation Studio, the same as another main sprint would. Slot-bound tracks and tracks without the `studio` need are unchanged.
