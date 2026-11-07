@@ -158,6 +158,14 @@ def test_the_official_studio_server_is_on_only_when_a_sprint_plan_names_it(tmp_p
     assert load(services.track_kilo_config(t, profile=profile(True)))["mcp"]["Roblox_Studio"]["enabled"]
     mcp = load(services.track_kilo_config(track("off", plain), profile=profile(False)))["mcp"]
     assert mcp["Roblox_Studio"]["enabled"] is True                     # setting off: always on
+    for body in ("Capture the lobby with screen_capture.", "Read logs via get_console_output.",
+                 "Use the official Studio MCP for the avatar pass.", "search_asset for a crate"):
+        n = f"t{abs(hash(body)) % 10000}"
+        mcp = load(services.track_kilo_config(track(n, {"VR-4": body}), profile=profile(True)))["mcp"]
+        assert mcp["Roblox_Studio"]["enabled"] is True, body           # each official-only job
+    community = {"VR-5": "solo_playtest, then get_runtime_logs and capture_screenshot."}
+    mcp = load(services.track_kilo_config(track("comm", community), profile=profile(True)))["mcp"]
+    assert mcp["Roblox_Studio"]["enabled"] is False                    # community jobs only
 
 
 def test_a_bad_source_or_track_changes_nothing(tmp_path):

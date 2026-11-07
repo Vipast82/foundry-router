@@ -306,12 +306,25 @@ def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
 # about 20.8k tokens resent on every turn, and VR asset sessions called it once in 90
 # minutes. With [automation] studio_official_mcp_on_demand a track gets it only when
 # one of its sprint plans names the server or one of its own tools.
+# The two Studio servers do different jobs (Victor 2026-11-07): the official one generates
+# (mesh, scene, avatar, material, texture, animation), captures the screen, searches and
+# stores Creator Store assets and images, drives navigation and user input, and runs Studio
+# skills and Open Cloud; the community one (robloxstudio-mcp) runs playtests, runtime eval,
+# logs, screenshots, the device simulator, profilers and rbxm import/export. Every tool only
+# the official server has counts (its tools/list minus the community one's), except words a
+# plan uses for other things (skill, subagent, multi_edit is also a Kilo tool).
 OFFICIAL_STUDIO_MCP = "Roblox_Studio"
+OFFICIAL_ONLY_TOOLS = (
+    "auto_setup_avatar", "character_navigation", "create_skill", "edit_skill",
+    "generate_animation", "generate_avatar", "generate_material", "generate_mesh",
+    "generate_procedural_model", "generate_scene", "generate_texture", "get_console_output",
+    "get_studio_state", "http_get", "inspect_instance", "list_roblox_studios", "list_skills",
+    "open_cloud_invoke", "screen_capture", "script_grep", "script_read", "script_search",
+    "search_asset", "search_game_tree", "segment_mesh", "start_stop_play", "store_image",
+    "upload_image", "user_keyboard_input", "user_mouse_input", "wait_job_finished")
 OFFICIAL_STUDIO_RE = re.compile(
-    r"\bRoblox_Studio\b|\b(?:generate_(?:mesh|scene|avatar|material|texture|procedural_model|"
-    r"animation)|auto_setup_avatar|segment_mesh|screen_capture|character_navigation|"
-    r"open_cloud_invoke|store_image|user_keyboard_input|user_mouse_input|start_stop_play|"
-    r"search_game_tree|inspect_instance)\b")
+    r"\bRoblox_Studio\b|\bofficial (?:Roblox )?(?:Studio )?MCP\b|\b(?:"
+    + "|".join(OFFICIAL_ONLY_TOOLS) + r")\b", re.I)
 
 
 def plans_need_official_studio(worktree: str, sprints) -> bool:

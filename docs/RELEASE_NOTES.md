@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.77 — the official Studio server follows every job only it does
+
+Victor (2026-11-07): the two Studio servers each do different jobs. The official `Roblox_Studio` server generates (mesh, scene, avatar, material, texture, animation), captures the screen, searches and stores Creator Store assets and images, drives navigation and user input, and runs Studio skills and Open Cloud. The community `robloxstudio-mcp` server runs playtests, runtime eval, logs, screenshots, the device simulator, profilers and rbxm import and export. v0.181.76 turned the official server on for a plan that named it or one of 15 of its tools. It now follows all 31 tools only the official server has (its `tools/list` minus the community one's), plus the phrase "official (Studio) MCP". Generic words a plan uses for other things (`skill`, `subagent`, and `multi_edit`, which is also a Kilo tool) do not count. 74 of the 395 AU plans name an official-only job; the current VR-AS plans name none.
+
+Test: `tests/coordinator/test_kilo_config_track.py::test_the_official_studio_server_is_on_only_when_a_sprint_plan_names_it` (each official-only job turns it on; community-only jobs keep it off).
+
 ## v0.181.76 — a track gets the official Studio MCP server only when a plan needs it
 
 Victor asked where Claude tokens go. In a 1,000-request sample (90 minutes, 2026-11-07), implementer turns were 91% of Claude prompt tokens, at about 131k tokens a turn with a 93% cache hit rate. Every turn resends the session's tool definitions. A track with the `studio` need turned on both Studio MCP servers. The official `Roblox_Studio` server lists 36 tools, about 20.8k tokens of definitions (measured with `tools/list`). VR asset sessions called it once in 90 minutes; their Studio calls go through `robloxstudio-mcp`.
