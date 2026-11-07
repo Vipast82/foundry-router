@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.76 — a track gets the official Studio MCP server only when a plan needs it
+
+Victor asked where Claude tokens go. In a 1,000-request sample (90 minutes, 2026-11-07), implementer turns were 91% of Claude prompt tokens, at about 131k tokens a turn with a 93% cache hit rate. Every turn resends the session's tool definitions. A track with the `studio` need turned on both Studio MCP servers. The official `Roblox_Studio` server lists 36 tools, about 20.8k tokens of definitions (measured with `tools/list`). VR asset sessions called it once in 90 minutes; their Studio calls go through `robloxstudio-mcp`.
+
+The new `[automation] studio_official_mcp_on_demand` (default on) gives a track the official server only when one of its sprint plans (`docs/progress/<id>_PLAN.md` in the worktree) names `Roblox_Studio` or one of its own tools: `generate_mesh`, `generate_scene`, `screen_capture` and the rest. A missing or unreadable plan counts as needing it. Off restores the old behaviour. `robloxstudio-mcp`, the coordinator's own Studio gate (which starts its own MCP clients) and the main checkout's kilo.jsonc are unchanged.
+
+Duplicate check (Victor's request): the router adds no MCP tools to Kilo sessions, since no Kilo persona has `preferred_mcp_tools`. Kilo's global config uses the same server names as the project file, so the project's settings win: git, crawl4ai and general-mcp-gateway, which are on in the global file, stay off. Skills reach a session as prompt text, not as tools.
+
+Test: `tests/coordinator/test_kilo_config_track.py::test_the_official_studio_server_is_on_only_when_a_sprint_plan_names_it`.
+
 ## v0.181.75 — an unblock with a reset starts the self-repair ladder over
 
 The self-repair ladder for a timed-out automation decision is lead repair, then a different approach, then one frontier session, then a park. It counts the steps from the task's self-repair log over a rolling 24 hours. An operator unblock with `--reset-attempts` gave a fresh attempt budget but kept that log. The first findings repeat after the unblock then went straight to "exhausted" and parked the sprint again. On 2026-11-06 Victor chose "more rounds" for VR-AS04 and VR-AS21. Each parked again within about an hour with "lead repair and different approach used; no frontier persona available", while 2 of their 8 visual rounds were still unused. An unblock with a reset now clears `self_repair_log`, so the ladder starts over with the new budget. The old steps stay in the `self_repair` events. A plain unblock without a reset keeps the log.

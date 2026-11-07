@@ -30,6 +30,7 @@ config relies on Kilo merging project over global config.
 from __future__ import annotations
 
 import copy
+import re
 import os
 import shutil
 import time
@@ -301,10 +302,37 @@ def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
     return out
 
 
+# 2026-11-07 token savings: the official Studio MCP server's 36 tool definitions are
+# about 20.8k tokens resent on every turn, and VR asset sessions called it once in 90
+# minutes. With [automation] studio_official_mcp_on_demand a track gets it only when
+# one of its sprint plans names the server or one of its own tools.
+OFFICIAL_STUDIO_MCP = "Roblox_Studio"
+OFFICIAL_STUDIO_RE = re.compile(
+    r"\bRoblox_Studio\b|\b(?:generate_(?:mesh|scene|avatar|material|texture|procedural_model|"
+    r"animation)|auto_setup_avatar|segment_mesh|screen_capture|character_navigation|"
+    r"open_cloud_invoke|store_image|user_keyboard_input|user_mouse_input|start_stop_play|"
+    r"search_game_tree|inspect_instance)\b")
+
+
+def plans_need_official_studio(worktree: str, sprints) -> bool:
+    """True when any of the track's sprint plans names the official Studio MCP server or one
+    of its own tools. An unreadable or missing plan counts as needing it (fail open)."""
+    for sid in sprints or []:
+        path = os.path.join(worktree, "docs", "progress", f"{sid}_PLAN.md")
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                if OFFICIAL_STUDIO_RE.search(f.read()):
+                    return True
+        except OSError:
+            return True
+    return False
+
+
 def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
-               extra: Optional[dict] = None) -> dict:
+               extra: Optional[dict] = None, official_studio: bool = True) -> dict:
     """Pure part of `track_kilo_config`: {"text", "mcp": {name: enabled}, "blocks": {agent: block},
-    "missing": [agents]}. Raises JsoncError on an unparseable source."""
+    "missing": [agents]}. Raises JsoncError on an unparseable source. `official_studio`
+    False keeps the official Studio MCP server off even with the `studio` need."""
     needs = SM.normalize_needs(needs)
     data = jsonc.parse(text)
     if not isinstance(data, dict):
@@ -314,6 +342,8 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
         new = jsonc.replace_value(new, ("snapshot",), False)
     new, _ = drop_retired_instructions(new, workspace=workspace)
     want = set(SM.mcp_for(needs))
+    if not official_studio:
+        want.discard(OFFICIAL_STUDIO_MCP)
     mcp = data.get("mcp") if isinstance(data.get("mcp"), dict) else None
     flags: dict = {}
     for name in SM.CONTROLLED_MCP:
@@ -382,9 +412,19 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
             text = f.read()
     except OSError as e:
         raise KiloConfigError(f"cannot read {source}: {e}") from None
+    official = True
+    if profile is not None and "studio" in needs:
+        from .automation import get as auto_get
+        try:
+            on_demand = bool(auto_get(profile, "studio_official_mcp_on_demand"))
+        except Exception:                                         # noqa: BLE001
+            on_demand = False
+        if on_demand:
+            official = plans_need_official_studio(wt, _attr(track, "sprints") or [])
     try:
         p = track_text(text, needs, role_rules, workspace or wt,
-                       extra_agents(profile, role_rules, workspace or wt))
+                       extra_agents(profile, role_rules, workspace or wt),
+                       official_studio=official)
     except (jsonc.JsoncError, RR.RuleError) as e:
         raise KiloConfigError(f"{source}: {e}") from None
     target = os.path.join(wt, "kilo.jsonc")

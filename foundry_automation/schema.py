@@ -275,6 +275,9 @@ AUTOMATION_DEFAULTS: dict = {
     "infra_backoff_seconds": 60,
     "preflight": True,
     "preflight_endpoints": [],
+    # 2026-11-07: a track gets the official Studio MCP server (36 tools, ~20.8k tokens a
+    # turn) only when one of its sprint plans names it or one of its tools
+    "studio_official_mcp_on_demand": True,
     "context_ceiling_tokens": 160000,
     # 2026-10-27: the handoff ceiling is this share of the session model's usable window
     # (Kilo limit.context - limit.output); context_ceiling_tokens when the window is unknown
@@ -919,6 +922,9 @@ _AUTO_DESC = {
     "infra_backoff_seconds": "First infra retry delay (doubles, capped at 15 min).",
     "preflight": "Check Kilo / Rojo / Studio MCP / local model before a session starts.",
     "preflight_endpoints": "Extra endpoints the preflight probes (name=url; tcp:// or http(s)://).",
+    "studio_official_mcp_on_demand": "A track with the studio need gets the official Roblox_Studio "
+                                     "MCP server only when one of its sprint plans names it or one "
+                                     "of its tools (saves ~20k tokens a turn). Off: always on.",
     "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off). "
                               "Used when the session model's window is unknown.",
     "context_ceiling_pct": "Hand off at this percentage of the session model's usable window "

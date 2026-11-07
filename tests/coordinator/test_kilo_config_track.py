@@ -127,6 +127,39 @@ def test_profile_supplies_the_source_and_rules(tmp_path, src):
     assert out["agent"]["code"]["permission"]["blender-mcp_*"] == "deny"
 
 
+def test_the_official_studio_server_is_on_only_when_a_sprint_plan_names_it(tmp_path, src):
+    def profile(on_demand):
+        class Profile:
+            workspace = str(tmp_path)
+            raw = {"role_rules": RULES, "config_pull": {"kilo_config": src},
+                   "automation": {"studio_official_mcp_on_demand": on_demand}}
+        return Profile
+
+    def track(name, plans):
+        t = Track(tmp_path, ["studio", "blender"], name)
+        t.sprints = list(plans)
+        d = os.path.join(t.worktree, "docs", "progress")
+        os.makedirs(d, exist_ok=True)
+        for sid, body in plans.items():
+            with open(os.path.join(d, f"{sid}_PLAN.md"), "w", encoding="utf-8") as f:
+                f.write(body)
+        return t
+
+    plain = {"VR-1": "Rebuild the cap in Blender; ASSET_CHECK via robloxstudio-mcp.",
+             "VR-2": "Fix the mask."}
+    mcp = load(services.track_kilo_config(track("vr", plain), profile=profile(True)))["mcp"]
+    assert mcp["Roblox_Studio"]["enabled"] is False                    # no plan needs it: off
+    assert mcp["robloxstudio-mcp"]["enabled"] is True and mcp["blender-mcp"]["enabled"] is True
+    named = {**plain, "VR-3": "Make the base mesh with generate_mesh."}
+    mcp = load(services.track_kilo_config(track("gen", named), profile=profile(True)))["mcp"]
+    assert mcp["Roblox_Studio"]["enabled"] is True                     # a plan uses its tool
+    t = track("miss", plain)
+    t.sprints.append("VR-9")                                           # no plan file: fail open
+    assert load(services.track_kilo_config(t, profile=profile(True)))["mcp"]["Roblox_Studio"]["enabled"]
+    mcp = load(services.track_kilo_config(track("off", plain), profile=profile(False)))["mcp"]
+    assert mcp["Roblox_Studio"]["enabled"] is True                     # setting off: always on
+
+
 def test_a_bad_source_or_track_changes_nothing(tmp_path):
     t = Track(tmp_path, ["studio"], "bad")
     with pytest.raises(K.KiloConfigError, match="cannot read"):
