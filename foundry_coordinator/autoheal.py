@@ -49,6 +49,11 @@ INFRA_SIGNATURES = (
     ("kilo_aborted", re.compile(r"MessageAbortedError|aborted every turn", re.I)),
     # Kilo sat in "retry" (router or model outage) until the coordinator stopped it
     ("kilo_retry", re.compile(r"kept retrying the model call", re.I)),
+    # 2026-11-07 05:45: the router's own database filled ("database or disk is full",
+    # code backend_error) and every session of every sprint ended at its first call; nine
+    # sprints spent their attempts in eight minutes. The router is down for everyone.
+    ("router_storage", re.compile(r"database or disk is full|No space left on device|"
+                                  r"database is locked|disk I/O error", re.I)),
     # a status code, never a quantity ("500 ms", "took 503 seconds", "504 tokens")
     ("backend_5xx", re.compile(r"\b(?:HTTP\s*)?5(?:00|02|03|04)\b" + _NOT_A_QUANTITY +
                                r"|Bad Gateway|Service Unavailable|Gateway Time-?out", re.I)),

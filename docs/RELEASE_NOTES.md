@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.80 — a router with a full database never costs a sprint an attempt
+
+On 2026-11-07 at about 05:45 the router's own database filled. Every model call answered `database or disk is full` (code `backend_error`), and every session of every AU sprint ended at its first call. None of the infra signatures matched the error, so each failure was an ordinary failed attempt. In eight minutes nine sprints (PT-5, VR-AS06, 07, 21, 29, 31, 37, 38, 40) used their whole attempt budgets and opened lead cases. The router's `/health` kept answering ok throughout. A new `router_storage` signature (`database or disk is full`, `No space left on device`, `database is locked`, `disk I/O error`) joins `local_busy` in `infra.NEVER_EXHAUSTS`: its failures wait for the infra backoff and never cost an attempt, however many come in a row.
+
+Test: `tests/coordinator/test_infra_outages.py::test_a_router_with_a_full_database_never_uses_an_attempt`.
+
 ## v0.181.79 — the unused Kilo built-ins are hidden through the track config
 
 v0.181.78 hid `UNUSED_SESSION_TOOLS` through the role-rule defaults. AU's live role rules list their own `deny_tools`, so the defaults do not reach them, and a router role_rules revision waits for a safe point with no live session. AU always has a live session: router revision 29, which added the list, sat pending and also held back revision 30, a live-only persona override (the Haiku trial). Revision 31 put role_rules back as they were. A track's kilo.jsonc now adds the list for its implementer and lead agents when `[automation] track_trim_unused_tools` is on. That file is rewritten and reloaded at the track's own safe point, the next session start. The main checkout keeps its built-ins until a main-checkout safe point is designed (together with the official-Studio trim there).

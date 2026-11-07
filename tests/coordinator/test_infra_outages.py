@@ -496,3 +496,30 @@ def test_a_busy_local_model_never_uses_an_attempt():
     finally:
         infra.auto_get, infra._schedule = orig_auto, orig_sched
     assert "infra_retry_exhausted" not in events and data["infra_failures"] == 6
+
+
+def test_a_router_with_a_full_database_never_uses_an_attempt():
+    """2026-11-07 05:45: the router's database filled and every session failed at its first
+    call; nine sprints spent their attempts in eight minutes."""
+    from foundry_coordinator.autoheal import infra_signature
+    why = ('session ended with an error: {"name": "UnknownError", "data": {"message": '
+           '"{\\"message\\":\\"database or disk is full\\",\\"type\\":\\"server_error\\",'
+           '\\"code\\":\\"backend_error\\"}"}}')
+    assert infra_signature(why) == "router_storage"
+    data = {"infra_failures": 0}
+    events = []
+    store = SimpleNamespace(
+        task=lambda pid, tid: {"task_id": tid, "data": dict(data)},
+        merge_data=lambda pid, tid, **kv: data.update(kv),
+        event=lambda pid, tid, kind, detail=None: events.append(kind))
+    c = SimpleNamespace(store=store, clock=time.time, _note=lambda *a, **k: None)
+    P = SimpleNamespace(id="g", profile=SimpleNamespace(automation={"infra_retry_max": 2}))
+    orig_auto, orig_sched = infra.auto_get, infra._schedule
+    infra.auto_get = lambda P, k: {"infra_retry_max": 2}.get(k)
+    infra._schedule = lambda c, P, t, why, kind: {"retry_at": time.time() + 60}
+    try:
+        for _ in range(6):
+            assert infra.session_failure(c, P, {"task_id": "T"}, why, False) is True
+    finally:
+        infra.auto_get, infra._schedule = orig_auto, orig_sched
+    assert "infra_retry_exhausted" not in events and data["infra_failures"] == 6

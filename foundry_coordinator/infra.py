@@ -194,6 +194,11 @@ def preflight_blocks(c, P, t: dict, persona: str) -> bool:
     return True
 
 
+# signatures whose failures never cost an attempt, however many in a row (each still waits
+# for the infra backoff before the next start)
+NEVER_EXHAUSTS = ("local_busy", "router_storage")
+
+
 def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
     """A session ended on `why`. Returns the free flag to use: an infra failure is
     free (and the next start waits for the backoff) until infra_retry_max of them
@@ -220,11 +225,12 @@ def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
         c.store.event(P.id, t["task_id"], "local_fallback_gpu", detail={
             "until": c.clock() + LOCAL_FALLBACK_S, "persona": persona, "why": why[:200]})
     _schedule(c, P, t, why, "session")
-    if sig == "local_busy":
+    if sig in NEVER_EXHAUSTS:
         # 2026-11-03 HK-ASSET1: the one local stream was held by other sprints' sessions that
         # fell to it while the Claude API sat at its daily cap; ten refusals in a row used up the
         # free retries and then real attempts (5 of 6). The model is busy, not broken: waiting
-        # for it never costs an attempt.
+        # for it never costs an attempt. 2026-11-07: a router whose database is full fails
+        # every session of every sprint at once; that is an outage, never the sprint's fault.
         if not free:
             c.store.event(P.id, t["task_id"], "infra_free_retry", detail={
                 "signature": sig, "n": n, "why": why[:300], "never_exhausts": True})
