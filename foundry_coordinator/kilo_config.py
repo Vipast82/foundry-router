@@ -278,9 +278,13 @@ def _attr(track, name: str, default=None):
     return getattr(track, name, default)
 
 
-def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
+def track_rules(role_rules: Optional[dict], needs: list,
+                hide_unused_builtins: bool = False) -> Optional[dict]:
     """The role rules narrowed to a track's needs: Studio tools denied without `studio`,
-    each other tool family denied without its need. None stays None (no rules)."""
+    each other tool family denied without its need. None stays None (no rules).
+    `hide_unused_builtins` also denies RR.UNUSED_SESSION_TOOLS for the implementer and lead
+    (a track's kilo.jsonc is rewritten and reloaded at a safe point of its own, so this
+    needs no project-wide role_rules revision, which waits for no live session at all)."""
     if not role_rules:
         return None
     out: dict = {}
@@ -290,6 +294,8 @@ def track_rules(role_rules: Optional[dict], needs: list) -> Optional[dict]:
             r["permissions"]["studio_read"] = "deny"
             r["permissions"]["studio_write"] = "deny"
         deny = list(r.get("deny_tools") or [])
+        if hide_unused_builtins and role in ("implementer", "lead"):
+            deny += [t for t in RR.UNUSED_SESSION_TOOLS if t not in deny]
         for need, tools in SM.NEEDS_TOOLS.items():
             if need not in needs:
                 deny += [t for t in tools if t not in deny]
@@ -398,7 +404,8 @@ def _narrow_skills(block: dict, keep: set) -> dict:
 
 def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
                extra: Optional[dict] = None, official_studio: bool = True,
-               docs_mcp: bool = True, skills_keep: Optional[set] = None) -> dict:
+               docs_mcp: bool = True, skills_keep: Optional[set] = None,
+               hide_unused_builtins: bool = False) -> dict:
     """Pure part of `track_kilo_config`: {"text", "mcp": {name: enabled}, "blocks": {agent: block},
     "missing": [agents]}. Raises JsoncError on an unparseable source. `official_studio`
     False keeps the official Studio MCP server off even with the `studio` need; `docs_mcp`
@@ -434,7 +441,7 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
             new = jsonc.replace_value(new, ("mcp", DOCS_MCP, "enabled"), False)
         flags[DOCS_MCP] = False
     out = {"mcp": flags, "blocks": {}, "missing": []}
-    rules = track_rules(role_rules, needs)
+    rules = track_rules(role_rules, needs, hide_unused_builtins)
     if rules:
         agents = data.get("agent") or {}
         # only the building agents' skill lists narrow; reviewers keep every skill
@@ -500,7 +507,7 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
             on_demand = False
         if on_demand:
             official = plans_need_official_studio(wt, _attr(track, "sprints") or [])
-    docs, keep = True, None
+    docs, keep, builtins = True, None, False
     if profile is not None:
         from .automation import get as auto_get
         sprints = _attr(track, "sprints") or []
@@ -508,6 +515,7 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
             trim = bool(auto_get(profile, "track_trim_unused_tools"))
         except Exception:                                         # noqa: BLE001
             trim = False
+        builtins = trim
         if trim and sprints:
             if "blender" in needs:
                 docs = plans_need_docs_mcp(wt, sprints)
@@ -515,7 +523,8 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
     try:
         p = track_text(text, needs, role_rules, workspace or wt,
                        extra_agents(profile, role_rules, workspace or wt),
-                       official_studio=official, docs_mcp=docs, skills_keep=keep)
+                       official_studio=official, docs_mcp=docs, skills_keep=keep,
+                       hide_unused_builtins=builtins)
     except (jsonc.JsoncError, RR.RuleError) as e:
         raise KiloConfigError(f"{source}: {e}") from None
     target = os.path.join(wt, "kilo.jsonc")

@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.79 — the unused Kilo built-ins are hidden through the track config
+
+v0.181.78 hid `UNUSED_SESSION_TOOLS` through the role-rule defaults. AU's live role rules list their own `deny_tools`, so the defaults do not reach them, and a router role_rules revision waits for a safe point with no live session. AU always has a live session: router revision 29, which added the list, sat pending and also held back revision 30, a live-only persona override (the Haiku trial). Revision 31 put role_rules back as they were. A track's kilo.jsonc now adds the list for its implementer and lead agents when `[automation] track_trim_unused_tools` is on. That file is rewritten and reloaded at the track's own safe point, the next session start. The main checkout keeps its built-ins until a main-checkout safe point is designed (together with the official-Studio trim there).
+
+Test: `tests/coordinator/test_kilo_config_track.py::test_unused_builtins_are_hidden_even_when_role_rules_list_their_own_denies`.
+
 ## v0.181.78 — sessions stop carrying tools, docs and skills they never use
 
 Measured on 2026-11-07 from captured request bodies: a slot-track implementer turn sends 103 tool definitions (about 31.5k tokens) and a 14.3k-token system prompt before any sprint text. A session's first turn is about 80k tokens on a slot track and about 105k on vr-c and the main checkout, and that fixed start is 77% of all implementer tokens.

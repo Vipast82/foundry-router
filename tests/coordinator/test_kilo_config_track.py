@@ -206,6 +206,9 @@ def test_a_blender_track_drops_docs_and_skills_its_plans_do_not_name(tmp_path):
     assert sk["roblox-testing"] == "allow"                             # preload_always
     assert sk["roblox-ui"] == "deny"                                   # unnamed roblox-*: hidden
     assert sk["au-debugging"] == "allow" and sk["au-blender-asset"] == "allow"   # au-* stay
+    code_perm = out["agent"]["code"]["permission"]
+    assert code_perm["cron_*"] == "deny" and code_perm["background_process"] == "deny"
+    assert code_perm["goal_report"] == "deny"                          # unused built-ins: hidden
     code = load(services.track_kilo_config(track("ui", ["studio"], plan), profile=profile(True)))
     assert code["mcp"]["roblox-docs"]["enabled"] is True               # a code track keeps docs
     named = {"VR-2": "Look the API up with roblox-docs first.\n"}
@@ -252,3 +255,13 @@ def test_existing_apply_still_works_and_leaves_mcp_alone(tmp_path, src):
     r = K.regenerate(Profile, role_rules=RULES, path=src)
     assert r["applied"] is False
     assert load(src)["mcp"]["blender-mcp"]["enabled"] is False
+
+
+def test_unused_builtins_are_hidden_even_when_role_rules_list_their_own_denies():
+    rules = {"implementer": {"deny_tools": ["searxng_*"]}, "lead": {"deny_tools": []}}
+    kept = K.track_rules(rules, ["studio"], hide_unused_builtins=False)
+    assert "cron_*" not in kept["implementer"]["deny_tools"]          # the project's own list
+    hidden = K.track_rules(rules, ["studio"], hide_unused_builtins=True)
+    assert "cron_*" in hidden["implementer"]["deny_tools"] and "searxng_*" in hidden["implementer"]["deny_tools"]
+    assert "background_process" in hidden["lead"]["deny_tools"]
+    assert "cron_*" not in hidden["reviewer"]["deny_tools"]          # reviewers deny by default anyway
