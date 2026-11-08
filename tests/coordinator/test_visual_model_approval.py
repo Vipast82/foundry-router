@@ -466,6 +466,24 @@ def test_a_finding_that_names_no_frame_is_judged_on_all_the_frames(tmp_path):
     assert sent[-1] == ["Frame b.png"]
 
 
+def test_the_judge_sees_the_frames_of_the_findings_in_their_order():
+    """2026-11-08 04:32: VR-AS15's judge got the first 10 named frames in alphabetical
+    order, so its first findings (EN-SQUIRREL_q34_front, last alphabetically) were judged
+    without their frame ("This frame was not attached"). Frames follow the findings'
+    order, and a finding whose frame no longer fits is not sent (it stays real)."""
+    from foundry_coordinator import visual_approval as VA
+    arts = {f"docs/e/{c}.png": "x" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+    findings = ([f"docs/e/Z.png: defect {i}" for i in range(3)]
+                + [f"docs/e/{c}.png: defect" for c in "YXWVUTSRQPO"])
+    sent, named = VA._judge_batch(arts, findings)
+    assert named[0] == "docs/e/Z.png" and len(named) == VA.BATCH_FRAMES
+    assert named == list(dict.fromkeys(f.split(":")[0] for f in sent))
+    assert sent == findings[:3 + VA.BATCH_FRAMES - 1]      # the 11th frame did not fit
+    # a finding with no frame: judged on the frames left over
+    sent, named = VA._judge_batch(arts, ["docs/e/C.png: x", "3 of 9 items could not be judged"])
+    assert named[0] == "docs/e/C.png" and len(named) == VA.BATCH_FRAMES and len(sent) == 2
+
+
 def test_visual_judge_is_a_known_profile_role():
     """v0.181.54: a profile naming [roles] visual_judge failed to load ("unknown roles") and
     the coordinator exited with code 2 on restart (2026-11-04 23:29)."""

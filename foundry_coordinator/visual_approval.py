@@ -636,6 +636,30 @@ def _round_limits(P) -> tuple:
     return before, mx
 
 
+def _judge_batch(arts: dict, findings: list) -> tuple:
+    """(the findings the judge rules on, the frames it sees). Frames go in the order the
+    findings first name them, and a finding is sent only while its frame fits in
+    BATCH_FRAMES (the rest stay real, as an unruled finding always has). 2026-11-08: the
+    frames were the first BATCH_FRAMES named ones in alphabetical order, so VR-AS15's first
+    findings (EN-SQUIRREL_q34_front, last alphabetically) were judged without their frame.
+    A finding that names no frame (the asset judge's "N of M checklist items could not be
+    judged" and "checklist C4 ..." lines) is judged on the frames left over (VR-AS40's
+    judge got none on 2026-11-07 23:09)."""
+    sent, named, unnamed = [], [], False
+    for f in findings[:20]:
+        rel = next((r for r in arts if str(f).startswith(r)), None)
+        if rel is None:
+            unnamed = True
+        elif rel not in named:
+            if len(named) >= BATCH_FRAMES:
+                break
+            named.append(rel)
+        sent.append(f)
+    if unnamed:
+        named += [r for r in arts if r not in named][:max(0, BATCH_FRAMES - len(named))]
+    return sent, named
+
+
 def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
     """A second, independent vision model rules on each finding that came back after a
     fix round: real (fix it, with an instruction), not_a_defect, or owner. None when the
@@ -651,13 +675,7 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
             personas.append(name)
     if P.foundry is None:
         return None
-    named = [r for r in arts if any(str(f).startswith(r) for f in findings)]
-    # a finding that names no frame (the asset judge's "N of M checklist items could not
-    # be judged" and "checklist C4 ..." lines) is judged on all the frames: VR-AS40's judge
-    # got none on 2026-11-07 23:09 and ruled on the reviewer's descriptions only
-    if any(not any(str(f).startswith(r) for r in arts) for f in findings):
-        named += [r for r in arts if r not in named]
-    named = named[:BATCH_FRAMES]
+    sent, named = _judge_batch(arts, findings)
     head = (f"You are the judge for a disputed visual review of project {pid}, task {tid}, "
             f"revision {revision}. A vision reviewer raised the findings below and the sprint "
             "has already had at least one fix round. Look at the attached frames and rule on "
@@ -666,7 +684,7 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
             "the acceptance), or owner (it needs a design, art-direction or new-art decision). "
             "Return JSON {\"rulings\": [{\"finding\", \"ruling\", \"instruction\"}]}, one "
             "ruling per finding, in order.\n\nFindings:\n"
-            + "\n".join(f"- {f}" for f in findings[:20]))
+            + "\n".join(f"- {f}" for f in sent))
     parts = [{"type": "text", "text": head}]
     for rel in named:
         try:
@@ -712,7 +730,7 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
     if not isinstance(rulings, list) or not rulings:
         return None
     out = []
-    for i, f in enumerate(findings[:len(rulings)]):
+    for i, f in enumerate(findings[:min(len(rulings), len(sent))]):
         r = rulings[i] if isinstance(rulings[i], dict) else {}
         ruling = str(r.get("ruling") or "").lower()
         out.append({"finding": f,

@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.87 — the visual judge sees the frames of the findings it rules on
+
+The visual judge took the first `BATCH_FRAMES` (10) named frames in alphabetical order, while the findings kept their own order. When findings named more than 10 frames, the earliest findings could lose their frame. On 2026-11-08 at 04:32, VR-AS15's first three findings named EN-SQUIRREL_q34_front, which sorted last and was cut, so the judge answered "This frame was not attached". In the past 24 hours, 11 judge replies said a frame was missing. `visual_approval._judge_batch` now takes frames in the order the findings first name them, and sends a finding only while its frame fits. Findings that don't fit stay real, as an unruled finding always has. A finding that names no frame is judged on the frames left over.
+
+Test: `tests/coordinator/test_visual_model_approval.py::test_the_judge_sees_the_frames_of_the_findings_in_their_order`.
+
 ## v0.181.86 — an edit-VM gate step loads a changed check module fresh
 
 Studio's edit VM keeps a required ModuleScript's result for the whole Studio session. A gate step that requires a check module after its source changed ran the old code. On 2026-11-08, VR-AS16's gate failed twice on the old vulture target (4.373 x 6.675) after `tests/checks/VR_AS16_check.lua` was updated to 4.490 x 8.014; a renamed copy of the check passed. Edit-VM steps that call `require` now run with a prelude (`studio_gate.fresh_require`): a ModuleScript whose `Source` changed since it was last loaded is required from a fresh, non-archivable clone beside it; an unchanged one keeps its loaded result, so state shared between steps still works. Modules required by those modules use the normal `require`.
