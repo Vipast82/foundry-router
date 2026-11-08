@@ -154,7 +154,11 @@ def test_valid_score_maps_letters_back_to_files():
     seen = dict(ok, frames=[_frame("A", ["the monocle is on the +X eye"]), _frame("B")])
     assert AJ.valid_score(seen, lettered, arts, CHECK)["findings"][0].startswith("e/front.png:")
     vague = dict(ok, items=_items(("unclear", "unclear", "unclear")))
-    assert AJ.valid_score(vague, lettered, arts, CHECK)["verdict"] == "uncertain"
+    # 2026-11-07 VR-AS41: a valid review that cannot see the items asks for better frames
+    r = AJ.valid_score(vague, lettered, arts, CHECK)
+    assert r["verdict"] == "changes_required"
+    assert "could not be judged" in r["findings"][0] and len(r["findings"]) == 4
+    assert r["findings"][1].startswith("checklist C1 Monocle") and "not visible" in r["findings"][1]
     wrong = dict(ok, frames=[_frame("A"), _frame("C")])
     assert AJ.valid_score(wrong, lettered, arts, CHECK)["verdict"] == "uncertain"
     missing = dict(ok, items=_items()[:2])

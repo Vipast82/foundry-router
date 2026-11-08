@@ -392,8 +392,18 @@ def valid_score(answer: dict, lettered: dict, arts: dict, checklist: list) -> di
     if findings:
         verdict = "changes_required"
     elif unclear > max(2, len(want) // 2):
-        verdict = "uncertain"
-        findings = [f"{unclear} of {len(want)} checklist items could not be judged from the images"]
+        # 2026-11-07 VR-AS41: a valid review that cannot see most checklist items is an
+        # answer about the frames, not a failed review: deferring and re-asking about the
+        # same images returned "14 of 22 checklist items could not be judged" six times,
+        # 30 min apart. The implementer gets the items to show instead.
+        verdict = "changes_required"
+        findings = [f"{unclear} of {len(want)} checklist items could not be judged from the "
+                    "images: add or reframe renders so each one below is clearly visible"]
+        for iid, it in got.items():
+            if it["status"].lower() == "unclear":
+                c = want[iid]
+                findings.append(f"checklist {iid} {c['part'] or ''}: {c['check'][:160]} -> not "
+                                f"visible in any frame ({str(it.get('note') or 'unclear')[:160]})")
     else:
         verdict = "approve"
     if said == "changes_required" and verdict == "approve" and not findings:

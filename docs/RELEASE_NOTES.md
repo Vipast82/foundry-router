@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.83 — a judge that cannot see the checklist items asks for better frames
+
+The asset judge scores each checklist item as pass, fail or unclear. When more than half were unclear, `asset_judge.valid_score` returned `uncertain`, and in review-until-clean mode an uncertain answer is deferred: re-asked 30 minutes later, up to 6 times, then accepted with notes. That deferral is meant for a judge route that returned no valid verdict. On 2026-11-07, VR-AS41's judge (Sonnet, valid answers) said "14 of 22 checklist items could not be judged from the images" at 21:01, 21:32, 22:02 and 22:33. These were the same frames at the same revision, so each paid call could only repeat the answer, and the sprint would end up accepted with 14 items never checked. A valid review whose items are mostly unclear is now `changes_required`. It names each unclear item ("checklist <id> <part>: <check> -> not visible in any frame"), so the implementer adds or reframes renders that show them. An invalid or malformed answer is still `uncertain` and keeps the deferral.
+
+Test: `tests/coordinator/test_asset_judge.py::test_valid_score_maps_letters_back_to_files` (the all-unclear case).
+
 ## v0.181.82 — a lead question that only asks for a decision is not an owner step
 
 Every lead escalation carries a `user_action` text: what the owner would do. Any non-empty `user_action` made the decision category `user_action`, and since the GF-RT3 rule (2026-11-01) a `user_action` decision may only time out to PARK. So whatever the lead recommended, its 3-minute timeout applied "stop the task". This happened to PT-5 (lead cap), VR-AS04, and on 2026-11-07 VR-AS06. The lead asked whether VR-AS06 may keep the generated outputs of its own builders and recommended "Yes: keep the scope widening"; the sprint was parked instead. `decision_policy.category` now looks at a lead escalation's `user_action`. When it only asks for a decision (it starts with decide, choose, pick, answer, confirm whether, say whether, approve or, raise, lower, increase or set) and names no physical act (`needs_human_act`), the escalation is categorised by its reason: a lead's own question (`lead_asks`, `scope_core`, `external`) is product, so its matched recommendation applies at the timeout, and a cap or limit is automation, so it gets the capped self-repair. A physical act ("click Connect in Studio") or a `user_action` blocker is still the owner's, as before.
