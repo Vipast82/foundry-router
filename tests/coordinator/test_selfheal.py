@@ -188,6 +188,29 @@ def test_a_case_with_a_live_call_or_in_a_paused_project_is_not_stuck(lead_env):
     assert lm.case(case["case_id"])["state"] != "CANCELLED"
 
 
+def test_a_track_case_waiting_for_its_worktree_lock_is_not_stuck(lead_env, tmp_path,
+                                                                monkeypatch):
+    """2026-11-08: VR-AS09's case (track vr-a) waited 30 min for the vr-a worktree lock
+    held by VR-AS08 and was cancelled as stuck: the check only knew the main checkout's
+    lock. A wait on the task's own track worktree lock is not stuck."""
+    import types
+    e = lead_env
+    c, P, lm = e["c"], e["P"], e["lm"]
+    clk = Clock()
+    c.clock = clk
+    case = open_case(e)
+    wt = tmp_path / "track-wt"
+    wt.mkdir()
+    TP = types.SimpleNamespace(id=P.id, profile=types.SimpleNamespace(workspace=str(wt)))
+    monkeypatch.setattr(c.tracks, "project_for", lambda _P, t: TP)
+    assert not c.store.acquire(c._workspace_locks(TP), P.id, "T2")   # another track task
+    clk.advance(3600)
+    assert selfheal.stuck_cases(c, P) == []
+    clk.advance(40 * 60)
+    assert selfheal.stuck_cases(c, P) == []
+    assert lm.case(case["case_id"])["state"] != "CANCELLED"
+
+
 # ------------------------------------------------------------------ 3 fixed by a release
 
 def _old_reset_then_budget_block(c, P):

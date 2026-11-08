@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.84 — a track Lead case waiting for its worktree is not stuck
+
+The self-heal `stuck_case` rule skips a Lead case whose call waits for a workspace lock held by another task, but it only checked the main checkout's lock. A track task's Lead waits for its track worktree's lock. On 2026-11-08, VR-AS09's case (track vr-a) waited 30 minutes for the vr-a lock held by VR-AS08, was cancelled as stuck, and left VR-AS09 BLOCKED with no case. `selfheal._ws_lock_held_by_other` now also checks the lock of the task's own track worktree (`tracks.project_for`).
+
+Test: `tests/coordinator/test_selfheal.py::test_a_track_case_waiting_for_its_worktree_lock_is_not_stuck`.
+
 ## v0.181.83 — a judge that cannot see the checklist items asks for better frames
 
 The asset judge scores each checklist item as pass, fail or unclear. When more than half were unclear, `asset_judge.valid_score` returned `uncertain`, and in review-until-clean mode an uncertain answer is deferred: re-asked 30 minutes later, up to 6 times, then accepted with notes. That deferral is meant for a judge route that returned no valid verdict. On 2026-11-07, VR-AS41's judge (Sonnet, valid answers) said "14 of 22 checklist items could not be judged from the images" at 21:01, 21:32, 22:02 and 22:33. These were the same frames at the same revision, so each paid call could only repeat the answer, and the sprint would end up accepted with 14 items never checked. A valid review whose items are mostly unclear is now `changes_required`. It names each unclear item ("checklist <id> <part>: <check> -> not visible in any frame"), so the implementer adds or reframes renders that show them. An invalid or malformed answer is still `uncertain` and keeps the deferral.

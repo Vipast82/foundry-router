@@ -374,8 +374,15 @@ def stuck_cases(c, P) -> list[dict]:
 
 
 def _ws_lock_held_by_other(c, P, tid: str) -> str:
+    # a track task's Lead waits for its track worktree's lock, not the main checkout's
+    # (2026-11-08: VR-AS09's case waited for vr-a's lock, held by VR-AS08, and was
+    # cancelled as stuck)
     try:
-        mine = set(c._workspace_locks(P))
+        TP = c.tracks.project_for(P, {"task_id": tid})
+    except Exception:                                            # noqa: BLE001
+        TP = P
+    try:
+        mine = set(c._workspace_locks(P)) | set(c._workspace_locks(TP))
     except Exception:                                            # noqa: BLE001
         return ""
     for lk in c.store.locks():
