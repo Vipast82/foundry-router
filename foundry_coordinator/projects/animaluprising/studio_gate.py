@@ -108,6 +108,44 @@ STORY_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 CREATE_NO_WINDOW = M.CREATE_NO_WINDOW
 _NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
 
+# The edit VM keeps a required ModuleScript's result for the Studio session, so a step
+# that requires a check module after its source changed ran the old code (2026-11-08:
+# VR-AS16's gate kept the old vulture target after the check was updated; a renamed copy
+# passed). Edit-VM steps get a `require` that loads a fresh clone whenever the module's
+# Source has changed, and keeps the loaded result while it has not (state shared between
+# steps still works). Modules those modules require use the normal require.
+FRESH_REQUIRE_PRELUDE = """local __au_require = require
+local __au_fresh = _G.__au_gate_fresh or {}
+_G.__au_gate_fresh = __au_fresh
+local function require(m)
+\tif typeof(m) == "Instance" and m:IsA("ModuleScript") then
+\t\tlocal ok, src = pcall(function() return m.Source end)
+\t\tif ok then
+\t\t\tlocal hit = __au_fresh[m]
+\t\t\tif hit and hit.src == src then return hit.result end
+\t\t\tif hit and hit.clone then pcall(function() hit.clone:Destroy() end) end
+\t\t\tlocal c = m:Clone()
+\t\t\tc.Archivable = false
+\t\t\tc.Name = m.Name .. "__gatefresh"
+\t\t\tc.Parent = m.Parent
+\t\t\tlocal result = __au_require(c)
+\t\t\t__au_fresh[m] = {src = src, clone = c, result = result}
+\t\t\treturn result
+\t\tend
+\tend
+\treturn __au_require(m)
+end
+"""
+_REQUIRE_RE = re.compile(r"\brequire\s*\(")
+
+
+def fresh_require(code: str) -> str:
+    """Edit-VM step code with the fresh-require prelude (code without `require(` as is)."""
+    if not _REQUIRE_RE.search(code or ""):
+        return code
+    return FRESH_REQUIRE_PRELUDE + "do\n" + code + "\nend"
+
+
 CALL_RE = re.compile(r"^CALL (\d+) \[vm=(\w+)\] (.*?) :: (.*)$")
 NOTE_TIGHT_RE = re.compile(r"^NOTE (\S+): CALL (\d+) must be issued back-to-back with CALL (\d+)")
 NOTE_DYN_RE = re.compile(r"^NOTE (\S+): CALL (\d+) is DYNARG")
@@ -1404,7 +1442,7 @@ class Gate:
     def vm(self, vm: str, code: str, label: str, timeout: Optional[float] = None) -> tuple:
         t = timeout or self.call_timeout
         if vm == "edit":
-            return self.edit(code, label, t)
+            return self.edit(fresh_require(code), label, t)
         tool = {"server": "eval_server_runtime", "client": "eval_client_runtime"}.get(vm)
         if tool is None:
             return f"UNKNOWN: no tool for vm={vm}", True

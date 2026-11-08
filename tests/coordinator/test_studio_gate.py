@@ -1411,3 +1411,25 @@ def test_every_device_switch_pins_landscape_and_the_run_ends_on_it():
     assert "orientation=" in G.SET_DESKTOP_DEVICE
     src = inspect.getsource(G._run_calls)
     assert 'g.edit(SET_DESKTOP_DEVICE, "leave Studio on AU_1920x1080 landscape")' in src
+
+
+def test_edit_vm_steps_load_a_changed_check_module_fresh(tmp_path):
+    """2026-11-08: the edit VM kept VR_AS16_check's old result, so the gate ran the old
+    vulture target after the check was updated (a renamed copy passed). Edit-VM steps that
+    require get the fresh-require prelude; other VMs and code without require are as is.
+    (The prelude's reload rule runs in Lune: scratch fresh.luau, 2026-11-08.)"""
+    sent = []
+
+    class Official:
+        def execute_luau(self, code, dm, timeout=None):
+            sent.append(code)
+            return {"text": "ok", "is_error": False}
+    g = G.Gate(str(tmp_path), "VR-AS16", "regression", official=Official(), community=object(),
+               run_cmd=lambda *a, **k: (0, ""), create_dir=False)
+    step = 'return (require(game.ServerScriptService.Checks.VR_AS16_check).vulture())'
+    g.vm("edit", step, "CALL 4")
+    assert sent[-1].startswith(G.FRESH_REQUIRE_PRELUDE) and sent[-1].endswith(step + "\nend")
+    assert "__gatefresh" in sent[-1] and "hit.src == src" in sent[-1]
+    g.vm("edit", "return workspace.Name", "CALL 5")
+    assert sent[-1] == "return workspace.Name"
+    assert G.fresh_require("return 1") == "return 1"

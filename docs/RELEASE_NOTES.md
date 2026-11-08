@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.86 — an edit-VM gate step loads a changed check module fresh
+
+Studio's edit VM keeps a required ModuleScript's result for the whole Studio session. A gate step that requires a check module after its source changed ran the old code. On 2026-11-08, VR-AS16's gate failed twice on the old vulture target (4.373 x 6.675) after `tests/checks/VR_AS16_check.lua` was updated to 4.490 x 8.014; a renamed copy of the check passed. Edit-VM steps that call `require` now run with a prelude (`studio_gate.fresh_require`): a ModuleScript whose `Source` changed since it was last loaded is required from a fresh, non-archivable clone beside it; an unchanged one keeps its loaded result, so state shared between steps still works. Modules required by those modules use the normal `require`.
+
+Test: `tests/coordinator/test_studio_gate.py::test_edit_vm_steps_load_a_changed_check_module_fresh` (the reload rule was also run in Lune against a stand-in ModuleScript).
+
 ## v0.181.85 — a judge ruling on a finding that names no frame sees all the frames
 
 The visual judge attached only the frames whose path starts a finding. The asset judge's "N of M checklist items could not be judged" and "checklist C4 ..." findings (v0.181.83) name no frame, so on 2026-11-07 at 23:09 VR-AS40's judge was sent no images and ruled on the reviewer's descriptions alone ("No frames were attached to this judging request"). When any finding names no frame, `visual_approval._judge` now also attaches the other frames, up to `BATCH_FRAMES`.
