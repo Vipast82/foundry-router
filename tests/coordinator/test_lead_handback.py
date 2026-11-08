@@ -309,3 +309,20 @@ def test_a_never_admitted_session_retries_after_a_minute_twice(env):  # noqa: F8
         waits.append(case["next_check_ts"] - before)
     assert all(abs(w - 60) < 1 for w in waits[:2])
     assert waits[2] > 61                                     # then the normal backoff
+
+
+def test_a_case_waiting_only_for_the_worktree_is_not_handed_back(env):  # noqa: F811
+    """2026-11-08 VR-AS14: its case opened at 17:01 and waited for the vr-e worktree
+    (VR-AS13 held it); the decision's 3-minute timeout handed it back "without a lead
+    call" at 17:04, self-repair counted the Lead repair as used and parked the sprint.
+    While another task holds the worktree the decision is deferred instead."""
+    c, P = env["c"], env["P"]
+    did = _repeat_stop(env)
+    case = _lead_case(env, did)
+    assert case["state"] == "DIAGNOSING"
+    assert not c.store.acquire(c._workspace_locks(P), "game", "T2")   # another task holds it
+    c.store.x("UPDATE decisions SET deadline_ts=? WHERE decision_id=?", (c.clock() - 1, did))
+    DP.sweep(c, force=True)
+    assert _events(c, "decision_timeout_deferred")
+    assert c.lead.case(case["case_id"])["state"] == "DIAGNOSING"
+    assert c.obligations.decision(did)["status"] == "open"

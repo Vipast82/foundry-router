@@ -328,6 +328,15 @@ def _lead_hands_back(c, P, d: dict, case: dict) -> bool:
     if decision_category(d) != AUTOMATION or case.get("state") not in ("DEFERRED",
                                                                         "DIAGNOSING"):
         return False
+    # a case waiting only for its task's worktree (another sprint of the track holds it)
+    # starts within minutes: not "could not run". 2026-11-08 VR-AS14: handed back 3 min
+    # after opening while VR-AS13 held vr-e, then self-repair counted it as used and parked
+    try:
+        from .selfheal import _ws_lock_held_by_other
+        if _ws_lock_held_by_other(c, P, d["task_id"]):
+            return False
+    except Exception:                                             # noqa: BLE001
+        pass
     L = getattr(c, "lead", None)
     fn = getattr(L, "hand_back", None)
     if not callable(fn):

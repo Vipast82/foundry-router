@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.96 — a Lead case waiting for its worktree is not handed back
+
+An automation decision whose Lead case never made its call (DEFERRED on readiness, quota or admission, or not started) is handed back to the capped self-repair when its timeout comes due (2026-10-28). A case that waited only for its task's worktree was treated the same way. On 2026-11-08, VR-AS14's case opened at 17:01 and waited for vr-e's worktree while VR-AS13 held it. At 17:04 the 3-minute decision timeout handed it back "without a lead call", the self-repair counted the Lead repair as used, and the sprint was parked. While another task holds the task's worktree (`selfheal._ws_lock_held_by_other`, track-aware since v0.181.84), the decision now defers 5 minutes at a time, as it does for a working case.
+
+Known: `tests/coordinator/test_revamp_lead.py::test_the_hard_cap_is_absolute` already failed before this release. A Lead hard-cap escalation defaults to self-repair, not park, since v0.181.82.
+
+Test: `tests/coordinator/test_lead_handback.py::test_a_case_waiting_only_for_the_worktree_is_not_handed_back`.
+
 ## v0.181.95 — a visual round brings two attempts
 
 Each visual fix round added one implementation attempt. A round's fix is an attempt, and a code review that sends the fix back is another, so VR-AS13 used 11 attempts by round 5 of 8. It opened four `attempts_exhausted` Lead cases between 15:27 and 16:30 on 2026-11-08, each a paid Lead call and a wait for the track's worktree. The last one also met a router outage and asked Victor. A visual round now adds two attempts (`obligations.VISUAL_ROUND_PER_KEY`), next to two review calls and three sessions.
