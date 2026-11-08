@@ -113,7 +113,11 @@ def situation(t: dict, raw: Optional[dict] = None, decisions: Optional[list] = N
             return _sit("PAUSED", f"Paused until {_clock(t.get('pause_until'))} (budget reset)",
                         COORD, t.get("pause_reason"))
         if owner and owner not in ("victor", "operator") and not hold.get("actor") == "victor":
-            return _sit("HELD", f"Held by the coordinator ({owner})", COORD,
+            kind, _, ref = owner.partition(":")
+            what = {"task": f"until {ref.split('/')[-1]} finishes",
+                    "session": "until its session ends", "case": f"until Lead case {ref} closes",
+                    "pid": "until its process exits", "prep": "until a prep landing finishes"}
+            return _sit("HELD", "Held " + what.get(kind, f"by the coordinator ({owner})"), COORD,
                         hold.get("reason") or t.get("pause_reason"))
         return _sit("PAUSED", "Paused by you", HUMAN,
                     t.get("pause_reason") or hold.get("reason"))

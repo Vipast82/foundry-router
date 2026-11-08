@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.94 — a coordinator hold says what it waits for
+
+v0.181.93 labelled a hold "Held by the coordinator (task:animaluprising/PT-4)". AS-VR1 and MV2-13 now read "Held until PT-4 finishes". The other hold owners read the same way: until its session ends, until Lead case X closes, until its process exits, or until a prep landing finishes.
+
+Test: `tests/coordinator/test_situation.py::test_pauses_say_who_paused_and_ignore_a_stale_session_note`.
+
 ## v0.181.93 — the GUI says what a task is actually doing and who has to act
 
 Victor 2026-11-08: "the GUI is read and managed by a human ... if its awaiting human, then that means a HUMAN must intervene, if its waiting for Visual Inspection then it should reflect that ... look for other gaps like this". The engine's states are its own bookkeeping, and the Control Center showed them raw:

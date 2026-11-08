@@ -50,6 +50,9 @@ def test_pauses_say_who_paused_and_ignore_a_stale_session_note():
     assert s["label"] == "Paused by you" and s["who"] == "human" and "session" not in s["detail"]
     t = task("PAUSED", data={"hold": {"owner": "prep:landing", "actor": "engine", "reason": "landing"}})
     assert situation(t, RAW)["code"] == "HELD"
+    # AS-VR1 / MV2-13 2026-11-08: held for PT-4, worded for a person
+    t = task("PAUSED", data={"hold": {"owner": "task:animaluprising/PT-4", "actor": "operator"}})
+    assert situation(t, RAW)["label"] == "Held until PT-4 finishes"
 
 
 def test_waits_gates_and_sessions_are_named():
