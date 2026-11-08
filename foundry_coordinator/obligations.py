@@ -218,7 +218,10 @@ VISUAL_ROUND_KEYS = ("ordinary", "sessions", "closeout", "review_calls")
 # VR sprints used ~3 sessions per round above the base 18 (VR-AS09 39 at round 7, VR-AS40
 # 40 at round 8) and opened a sessions_exhausted Lead case per extra session (VR-AS09:
 # three cases from 09:15 to 10:01 on 2026-11-08, one session granted each).
-VISUAL_ROUND_PER_KEY = {"review_calls": 2, "sessions": 3}
+# Attempts too: a round's fix is an attempt, and a code review that sends it back is
+# another (VR-AS13 used 11 attempts by round 5 and opened four attempts_exhausted Lead
+# cases between 15:27 and 16:30 on 2026-11-08).
+VISUAL_ROUND_PER_KEY = {"review_calls": 2, "sessions": 3, "ordinary": 2}
 
 
 def visual_round_allowance(P, trow) -> int:

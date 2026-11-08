@@ -668,13 +668,14 @@ def test_visual_fix_rounds_bring_their_own_attempt_and_review_room(store):
     bounded by [approval] visual_rounds_max; without that setting nothing changes.
     v0.181.89: two review calls per round (a fix is reviewed, and re-reviewed when sent
     back): VR-AS12 parked at round 5/8 on 10/10 review calls, 2026-11-08. v0.181.90: three
-    sessions per round (VR-AS09 opened a sessions_exhausted Lead case per extra session)."""
+    sessions per round (VR-AS09 opened a sessions_exhausted Lead case per extra session).
+    v0.181.95: two attempts per round (VR-AS13: four attempts_exhausted cases in an hour)."""
     ob = Obligations(store)
     P = project(limits={"max_attempts": 3, "max_review_calls": 4})
     P.profile.raw = {"approval": {"visual_rounds_max": 8}}
     t = task_row(store, data={"visual_changes_rounds": 3})
     lim = ob.effective_limits(P, t)
-    assert lim["review_calls"]["max"] == 10 and lim["ordinary"]["max"] == 6
+    assert lim["review_calls"]["max"] == 10 and lim["ordinary"]["max"] == 9   # 3 + 3 rounds x 2
     assert lim["sessions"]["max"] == ob.effective_limits(project(limits={"max_attempts": 3,
                                                          "max_review_calls": 4}), t)[
         "sessions"]["max"] + 9                                            # 3 rounds x 3

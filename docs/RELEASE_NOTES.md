@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.95 — a visual round brings two attempts
+
+Each visual fix round added one implementation attempt. A round's fix is an attempt, and a code review that sends the fix back is another, so VR-AS13 used 11 attempts by round 5 of 8. It opened four `attempts_exhausted` Lead cases between 15:27 and 16:30 on 2026-11-08, each a paid Lead call and a wait for the track's worktree. The last one also met a router outage and asked Victor. A visual round now adds two attempts (`obligations.VISUAL_ROUND_PER_KEY`), next to two review calls and three sessions.
+
+Test: `tests/coordinator/test_obligations.py::test_visual_fix_rounds_bring_their_own_attempt_and_review_room`.
+
 ## v0.181.94 — a coordinator hold says what it waits for
 
 v0.181.93 labelled a hold "Held by the coordinator (task:animaluprising/PT-4)". AS-VR1 and MV2-13 now read "Held until PT-4 finishes". The other hold owners read the same way: until its session ends, until Lead case X closes, until its process exits, or until a prep landing finishes.
