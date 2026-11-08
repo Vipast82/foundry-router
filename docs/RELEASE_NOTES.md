@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.82 — a lead question that only asks for a decision is not an owner step
+
+Every lead escalation carries a `user_action` text: what the owner would do. Any non-empty `user_action` made the decision category `user_action`, and since the GF-RT3 rule (2026-11-01) a `user_action` decision may only time out to PARK. So whatever the lead recommended, its 3-minute timeout applied "stop the task". This happened to PT-5 (lead cap), VR-AS04, and on 2026-11-07 VR-AS06. The lead asked whether VR-AS06 may keep the generated outputs of its own builders and recommended "Yes: keep the scope widening"; the sprint was parked instead. `decision_policy.category` now looks at a lead escalation's `user_action`. When it only asks for a decision (it starts with decide, choose, pick, answer, confirm whether, say whether, approve or, raise, lower, increase or set) and names no physical act (`needs_human_act`), the escalation is categorised by its reason: a lead's own question (`lead_asks`, `scope_core`, `external`) is product, so its matched recommendation applies at the timeout, and a cap or limit is automation, so it gets the capped self-repair. A physical act ("click Connect in Studio") or a `user_action` blocker is still the owner's, as before.
+
+Test: `tests/coordinator/test_audit_d_decisions_commits.py::test_a_lead_question_that_only_asks_for_a_decision_is_not_an_owner_step`.
+
 ## v0.181.81 — a slot Blender job has a time limit
 
 On 2026-11-07 two of VR-AS29's Blender jobs on slot-1, a `render_views.py` and a `mesh_report.py` for COS-TORTOISE-SHELL-SHIELD, hung for 7 h 42 min at 0% CPU. Together they held both of the slot's pool locks. From about 09:30 every other track's Blender run waited `pool_wait_seconds` (600 s) and exited 75 ("busy"). VR-AS31 and VR-AS37 parked on it, and VR-AS29 itself completed at 11:37 with other runs. Nothing ended a slot Blender job: when the coordinator side gave up, the remote `bash` and Blender kept running and kept the lock. The slot script now runs Blender under `timeout --kill-after=30 <max_job_seconds>`. A job past the limit is stopped, its lock is freed, and the log says so (exit 124, or 137 after the kill). The new setting `[blender] max_job_seconds` (default 3600, 0 = no limit) is in the Automation UI beside `pool_wait_seconds`. It reaches the drop-in's settings for both a single slot and the pool, and the build-replay rerun path uses it too.

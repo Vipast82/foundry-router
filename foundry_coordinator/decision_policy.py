@@ -94,11 +94,29 @@ def classify(kind: str, evidence: Optional[dict]) -> str:
     return "defect" if kind in DEFECT_KINDS else "decision"
 
 
+# A lead escalation's `user_action` text says what the owner would do. When that is a decision
+# ("Decide whether VR-AS06 may keep ...", "raise lead_hard_max_calls or decide the sprint")
+# and not a physical act, the escalation is categorised by its reason, not as an owner step:
+# 2026-11-07 VR-AS06 (and PT-5, VR-AS04 before it) timed out to "stop the task" because a
+# user_action decision may only ever time out to PARK, so the lead's own recommendation
+# ("Yes: keep the scope widening") was never applied.
+_DECISION_ASK = re.compile(r"^\s*(?:decide|choose|pick|answer|confirm\s+whether|say\s+whether|"
+                           r"approve\s+or|raise|lower|increase|set)(?![A-Za-z])", re.I)
+
+
+def _decision_only(text: str) -> bool:
+    t = str(text or "").strip()
+    return bool(t) and bool(_DECISION_ASK.search(t)) and not _HUMAN_ACT.search(t)
+
+
 def category(kind: str, evidence: Optional[dict] = None, question: str = "") -> str:
     """product | user_action | automation for a decision (see the module notes)."""
     ev = evidence if isinstance(evidence, dict) else {}
     bk = str(ev.get("blocker_kind") or "").strip().lower()
-    if kind == USER_ACTION or bk == USER_ACTION or str(ev.get("user_action") or "").strip():
+    ua = str(ev.get("user_action") or "").strip()
+    if ua and kind == "lead_escalation" and bk != USER_ACTION and _decision_only(ua):
+        ua = ""                          # a decision, not a physical act: go by the reason
+    if kind == USER_ACTION or bk == USER_ACTION or ua:
         return USER_ACTION
     if kind in PRODUCT_KINDS or bk == PRODUCT or _IMAGE_ASK.search(str(question or "")):
         return PRODUCT

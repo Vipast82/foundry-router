@@ -280,3 +280,24 @@ def test_the_lead_commit_formats_luau_then_commits_with_the_env(tmp_path):
     assert sha and formatted == [["src/m.lua"]]
     kinds = [k for k, _ in fake.store.events]
     assert "lead_commit_formatted" in kinds and "lead_commit" in kinds
+
+
+def test_a_lead_question_that_only_asks_for_a_decision_is_not_an_owner_step():
+    """2026-11-07 VR-AS06: the lead asked whether the sprint may keep a scope widening and
+    recommended "Yes: keep ..."; its evidence user_action ("Decide whether ...") made it a
+    user_action decision, which may only time out to PARK, so the sprint was parked."""
+    opts = ["Yes: keep the scope widening (commit 16ffa0b) and let the sprint resume",
+            "No: revert 16ffa0b; each rebuild must restore the out-of-scope files"]
+    ev = {"reason": "lead_asks", "user_action": "Decide whether VR-AS06 may keep the scope "
+          "widening made in commit 16ffa0b.", "recommended": opts[0]}
+    m = DP.meta(P0, "lead_escalation", ev, opts)
+    assert m["category"] == "product"
+    assert m["recommended"] == json.dumps(opts[0])
+    cap = {"reason": "lead_hard_cap",
+           "user_action": "raise [automation] lead_hard_max_calls or decide the sprint"}
+    assert DP.category("lead_escalation", cap) == "automation"
+    # a physical act stays the owner's
+    assert DP.category("lead_escalation", {"reason": "lead_asks",
+                                           "user_action": "click Connect in Studio"}) == "user_action"
+    assert DP.category("lead_escalation", {"reason": "lead_asks",
+                                           "user_action": "Decide whether Victor clicks Connect"}) == "user_action"
