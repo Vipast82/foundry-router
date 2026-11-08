@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.89 — a visual round brings two review calls
+
+Each visual fix round added one review call to the sprint's budget (v0.181.57). A round's fix is reviewed, and reviewed again when the reviewer sends it back, so VR sprints used about two per round. VR-AS12 parked at round 5 of 8 on 10 of 10 review calls with the 2/day automatic cap used. VR-AS16 had 13 at round 8, and VR-AS09 12 at round 6. A visual round now adds two review calls (`obligations.VISUAL_ROUND_PER_KEY`); attempts, sessions and closeouts still add one each. Rounds stay bounded by `[approval] visual_rounds_max`.
+
+Test: `tests/coordinator/test_obligations.py::test_visual_fix_rounds_bring_their_own_attempt_and_review_room`.
+
 ## v0.181.88 — a sprint at its last visual round gets the review call that ends it
 
 A sprint's automatic review-call extensions are capped per day (`[automation] self_repair_max_reviews_per_day`). On 2026-11-08, VR-AS16 reached visual round 8 of 8 with 13 of 13 review calls used and today's 2 extensions taken, so its Lead case asked Victor whether to stop it, one review short of the end. The last visual round always ends the sprint: it is approved, or accepted with notes at `visual_rounds_max`. A task whose `visual_changes_rounds` has reached `[approval] visual_rounds_max` now gets one review extension above the daily cap. That covers both the engine's ledger check (`engine._policy_cap(project, counter, task)`) and the Lead's `review_extension_room`.

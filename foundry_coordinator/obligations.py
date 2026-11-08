@@ -211,6 +211,10 @@ def _sha(text: str, n: int = 16) -> str:
 # round brings that room with it. 2026-11-05 VR-MAP1: 8 rounds were allowed, but the
 # ordinary budget ran out first. The sprint parked and the Lead asked Victor twice.
 VISUAL_ROUND_KEYS = ("ordinary", "sessions", "closeout", "review_calls")
+# Review calls per visual round. 2026-11-08: a round's fix is reviewed and, when the
+# reviewer sends it back, reviewed again, so VR sprints used about two per round (VR-AS12:
+# 10 reviews at round 5; VR-AS16: 13 at round 8) and parked on the review budget mid-loop.
+VISUAL_ROUND_PER_KEY = {"review_calls": 2}
 
 
 def visual_round_allowance(P, trow) -> int:
@@ -1371,7 +1375,8 @@ class Obligations:
                 from .retry_guidance import RetryGuidance
                 base = RetryGuidance.allowance(trow)
             else:
-                base = _limit(P, lim_key, default) + (visual if key in VISUAL_ROUND_KEYS else 0)
+                base = _limit(P, lim_key, default) + (
+                    visual * VISUAL_ROUND_PER_KEY.get(key, 1) if key in VISUAL_ROUND_KEYS else 0)
             used, auth = c.get(counter, 0), c.get(AUTH_PREFIX + counter, 0)
             mx = base + auth
             out[key] = {"counter": counter, "used": used, "base_max": base, "authorized": auth,
