@@ -1313,7 +1313,10 @@ class Obligations:
         cap = 0
         if callable(self.policy_cap):
             try:
-                cap = max(0, int(self.policy_cap(project, counter) or 0))
+                try:
+                    cap = max(0, int(self.policy_cap(project, counter, task) or 0))
+                except TypeError:                                 # a (project, counter) hook
+                    cap = max(0, int(self.policy_cap(project, counter) or 0))
             except Exception:                                     # noqa: BLE001
                 cap = 0
         used = self.policy_extensions(project, task, counter)

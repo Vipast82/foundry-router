@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.88 — a sprint at its last visual round gets the review call that ends it
+
+A sprint's automatic review-call extensions are capped per day (`[automation] self_repair_max_reviews_per_day`). On 2026-11-08, VR-AS16 reached visual round 8 of 8 with 13 of 13 review calls used and today's 2 extensions taken, so its Lead case asked Victor whether to stop it, one review short of the end. The last visual round always ends the sprint: it is approved, or accepted with notes at `visual_rounds_max`. A task whose `visual_changes_rounds` has reached `[approval] visual_rounds_max` now gets one review extension above the daily cap. That covers both the engine's ledger check (`engine._policy_cap(project, counter, task)`) and the Lead's `review_extension_room`.
+
+Test: `tests/coordinator/test_lead_review_budget.py::test_a_task_at_its_last_visual_round_gets_one_more_review_call`.
+
 ## v0.181.87 — the visual judge sees the frames of the findings it rules on
 
 The visual judge took the first `BATCH_FRAMES` (10) named frames in alphabetical order, while the findings kept their own order. When findings named more than 10 frames, the earliest findings could lose their frame. On 2026-11-08 at 04:32, VR-AS15's first three findings named EN-SQUIRREL_q34_front, which sorted last and was cut, so the judge answered "This frame was not attached". In the past 24 hours, 11 judge replies said a frame was missing. `visual_approval._judge_batch` now takes frames in the order the findings first name them, and sends a finding only while its frame fits. Findings that don't fit stay real, as an unruled finding always has. A finding that names no frame is judged on the frames left over.

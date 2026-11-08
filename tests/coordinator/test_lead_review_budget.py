@@ -116,6 +116,21 @@ def test_replay_review_budget_case_with_the_daily_cap_used_escalates_once(tmp_pa
                 if x["kind"] == "lead_escalation"]) == 1
 
 
+def test_a_task_at_its_last_visual_round_gets_one_more_review_call(tmp_path):
+    """2026-11-08: VR-AS16 reached visual round 8/8 with 13/13 review calls and the
+    2/day cap used, and its case asked Victor to stop it one review short of the end
+    (the last round always ends the sprint). At the last round the cap has one more."""
+    c, P = game(tmp_path)
+    P.profile.raw.setdefault("approval", {})["visual_rounds_max"] = 8
+    policy_grants(c, 2)
+    c.store.merge_data("game", TID, visual_changes_rounds=8)
+    assert c._policy_cap("game", "review_calls", TID) == c._policy_cap("game", "review_calls") + 1
+    case = c.lead.open_case(P, task(c), block_on_reviews(c, P), {})
+    assert case["state"] == "DIAGNOSING", case["state"]
+    c.obligations.authorize("game", TID, "review_calls", 1, "self-repair: +1 review",
+                            POLICY_ACTOR, f"policy:review_calls:{'f' * 40}")
+
+
 def test_review_budget_case_with_room_left_is_diagnosed(tmp_path):
     c, P = game(tmp_path)
     policy_grants(c, 1)

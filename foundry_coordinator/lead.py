@@ -1785,7 +1785,9 @@ class LeadManager:
                 return out
             from . import decision_policy as DP
             out["ledger"] = True
-            out["cap"] = int(DP.policy_cap(P, "review_calls"))
+            fn = getattr(self.c, "_policy_cap", None)     # with the last-round extra
+            out["cap"] = int(fn(P.id, "review_calls", tid) if callable(fn)
+                             else DP.policy_cap(P, "review_calls"))
             out["used"] = int(O.policy_extensions(P.id, tid, "review_calls"))
         except Exception:                                        # noqa: BLE001
             return out

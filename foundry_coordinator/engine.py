@@ -4624,10 +4624,25 @@ class Coordinator:
                                             policy_validator=self._policy_ref_ok)
         return self._obligations
 
-    def _policy_cap(self, project: str, counter: str) -> int:
-        """Self-driving part 1: policy extensions of `counter` per task per day."""
+    def _policy_cap(self, project: str, counter: str, task: str = "") -> int:
+        """Self-driving part 1: policy extensions of `counter` per task per day. A task at
+        its last visual round ([approval] visual_rounds_max) gets one more review call:
+        that round always ends the sprint (approved or accepted with notes). 2026-11-08:
+        VR-AS16 reached round 8/8 with 13/13 review calls and the 2/day cap used, and its
+        Lead case asked Victor to stop it one review short of the end."""
         from . import decision_policy
-        return decision_policy.policy_cap(self.projects.get(project), counter)
+        P = self.projects.get(project)
+        cap = decision_policy.policy_cap(P, counter)
+        if cap and counter == "review_calls" and task and P is not None:
+            try:
+                from . import visual_approval as VA
+                _, mx = VA._round_limits(P)
+                t = self.store.task(project, task) or {}
+                if mx and int((t.get("data") or {}).get("visual_changes_rounds") or 0) >= mx:
+                    cap += 1
+            except Exception:                                     # noqa: BLE001
+                pass
+        return cap
 
     def _policy_ref_ok(self, project: str, task: str, ref: str, counter: str) -> bool:
         """The condition of a `policy:<counter>:<key>` extension. <key> is either an
