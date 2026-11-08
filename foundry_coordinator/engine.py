@@ -734,7 +734,10 @@ class Coordinator:
                 # 2026-10-29 AS-R7: an operator unblock moved it BLOCKED -> READY (skipping
                 # the QUEUED dep check) and it started before AS-P5, which its plan needs
                 return self._note(P, t, "waiting for " + ", ".join(wait))
-            fix = self._track_fix_round_pending(P, t)
+            # only a sprint that never ran waits for another's fix round: an operator reset
+            # clears attempt and started_ts, and VR-AS16 (15 attempts, round 8/8) then lost
+            # its turn on vr-d to VR-AS17..19's fix rounds for 5 hours (2026-11-08)
+            fix = "" if t.get("run_id") else self._track_fix_round_pending(P, t)
             if fix:
                 return self._note(P, t, f"waiting for {fix}'s fix round (a sprint sent back "
                                         f"by review goes before a new one on this track)")

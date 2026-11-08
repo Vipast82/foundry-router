@@ -1255,6 +1255,23 @@ def test_a_track_sprint_sent_back_by_review_goes_before_a_new_sprint(game):
     assert c._track_fix_round_pending(P, t2) == ""
 
 
+def test_a_reset_sprint_that_ran_before_does_not_wait_for_fix_rounds(game):
+    """2026-11-08: an operator reset cleared VR-AS16's attempt and started_ts, so it looked
+    new and waited 5 hours on vr-d behind VR-AS17..19's fix rounds at round 8/8. A sprint
+    that ran before (it has a run_id) starts in its turn."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    c.store.x("UPDATE queue SET track='vr-a' WHERE project_id='game'")
+    c.store.update_task("game", "T1", state=S.CHANGES_REQUIRED)
+    c.store.update_task("game", "T2", state=S.READY, run_id="T2-a15-old")
+    c.store.merge_data("game", "T2", deps_dropped=["T1"])
+    c._start_implementation(P, c.store.task("game", "T2"))
+    assert "fix round" not in (c.store.task("game", "T2")["next_action"] or "")
+
+
 def test_a_local_fallback_hold_clears_when_a_probe_finds_the_frontier_back(game):
     """v0.181.63 (Victor 2026-11-05 "Yes, fix it"): BAL-1 kept a one-hour local hold after
     Claude answered again. During a hold, a tiny probe through the implementer persona (at

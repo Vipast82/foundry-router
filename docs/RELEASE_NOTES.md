@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.91 — a reset sprint that ran before no longer waits behind fix rounds
+
+On a track, a new sprint waits while another sprint's fix round is pending (v0.181.61, "fixes first"). "New" meant attempt 0 and no `started_ts`, and an operator unblock with `--reset-attempts` clears both. On 2026-11-08, VR-AS16 (15 attempts, visual round 8 of 8) was reset at 06:54 and then waited on vr-d for 5 hours while VR-AS17, VR-AS18 and VR-AS19 took turns with their fix rounds. Only a sprint that never ran (no `run_id`) now waits for another's fix round; the dependency check for a fresh start is unchanged.
+
+Test: `tests/coordinator/test_engine.py::test_a_reset_sprint_that_ran_before_does_not_wait_for_fix_rounds`.
+
 ## v0.181.90 — a visual round brings three sessions
 
 Each visual fix round added one session to the sprint's budget (base `max_sessions_per_task` 18). A round's fix often spans a context handoff plus its closeout session, so VR sprints used about three sessions per round above the base: VR-AS09 had 39 at round 7, VR-AS11 37 and VR-AS40 40 at round 8. Each extra session past the budget opened a `sessions_exhausted` Lead case that granted one more. VR-AS09 opened three of them between 09:15 and 10:01 on 2026-11-08, each a paid Lead call and a wait for the track's worktree. A visual round now adds three sessions (`obligations.VISUAL_ROUND_PER_KEY`), still bounded by `[approval] visual_rounds_max`.
