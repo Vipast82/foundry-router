@@ -651,7 +651,13 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
             personas.append(name)
     if P.foundry is None:
         return None
-    named = [r for r in arts if any(str(f).startswith(r) for f in findings)][:BATCH_FRAMES]
+    named = [r for r in arts if any(str(f).startswith(r) for f in findings)]
+    # a finding that names no frame (the asset judge's "N of M checklist items could not
+    # be judged" and "checklist C4 ..." lines) is judged on all the frames: VR-AS40's judge
+    # got none on 2026-11-07 23:09 and ruled on the reviewer's descriptions only
+    if any(not any(str(f).startswith(r) for r in arts) for f in findings):
+        named += [r for r in arts if r not in named]
+    named = named[:BATCH_FRAMES]
     head = (f"You are the judge for a disputed visual review of project {pid}, task {tid}, "
             f"revision {revision}. A vision reviewer raised the findings below and the sprint "
             "has already had at least one fix round. Look at the attached frames and rule on "

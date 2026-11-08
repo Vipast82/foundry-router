@@ -440,6 +440,32 @@ def test_a_refused_judge_persona_falls_back_to_the_visual_reviewer():
     assert any(k == "visual_judge" and d["persona"] == "Review" for k, d in ev)
 
 
+def test_a_finding_that_names_no_frame_is_judged_on_all_the_frames(tmp_path):
+    """2026-11-07 23:09: VR-AS40's findings were the asset judge's "12 of 19 checklist
+    items could not be judged ..." and "checklist C4 ..." lines, which name no frame, so the
+    judge was sent no images ("No frames were attached to this judging request")."""
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG")
+    arts = {"a.png": "x", "b.png": "y", "c.png": "z"}
+    sent = []
+    VA, P, c, t, ev, rej, appr, calls = _judge_env(2, {}, [
+        {"finding": "f", "ruling": "real", "instruction": "show it"}])
+    P.profile.workspace = str(tmp_path)
+
+    def chat(persona, messages, **kw):
+        sent.append([p["text"] for p in messages[1]["content"]
+                     if p["type"] == "text" and p["text"].startswith("Frame ")])
+        return json.dumps({"rulings": [{"finding": "f", "ruling": "real",
+                                        "instruction": "show it"}]}), {}
+    P.foundry.chat = chat
+    VA._judge(c, P, t, "rev", arts, ["2 of 3 checklist items could not be judged",
+                                     "checklist C1 body: round -> not visible"])
+    assert sent[-1] == ["Frame a.png", "Frame b.png", "Frame c.png"]
+    # findings that name frames still send only those frames
+    VA._judge(c, P, t, "rev2", arts, ["b.png: cropped"])
+    assert sent[-1] == ["Frame b.png"]
+
+
 def test_visual_judge_is_a_known_profile_role():
     """v0.181.54: a profile naming [roles] visual_judge failed to load ("unknown roles") and
     the coordinator exited with code 2 on restart (2026-11-04 23:29)."""

@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.85 — a judge ruling on a finding that names no frame sees all the frames
+
+The visual judge attached only the frames whose path starts a finding. The asset judge's "N of M checklist items could not be judged" and "checklist C4 ..." findings (v0.181.83) name no frame, so on 2026-11-07 at 23:09 VR-AS40's judge was sent no images and ruled on the reviewer's descriptions alone ("No frames were attached to this judging request"). When any finding names no frame, `visual_approval._judge` now also attaches the other frames, up to `BATCH_FRAMES`.
+
+Test: `tests/coordinator/test_visual_model_approval.py::test_a_finding_that_names_no_frame_is_judged_on_all_the_frames`.
+
 ## v0.181.84 — a track Lead case waiting for its worktree is not stuck
 
 The self-heal `stuck_case` rule skips a Lead case whose call waits for a workspace lock held by another task, but it only checked the main checkout's lock. A track task's Lead waits for its track worktree's lock. On 2026-11-08, VR-AS09's case (track vr-a) waited 30 minutes for the vr-a lock held by VR-AS08, was cancelled as stuck, and left VR-AS09 BLOCKED with no case. `selfheal._ws_lock_held_by_other` now also checks the lock of the task's own track worktree (`tracks.project_for`).
