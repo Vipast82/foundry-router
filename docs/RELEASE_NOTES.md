@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.93 — the GUI says what a task is actually doing and who has to act
+
+Victor 2026-11-08: "the GUI is read and managed by a human ... if its awaiting human, then that means a HUMAN must intervene, if its waiting for Visual Inspection then it should reflect that ... look for other gaps like this". The engine's states are its own bookkeeping, and the Control Center showed them raw:
+
+- AWAITING_HUMAN also covered the model judge's visual review. VR-AS10 read "Waiting for your answer", and every visual round raised a critical "human visual approval needed" alert.
+- BLOCKED also covered a Lead repair in progress, with the prompt "Clear the blocker, then unblock" and a high "is BLOCKED" alert.
+- A decision with a default looked the same as one waiting for Victor.
+- PAUSED sprints kept the note of the session they paused (MV2-13: "implement session working").
+
+New `foundry_coordinator/situation.py` reads the state together with the approval policy, open decisions, the Lead case, background work and the wait note. It returns `{code, label, who, detail}`, where `who` is `human` only when a person must act; otherwise `model`, `lead`, `agent` or `coordinator`. Codes:
+
+| Code | Meaning |
+|---|---|
+| NEEDS_YOU | A person must act. |
+| AWAITING_HUMAN | A person approves. |
+| VISUAL_REVIEW | The model judge is reviewing. |
+| LEAD_RECOVERY | The Lead is repairing. |
+| DECISION_PENDING | A decision whose default applies at a stated time. |
+| WAITING_TURN | Waiting for a shared resource. |
+| STUDIO_GATE | Studio checks are running. |
+| CODING | A coding session is working. |
+| CODE_REVIEW | The reviewer model is reviewing. |
+| FIX_ROUND | Changes from review or the judge are next. |
+| PAUSED / HELD | Paused by you, or held by the coordinator. |
+
+Task telemetry carries it as `situation`. The Control Center shows its label on the task badge, the task picker, the composer target, the sprint "Coordinator" line, and the Automation queue and board, with the engine state in the tooltip. The page lists "needs you" items only for `who: human`. `control_center._in_task` raises approval and blocked alerts only for `who: human`, and clears open ones when the situation says no one has to act. A coordinator without `situation` keeps the old alerts.
+
+The router serves the Control Center, so the page and alert changes take effect when the router is updated to this release.
+
+Tests: `tests/coordinator/test_situation.py`.
+
 ## v0.181.92 — a track worktree goes to the sprint first in queue order
 
 Only the gpu and claude units went in queue order (`_gpu_first_in_line`, 2026-11-02 AS-A02). A track's worktree lock went to whichever sprint the tick stepped next after the release. On 2026-11-08 at 11:50, VR-AS18 released vr-d's worktree and VR-AS19 (stepped later) took it, while VR-AS16 (queue position 278, at its last visual round) had been waiting for it since 11:45. On a track, a sprint that wants the worktree now steps aside for an earlier sprint in queue order that is already waiting for it. Only READY and CHANGES_REQUIRED waiters count, so a sprint mid-gate with an old note never holds the line.

@@ -1222,13 +1222,25 @@ class ControlCenter:
                   (pid, tid, state, _j(data), _f(o.get("source_ts")), now, seq))
         out = []
         ref = {"project_id": pid, "task_id": tid, "session_id": o.get("session_id") or ""}
-        if state == "AWAITING_HUMAN" and (o.get("approval") or {}).get("kinds"):
+        # the coordinator's situation says who has to act (foundry_coordinator.situation);
+        # a model review or a Lead repair is not a "needs you" alert (Victor 2026-11-08:
+        # "if its awaiting human, then that means a HUMAN must intervene")
+        sit = o.get("situation") if isinstance(o.get("situation"), dict) else None
+        human = sit is None or sit.get("who") == "human"
+        if not human:
+            for pre in ("approval", "blocked"):
+                for a in self._rows(c, "SELECT dedupe_key FROM cc_alerts WHERE dedupe_key LIKE ? "
+                                       "AND status IN ('new','acknowledged')",
+                                    (f"{pre}:{pid}:{tid}:%",)):
+                    out.append(("resolve", a["dedupe_key"],
+                                f"no action needed: {_s(sit.get('label'), 120)}", "resolved"))
+        if human and state == "AWAITING_HUMAN" and (o.get("approval") or {}).get("kinds"):
             ap = o["approval"]
             out.append(("raise", f"approval:{pid}:{tid}:{ap.get('revision') or ''}", "approval",
                         "critical", f"{tid}: human {', '.join(ap['kinds'])} approval needed",
                         f"revision {str(ap.get('revision') or '')[:12]} — stage "
                         f"{ap.get('stage') or '?'}", ref))
-        if state == "BLOCKED":
+        if human and state == "BLOCKED":
             bc = _s(o.get("blocker_class"), 40)
             if bc in ENV_BLOCKER_CLASSES:
                 # an environment fault (Rojo down, MCP failed ...) is not a product

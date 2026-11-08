@@ -1679,6 +1679,14 @@ function rmChip(listKey, side, i) {
 /* ======================================================================== queue view (C4) */
 const STATE_CLS = {COMPLETE: "ok", CANCELLED: "", FAILED: "bad", BLOCKED: "bad", AWAITING_HUMAN: "warn", PAUSED: "warn",
                    QUEUED: "info", READY: "info", IMPLEMENTING: "info", VERIFYING: "info", REVIEWING: "info", CLOSING: "info", CHANGES_REQUIRED: "warn"};
+// what the task is actually doing and who acts (coordinator situation, v0.181.93): the
+// card shows that label, the engine state stays in the tooltip
+const SIT_CLS = {human: "bad", model: "info", lead: "warn", agent: "info", coordinator: ""};
+function qStatePill(x) {
+  const s = ((x.live || {}).data || {}).situation;
+  if (!s || !s.label) return `<span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span>`;
+  return `<span class="pill ${SIT_CLS[s.who] ?? ""}" title="${esc(x.state)}${s.detail ? " · " + esc(s.detail) : ""}">${esc(s.label)}</span>`;
+}
 const RUNNING = ["IMPLEMENTING", "VERIFYING", "REVIEWING", "CLOSING", "CHANGES_REQUIRED", "READY"];
 async function loadQueue() {
   S.ov = await api("overview?hours=720");
@@ -1799,7 +1807,7 @@ function kcard(x) {
   const dl = dec ? deadline(dec) : null;
   const i = (S.queue || []).findIndex(y => y.task_id === x.task_id);
   return `<li class="kcard" data-task="${esc(x.task_id)}">
-    <div class="khead">${S.qOps ? `<button class="drag" type="button" data-act="q-key" data-task="${esc(x.task_id)}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${(S.queue || []).length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span></button>` : ""}<b class="mono" title="${esc(x.task_id)}">${esc(x.task_id)}</b><span class="grow"></span><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></div>
+    <div class="khead">${S.qOps ? `<button class="drag" type="button" data-act="q-key" data-task="${esc(x.task_id)}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${(S.queue || []).length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span></button>` : ""}<b class="mono" title="${esc(x.task_id)}">${esc(x.task_id)}</b><span class="grow"></span>${qStatePill(x)}</div>
     <div class="kmeta">${att != null ? `<span title="attempt">try ${esc(att)}${mx ? `/${esc(mx)}` : ""}</span>` : ""}${(x.deps || []).length ? `<span title="depends on ${esc(x.deps.join(", "))}">${x.deps.length} dep(s)</span>` : ""}${x.track ? `<span title="track">${esc(x.track)}</span>` : ""}${dl ? `<span class="countdown" data-deadline="${dl}" title="An open decision's default applies when the timeout passes">${esc(countdown(dl))}</span>` : dec ? `<span class="pill warn">decision open</span>` : ""}</div>
     ${blocker ? `<div class="kblock">${esc(blocker)}</div>` : ""}
     <div class="acts">${rowActions(x)}</div></li>`;
@@ -1823,7 +1831,7 @@ function tableHtml(rows, order = true) {
       return `<tr data-task="${esc(x.task_id)}">
       ${S.qOps && order ? `<td><button class="drag" type="button" data-act="q-key" data-task="${esc(x.task_id)}" aria-label="${esc(x.task_id)}, position ${i + 1} of ${(S.queue || []).length}. Drag, or press arrow up or down to move."><span aria-hidden="true">⠿</span><span class="pos" aria-hidden="true">${i + 1}</span></button></td>` : ""}
       <td><b class="mono">${esc(x.task_id)}</b>${x.approved_by ? `<div class="hint" style="margin:0">approved by ${esc(x.approved_by)}</div>` : ""}</td>
-      <td><span class="pill ${STATE_CLS[x.state] || ""}">${esc(x.state || "?")}</span></td>
+      <td>${qStatePill(x)}</td>
       <td>${depsHtml(x)}</td>
       <td>${needsHtml(x)}</td>
       <td class="hint" style="margin:0;max-width:340px">${esc(String(x.note || "").slice(0, 200))}</td>

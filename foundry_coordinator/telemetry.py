@@ -1898,6 +1898,12 @@ class TelemetryBridge:
                 o["lead"] = self._lead(P, t, present)
             except Exception as e:                               # noqa: BLE001
                 o["lead_error"] = f"{type(e).__name__}: {e}"[:300]
+        try:
+            from .situation import situation
+            o["situation"] = situation(t, getattr(P.profile, "raw", {}) or {},
+                                       o.get("decisions"), o.get("lead"), o.get("background"))
+        except Exception as e:                                   # noqa: BLE001
+            o["situation_error"] = f"{type(e).__name__}: {e}"[:300]
         return o
 
     def _lead(self, P, t: dict, present: set) -> Optional[dict]:

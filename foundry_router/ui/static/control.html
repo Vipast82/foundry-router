@@ -1569,8 +1569,21 @@ function buildContText(b) {
   const n = Math.max(0, +b.open_steps || 0);
   return `BUILD continuing — ${n}${b.truncated ? "+" : ""} checklist step${n === 1 ? "" : "s"} still open, progress committed${b.head_sha ? " at " + String(b.head_sha).slice(0, 12) : ""}`;
 }
+// what the task is actually doing and who has to act (coordinator situation, v0.181.93):
+// "Needs you" only when a person must act; a model review or a Lead repair says so
+const WHO_CLS = {human: "bad", model: "info", lead: "warn", agent: "info", coordinator: ""};
+const WHO_TEXT = {human: "needs you", model: "model", lead: "Lead", agent: "coding session", coordinator: "coordinator"};
+function sitOf(t) { const s = t && (t.data || {}).situation; return s && typeof s === "object" && s.label ? s : null; }
+function sitPill(t) {
+  const s = sitOf(t);
+  if (!s) return "";
+  const tip = `${t.state}${s.detail ? " · " + s.detail : ""} · who acts: ${WHO_TEXT[s.who] || s.who}`;
+  return `<span class="pill ${WHO_CLS[s.who] ?? ""}" data-situation="${esc(s.code)}" title="${esc(tip)}">${esc(s.label)}</span>`;
+}
 function taskStatePill(t) {
   if (!t) return "";
+  const sp = sitPill(t);
+  if (sp) return sp + (typeof leadHeadPill === "function" ? leadHeadPill(t) : "");
   const b = buildCont(t);
   // an active lead recovery case rides along with the task state (lead block below)
   const lp = typeof leadHeadPill === "function" ? leadHeadPill(t) : "";
@@ -1730,7 +1743,7 @@ const STATE_DOING = {
   IMPLEMENTING: "A coding session is working on the task", CHANGES_REQUIRED: "Starting the next BUILD session",
   VERIFYING: "Running the project's checks on the latest commit", REVIEWING: "Reviewing the verified commit",
   APPROVED: "Approved, starting closeout", CLOSING: "Closeout session: docs and the final gate",
-  COMPLETE: "Finished", AWAITING_HUMAN: "Waiting for your answer", BLOCKED: "Stopped until the blocker is cleared",
+  COMPLETE: "Finished", AWAITING_HUMAN: "Waiting for approval", BLOCKED: "Stopped until the blocker is cleared",
   FAILED: "Stopped: the task failed", PAUSED: "Paused", CANCELLED: "Cancelled"};
 const stepText = s => String(s || "").replace(/^\s*[-*]\s*\[[ xX]?\]\s*/, "").trim();
 function sprintModel(t, ctx) {
@@ -1741,8 +1754,10 @@ function sprintModel(t, ctx) {
   const sessPhase = SESSION_PHASE[String(d.phase || "").toLowerCase()] || null;
   const phase = STATE_PHASE[eff] || sessPhase || (["AWAITING_HUMAN", "BLOCKED", "FAILED"].includes(eff) ? "BUILD" : null);
   const idx = phase ? PHASES.indexOf(phase) : -1;
-  const mode = state === "COMPLETE" ? "complete" : ["BLOCKED", "FAILED", "CANCELLED"].includes(state) ? "stopped"
-    : state === "AWAITING_HUMAN" ? "waiting" : state === "PAUSED" ? "paused" : "running";
+  const sit = sitOf(t), human = !sit || sit.who === "human";
+  const mode = state === "COMPLETE" ? "complete" : ["FAILED", "CANCELLED"].includes(state) ? "stopped"
+    : state === "BLOCKED" ? (human ? "stopped" : "running")
+    : state === "AWAITING_HUMAN" ? (human ? "waiting" : "running") : state === "PAUSED" ? "paused" : "running";
   const phases = PHASES.map((p, i) => ({name: p, help: PHASE_HELP[p],
     status: mode === "complete" || i < idx ? "done" : i === idx ? "now" : "todo"}));
   // BUILD steps: the engine's own record. open is capped at 12 by the engine.
@@ -1774,8 +1789,8 @@ function sprintModel(t, ctx) {
   const decs = ((v.decisions || {}).open || []).filter(x => !x.answer_action);
   if (decs.length) needs.push({kind: "decision", sev: "bad", act: "inbox", text: decs.length === 1 ? "Make 1 decision" : `Make ${decs.length} decisions`});
   if (lead && lead.needs_human) needs.push({kind: "lead", sev: "bad", act: "inspect", text: "The lead needs you on the recovery case"});
-  if (state === "AWAITING_HUMAN" && !pend.length && d.awaiting) needs.push({kind: "awaiting", sev: "warn", act: "answer", text: String(d.awaiting).slice(0, 240)});
-  if (["BLOCKED", "FAILED"].includes(state)) needs.push({kind: "blocker", sev: "bad", act: "command", text: state === "FAILED" ? "Decide whether to retry or cancel" : "Clear the blocker, then unblock"});
+  if (state === "AWAITING_HUMAN" && human && !pend.length && d.awaiting) needs.push({kind: "awaiting", sev: "warn", act: "answer", text: String(d.awaiting).slice(0, 240)});
+  if (["BLOCKED", "FAILED"].includes(state) && human) needs.push({kind: "blocker", sev: "bad", act: "command", text: state === "FAILED" ? "Decide whether to retry or cancel" : "Clear the blocker, then unblock"});
   if (state === "PAUSED" && d.pause_reason) needs.push({kind: "paused", sev: "warn", act: "command", text: `Paused: ${String(d.pause_reason).slice(0, 160)}`});
   // background work: the fast lane's studio gate or vision batches (not Kilo
   // sessions, so the panes look quiet), and helper units still in progress
@@ -1820,8 +1835,9 @@ function sprintModel(t, ctx) {
   });
   return {task: t.task_id, project: t.project_id, state, phase, mode, phases, build, obligations, todo, needs,
     bg, helpers, tests,
-    doing: bgDoing || STATE_DOING[state] || state || "No state reported",
-    detail: d.next_action && d.next_action !== STATE_DOING[state] ? String(d.next_action) : "",
+    doing: bgDoing || (sit && sit.label) || STATE_DOING[state] || state || "No state reported",
+    detail: sit ? String(sit.detail || "") : d.next_action && d.next_action !== STATE_DOING[state] ? String(d.next_action) : "",
+    who: sit ? sit.who : "",
     attempt: d.attempt ?? null, sessions: d.sessions ?? null,
     blocker: ["BLOCKED", "FAILED"].includes(state) ? String(d.blocker || "") : "",
     lead: lead && lead.active ? lead.state : ""};
@@ -2963,7 +2979,7 @@ function renderComposer(force) {
     <button role="tab" aria-selected="${m === "command"}" class="${m === "command" ? "on" : ""}" data-mode="command">Coordinator command</button>
     ${m === "decision" ? `<button class="on" data-mode="decision">Approval decision</button>` : ""}
     <span class="spacer"></span><button class="ghost" id="comp-toggle" aria-label="Collapse composer">▾</button></div>`;
-  const target = t ? `<div class="target">Target: <b>${esc(t.project_id)} / ${esc(t.task_id)}</b> · <span class="pill ${stateCls(t.state)}">${esc(t.state)}</span> · phase ${esc(d.phase || "?")}
+  const target = t ? `<div class="target">Target: <b>${esc(t.project_id)} / ${esc(t.task_id)}</b> · ${sitPill(t) || `<span class="pill ${stateCls(t.state)}">${esc(t.state)}</span>`} · phase ${esc(d.phase || "?")}
       · worker ${d.session_id ? `<code>${esc(short(d.session_id, 14))}</code> ${ws ? statusPill(ws) : ""}` : "none"}${busy ? ' <span class="dim">(busy)</span>' : ""}</div>` : `<div class="target dim">Select a task.</div>`;
   let body = "";
   if (m === "answer") body = composerAnswer(pend);
@@ -3868,7 +3884,7 @@ function renderTaskSelect() {
     const active = tasks.find(t => ["IMPLEMENTING", "CLOSING", "VERIFYING", "REVIEWING", "AWAITING_HUMAN"].includes(t.state)) || tasks[0];
     S.task = active ? active.task_id : "";
   }
-  $("#sel-task").innerHTML = tasks.map(t => `<option value="${esc(t.task_id)}" ${t.task_id === S.task ? "selected" : ""}>${esc(t.task_id)} · ${esc(t.state)}</option>`).join("");
+  $("#sel-task").innerHTML = tasks.map(t => `<option value="${esc(t.task_id)}" ${t.task_id === S.task ? "selected" : ""}>${esc(t.task_id)} · ${esc((sitOf(t) || {}).label || t.state)}</option>`).join("");
   const t = curTask();
   $("#task-state").innerHTML = t ? taskStatePill(t) : "";
   renderPauseCtl();
