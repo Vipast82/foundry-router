@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.92 — a track worktree goes to the sprint first in queue order
+
+Only the gpu and claude units went in queue order (`_gpu_first_in_line`, 2026-11-02 AS-A02). A track's worktree lock went to whichever sprint the tick stepped next after the release. On 2026-11-08 at 11:50, VR-AS18 released vr-d's worktree and VR-AS19 (stepped later) took it, while VR-AS16 (queue position 278, at its last visual round) had been waiting for it since 11:45. On a track, a sprint that wants the worktree now steps aside for an earlier sprint in queue order that is already waiting for it. Only READY and CHANGES_REQUIRED waiters count, so a sprint mid-gate with an old note never holds the line.
+
+Test: `tests/coordinator/test_engine.py::test_a_track_worktree_goes_to_the_waiter_first_in_queue_order`.
+
 ## v0.181.91 — a reset sprint that ran before no longer waits behind fix rounds
 
 On a track, a new sprint waits while another sprint's fix round is pending (v0.181.61, "fixes first"). "New" meant attempt 0 and no `started_ts`, and an operator unblock with `--reset-attempts` clears both. On 2026-11-08, VR-AS16 (15 attempts, visual round 8 of 8) was reset at 06:54 and then waited on vr-d for 5 hours while VR-AS17, VR-AS18 and VR-AS19 took turns with their fix rounds. Only a sprint that never ran (no `run_id`) now waits for another's fix round; the dependency check for a fresh start is unchanged.

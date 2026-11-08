@@ -1537,6 +1537,31 @@ def test_a_sprint_waiting_on_a_decision_that_answers_itself_soon_keeps_the_main_
     assert c._main_sprint_in_flight(P, c.store.task("game", "T2")) == ""
 
 
+def test_a_track_worktree_goes_to_the_waiter_first_in_queue_order(game, monkeypatch):
+    """2026-11-08: VR-AS16 (queue position 278) waited for vr-d's worktree while VR-AS19,
+    stepped later in the same tick, took it when VR-AS18 released it. The worktree lock
+    goes in queue order like the gpu unit, among sprints waiting to start."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", [], "victor")
+    P = c.projects["game"]
+    monkeypatch.setattr(c.tracks, "is_track", lambda _P: True)
+    ws = "workspace:c:\roblox\tracks\vr-d"
+    c.store.update_task("game", "T1", state=S.READY)
+    c.store.update_task("game", "T2", state=S.CHANGES_REQUIRED)
+    c.store.acquire([ws], "game", "HOLDER")
+    assert c._acquire(P, c.store.task("game", "T1"), [ws]) is not None
+    c.store.release("game", "HOLDER")
+    w = c._acquire(P, c.store.task("game", "T2"), [ws])
+    assert w and w["task_id"] == "T1" and c.store.holds("game", "T2") == []
+    assert c._acquire(P, c.store.task("game", "T1"), [ws]) is None
+    # a sprint mid-gate (IMPLEMENTING) with an old note does not hold the line
+    c.store.release("game", "T1")
+    c.store.update_task("game", "T1", state=S.IMPLEMENTING)
+    assert c._acquire(P, c.store.task("game", "T2"), [ws]) is None
+
+
 def test_the_gpu_unit_goes_to_the_waiter_first_in_queue_order(game):
     """2026-11-02 AS-A02 (queue position 119) waited 30 min for Strata: the sprint giving it
     up released it during its own step, and the sprint stepped right after it in the same

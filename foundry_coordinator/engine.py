@@ -7803,6 +7803,15 @@ class Coordinator:
                 if first:
                     self._note(P, t, f"waiting for {res} ({first} is first in line)")
                     return {"resource": res, "project_id": pid, "task_id": first}
+        # a track worktree goes in queue order too: 2026-11-08 VR-AS16 (position 278) waited
+        # for vr-d's worktree while VR-AS19 (stepped later in the tick) took it on release
+        for res in resources:
+            if res.startswith("workspace:") and res not in before and self.tracks.is_track(P):
+                first = self._gpu_first_in_line(pid, tid, res,
+                                                states=(S.READY, S.CHANGES_REQUIRED))
+                if first:
+                    self._note(P, t, f"waiting for {res} ({first} is first in line)")
+                    return {"resource": res, "project_id": pid, "task_id": first}
         lead = self._lead_waits_for_workspace(P, t, resources, before)
         if lead:
             self._note(P, t, f"waiting for {lead['resource']} (Lead case {lead['case_id']} "
@@ -7877,7 +7886,8 @@ class Coordinator:
 
     GPU_LINE_STATES = (S.READY, S.CHANGES_REQUIRED, S.IMPLEMENTING, S.CLOSING)
 
-    def _gpu_first_in_line(self, pid: str, tid: str, res: str = "gpu") -> str:
+    def _gpu_first_in_line(self, pid: str, tid: str, res: str = "gpu",
+                           states: tuple = ()) -> str:
         """The task ahead of `tid` in queue order that already waits for the gpu unit ("" when
         none). 2026-11-02 AS-A02: the releasing sprint frees Strata during its own step, and
         the sprint stepped right after it in the same tick took it; AS-A02 (queue position
@@ -7896,7 +7906,7 @@ class Coordinator:
         except Exception:                                         # noqa: BLE001
             return ""
         for r in rows:
-            if r["state"] not in self.GPU_LINE_STATES:
+            if r["state"] not in (states or self.GPU_LINE_STATES):
                 continue                      # a stale note on a stopped task
             if any(str(h).split("#", 1)[0] == res for h in self.store.holds(pid, r["task_id"])):
                 continue
