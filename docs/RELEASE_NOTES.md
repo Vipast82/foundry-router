@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.90 — a visual round brings three sessions
+
+Each visual fix round added one session to the sprint's budget (base `max_sessions_per_task` 18). A round's fix often spans a context handoff plus its closeout session, so VR sprints used about three sessions per round above the base: VR-AS09 had 39 at round 7, VR-AS11 37 and VR-AS40 40 at round 8. Each extra session past the budget opened a `sessions_exhausted` Lead case that granted one more. VR-AS09 opened three of them between 09:15 and 10:01 on 2026-11-08, each a paid Lead call and a wait for the track's worktree. A visual round now adds three sessions (`obligations.VISUAL_ROUND_PER_KEY`), still bounded by `[approval] visual_rounds_max`.
+
+Test: `tests/coordinator/test_obligations.py::test_visual_fix_rounds_bring_their_own_attempt_and_review_room`.
+
 ## v0.181.89 — a visual round brings two review calls
 
 Each visual fix round added one review call to the sprint's budget (v0.181.57). A round's fix is reviewed, and reviewed again when the reviewer sends it back, so VR sprints used about two per round. VR-AS12 parked at round 5 of 8 on 10 of 10 review calls with the 2/day automatic cap used. VR-AS16 had 13 at round 8, and VR-AS09 12 at round 6. A visual round now adds two review calls (`obligations.VISUAL_ROUND_PER_KEY`); attempts, sessions and closeouts still add one each. Rounds stay bounded by `[approval] visual_rounds_max`.
