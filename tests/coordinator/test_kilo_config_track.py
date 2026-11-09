@@ -265,3 +265,54 @@ def test_unused_builtins_are_hidden_even_when_role_rules_list_their_own_denies()
     assert "cron_*" in hidden["implementer"]["deny_tools"] and "searxng_*" in hidden["implementer"]["deny_tools"]
     assert "background_process" in hidden["lead"]["deny_tools"]
     assert "cron_*" not in hidden["reviewer"]["deny_tools"]          # reviewers deny by default anyway
+
+
+def test_every_implementer_session_starts_with_the_track_tool_cuts(tmp_path):
+    """2026-11-09: the main checkout's kilo.jsonc is the source every track file is built from,
+    so it is never trimmed in place; the cuts ride in each implementer session's own deny rules
+    (Kilo drops a tool a session rule denies outright from the list it sends)."""
+    skills = tmp_path / ".kilo" / "skills"
+    for name, body in (("au-ui", "Use robloxstudio-mcp capture_screenshot."),
+                       ("au-gen", "Make the mesh with generate_mesh.")):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n{body}\n", "utf-8")
+
+    def proj(auto=None):
+        class Profile:
+            workspace = str(tmp_path)
+            raw = {"automation": dict(auto or {}), "skills": {}}
+        class P:
+            id = "p"
+            profile = Profile
+        return P
+
+    class C:
+        class tracks:
+            @staticmethod
+            def main_of(P):
+                return P
+
+    def spec(plan):
+        class S:
+            task_id = "UI-9"
+            data = {}
+        S.spec = plan
+        return S
+
+    def denied(P, plan, needs=()):
+        return {r["permission"] for r in K.session_tool_denies(C, P, spec(plan), list(needs))
+                if r["action"] == "deny" and r["pattern"] == "*"}
+
+    ui = "# UI-9\n\n## Skills\n`au-ui`\n\n## Spec\nskin the HUD\n"
+    d = denied(proj(), ui)
+    assert {"cron_*", "background_process", "goal_report"} <= d          # unused built-ins
+    assert "Roblox_Studio_*" in d                                         # official: unnamed
+    assert "roblox-docs_*" not in d                                       # code sprint keeps docs
+    gen = "# UI-9\n\n## Skills\n`au-gen`\n\n## Spec\nx\n"
+    assert "Roblox_Studio_*" not in denied(proj(), gen)                   # a preloaded skill names it
+    assert "Roblox_Studio_*" not in denied(proj(), "use screen_capture for the frame\n")
+    assert "roblox-docs_*" in denied(proj(), ui, ["blender"])             # Blender sprint: no docs
+    assert "roblox-docs_*" not in denied(proj(), ui + "check roblox-docs\n", ["blender"])
+    assert denied(proj({"session_trim_unused_tools": False}), ui) == set()  # off: as before
+    assert "Roblox_Studio_*" not in denied(proj({"studio_official_mcp_on_demand": False}), ui)
+    assert "Roblox_Studio_*" not in denied(proj(), "")                    # no plan text: keep

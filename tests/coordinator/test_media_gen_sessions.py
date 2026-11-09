@@ -106,3 +106,14 @@ def test_generate_answer_gives_both_image_paths_and_allow_skips_the_question(tmp
     assert run_until(c2, lambda: c2.store.task("game", "I1")["state"] == S.COMPLETE, limit=40)
     assert SV.images_decision(c2, "game", "I1") is None
     assert foundry_media_denied(c2, "I1") == (False, False)
+
+
+def test_an_implementer_session_starts_without_unused_builtins_or_the_official_studio(tmp_path):
+    """2026-11-09: the main checkout's sessions carry the track tool cuts as session rules."""
+    c, P = env(tmp_path)
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: c.store.task("game", "T1")["state"] == S.COMPLETE, limit=40)
+    perms = [s["permissions"] for s in P.client.sessions.values()
+             if s["metadata"].get("task") == "T1" and s["metadata"].get("role") == "implementer"][-1]
+    d = {r["permission"] for r in perms if r["action"] == "deny" and r["pattern"] == "*"}
+    assert {"cron_*", "background_process", "Roblox_Studio_*"} <= d

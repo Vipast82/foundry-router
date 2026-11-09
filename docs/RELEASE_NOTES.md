@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.108 — main-checkout sessions get the track tool cuts
+
+v0.181.76–79 cut tools a session never uses, but only in a track's own kilo.jsonc. The main checkout's file is also the source every track's file is built from, so it was never trimmed in place: main sprints (UI-V2, POL-FIX1, the NW chain) still sent the official `Roblox_Studio` server's 36 tools (about 20.8k tokens), the unused Kilo built-ins (about 7-8k) and the full skill list on every turn. A main session's first turn was about 105k tokens, against about 80k on a slot track.
+
+Kilo leaves a tool out of the list it sends when the session's own permission rules deny it outright. Checked against Kilo 7.8.8 with a fake model that records each request: a session `bash` deny took the list from 96 tools to 95, and a `re*` deny removed `read`. So every implementer session, on the main checkout and on tracks, now starts with the cuts as its own deny rules, worked out per sprint:
+
+- `role_rules.UNUSED_SESSION_TOOLS` (the built-ins no session called in a 1,000-request sample);
+- `Roblox_Studio_*`, unless the sprint's plan or a skill page it preloads names the official server or one of its own tools (`[automation] studio_official_mcp_on_demand`);
+- `roblox-docs_*`, for a Blender sprint whose plan and preloaded skills do not name it.
+
+No file is rewritten and Kilo is never reloaded. The set is fixed for a session's life, so it does not bust the prompt cache. The skill list is unchanged on the main checkout. The new `[automation] session_trim_unused_tools` (default on) turns it off. Sessions that started before the deploy keep their tools.
+
+Tests: `tests/coordinator/test_kilo_config_track.py::test_every_implementer_session_starts_with_the_track_tool_cuts`, `tests/coordinator/test_media_gen_sessions.py::test_an_implementer_session_starts_without_unused_builtins_or_the_official_studio`.
+
 ## v0.181.107 — a slot sprint runs its own in-Studio checks
 
 VQ-10 rebuilt EN-BADGER, EN-BAT and EN-BEAR, passed the scripted gate, and then left the in-Studio ASSET_CHECK "owed to the coordinator" twice, so its findings repeated and it parked BLOCKED. Nothing else runs that check: VQ-14 ran the same REGISTER/ASSET_CHECK itself on slot-2. A slot sprint's prompt now says that an in-Studio check a plan step names (ASSET_CHECK, REGISTER, a capture, a playtest row) is the sprint's own, run with its Studio MCP tools on the slot and logged as `PASS:` lines; the scripted gate runs only the test suites.

@@ -1172,6 +1172,15 @@ class Coordinator:
         # the same 2D decision as Media_Gen's image tools
         rules += SM.foundry_media_denied(self._images_allowed(P, spec, role))
         if role == "implementer":
+            if spec is not None:
+                # 2026-11-09: the track tool cuts, per session, on the main checkout too
+                from . import kilo_config as KC
+                from . import services as SV
+                try:
+                    t = self.store.task(P.id, spec.task_id) or {"task_id": spec.task_id}
+                    rules += KC.session_tool_denies(self, P, spec, SV.needs_of(t, spec))
+                except Exception as e:                            # noqa: BLE001
+                    self.log(f"{P.id}/{spec.task_id}: session tool trims skipped: {e}")
             rules += [dict(r) for r in self.IMPLEMENTER_DENIES]
         return rules
 

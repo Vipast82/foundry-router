@@ -281,6 +281,9 @@ AUTOMATION_DEFAULTS: dict = {
     # 2026-11-07: a Blender track drops roblox-docs unless a plan names it, and a track lists only
     # the roblox-* skills its plans name (au-* skills always stay)
     "track_trim_unused_tools": True,
+    # 2026-11-09: every implementer session (main checkout too) starts with the track cuts as
+    # its own deny rules: unused Kilo built-ins, the official Studio server, roblox-docs
+    "session_trim_unused_tools": True,
     "context_ceiling_tokens": 160000,
     # 2026-10-27: the handoff ceiling is this share of the session model's usable window
     # (Kilo limit.context - limit.output); context_ceiling_tokens when the window is unknown
@@ -931,6 +934,12 @@ _AUTO_DESC = {
     "track_trim_unused_tools": "A Blender track turns roblox-docs off unless a plan names it, and "
                                "a track lists only the roblox-* skills its plans name (the au-* "
                                "skills always stay). Off: every server and skill listed.",
+    "session_trim_unused_tools": "Every implementer session, on the main checkout and on "
+                                 "tracks, starts with unused Kilo built-ins denied, the official "
+                                 "Roblox_Studio tools denied unless its plan or a preloaded skill "
+                                 "names them, and roblox-docs denied for a Blender sprint that does "
+                                 "not name it. Kilo then leaves them out of the tool list. Off: the "
+                                 "session sees every tool its kilo.jsonc allows.",
     "context_ceiling_tokens": "A session over this context hands off to a fresh one (0 = off). "
                               "Used when the session model's window is unknown.",
     "context_ceiling_pct": "Hand off at this percentage of the session model's usable window "

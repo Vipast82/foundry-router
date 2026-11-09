@@ -562,3 +562,52 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
         raise KiloConfigError(f"track kilo.jsonc not written: {type(e).__name__}: {e}"[:500]
                               ) from None
     return target
+
+
+# 2026-11-09 session trims: the track cuts above reach only a track's kilo.jsonc, and the main
+# checkout's file is also the source every track's file is built from, so it is never trimmed
+# in place. Kilo leaves a tool out of the list it sends when the session's own permission rules
+# deny it outright (checked against Kilo 7.8.8 with a recording fake model: a session `bash`
+# deny took 96 tools to 95, and a `re*` deny removed `read`). So every implementer session, on
+# the main checkout and on tracks, starts with the same cuts as its rules, per sprint, with no
+# file rewrite and no Kilo reload. The set is fixed for the session's life (prompt cache safe).
+def _skill_text(c, P, spec) -> str:
+    """The SKILL.md bodies of the skills this sprint's sessions preload ('' on any error)."""
+    from . import skills_preload as SP
+    out = []
+    try:
+        for name in SP.wanted(P, spec):
+            d = SP.find(c, P, name)
+            if d:
+                try:
+                    out.append(SP._page(d))
+                except OSError:
+                    pass
+    except Exception:                                             # noqa: BLE001
+        return ""
+    return "\n".join(out)
+
+
+def session_tool_denies(c, P, spec, needs) -> list[dict]:
+    """Deny rules for an implementer session of `spec` ([automation] session_trim_unused_tools):
+    Kilo built-ins no session uses; the official Studio server unless the plan or a skill page
+    it preloads names it or one of its own tools ([automation] studio_official_mcp_on_demand);
+    roblox-docs for a Blender sprint unless the plan or a preloaded skill names it."""
+    from .automation import get as auto_get
+    try:
+        if not bool(auto_get(P, "session_trim_unused_tools")):
+            return []
+    except Exception:                                             # noqa: BLE001
+        return []
+    deny = list(RR.UNUSED_SESSION_TOOLS)
+    plan = str(getattr(spec, "spec", "") or "")
+    text = plan + "\n" + _skill_text(c, P, spec)
+    try:
+        on_demand = bool(auto_get(P, "studio_official_mcp_on_demand"))
+    except Exception:                                             # noqa: BLE001
+        on_demand = False
+    if on_demand and plan.strip() and not OFFICIAL_STUDIO_RE.search(text):
+        deny.append(f"{OFFICIAL_STUDIO_MCP}_*")
+    if "blender" in SM.normalize_needs(needs or []) and plan.strip() and not DOCS_RE.search(text):
+        deny += [f"{DOCS_MCP}_*", "roblox_docs_*"]
+    return [{"permission": n, "pattern": "*", "action": "deny"} for n in deny]
