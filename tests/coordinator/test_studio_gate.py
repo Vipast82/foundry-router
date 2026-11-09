@@ -1433,3 +1433,37 @@ def test_edit_vm_steps_load_a_changed_check_module_fresh(tmp_path):
     g.vm("edit", "return workspace.Name", "CALL 5")
     assert sent[-1] == "return workspace.Name"
     assert G.fresh_require("return 1") == "return 1"
+
+
+def test_a_docs_only_commit_keeps_the_host_half_verdicts(tmp_path):
+    """2026-11-09: operator plan commits (docs/progress only) moved HEAD under VR-MAP2's gate
+    twice and the Studio half was refused "stamped <old>, HEAD is <new>". A commit that only
+    changes docs/progress or docs/evidence keeps the host half valid; a code change does not."""
+    import subprocess as sp
+    r = str(tmp_path)
+
+    def git(*a):
+        return sp.run(["git", "-C", r, *a], capture_output=True, text=True, check=True).stdout.strip()
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    os.makedirs(os.path.join(r, "src"))
+    os.makedirs(os.path.join(r, "docs", "progress"))
+    open(os.path.join(r, "src", "a.lua"), "w").write("return 1\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "c1")
+    c1 = git("rev-parse", "HEAD")
+    json.dump({"headSha": c1, "lune": True}, open(os.path.join(r, "docs", "progress", "X_gate_verdicts.json"), "w"))
+    json.dump({"files": {"src/a.lua": "x"}}, open(os.path.join(r, "docs", "progress", "X_gate_expect.json"), "w"))
+    open(os.path.join(r, "docs", "progress", "Y_PLAN.md"), "w").write("plan\n")
+    git("add", "docs/progress/Y_PLAN.md")
+    git("commit", "-q", "-m", "plans: Y")
+    c2 = git("rev-parse", "HEAD")
+    problem, files = G.calls_preconditions(r, "X", c2)
+    assert problem is None and files == {"src/a.lua": "x"}
+    open(os.path.join(r, "src", "a.lua"), "w").write("return 2\n")
+    git("add", "src/a.lua")
+    git("commit", "-q", "-m", "code")
+    c3 = git("rev-parse", "HEAD")
+    problem, _ = G.calls_preconditions(r, "X", c3)
+    assert problem and "must pass at the current HEAD" in problem

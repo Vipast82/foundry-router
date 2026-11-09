@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.99 — a docs-only commit keeps the gate's host-half verdicts valid
+
+The Studio half of the scripted gate (`calls_preconditions`) required the host half's `<ID>_gate_verdicts.json` to be stamped with the exact current HEAD. On 2026-11-09, two operator plan commits (`plans: ...`, files under `docs/progress/` only) moved HEAD while VR-MAP2's gate ran. Both times the Studio half was refused "stamped <old>, HEAD is <new>: the host half must pass at the current HEAD", and a Lead case opened. A commit cannot change the host half's result when every file it changes, between the stamp and HEAD, is under `docs/progress/` or `docs/evidence/` (plans, summaries, evidence logs and captures). Such commits now keep the verdicts valid (`studio_gate.docs_only_since`: the stamp must be an ancestor of HEAD). Any other change still needs a fresh host half.
+
+Test: `tests/coordinator/test_studio_gate.py::test_a_docs_only_commit_keeps_the_host_half_verdicts`.
+
 ## v0.181.98 — a sprint resumed past the queue check still waits for a cancelled dependency
 
 The first-start check (`_unmet_start_deps`) skipped a FAILED or CANCELLED dependency and left it to the QUEUED check, which blocks the sprint. A Lead resume moves a sprint from BLOCKED to READY, past the QUEUED check. On 2026-11-08, VR-AS-SYNC was cancelled at 20:1x so it could rerun after the vr-e merge. VR-MAP2, depending on it, went BLOCKED; its Lead case's decision timed out at 20:21 and resumed it, and it started at once, ahead of VR-AS-SYNC. A queue dependency that is cancelled or failed now counts as unmet at start ("waiting for VR-AS-SYNC (CANCELLED)"). Dependencies named only in the task source keep the old behaviour.

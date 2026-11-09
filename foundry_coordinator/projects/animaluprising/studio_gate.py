@@ -3770,6 +3770,33 @@ def studio_lock_release(sprint: str, owner: str = STUDIO_LOCK_OWNER) -> bool:
     return False
 
 
+# Paths the host half never reads: plans, summaries, evidence logs and captures. A commit
+# that changes only these between the host half's stamp and HEAD cannot change its result.
+# 2026-11-09: two operator plan commits (plans: ...) moved HEAD under VR-MAP2's gate twice;
+# each time the Studio half was refused "stamped <old>, HEAD is <new>" and a Lead case opened.
+DOCS_ONLY_PREFIXES = ("docs/progress/", "docs/evidence/")
+
+
+def docs_only_since(repo: str, stamped: str, head: str) -> bool:
+    """True when `stamped` is an ancestor of `head` and every file changed between them
+    is under DOCS_ONLY_PREFIXES."""
+    if not stamped or not head:
+        return False
+    try:
+        anc = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", stamped, head],
+                             capture_output=True, text=True, timeout=30, **_NO_WINDOW)
+        if anc.returncode != 0:
+            return False
+        diff = subprocess.run(["git", "-C", repo, "diff", "--name-only", stamped, head],
+                              capture_output=True, text=True, timeout=30, **_NO_WINDOW)
+        if diff.returncode != 0:
+            return False
+    except (OSError, subprocess.SubprocessError):
+        return False
+    paths = [x.strip() for x in diff.stdout.splitlines() if x.strip()]
+    return bool(paths) and all(x.startswith(DOCS_ONLY_PREFIXES) for x in paths)
+
+
 def calls_preconditions(repo: str, sprint: str, head: str) -> tuple:
     """(problem | None, expect map): the host half passed at THIS HEAD
     (<ID>_gate_verdicts.json: headSha == HEAD, every step true) and its file map
@@ -3784,8 +3811,9 @@ def calls_preconditions(repo: str, sprint: str, head: str) -> tuple:
                f"-Finish) at HEAD first", {}
     if not isinstance(v, dict):
         return f"{vrel} is not a JSON object", {}
-    if str(v.get("headSha") or "") != head:
-        return (f"{vrel} is stamped {str(v.get('headSha') or '(none)')[:12]}, HEAD is {head[:12]}: "
+    stamped = str(v.get("headSha") or "")
+    if stamped != head and not docs_only_since(repo, stamped, head):
+        return (f"{vrel} is stamped {(stamped or '(none)')[:12]}, HEAD is {head[:12]}: "
                 f"the host half must pass at the current HEAD"), {}
     bad = sorted(k for k, x in v.items() if k not in ("headSha", "sprint", "tier") and x is not True)
     if bad:
