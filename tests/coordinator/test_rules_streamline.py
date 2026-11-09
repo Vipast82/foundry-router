@@ -603,3 +603,20 @@ def test_a_slot_sprint_is_told_how_to_bring_studio_files_back(repo, tmp_path, mo
     assert "-fetch" in build and "SLOT-FETCH OK" in build
     plain = a.implement_prompt(a.describe(T), {"attempt": 1, "run_id": "r1"})
     assert "FILES FROM STUDIO" not in plain
+
+
+def test_a_slot_sprint_runs_its_own_in_studio_checks(repo, tmp_path, monkeypatch):
+    """2026-11-09 VQ-10: the session left ASSET_CHECK 'owed to the coordinator'; the slot
+    prompt now says in-Studio checks are the sprint's own."""
+    monkeypatch.setenv("FOUNDRY_BLENDER_DIR", str(tmp_path / "dropins"))
+    a = repo["a"]
+    raw = a.p.raw
+    a.p.raw = {**raw, "studio": {"main_slot": "slot-1"},
+               "slots": {"slot-1": {"container": "studio-slot", "host": "192.0.2.5"}}}
+    try:
+        build = a.implement_prompt(a.describe(T), {"attempt": 1, "run_id": "r1"})
+    finally:
+        a.p.raw = raw
+    assert "STUDIO CHECKS ARE YOURS" in build and "ASSET_CHECK" in build
+    plain = a.implement_prompt(a.describe(T), {"attempt": 1, "run_id": "r1"})
+    assert "STUDIO CHECKS ARE YOURS" not in plain

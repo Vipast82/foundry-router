@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.107 — a slot sprint runs its own in-Studio checks
+
+VQ-10 rebuilt EN-BADGER, EN-BAT and EN-BEAR, passed the scripted gate, and then left the in-Studio ASSET_CHECK "owed to the coordinator" twice, so its findings repeated and it parked BLOCKED. Nothing else runs that check: VQ-14 ran the same REGISTER/ASSET_CHECK itself on slot-2. A slot sprint's prompt now says that an in-Studio check a plan step names (ASSET_CHECK, REGISTER, a capture, a playtest row) is the sprint's own, run with its Studio MCP tools on the slot and logged as `PASS:` lines; the scripted gate runs only the test suites.
+
+Test: `tests/coordinator/test_rules_streamline.py::test_a_slot_sprint_runs_its_own_in_studio_checks`.
+
 ## v0.181.106 — the visual judge ignores capture-environment chrome
 
 UI-SQHP1's HUD frames were sent back round after round for Studio's viewport navigation widget and the Roblox core topbar drawn over the capture. No sprint can remove either. On 2026-11-09 the sprint stopped as an owner step, asking Victor to change Studio settings. The review prompt now carries `visual_approval.ENV_CHROME`: the Roblox core topbar, Studio's navigation widget, view cube and axis gizmo, the device simulator's touch thumbstick and jump button, and Studio window chrome are never defects, and neither is anything Studio draws over the game. The game's own UI placed under the core topbar is still a defect, since the topbar is in the live client too.

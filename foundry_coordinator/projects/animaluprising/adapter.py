@@ -758,6 +758,12 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                       "checkout or studio.lock.\n")
         if slot:
             notice += self._slot_fetch_notice(slot)
+            # 2026-11-09 VQ-10: the session left ASSET_CHECK "owed to the coordinator" twice
+            notice += ("\nSTUDIO CHECKS ARE YOURS: a plan step that names an in-Studio check "
+                       "(ASSET_CHECK, REGISTER, a capture, a playtest row) is yours to run with "
+                       "your Studio MCP tools on the slot, logged as `PASS:` lines in the "
+                       "evidence log. The scripted gate runs only the test suites; nothing else "
+                       "runs that check for you, so never leave it owed to the coordinator.\n")
         if track and not slot:
             notice = (f"\nTRACK SPRINT (track `{track}`, worktree `{self.p.workspace}`): no Studio "
                       "here. The main sprint owns Studio and Rojo. Never run tools/gate.ps1, a "
