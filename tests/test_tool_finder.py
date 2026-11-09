@@ -193,3 +193,65 @@ def test_the_persona_endpoint_serves_the_finder_pair(tmp_path):
             "params": {"name": TF.CALL_TOOL,
                        "arguments": {"name": "sandbox__run_python", "arguments": {}}}})
         assert "ERROR" in json.dumps(r.json()) and ran == [("crawl4ai", "crawl")]
+
+
+@pytest.mark.asyncio
+async def test_loose_call_shapes_from_small_models_are_accepted(tmp_path):
+    """v0.181.110: the shapes a local model gets wrong cost no turn."""
+    granted = _registry(tmp_path).mcp_tools_for_persona(_persona(["*", "!sandbox"]))
+    ran = []
+
+    async def call(td, args):
+        ran.append((td.mcp_tool, args))
+        return ToolResult([{"type": "text", "text": "ok"}])
+
+    async def go(args):
+        return (await TF.run(granted, TF.CALL_TOOL, args, call)).text
+
+    assert await go({"tool": "crawl", "args": {"q": 1}}) == "ok"             # aliases
+    assert await go({"name": "crawl", "q": 2}) == "ok"                       # args beside name
+    assert await go({"name": "Crawl4ai/Crawl", "arguments": '```json\n{"q": 3}\n```'}) == "ok"
+    assert await go({"name": "searxng.searxng_web_search", "parameters": None}) == "ok"
+    assert ran == [("crawl", {"q": 1}), ("crawl", {"q": 2}), ("crawl", {"q": 3}),
+                   ("searxng_web_search", {})]
+    bad = await go({"name": "web_search", "arguments": {}})                  # no such tool
+    assert bad.startswith("ERROR") and "searxng__searxng_web_search" in bad  # closest tools
+    assert (await go({"name": "sandbox__run_python"})).startswith("ERROR")   # still gated
+    assert (await go({"name": "crawl", "arguments": "not json"})).startswith("ERROR")
+    found = await TF.run(granted, TF.FIND_TOOL, {"q": "generate image"}, call)
+    assert "generate_image" in found.text                                     # query alias
+    assert len(ran) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_brain_routes_a_direct_tool_call_through_the_finder_gate(tmp_path):
+    """A finder persona's brain that calls a granted tool by name (skipping
+    foundry_call_tool) still passes the grant check; an ungranted one is refused."""
+    from foundry_router.brain import agent as A
+    seen = []
+
+    async def fake_rich(mcp, server, tool, args, **kw):
+        seen.append((server, tool, args))
+        return ToolResult([{"type": "text", "text": f"via {server}/{tool}"}])
+
+    reg = _registry(tmp_path)
+    ag = A.AgentRunner.__new__(A.AgentRunner)
+    ag.tool_registry = reg
+
+    async def hb(coro, *a, **k):
+        return await coro
+    ag._with_heartbeat = hb
+    ag.brain = types.SimpleNamespace(cfg=types.SimpleNamespace(mcp_result_limit_chars=4000))
+    import foundry_router.brain.agent as mod
+    orig = mod.call_tool_rich
+    mod.call_tool_rich = fake_rich
+    try:
+        ctx = types.SimpleNamespace(persona=_persona(["searxng"], "finder"), media=[],
+                                    logger=types.SimpleNamespace(
+                                        record_tool_call=lambda *a, **k: None))
+        out, _ = await ag._execute_tool("searxng__searxng_web_search", {"q": "x"}, ctx,
+                                        lambda *a, **k: None, {"tool_trail": []}, {})
+    finally:
+        mod.call_tool_rich = orig
+    assert seen and seen[0][0] == TF.FINDER_SERVER and seen[0][1] == TF.CALL_TOOL
+    assert seen[0][2] == {"name": "searxng__searxng_web_search", "arguments": {"q": "x"}}

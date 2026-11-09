@@ -887,6 +887,14 @@ class AgentRunner:
                     "(unknown capability, moderate cost) for this request."), False
 
         # ---- dynamic tools (Tool Sync, §4.2) ----
+        from .. import tool_finder
+        if tool_finder.is_finder(ctx.persona) and name not in (tool_finder.FIND_TOOL,
+                                                               tool_finder.CALL_TOOL):
+            real = self.tool_registry.get(name)
+            if real is not None and real.kind == "mcp":
+                # find-on-demand persona calling a tool by name without foundry_call_tool:
+                # run it through the finder, which checks the persona's grants
+                args, name = {"name": name, "arguments": args}, tool_finder.CALL_TOOL
         tool = self.tool_registry.get(name)
         if tool is None:
             emit("think", f"Tool {name} is no longer available (backend change mid-request).")
@@ -1862,6 +1870,13 @@ class AgentRunner:
                                                 "schema."})
                     continue
                 tool = by_name.get(tc["name"])
+                from .. import tool_finder
+                if tool is None and tool_finder.CALL_TOOL in by_name:
+                    # find-on-demand: a tool called by name without foundry_call_tool goes
+                    # through the finder (grant check; an unknown name gets suggestions)
+                    tc = {**tc, "name": tool_finder.CALL_TOOL,
+                          "arguments": {"name": tc["name"], "arguments": tc.get("arguments")}}
+                    tool = by_name[tool_finder.CALL_TOOL]
                 if tool is None:
                     self.model_registry.record_tool_call(worker, ok=False)
                     async for ev in hand_to_brain(

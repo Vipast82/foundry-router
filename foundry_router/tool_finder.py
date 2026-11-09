@@ -133,7 +133,7 @@ def find_text(tools: list, args: Optional[dict]) -> str:
         limit = max(1, min(MAX_LIMIT, int(args.get("limit") or DEFAULT_LIMIT)))
     except (TypeError, ValueError):
         limit = DEFAULT_LIMIT
-    query = str(args.get("query") or "")
+    query = str(_first(args, QUERY_KEYS) or "")
     if not tools:
         return "No tools are available to you."
     hits = search(tools, query, limit)
@@ -151,36 +151,103 @@ def find_text(tools: list, args: Optional[dict]) -> str:
                       ensure_ascii=False)
 
 
+# v0.181.110: smaller local models get the shape of a finder call wrong in a few common ways;
+# each is accepted instead of costing a turn on an error
+QUERY_KEYS = ("query", "q", "search", "text", "keywords", "task")
+NAME_KEYS = ("name", "tool", "tool_name", "toolName", "function")
+ARG_KEYS = ("arguments", "args", "parameters", "params", "input", "tool_input", "kwargs")
+_SEP = re.compile(r"[\s./:\\-]+|_{2,}")
+
+
+def _first(d: dict, keys):
+    for k in keys:
+        if d.get(k) not in (None, ""):
+            return d[k]
+    return None
+
+
+def _as_object(v):
+    """A dict for a tool's arguments: a dict as is, a JSON object string parsed (also one
+    wrapped in a code fence), None/"" as {}; anything else None (an error)."""
+    if v is None:
+        return {}
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        t = v.strip()
+        if t.startswith("```"):
+            t = t.strip("`")
+            t = t[4:] if t.lower().startswith("json") else t
+            t = t.strip()
+        if not t:
+            return {}
+        try:
+            v = json.loads(t)
+        except ValueError:
+            return None
+        return v if isinstance(v, dict) else None
+    return None
+
+
+def _norm(name: str) -> str:
+    return _SEP.sub("_", str(name or "").strip().strip("`'\"").lower())
+
+
+def _resolve(tools: list, name: str):
+    """The granted tool `name` means: exact registry or bare name, then the same ignoring
+    case and separators ("searxng/web_search", "Searxng.web_search", "searxng__web_search"),
+    then a server-qualified bare name. None when it matches no granted tool or several."""
+    exact = {}
+    for t in tools:
+        exact.setdefault(t.name, t)
+        if t.mcp_tool:
+            exact.setdefault(t.mcp_tool, t)
+    if name in exact:
+        return exact[name]
+    want = _norm(name)
+    hits = {id(t): t for t in tools
+            if want in (_norm(t.name), _norm(t.mcp_tool or ""),
+                        _norm(f"{t.server}_{t.mcp_tool or t.name}"))}
+    if len(hits) == 1:
+        return next(iter(hits.values()))
+    return None
+
+
 async def run(tools: list, tool: str, args: Optional[dict],
               call: Callable[[object, dict], Awaitable]):
     """A finder call. `tools` is the persona's granted set (the gate); `call(td, arguments)`
-    runs a real tool the caller's usual way (media, jobs, logging) and returns a ToolResult."""
+    runs a real tool the caller's usual way (media, jobs, logging) and returns a ToolResult.
+
+    Loose shapes are accepted: `tool` / `tool_name` for `name`, `args` / `parameters` /
+    `input` for `arguments`, arguments as a JSON string (fenced or not), the tool's own
+    arguments placed next to `name` instead of inside `arguments`, and a name that differs
+    only in case or separators. A name that is still unknown gets the closest granted tools
+    back, with their schemas, so the next call can be right."""
     from .tools.mcp_client import ToolResult
+
+    def text(t: str):
+        return ToolResult([{"type": "text", "text": t}])
+    if isinstance(args, str):
+        args = _as_object(args)
     args = args if isinstance(args, dict) else {}
     if tool == FIND_TOOL:
-        return ToolResult([{"type": "text", "text": find_text(tools, args)}])
+        return text(find_text(tools, args))
     if tool != CALL_TOOL:
-        return ToolResult([{"type": "text", "text": f"ERROR: unknown finder tool {tool!r}."}])
-    name = str(args.get("name") or "").strip()
-    inner = args.get("arguments")
-    if isinstance(inner, str):
-        try:
-            inner = json.loads(inner) if inner.strip() else {}
-        except ValueError:
-            return ToolResult([{"type": "text", "text": "ERROR: arguments must be a JSON "
-                                                        "object matching the tool's schema."}])
+        return text(f"ERROR: unknown finder tool {tool!r}.")
+    name = str(_first(args, NAME_KEYS) or "").strip()
+    raw = _first(args, ARG_KEYS)
+    if raw is None:
+        # the tool's own arguments beside the name ({"name": "x", "query": "..."})
+        raw = {k: v for k, v in args.items() if k not in NAME_KEYS and k not in ARG_KEYS}
+    inner = _as_object(raw)
     if inner is None:
-        inner = {}
-    if not isinstance(inner, dict):
-        return ToolResult([{"type": "text", "text": "ERROR: arguments must be a JSON object."}])
-    by_name = {}
-    for t in tools:
-        by_name.setdefault(t.name, t)
-        if t.mcp_tool:
-            by_name.setdefault(t.mcp_tool, t)
-    td = by_name.get(name)
+        return text("ERROR: arguments must be a JSON object matching the tool's schema, "
+                    'e.g. foundry_call_tool(name="...", arguments={"query": "..."}).')
+    td = _resolve(tools, name) if name else None
     if td is None or td.server == FINDER_SERVER:
-        return ToolResult([{"type": "text", "text": (
-            f"ERROR: {name!r} is not a tool you can use. Call foundry_find_tools to find "
-            "the right one and use its exact name.")}])
+        close = search(tools, name, 3) if name else []
+        tip = ("" if not close else " Closest tools you can use: "
+               + json.dumps([_entry(t) for t in close], ensure_ascii=False))
+        return text(f"ERROR: {name or '(no name)'!r} is not a tool you can use. Use the exact "
+                    f"name foundry_find_tools returns." + tip)
     return await call(td, inner)

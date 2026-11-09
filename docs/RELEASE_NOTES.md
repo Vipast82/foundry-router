@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.110 — the finder accepts the call shapes small models get wrong
+
+Local models (Qwen on Strata) handle a two-step "find, then call" well when the schema comes back in the result, but they often get the shape of the second call slightly wrong. Each of these used to cost a turn on an error; `foundry_call_tool` now accepts them:
+
+- `tool` / `tool_name` for `name`; `args` / `parameters` / `input` for `arguments`; `q` / `search` for `foundry_find_tools`' `query`;
+- the arguments as a JSON string, also inside a code fence;
+- the tool's own arguments placed next to `name` instead of inside `arguments`;
+- a name that differs only in case or separators (`Crawl4ai/Crawl`, `searxng.searxng_web_search`).
+
+A name that still matches nothing gets the three closest granted tools back, with their schemas, so the next call can be right. The persona's grants still decide what runs.
+
+A find-on-demand persona whose model calls a granted tool by its own name, skipping `foundry_call_tool`, no longer fails: the brain loop and the worker tool loop send that call through the finder, so it is checked against the grants and runs (the worker loop used to give up and hand the request to the brain).
+
+Tests: `tests/test_tool_finder.py::test_loose_call_shapes_from_small_models_are_accepted`, `::test_the_brain_routes_a_direct_tool_call_through_the_finder_gate`.
+
 ## v0.181.109 — personas can find MCP tools on demand
 
 Every granted MCP tool definition rides in the prompt on every turn: Foundry-Chat's 58 were about 13.4k tokens, read cold on a new chat (about 11 s on Strata). Victor asked for a find/call option, gated per persona, so a chat persona can reach any tool without giving each client its own MCP servers.
