@@ -279,15 +279,20 @@ def copy_back(slot, slot_repo: str, worktree: str, task: str) -> list:
     if not r.stdout:
         return []
     allowed = tuple(g.replace("{task}", task).rstrip("*") for g in OUTPUT_GLOBS)
+    return _extract(r.stdout, worktree, lambda name: name.startswith(allowed))
+
+
+def _extract(data: bytes, worktree: str, ok) -> list:
+    """Unpack a tar stream into the worktree: regular files and folders only, each name passing
+    `ok(name)`, never outside the worktree. Returns the file paths written."""
     root = os.path.realpath(worktree)
     out = []
-    with tarfile.open(fileobj=io.BytesIO(r.stdout)) as tf:
+    with tarfile.open(fileobj=io.BytesIO(data)) as tf:
         for m in tf.getmembers():
             name = m.name.replace("\\", "/")
             while name.startswith("./"):
                 name = name[2:]
-            if not (m.isfile() or m.isdir()) or ".." in name.split("/") \
-                    or not name.startswith(allowed):
+            if not (m.isfile() or m.isdir()) or ".." in name.split("/") or not ok(name):
                 continue
             dest = os.path.realpath(os.path.join(root, *name.split("/")))
             if not dest.startswith(root + os.sep):
@@ -303,6 +308,120 @@ def copy_back(slot, slot_repo: str, worktree: str, task: str) -> list:
                 f.write(src.read())
             out.append(name)
     return out
+
+
+def fetch_rel(path: str, slot_repo: str, worktree: str) -> tuple:
+    """(repo-relative path, '') for a path given as repo-relative, as the slot checkout's
+    absolute path, or as this worktree's absolute path; ('', why) for anything else."""
+    p = str(path or "").strip().replace("\\", "/")
+    for base in (str(slot_repo or "").rstrip("/"),
+                 os.path.realpath(worktree).replace("\\", "/") if worktree else ""):
+        if base and (p == base or p.lower().startswith(base.lower() + "/")):
+            p = p[len(base) + 1:]
+            break
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.rstrip("/")
+    parts = p.split("/")
+    if not p or p.startswith("/") or re.match(r"^[A-Za-z]:", p) or ".." in parts \
+            or parts[0] == ".git":
+        return "", (f"{path}: not a path inside the repo (give it repo-relative, or under "
+                    f"{slot_repo} on the slot)")
+    return p, ""
+
+
+def fetch(slot: dict, slot_repo: str, worktree: str, paths: list) -> tuple:
+    """Copy files (or folders) Studio wrote in the slot's checkout into the same repo-relative
+    paths in this worktree (export_rbxm and other files a Studio MCP tool saves land on the
+    slot, not here). Returns (copied paths, error or '', exit code)."""
+    rels = []
+    for p in paths:
+        r, why = fetch_rel(p, slot_repo, worktree)
+        if why:
+            return [], why, 2
+        rels.append(r)
+    if not rels:
+        return [], "no paths given", 2
+    q = " ".join(shlex.quote(r) for r in rels)
+    script = (f"cd {shlex.quote(slot_repo)} && for p in {q}; do [ -e \"$p\" ] || "
+              "{ echo \"missing on the slot: $p\" >&2; exit 4; }; done; tar -cf - -- " + q)
+    try:
+        r = subprocess.run(exec_argv(_slot_of(slot), ["bash", "-lc", script]),
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=300, creationflags=_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return [], "the slot did not answer in 300 s", 3
+    except OSError as e:
+        return [], f"cannot reach the slot: {e}"[:300], 3
+    if r.returncode != 0:
+        return [], ((r.stderr or b"").decode("utf-8", "replace").strip()[-300:]
+                    or f"rc={r.returncode}"), (4 if r.returncode == 4 else 3)
+    got = _extract(r.stdout, worktree,
+                   lambda n: any(n == x or n.startswith(x + "/") for x in rels))
+    return got, ("" if got else "nothing came back from the slot"), (0 if got else 3)
+
+
+def fetch_paths(profile, state_dir: str = "") -> tuple:
+    """(settings json, drop-in) of a worktree's foundry-slot-fetch, beside its foundry-blender."""
+    from .slot_blender import wrapper_paths
+    cfg, cmd = wrapper_paths(profile, state_dir)
+    base = cfg[:-len(".json")] + "-fetch"
+    return base + ".json", base + os.path.splitext(cmd)[1]
+
+
+def prepare_fetch(profile, slot_id: str, state_dir: str = "") -> dict:
+    """Write this worktree's foundry-slot-fetch for `slot_id`: {command, repo} or {error}."""
+    s = configured(profile).get(slot_id) if slot_id else None
+    if not s:
+        return {"error": f"no enabled slot {slot_id} is configured"}
+    cfg_path, cmd_path = fetch_paths(profile, state_dir)
+    ws = os.path.realpath(str(getattr(profile, "workspace", "") or ""))
+    cfg = {"slot": slot_id, "workspace": ws, "repo": s.get("repo") or DEFAULTS["repo"],
+           **{k: s.get(k) for k in ("host", "container")}}
+    if [str(x) for x in (s.get("ssh") or [])] not in ([], SSH_DEFAULT):
+        cfg["ssh"] = s["ssh"]
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.name == "nt":
+        text = ("@echo off\r\n"
+                "rem foundry-slot-fetch for this worktree: copies files Studio wrote on the slot\r\n"
+                f'set "PYTHONPATH={root}"\r\n'
+                f'"{sys.executable}" -m foundry_coordinator.slots fetch --config "{cfg_path}" %*\r\n'
+                "exit /b %ERRORLEVEL%\r\n")
+    else:
+        text = ("#!/bin/sh\n# foundry-slot-fetch for this worktree\n"
+                f"PYTHONPATH={shlex.quote(root)} exec {shlex.quote(sys.executable)} -m "
+                f"foundry_coordinator.slots fetch --config {shlex.quote(cfg_path)} \"$@\"\n")
+    for path, body in ((cfg_path, json.dumps(cfg, indent=1)), (cmd_path, text)):
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(body)
+        os.replace(tmp, path)
+    if os.name != "nt":
+        os.chmod(cmd_path, 0o755)
+    return {"command": cmd_path, "config": cfg_path, "repo": cfg["repo"]}
+
+
+def fetch_main(a) -> int:
+    """`slots fetch --config <json> PATH...`: 0 copied, 2 bad path or settings, 3 slot error,
+    4 a path is missing on the slot."""
+    try:
+        with open(a.config, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"SLOT-FETCH FAIL: settings {a.config}: {e}", flush=True)
+        return 2
+    slot = {k: cfg.get(k) for k in ("host", "container", "ssh") if cfg.get(k)}
+    if not slot.get("container"):
+        print("SLOT-FETCH FAIL: the settings name no container", flush=True)
+        return 2
+    got, why, rc = fetch(slot, str(cfg.get("repo") or DEFAULTS["repo"]),
+                         a.repo or str(cfg.get("workspace") or os.getcwd()), list(a.paths))
+    if why:
+        print(f"SLOT-FETCH FAIL: {why}", flush=True)
+        return rc
+    print(f"SLOT-FETCH OK: {len(got)} file(s): " + ", ".join(got[:20]), flush=True)
+    return 0
 
 
 def run(a) -> int:
@@ -463,6 +582,10 @@ def main(argv=None) -> int:
     r.add_argument("--foundry-push-url", default="")
     r.add_argument("--foundry-host-dir", default="")
     r.add_argument("pipeline", nargs=argparse.REMAINDER)
+    fe = sub.add_parser("fetch", help="copy files Studio wrote on a slot into this worktree")
+    fe.add_argument("--config", required=True)
+    fe.add_argument("--repo", default="", help="the worktree (default: the settings' workspace)")
+    fe.add_argument("paths", nargs="+")
     from . import slot_blender
     slot_blender.add_parser(sub)
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -477,6 +600,8 @@ def main(argv=None) -> int:
         return run(a)
     if a.cmd == "blender":
         return slot_blender.run(a, list(a.blender))
+    if a.cmd == "fetch":
+        return fetch_main(a)
     return 2
 
 

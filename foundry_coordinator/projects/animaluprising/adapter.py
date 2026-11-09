@@ -551,6 +551,27 @@ class AnimalUprisingAdapter(GenericAdapter):
                 "Paths must be inside this worktree. The local blender.exe is denied. Exit 75 = "
                 "the slot's Blender stayed busy (another job): retry once, then report it.\n")
 
+    def _slot_fetch_notice(self, slot: str) -> str:
+        """2026-11-09 ART-POI1: a Studio MCP tool that saves a file (export_rbxm) writes it on the
+        slot, not here. Says where to save it and how to bring it into this worktree."""
+        from ...slots import prepare_fetch
+        try:
+            f = prepare_fetch(self.p, slot, self.state_dir)
+        except Exception as e:                                    # noqa: BLE001
+            f = {"error": f"foundry-slot-fetch could not be prepared: {e}"}
+        if f.get("error"):
+            return (f"\nFILES FROM STUDIO: {f['error']}. A Studio MCP tool that saves a file "
+                    "(export_rbxm) writes it on the slot; if this sprint needs one, report "
+                    "BLOCKED with this line.\n")
+        repo = f["repo"].rstrip("/")
+        return (f"\nFILES FROM STUDIO: Studio runs on the slot, so a Studio MCP tool that saves a "
+                f"file (export_rbxm's output_path) writes it on the slot. Give it the slot "
+                f"checkout's path, `{repo}/<repo-relative path>` (e.g. `{repo}/assets/models/"
+                f"X.rbxm`; never a C:\\ path), then run `\"{f['command']}\" <repo-relative path> "
+                "[more paths]` to copy it into the same path in this worktree. SLOT-FETCH OK = "
+                "copied; exit 4 = the file is not on the slot (check the output_path). Then "
+                "commit it like any other file.\n")
+
     def _asset_skill_notice(self, task_id: str) -> str:
         """FOUNDRY_SKILLS_DELIVERY_PLAN (gap 7): an AS- sprint loads `au-blender-asset` once
         Foundry installs it ([skills] install lists it)."""
@@ -735,7 +756,9 @@ The approved plan and its checklist are this attempt's plan: do not spawn planne
                       "Rojo serves COMMITTED code only: the coordinator moves the slot to your HEAD "
                       "for each scripted gate, so commit before asking for it. Never touch the main "
                       "checkout or studio.lock.\n")
-        elif track:
+        if slot:
+            notice += self._slot_fetch_notice(slot)
+        if track and not slot:
             notice = (f"\nTRACK SPRINT (track `{track}`, worktree `{self.p.workspace}`): no Studio "
                       "here. The main sprint owns Studio and Rojo. Never run tools/gate.ps1, a "
                       "playtest or a boot check, never take or wait for studio.lock, never touch "

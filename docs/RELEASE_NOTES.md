@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.100 — slot sprints can bring files Studio saves back into their worktree
+
+On a slot, the Studio MCP servers run inside the slot container, so a tool that saves a file (`export_rbxm`'s `output_path`) writes it there. On 2026-11-09, ART-POI1 (slot-2) passed a workstation path, the file landed at `/home/studio/C:\Roblox\...` in the container, and the sprint reported BLOCKED: "not synced back". Foundry now writes a `foundry-slot-fetch` drop-in for each slot worktree (beside foundry-blender's), and the AU prompt for a sprint whose Studio is on a slot says to save into the slot checkout (`/home/studio/work/AnimalUprising/<repo-relative path>`) and run it to copy the file into the same path in the worktree. `python -m foundry_coordinator.slots fetch --config <json> PATH...` copies only the named repo paths (never `.git` or anything outside the repo). Exit codes: 0 copied, 2 bad path, 3 slot error, 4 missing on the slot.
+
+Tests: `tests/coordinator/test_slot_fetch.py`, `tests/coordinator/test_rules_streamline.py::test_a_slot_sprint_is_told_how_to_bring_studio_files_back`.
+
 ## v0.181.99 — a docs-only commit keeps the gate's host-half verdicts valid
 
 The Studio half of the scripted gate (`calls_preconditions`) required the host half's `<ID>_gate_verdicts.json` to be stamped with the exact current HEAD. On 2026-11-09, two operator plan commits (`plans: ...`, files under `docs/progress/` only) moved HEAD while VR-MAP2's gate ran. Both times the Studio half was refused "stamped <old>, HEAD is <new>: the host half must pass at the current HEAD", and a Lead case opened. A commit cannot change the host half's result when every file it changes, between the stamp and HEAD, is under `docs/progress/` or `docs/evidence/` (plans, summaries, evidence logs and captures). Such commits now keep the verdicts valid (`studio_gate.docs_only_since`: the stamp must be an ancestor of HEAD). Any other change still needs a fresh host half.
