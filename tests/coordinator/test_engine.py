@@ -413,6 +413,21 @@ def test_visual_approval_after_close_bound_to_revision_and_artifacts(tmp_path):
         c.approve_human("vis", "T2", "visual", "victor")
 
 
+def test_a_dependency_waits_for_the_model_judges_visual_verdict(game):
+    """2026-11-09: VQ-14 started on VQ-0's pending visual approval and the model judge sent
+    VQ-0 back a minute later. deps_accept_pending skips a wait for a human only."""
+    from types import SimpleNamespace
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    dt = {"state": S.AWAITING_HUMAN, "data": {"stage": "after_close", "awaiting_kinds": ["visual"]}}
+    human = SimpleNamespace(profile=SimpleNamespace(deps_accept_pending=["visual"], raw={}))
+    judge = SimpleNamespace(profile=SimpleNamespace(deps_accept_pending=["visual"],
+                                                    raw={"approval": {"visual_model": True}}))
+    assert c._dep_satisfied(human, dt) is True
+    assert c._dep_satisfied(judge, dt) is False
+    assert c._dep_satisfied(judge, {"state": S.COMPLETE, "data": {}}) is True
+
+
 def test_before_close_approval_is_invalidated_by_a_later_code_change(tmp_path):
     root, _ = make_repo(tmp_path, "pub", [dict(T1, tags=["publish"])])
     prof = write_profile(tmp_path, "pub", root, extra="""

@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.102 — a dependency waits for the model judge's visual verdict
+
+`[approval] deps_accept_pending = ["visual"]` lets a sprint start while its dependency waits for its visual approval, so a chain does not stop on a human. With `visual_model = true`, the model judge gives that approval within minutes, and it can reject. On 2026-11-09, VQ-14 started at 02:32 on VQ-0's pending approval, and at 02:33 the judge sent VQ-0 back for changes. VQ-14 had started from a method pick that was not final. `_dep_satisfied` now accepts a pending approval only when a human gives it (`situation.model_approves` is false for that kind). Track queue order, without a declared dependency, is unchanged.
+
+Test: `tests/coordinator/test_engine.py::test_a_dependency_waits_for_the_model_judges_visual_verdict`.
+
 ## v0.181.101 — the gate's end-of-run HEAD check allows docs-only commits; the viewport pin falls back to a listed device
 
 1. v0.181.99 let a docs-only commit keep the host-half verdicts at the start of the Studio half. The end-of-run check still failed: on 2026-11-09 an operator `plans:` commit (docs/progress only) landed during VR-MAP2's 75-minute gate, and the run ended "tooling: HEAD moved during the run (2b5ba63740ec -> 948d2991b635)" and opened a Lead case. When every change between the start and the current HEAD is under `docs/progress/` or `docs/evidence/` (`docs_only_since`), the gate now writes a NOTE line and keeps the run. Any other move is still a tooling error.

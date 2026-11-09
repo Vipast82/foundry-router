@@ -736,7 +736,13 @@ class Coordinator:
             return not self._dep_unmerged_track(P, dt, for_tid)
         if dt.get("state") == S.AWAITING_HUMAN and (dt.get("data") or {}).get("stage") == "after_close":
             kinds = (dt.get("data") or {}).get("awaiting_kinds") or []
-            return bool(kinds) and all(k in P.profile.deps_accept_pending for k in kinds)
+            # 2026-11-09 VQ-14 started on VQ-0's pending visual approval, and the model judge
+            # sent VQ-0 back a minute later: deps_accept_pending skips a wait for a HUMAN;
+            # a model judge answers in minutes and can reject, so its verdict is awaited
+            from .situation import model_approves
+            raw = getattr(P.profile, "raw", None) or {}
+            return bool(kinds) and all(k in P.profile.deps_accept_pending
+                                       and not model_approves(raw, k) for k in kinds)
         return False
 
     def _dep_done_outside(self, P: Project, dep: str) -> bool:
