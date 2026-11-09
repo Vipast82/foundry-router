@@ -941,6 +941,18 @@ def test_a_double_prefixed_commit_belongs_to_its_inner_sprint():
     assert sprint_owner("prep: rules") == ""
 
 
+def test_a_digit_less_sprint_id_owns_its_commits():
+    """2026-11-09 VR-MAP2: VR-AS-SYNC's commits were blamed on VR-MAP2 (the owner match
+    needed a digit), and its scope check failed three times on another sprint's files."""
+    from foundry_coordinator.bookkeeping import other_sprint, sprint_owner
+    assert sprint_owner("VR-AS-SYNC: closeout") == "VR-AS-SYNC"
+    assert sprint_owner("VQ-SYNC: ids") == "VQ-SYNC"
+    assert other_sprint("VR-AS-SYNC: scripted Studio gate PASS", "VR-MAP2")
+    for housekeeping in ("plans: VQ plans", "docs: ENVIRONMENT", "Merge: x", "Revert: y",
+                         "WIP: z", "Gate: q"):
+        assert sprint_owner(housekeeping) == "", housekeeping
+
+
 def test_review_packet_leaves_out_files_only_other_sprints_changed(env):
     """2026-10-29 GF-FIX1: its review range held 25 commits of other sprints and the
     packet went over budget. Files only other sprints' commits changed are left out."""

@@ -75,6 +75,15 @@ def commit(c, P, t: dict, paths: list, text: str, kind: str) -> tuple[str, str]:
 _PREFIX = re.compile(r"^([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9.]+)*):")
 
 
+# 2026-11-09 VR-MAP2: a digit-less id in capitals with a hyphen is a sprint too (VR-AS-SYNC,
+# VQ-SYNC); its commits were blamed on VR-MAP2 and the scope check repeated three times
+_CAPS_ID = re.compile(r"^[A-Z]{2,}(?:-[A-Z0-9]{2,})+$")
+
+
+def _is_sprint_id(x: str) -> bool:
+    return any(ch.isdigit() for ch in x) or bool(_CAPS_ID.match(x))
+
+
 def other_sprint(subject: str, tid: str) -> bool:
     """A commit subject that starts with ANOTHER sprint's id prefix ("UI-SKIN2: ...") is
     that sprint's work. 2026-10-28 AS-P5: master moved under a long sprint (UI-SKIN2
@@ -92,7 +101,7 @@ def sprint_owner(subject: str) -> str:
     owner = ""
     for _ in range(3):
         m = _PREFIX.match(s)
-        if not m or not any(ch.isdigit() for ch in m.group(1)):
+        if not m or not _is_sprint_id(m.group(1)):
             break
         owner = m.group(1)
         s = s[m.end():].lstrip()

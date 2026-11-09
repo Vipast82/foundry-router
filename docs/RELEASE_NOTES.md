@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.104 — a digit-less sprint id owns its commits (VR-AS-SYNC, VQ-SYNC)
+
+The scope check leaves out commits another sprint made (`bookkeeping.sprint_owner`). An id prefix counted as a sprint only when it contained a digit, so the goal of keeping out housekeeping prefixes (`plans:`, `docs:`) also dropped `VR-AS-SYNC:` and `VQ-SYNC:`. On 2026-11-09, VR-AS-SYNC's committed evidence, summary and gate files fell inside VR-MAP2's range. VR-MAP2's scope check failed three times, a "findings repeat" decision opened, and the Lead had to add another sprint's files to VR-MAP2's plan. A prefix in capitals with at least one hyphen (`[A-Z]{2,}(-[A-Z0-9]{2,})+`) now counts as a sprint id too. `plans:`, `docs:`, `Merge:` and `WIP:` stay housekeeping.
+
+Test: `tests/coordinator/test_revamp_gate.py::test_a_digit_less_sprint_id_owns_its_commits`.
+
 ## v0.181.103 — the gate pipeline keeps a run whose HEAD moved by docs-only commits; a tooling stop during VERIFYING carries its verification id
 
 1. On 2026-11-09 03:05, an operator `plans:` commit (docs/progress only) landed between the host half and the Studio half of VR-MAP2's gate. The Studio half passed at the new HEAD and wrote `<new>.calls.json`. The pipeline looked only for `<start>.calls.json`, found none, and recorded "ERROR ... CALLS VR-MAP2 PASS". When the verdict is missing at the start HEAD, `run_pipeline` now reads HEAD again. If every change since the start is under `docs/progress/` or `docs/evidence/` (`docs_only_since`) and the Studio half's verdict at the new HEAD belongs to this run, the pipeline uses it and runs `-Finish` at that HEAD (`head_moved_docs_only` in the record).
