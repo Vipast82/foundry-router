@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.98 — a sprint resumed past the queue check still waits for a cancelled dependency
+
+The first-start check (`_unmet_start_deps`) skipped a FAILED or CANCELLED dependency and left it to the QUEUED check, which blocks the sprint. A Lead resume moves a sprint from BLOCKED to READY, past the QUEUED check. On 2026-11-08, VR-AS-SYNC was cancelled at 20:1x so it could rerun after the vr-e merge. VR-MAP2, depending on it, went BLOCKED; its Lead case's decision timed out at 20:21 and resumed it, and it started at once, ahead of VR-AS-SYNC. A queue dependency that is cancelled or failed now counts as unmet at start ("waiting for VR-AS-SYNC (CANCELLED)"). Dependencies named only in the task source keep the old behaviour.
+
+Test: `tests/coordinator/test_engine.py::test_a_sprint_resumed_past_the_queue_check_waits_for_a_cancelled_dependency`.
+
 ## v0.181.97 — a main sprint waits until its dependency's track has merged
 
 A COMPLETE dependency satisfied every dependent, even while its work was still on an unmerged track branch. On 2026-11-08, VR-AS14 completed on vr-e at 19:59 and VR-AS-SYNC (main checkout, depending on all 43 VR sprints) started at once. vr-e still waited to merge, both on the busy main checkout and on a Lead repair of an ASSET_LEDGER.md conflict, so VR-AS-SYNC regenerated the asset ids without VR-AS11..14's models. The watch cancelled it before it completed, and it reruns after the merge.

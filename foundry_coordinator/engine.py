@@ -678,6 +678,12 @@ class Coordinator:
         out = []
         for d in list(q["deps"]) + [x for x in src if x not in q["deps"] and x not in dropped]:
             dt = self.store.task(P.id, d)
+            if dt is not None and dt.get("state") in (S.FAILED, S.CANCELLED) and d in q["deps"]:
+                # a queue dep that was cancelled or failed is not met: a Lead resume moves a
+                # sprint BLOCKED -> READY past the QUEUED check (2026-11-08: VR-MAP2 started
+                # while VR-AS-SYNC was CANCELLED, before it reran after the vr-e merge)
+                out.append(f"{d} ({dt['state']})")
+                continue
             if dt is None or dt.get("state") in (S.FAILED, S.CANCELLED):
                 continue                     # not on the queue: the QUEUED check owns that
             if not self._dep_satisfied(P, dt, t["task_id"]) and not self._dep_done_outside(P, d):

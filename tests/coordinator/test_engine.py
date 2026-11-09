@@ -2017,3 +2017,20 @@ def test_a_main_sprint_waits_until_its_dependencys_track_has_merged(game):
     c.store.x("UPDATE queue SET track='' WHERE project_id='game' AND task_id='T2'")
     c.store.update_track("game", "vr-e", state="merged")
     assert c._dep_satisfied(P, t1, "T2")                  # merged: satisfied
+
+
+def test_a_sprint_resumed_past_the_queue_check_waits_for_a_cancelled_dependency(game):
+    """2026-11-08: VR-AS-SYNC was cancelled (to rerun after the vr-e merge); VR-MAP2,
+    depending on it, went BLOCKED, its Lead case resumed it BLOCKED -> READY and it started
+    at once: the start check skipped a CANCELLED queue dep (the QUEUED check owned that)."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", ["T1"], "victor")
+    P = c.projects["game"]
+    c.store.update_task("game", "T1", state=S.CANCELLED)
+    c.store.update_task("game", "T2", state=S.READY)
+    assert c._unmet_start_deps(P, c.store.task("game", "T2")) == ["T1 (CANCELLED)"]
+    c._start_implementation(P, c.store.task("game", "T2"))
+    t2 = c.store.task("game", "T2")
+    assert t2["state"] == S.READY and "waiting for T1" in (t2["next_action"] or "")
