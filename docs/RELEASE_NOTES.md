@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.103 — the gate pipeline keeps a run whose HEAD moved by docs-only commits; a tooling stop during VERIFYING carries its verification id
+
+1. On 2026-11-09 03:05, an operator `plans:` commit (docs/progress only) landed between the host half and the Studio half of VR-MAP2's gate. The Studio half passed at the new HEAD and wrote `<new>.calls.json`. The pipeline looked only for `<start>.calls.json`, found none, and recorded "ERROR ... CALLS VR-MAP2 PASS". When the verdict is missing at the start HEAD, `run_pipeline` now reads HEAD again. If every change since the start is under `docs/progress/` or `docs/evidence/` (`docs_only_since`) and the Studio half's verdict at the new HEAD belongs to this run, the pipeline uses it and runs `-Finish` at that HEAD (`head_moved_docs_only` in the record).
+2. A scripted-gate tooling ERROR while the task was VERIFYING failed with "VERIFYING -> BLOCKED needs evidence: verification_id", so the task was never stopped. `_tooling` now passes the task's verification id, or the run id when there is none.
+
+Test: `tests/coordinator/test_studio_calls.py::test_pipeline_keeps_a_run_whose_head_moved_by_docs_only_commits`.
+
 ## v0.181.102 — a dependency waits for the model judge's visual verdict
 
 `[approval] deps_accept_pending = ["visual"]` lets a sprint start while its dependency waits for its visual approval, so a chain does not stop on a human. With `visual_model = true`, the model judge gives that approval within minutes, and it can reject. On 2026-11-09, VQ-14 started at 02:32 on VQ-0's pending approval, and at 02:33 the judge sent VQ-0 back for changes. VQ-14 had started from a method pick that was not final. `_dep_satisfied` now accepts a pending approval only when a human gives it (`situation.model_approves` is false for that kind). Track queue order, without a declared dependency, is unchanged.

@@ -307,6 +307,37 @@ def test_pipeline_binds_the_test_studio_by_the_client_title_match(tmp_path, monk
     assert "--place" not in seen[2]
 
 
+def test_pipeline_keeps_a_run_whose_head_moved_by_docs_only_commits(tmp_path, monkeypatch):
+    """2026-11-09 VR-MAP2: an operator plans commit landed between the host half and the
+    Studio half; the Studio half passed at the new HEAD and the pipeline called it ERROR."""
+    repo = tmp_path / "au"
+    (repo / "docs" / "progress").mkdir(parents=True)
+    old, new = "a" * 40, "b" * 40
+    heads = iter([old, new])
+    monkeypatch.setattr(SC._sg(), "docs_only_since", lambda r, a, b: (a, b) == (old, new))
+
+    def run(cmd, cwd, timeout, env=None):
+        if cmd[:2] == ["git", "-C"]:
+            return 0, next(heads)
+        if "-Finish" in cmd:
+            return 0, "GATE P1 PASS"
+        if "calls" in cmd:
+            gd = repo / ".plan" / "tmp" / "gate" / "P1"
+            gd.mkdir(parents=True, exist_ok=True)
+            (gd / f"{new[:12]}.calls.json").write_text(json.dumps(
+                {"run_id": "rid-1", "head": new, "result": "PASS", "mode": "calls"}))
+            return 0, "CALLS P1 PASS"
+        (repo / "docs" / "progress" / "P1_gate_verdicts.json").write_text(json.dumps(
+            {"headSha": old, "lune": True}))
+        (repo / "docs" / "progress" / "P1_gate_expect.json").write_text(json.dumps(
+            {"files": {"src/a.txt": "1"}}))
+        return 0, "host ok"
+    lines = []
+    st = SC.run_pipeline(_pipe_args(repo), run=run, log=lines.append)
+    assert st["result"] == "PASS" and st["head"] == new and st["head_moved_docs_only"]
+    assert any("docs-only commits during the run" in x for x in lines)
+
+
 def test_pipeline_host_failure_and_calls_error(tmp_path):
     repo = tmp_path / "au"
     (repo / "docs" / "progress").mkdir(parents=True)

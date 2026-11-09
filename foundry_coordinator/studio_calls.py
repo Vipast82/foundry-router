@@ -341,6 +341,19 @@ def run_pipeline(a, run: Callable = run_step, log: Callable = print) -> dict:
     cv = _read_json(os.path.join(gd, f"{head[:12]}.calls.json"))
     if cv is not None and (cv.get("run_id") != a.run_id or cv.get("head") != head):
         cv = None
+    if cv is None:
+        # 2026-11-09 VR-MAP2: an operator `plans:` commit (docs/progress only) landed between
+        # the host half and the Studio half; the Studio half ran (and passed) at the new HEAD
+        # and wrote its verdict there. A docs-only move keeps the run, at the new HEAD.
+        rcn, now = run(["git", "-C", repo, "rev-parse", "HEAD"], repo, 60)
+        now = (now or "").strip()
+        if rcn == 0 and re.fullmatch(r"[0-9a-f]{40}", now) and now != head                 and _sg().docs_only_since(repo, head, now):
+            cn = _read_json(os.path.join(gd, f"{now[:12]}.calls.json"))
+            if cn is not None and cn.get("run_id") == a.run_id and cn.get("head") == now:
+                log(f"NOTE: HEAD moved by docs-only commits during the run: {head[:12]} -> "
+                    f"{now[:12]}; the Studio half's verdict at {now[:12]} is used")
+                head, cv = now, cn
+                save(head=head, head_moved_docs_only=True)
     save(calls_rc=rc2, calls_json=f"{GATE_DIR}/{sprint}/{head[:12]}.calls.json" if cv else "")
     if rc2 not in (0, 1) or cv is None or cv.get("result") == "ERROR":
         why = (cv or {}).get("error") or next(
@@ -1093,8 +1106,12 @@ class StudioCalls:
         tid = t["task_id"]
         self.c.store.release(P.id, tid)
         cur = self.store.task(P.id, tid) or t
-        self.c._stop(P, cur, S.BLOCKED, {"blocker": why[:1000], "blocker_kind": "tooling",
-                                         "studio_calls": run.get("run_id")},
+        ev = {"blocker": why[:1000], "blocker_kind": "tooling", "studio_calls": run.get("run_id")}
+        if cur.get("state") == S.VERIFYING:
+            # 2026-11-09 VR-MAP2: "VERIFYING -> BLOCKED needs evidence: verification_id" (an
+            # auto gate run during verification); the run is the verification here
+            ev["verification_id"] = cur.get("verification_id") or run.get("run_id") or "studio_calls"
+        self.c._stop(P, cur, S.BLOCKED, ev,
                      cls="studio_calls_error", blocker=why[:500])
         return outcome
 
