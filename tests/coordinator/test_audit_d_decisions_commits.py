@@ -282,6 +282,22 @@ def test_the_lead_commit_formats_luau_then_commits_with_the_env(tmp_path):
     assert "lead_commit_formatted" in kinds and "lead_commit" in kinds
 
 
+def test_a_lead_question_whose_user_action_is_none_takes_the_leads_recommendation():
+    """2026-11-09 VQ-14: user_action "none; a scope decision only. Grant or deny adding ..."
+    made it an owner step, which timed out to "stop the task" instead of the lead's Grant."""
+    opts = ["Grant: add the three rbxm files to VQ-14's file list",
+            "Deny: leave the rbxm files to VQ-SYNC"]
+    ev = {"reason": "lead_asks", "recommended": opts[0],
+          "user_action": "none; a scope decision only. Grant or deny adding "
+                         "assets/roblox/Enemies/EN-OWL.rbxm to VQ-14's file list."}
+    m = DP.meta(P0, "lead_escalation", ev, opts)
+    assert m["category"] == "product" and m["recommended"] == json.dumps(opts[0])
+    for ua in ("n/a", "No action needed: choose Grant or Deny", "grant or deny the scope"):
+        assert DP.category("lead_escalation", {"reason": "lead_asks", "user_action": ua})             == "product", ua
+    assert DP.category("lead_escalation", {"reason": "lead_asks",
+                                           "user_action": "Victor uploads the badge art"})         == "user_action"
+
+
 def test_a_lead_question_that_only_asks_for_a_decision_is_not_an_owner_step():
     """2026-11-07 VR-AS06: the lead asked whether the sprint may keep a scope widening and
     recommended "Yes: keep ..."; its evidence user_action ("Decide whether ...") made it a

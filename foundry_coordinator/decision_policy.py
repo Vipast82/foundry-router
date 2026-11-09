@@ -104,9 +104,20 @@ _DECISION_ASK = re.compile(r"^\s*(?:decide|choose|pick|answer|confirm\s+whether|
                            r"approve\s+or|raise|lower|increase|set)(?![A-Za-z])", re.I)
 
 
+# 2026-11-09 VQ-14: the lead wrote user_action "none; a scope decision only. Grant or deny
+# adding ..." and the escalation still counted as an owner step (timed out to "stop the task",
+# not the lead's recommended Grant). "none" / "n/a" means no physical act.
+_NO_ACT = re.compile(r"^\s*(?:none|n/?a|nothing|no\s+(?:physical\s+|owner\s+|user\s+)?"
+                     r"(?:action|step|act))\b", re.I)
+_GRANT_ASK = re.compile(r"\b(?:grant|deny|allow|refuse|accept|reject)\s+(?:or|/)\s+"
+                        r"(?:grant|deny|allow|refuse|accept|reject)\b", re.I)
+
+
 def _decision_only(text: str) -> bool:
     t = str(text or "").strip()
-    return bool(t) and bool(_DECISION_ASK.search(t)) and not _HUMAN_ACT.search(t)
+    if not t or _HUMAN_ACT.search(t):
+        return False
+    return bool(_NO_ACT.search(t) or _DECISION_ASK.search(t) or _GRANT_ASK.search(t))
 
 
 def category(kind: str, evidence: Optional[dict] = None, question: str = "") -> str:

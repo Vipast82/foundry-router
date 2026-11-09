@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.105 — a Lead question whose user action is "none" takes the Lead's recommendation
+
+A Lead escalation with any `user_action` text counted as an owner step, and an owner step may only time out to PARK. v0.181.80 exempted texts that ask for a decision ("Decide whether ..."). On 2026-11-09 VQ-14's Lead wrote "none; a scope decision only. Grant or deny adding assets/roblox/Enemies/EN-OWL.rbxm ...". The question timed out to "stop the task", and VQ-14 was parked instead of getting the recommended Grant. `_decision_only` now also treats a user action that starts "none", "n/a" or "no action", or that offers "grant or deny" (allow / refuse / accept / reject), as a decision. A named human act ("Victor uploads ...") stays the owner's.
+
+Test: `tests/coordinator/test_audit_d_decisions_commits.py::test_a_lead_question_whose_user_action_is_none_takes_the_leads_recommendation`.
+
 ## v0.181.104 — a digit-less sprint id owns its commits (VR-AS-SYNC, VQ-SYNC)
 
 The scope check leaves out commits another sprint made (`bookkeeping.sprint_owner`). An id prefix counted as a sprint only when it contained a digit, so the goal of keeping out housekeeping prefixes (`plans:`, `docs:`) also dropped `VR-AS-SYNC:` and `VQ-SYNC:`. On 2026-11-09, VR-AS-SYNC's committed evidence, summary and gate files fell inside VR-MAP2's range. VR-MAP2's scope check failed three times, a "findings repeat" decision opened, and the Lead had to add another sprint's files to VR-MAP2's plan. A prefix in capitals with at least one hyphen (`[A-Z]{2,}(-[A-Z0-9]{2,})+`) now counts as a sprint id too. `plans:`, `docs:`, `Merge:` and `WIP:` stay housekeeping.
