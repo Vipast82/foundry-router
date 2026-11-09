@@ -89,8 +89,8 @@ TEMPLATES = {
 # set_persona_fields edits these; routes and the name have their own tools
 FIELD_KEYS = ("context_window", "max_output_tokens", "reasoning_effort", "force_reasoning_effort",
               "local_bias_strength", "routing", "backend", "description", "preferred_mcp_tools",
-              "mcp_tools_in_direct", "mcp_with_client_tools", "fallback_policy",
-              "execution_mode", "capabilities",
+              "mcp_tools_in_direct", "mcp_with_client_tools", "mcp_tool_mode",
+              "fallback_policy", "execution_mode", "capabilities",
               "enabled", "benchmark_category", "expose_tool_trail", "quiet_narration",
               "output_style", "sampling_options", "escalate_when_local_busy", "outcome_judge")
 
@@ -423,8 +423,12 @@ def register(eng) -> None:                    # noqa: C901 - the catalog in one 
               "max_output_tokens, reasoning_effort (off/low/medium/high/max) and "
               "force_reasoning_effort, local_bias_strength (strong/moderate/cost_aware_default/"
               "prefer_paid), routing (strict or flexible), backend, description, "
-              "preferred_mcp_tools (MCP servers/tools it may use; or mcp_add / mcp_remove lists "
-              "of server or tool names) and mcp_tools_in_direct, mcp_with_client_tools (which "
+              "preferred_mcp_tools (MCP servers/tools it may use; \"*\" = every server, \"!name\" "
+              "excludes a server or tool; or mcp_add / mcp_remove lists of server or tool "
+              "names), mcp_tool_mode (finder = the model gets foundry_find_tools / "
+              "foundry_call_tool, which reach only those granted tools, instead of every tool "
+              "definition up front; full or empty = every granted tool) and "
+              "mcp_tools_in_direct, mcp_with_client_tools (which "
               "of those MCP tools still ride along when the client brings its OWN tools, e.g. "
               "AnythingLLM @agent or Cline: empty = default (all), off, all, dedupe (skip ones "
               "that duplicate the client's own), or a list of server/tool names; a client "

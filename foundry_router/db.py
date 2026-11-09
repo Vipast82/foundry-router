@@ -605,6 +605,9 @@ class Database:
             ("request_log", "user_agent", "TEXT"),
             # "— via <model> @ <backend>" under answers (also per client key)
             ("personas", "route_footer", "INTEGER DEFAULT 0"),
+            # v0.181.109: "finder" = the model gets foundry_find_tools / foundry_call_tool
+            # instead of every granted MCP tool (tool_finder.py); NULL / "full" = all of them
+            ("personas", "mcp_tool_mode", "TEXT"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

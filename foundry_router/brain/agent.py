@@ -87,7 +87,17 @@ async def call_tool_rich(mcp, server: str, tool: str, args: dict, *, sink=None,
     tool_media.run_tool — images/audio are stored and queued for the reply,
     long-running servers become tool jobs. tool_job_status always goes there."""
     from .. import tool_media
+    from .. import tool_finder
     svc = getattr(mcp, "foundry_svc", None)
+    if server == tool_finder.FINDER_SERVER:
+        # find-on-demand: search / run within the persona's granted tools only
+        pdict = svc.personas.get(persona) if (svc is not None and persona) else None
+        granted = svc.tool_registry.mcp_tools_for_persona(pdict) if pdict else []
+
+        async def _inner(td, a):
+            return await call_tool_rich(mcp, td.server, td.mcp_tool or td.name, a, sink=sink,
+                                        persona=persona, progress=progress, **kw)
+        return await tool_finder.run(granted, tool, args, _inner)
     if svc is not None and (sink is not None or server == tool_media.JOBS_SERVER):
         return await tool_media.run_tool(svc, mcp, server, tool, args,
                                          sink=sink if sink is not None else [],
@@ -1656,7 +1666,7 @@ class AgentRunner:
         # Same resolver the brain-mediated path uses — honors whole-server AND
         # scoped per-tool grants, so a scoped persona's worker never sees a tool
         # outside its grant (per-tool-grant spec: absent, not merely blocked).
-        mcp_tools = self.tool_registry.mcp_tools_for_persona(persona)
+        mcp_tools = self.tool_registry.offered_mcp_tools(persona)
         if not mcp_tools:
             # Tools attached but none reachable right now — hand to the brain,
             # which will narrate the same and route without them.

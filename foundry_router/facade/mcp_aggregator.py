@@ -284,14 +284,36 @@ class MCPAggregator:
                 raise ValueError(f"no persona named {name!r}")
             return f"persona:{name}", names, client
 
+        def _finder_persona(scope: str):
+            """The persona of a /persona/<name> endpoint when it finds tools on demand."""
+            from .. import tool_finder
+            if not persona_mode or not scope.startswith("persona:"):
+                return None
+            p = self.svc.personas.get(scope.split(":", 1)[1])
+            return p if tool_finder.is_finder(p) else None
+
         @server.list_tools()
         async def _list():
             scope, names, _client = _scope()
-            return [self._tool_meta(td) for td in self._visible_tools(server_filter, names)]
+            visible = self._visible_tools(server_filter, names)
+            if _finder_persona(scope) is not None:
+                from .. import tool_finder
+                return [self._tool_meta(td) for td in tool_finder.tooldefs()] if visible else []
+            return [self._tool_meta(td) for td in visible]
 
         @server.call_tool()
         async def _call(name: str, arguments: Optional[dict]):
             scope, names, client = _scope()
+            from .. import tool_finder
+            if name in (tool_finder.FIND_TOOL, tool_finder.CALL_TOOL) \
+                    and _finder_persona(scope) is not None:
+                granted = self._visible_tools(server_filter, names)
+
+                async def _inner(td, a):
+                    return await self._dispatch_rich(td.name, a, server_filter, names,
+                                                     scope, client)
+                result = await tool_finder.run(granted, name, arguments, _inner)
+                return self._to_mcp_content(result)
             hb = self.svc.config_store.config.mcp_aggregator.progress_heartbeat_seconds or 0
             result = await self._dispatch_with_heartbeat(
                 server, name, arguments, server_filter, hb, names, scope, client)

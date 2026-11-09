@@ -934,6 +934,15 @@ def _direct_mcp_split(svc, persona: dict, client_tools) -> tuple[dict, int, str]
     granted = [t for t in tools if t.name not in client_names and t.server != JOBS_SERVER]
     override, who = _client_tool_override(svc) if client_tools else (None, "")
     offered, mode, source = tool_policy.select(persona, granted, client_tools, override)
+    from .. import tool_finder
+    if tool_finder.is_finder(persona):
+        # find-on-demand: the policy decides whether tools ride along at all; when they do,
+        # the model gets the two finder tools, which reach every granted tool
+        if not offered:
+            return {}, len(granted), ""
+        pair = {t.name: t for t in tool_finder.tooldefs() if t.name not in client_names}
+        return pair, 0, ("find on demand: " + str(len(granted)) + " granted tools "
+                                    "behind foundry_find_tools / foundry_call_tool")
     raw = override if source == "client" else persona.get("mcp_with_client_tools")
     why = ({"client": who, "persona": f"persona {persona.get('virtual_name')}"}.get(source, "default")
            + ": " + tool_policy.describe(raw)) if client_tools else ""

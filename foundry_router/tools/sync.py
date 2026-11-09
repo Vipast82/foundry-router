@@ -260,6 +260,11 @@ class ToolRegistry:
         if t is None and name == _status_tool_name():
             from ..tool_media import status_tooldef     # Foundry-owned, never synced
             return status_tooldef()
+        if t is None:
+            from ..tool_finder import tooldef as finder_tooldef   # Foundry-owned, never synced
+            f = finder_tooldef(name)
+            if f is not None:
+                return f
         return t if t and not t.disabled else None
 
     def _has_long_running(self, tools: list[ToolDef]) -> bool:
@@ -281,6 +286,11 @@ class ToolRegistry:
         tool), never erroring the persona out."""
         from .. import request_context
         whole, scoped, bare = parse_preferred_mcp(persona)
+        # v0.181.109: "*" grants every server (also ones added later); "!name" excludes a
+        # server or a tool from any grant (the find-on-demand persona's gate)
+        every = "*" in bare
+        excluded = {b[1:] for b in bare if b.startswith("!") and len(b) > 1}
+        bare = {b for b in bare if b != "*" and not b.startswith("!")}
         out: list[ToolDef] = []
         registered: dict[str, set[str]] = {}   # server -> names actually present
         # Loop protection: a request that came FROM an agent never gets agent tools.
@@ -299,7 +309,9 @@ class ToolRegistry:
             names = {n for n in (t.mcp_tool, t.name) if n}
             if srv in scoped:
                 registered.setdefault(srv, set()).update(names)
-            if srv in whole or srv in bare or (names & bare) \
+            if srv in excluded or (names & excluded):
+                continue
+            if every or srv in whole or srv in bare or (names & bare) \
                     or (srv in scoped and (names & scoped[srv])):
                 out.append(t)
         self._report_missing_scoped(persona, scoped, registered)
@@ -335,8 +347,18 @@ class ToolRegistry:
         the 'preferentially load for this persona's sessions' field from §4.8.
         (The Research Agent bypasses this and calls MCPManager directly.)"""
         out = [t.spec() for t in self.enabled() if t.kind != "mcp"]
-        out += [t.spec() for t in self.mcp_tools_for_persona(persona)]
+        out += [t.spec() for t in self.offered_mcp_tools(persona)]
         return out
+
+    def offered_mcp_tools(self, persona: Optional[dict] = None) -> list[ToolDef]:
+        """The MCP tools a model is shown for this persona: its granted tools, or with
+        mcp_tool_mode "finder" the two find/call tools that reach them (none when nothing is
+        granted). A finder call is dispatched by tool_finder.run over mcp_tools_for_persona."""
+        from ..tool_finder import is_finder, tooldefs
+        granted = self.mcp_tools_for_persona(persona)
+        if is_finder(persona):
+            return tooldefs() if granted else []
+        return granted
 
     def status(self) -> list[dict]:
         def mcp_extra(t: ToolDef) -> dict:

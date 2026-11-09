@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.109 — personas can find MCP tools on demand
+
+Every granted MCP tool definition rides in the prompt on every turn: Foundry-Chat's 58 were about 13.4k tokens, read cold on a new chat (about 11 s on Strata). Victor asked for a find/call option, gated per persona, so a chat persona can reach any tool without giving each client its own MCP servers.
+
+- **MCP tool loading** (persona editor; `mcp_tool_mode`). *All up front* is the default and today's behaviour. *Find on demand* gives the model two Foundry-owned tools instead, about 400 tokens: `foundry_find_tools(query, limit?)` returns the best matches with server, description and argument schema, and `foundry_call_tool(name, arguments)` runs one. Matching weighs words in the tool name, then the server name, then the description; a query that matches nothing lists the servers it can use.
+- **The grants stay the gate.** Search sees only the persona's granted tools, and a call to anything else is refused with an error the model can recover from. A new *every server* box grants `"*"`, servers added later included. With it on, a server or tool left unticked is stored as `"!server"` / `"!tool"` and excluded, so a persona can reach everything except what you hold back. Exclusions also narrow a plain grant. Gateway admin tools are never granted, as before.
+- **Every route**: the brain's loop, the worker tool loop, direct mode (when tools ride along with the client's own; *MCP tools with client tools* = off still sends none) and the aggregator's `/mcp/persona/<Persona>/` endpoint. A real call made through `foundry_call_tool` goes the usual way: media hand-back, tool jobs, poll guard, MCP metrics.
+- **Prompt cache**: the two tools never change between turns, so the cached prefix holds. Found schemas arrive as tool results, appended to the conversation like any other result.
+- The chat's `set_persona_fields` takes `mcp_tool_mode` and the `"*"` / `"!name"` grants.
+
+Test: `tests/test_tool_finder.py`.
+
 ## v0.181.108 — main-checkout sessions get the track tool cuts
 
 v0.181.76–79 cut tools a session never uses, but only in a track's own kilo.jsonc. The main checkout's file is also the source every track's file is built from, so it was never trimmed in place: main sprints (UI-V2, POL-FIX1, the NW chain) still sent the official `Roblox_Studio` server's 36 tools (about 20.8k tokens), the unused Kilo built-ins (about 7-8k) and the full skill list on every turn. A main session's first turn was about 105k tokens, against about 80k on a slot track.

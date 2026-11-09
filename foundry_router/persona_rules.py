@@ -32,6 +32,7 @@ ENUMS: dict[str, tuple] = {
     "kind": (None, "chat", "media"),
     "output_style": (None, "plain_text"),
     "outcome_judge": (None, "paid", "local_large", "brain"),
+    "mcp_tool_mode": (None, "finder"),
     "benchmark_category": (None, "coding", "reasoning", "general_chat", "tool_calling",
                            "agentic"),
 }
@@ -44,6 +45,8 @@ ALIASES: dict[str, dict] = {
     "kind": {"image": "media", "": None},
     "output_style": {"default": None, "": None},
     "outcome_judge": {"off": None, "": None},
+    "mcp_tool_mode": {"full": None, "all": None, "find": "finder", "on_demand": "finder",
+                      "": None},
     "local_bias_strength": {"": None},
     "benchmark_category": {"": None},
 }
@@ -121,7 +124,10 @@ def validate_mcp_grants(svc, value: Any) -> tuple[Optional[list], list, list]:
     for e in v:
         if isinstance(e, str) and e.strip():
             out.append(e.strip())
-            if servers and e.strip() not in servers and e.strip() not in tools:
+            name = e.strip()[1:] if e.strip().startswith("!") else e.strip()
+            if name == "*":
+                continue                       # every server (v0.181.109)
+            if servers and name not in servers and name not in tools:
                 warnings.append(f"MCP grant {e!r} matches no connected server or tool right now")
         elif isinstance(e, dict) and isinstance(e.get("server"), str) and e["server"].strip():
             entry: dict = {"server": e["server"].strip()}

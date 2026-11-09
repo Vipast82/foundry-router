@@ -4849,6 +4849,8 @@ async function tabPersonas() {
     let pref = [];
     try { pref = JSON.parse(p.preferred_mcp_tools || "[]"); } catch (e) {}
     // entries are bare server strings OR {server, tools} objects — check both
+    if (pref.includes("*"))       // every server: any code server it does not exclude
+      return [...codeExecServers].some(srv => !pref.includes("!" + srv));
     return pref.some(x => codeExecServers.has(typeof x === "string" ? x : (x && x.server)));
   };
   // Review-model choices: any reachable chat-capable model, local or paid —
@@ -4976,7 +4978,13 @@ async function tabPersonas() {
     let entries = [];
     try { entries = JSON.parse(p.preferred_mcp_tools || "[]"); } catch (e) {}
     if (!Array.isArray(entries) || !entries.length) return '<span class="hint">—</span>';
-    return entries.map(e => {
+    const finder = p.mcp_tool_mode === "finder"
+      ? '<span class="pill" title="find on demand: the model gets foundry_find_tools / foundry_call_tool instead of every tool definition">🔍 find on demand</span> ' : "";
+    return finder + entries.map(e => {
+      if (e === "*")
+        return `<span class="pill ok" title="every MCP server, including ones added later">every server</span>`;
+      if (typeof e === "string" && e.startsWith("!"))
+        return `<span class="pill bad" title="excluded from this persona">not ${esc(e.slice(1))}</span>`;
       if (typeof e === "string")
         return `<span class="pill ok" title="whole server — all current & future tools">${esc(e)}</span>`;
       if (e && e.server) {
@@ -5035,6 +5043,11 @@ async function tabPersonas() {
         <input id="pe-trig" data-multi="json" value="[]" placeholder="type a trigger, Enter to add"></div>
       <div class="row"><label title="MCP servers preferentially loaded for this persona's sessions (writes to preferred_mcp_tools). Checking a server prefers ALL of its tools. Populated live from the Tools tab's discovered set. Model (ask_*) tools are always available and not listed here. Not auto-attached — checking is a deliberate per-persona context-cost choice.">preferred MCP servers</label>
         <div id="pe-mcp" class="mcp-checklist">${checklist}</div></div>
+      <div class="row"><label title="Grant EVERY MCP server, including ones added later. With this on, a server or tool you untick below is excluded (stored as !name), so you can still gate tools away from this persona.">every server</label>
+        <input type="checkbox" id="pe-mcp-all">
+        <span class="hint">every connected server, now and later; untick a server or tool below to exclude it</span>
+        <label title="How this persona's granted MCP tools reach the model. all up front (default) = every granted tool definition is in the prompt on every turn (Foundry-Chat's 58 were ~13k tokens). find on demand = the model gets two tools, foundry_find_tools and foundry_call_tool (~400 tokens): it searches the granted tools when it needs one, reads that tool's schema, then runs it. Search and calls only ever reach the tools granted above. The two tools never change between turns, so the prompt prefix stays cached. Applies to plain chat, the worker tool loop, direct mode and the /mcp/persona/&lt;name&gt; endpoint.">MCP tool loading</label>
+        <select id="pe-mcp-loading"><option value="">all up front (default)</option><option value="finder">find on demand (2 tools)</option></select></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
       <div class="row"><label title="Ordered list of model ids tried in priority order. In brain (agent) mode: boosted to the top of candidates, guardrail/quota denial falls to the next pin, then the normal pool. In DIRECT mode (Cline) with local_bias_strength=prefer_paid: the paid pins are tried top-down as a cascade — each usage/cost-gated — before degrading to a local model on exhaustion (e.g. Opus 4.8 → Sonnet 5 → local). Local pins are honored as the local fallback, not the paid cascade.">pinned_models (priority order)</label>
@@ -5145,6 +5158,7 @@ async function tabPersonas() {
     context_window: $("#pe-ctx").value ? parseInt($("#pe-ctx").value, 10) : null,
     preferred_mcp_tools: readPreferredMcp(
       parseTags((window._personas[$("#pe-name").value.trim()] || {}).preferred_mcp_tools)),
+    mcp_tool_mode: $("#pe-mcp-loading").value || null,
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
     model_allowlist: JSON.parse($("#pe-allow").value || "[]"),
@@ -5201,6 +5215,23 @@ function readPreferredMcp(prevList) {
   const listedServers = new Set(items.map(i => i.dataset.server));
   const listedTools = new Set();
   const out = [];
+  const allBox = document.querySelector("#pe-mcp-all");
+  if (allBox && allBox.checked) {
+    // v0.181.109: every server, minus what is unticked (kept as "!name" exclusions)
+    out.push("*");
+    for (const item of items) {
+      const boxes = [...item.querySelectorAll(".mcp-tool")];
+      const checked = boxes.filter(b => b.checked);
+      if (!checked.length) out.push("!" + item.dataset.server);
+      else boxes.filter(b => !b.checked).forEach(b => out.push("!" + b.dataset.tool));
+      boxes.forEach(b => listedTools.add(b.dataset.tool));
+    }
+    for (const e of (prevList || [])) {    // exclusions of servers not shown right now
+      if (typeof e === "string" && e.startsWith("!") && !listedServers.has(e.slice(1))
+          && !listedTools.has(e.slice(1)) && !out.includes(e)) out.push(e);
+    }
+    return out;
+  }
   for (const item of items) {
     const s = item.dataset.server;
     const boxes = [...item.querySelectorAll(".mcp-tool")];
@@ -5213,6 +5244,7 @@ function readPreferredMcp(prevList) {
   // Preserve entries whose server isn't shown right now (offline server, etc.).
   for (const e of (prevList || [])) {
     if (typeof e === "string") {
+      if (e === "*" || e.startsWith("!")) continue;     // only meaningful with every server
       if (!listedServers.has(e) && !listedTools.has(e)) out.push(e);
     } else if (e && e.server && !listedServers.has(e.server)) {
       out.push(e);
@@ -5387,8 +5419,19 @@ window.editPersona = name => {
   // tool box; a scoped grant checks only the listed tools and leaves the
   // server box in the mixed/indeterminate state (auto-expanded so it's visible).
   const {whole, bare, scoped} = parsePreferredMcp(p.preferred_mcp_tools);
+  const every = bare.has("*");
+  const excluded = new Set([...bare].filter(b => b.startsWith("!")).map(b => b.slice(1)));
+  if ($("#pe-mcp-all")) $("#pe-mcp-all").checked = every;
+  if ($("#pe-mcp-loading")) $("#pe-mcp-loading").value = p.mcp_tool_mode === "finder" ? "finder" : "";
   document.querySelectorAll("#pe-mcp .mcp-item").forEach(item => {
     const s = item.dataset.server;
+    if (every) {
+      item.querySelectorAll(".mcp-tool").forEach(b => {
+        b.checked = !excluded.has(s) && !excluded.has(b.dataset.tool);
+      });
+      refreshServerBox(item);
+      return;
+    }
     const allGranted = whole.has(s) || bare.has(s);
     const scopedSet = scoped[s] || new Set();
     let anyScoped = false;

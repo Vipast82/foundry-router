@@ -195,6 +195,18 @@ so behaviour and metrics are identical on every route:
 * **Persona endpoints** `/mcp/persona/<Persona>/` serve only that persona's
   tools (live — no restart when grants change): point AnythingLLM there to
   load 3 tools instead of 57.
+* **Find on demand** (persona setting *MCP tool loading*, `mcp_tool_mode = "finder"`):
+  instead of every granted tool definition, the model gets two tools,
+  `foundry_find_tools(query, limit?)` and `foundry_call_tool(name, arguments)`,
+  about 400 tokens in all. It searches when it needs a tool, gets back the
+  best matches with their argument schemas, and runs one. Search and calls
+  reach only the persona's grants, so the grants stay the gate: grant
+  *every server* (`"*"`, servers added later included) and untick what it may
+  not use (stored as `"!server"` / `"!tool"`). The two tools are the same on
+  every turn, so the prompt prefix stays cached. It applies on every route
+  above: the brain, the worker tool loop, direct mode and
+  `/mcp/persona/<Persona>/`, so a client pointed at a finder persona's endpoint
+  loads two tools and can still reach all of them.
 * **Pooled sessions**: one MCP session per server is kept open and reused
   (auto-reconnect; `persistent_session: false` per server to disable).
 * **Result size**: workers get `worker_tool_result_chars` (default 24000) of a
