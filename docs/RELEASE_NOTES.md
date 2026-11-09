@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.97 — a main sprint waits until its dependency's track has merged
+
+A COMPLETE dependency satisfied every dependent, even while its work was still on an unmerged track branch. On 2026-11-08, VR-AS14 completed on vr-e at 19:59 and VR-AS-SYNC (main checkout, depending on all 43 VR sprints) started at once. vr-e still waited to merge, both on the busy main checkout and on a Lead repair of an ASSET_LEDGER.md conflict, so VR-AS-SYNC regenerated the asset ids without VR-AS11..14's models. The watch cancelled it before it completed, and it reruns after the merge.
+
+A COMPLETE dependency now satisfies only sprints on its own track while that track is live (planned, running or merging). Every other sprint waits, with the note "VR-AS14 (COMPLETE, track vr-e not merged yet)". The QUEUED check and the first-start check (`_unmet_start_deps`) both apply it.
+
+Test: `tests/coordinator/test_engine.py::test_a_main_sprint_waits_until_its_dependencys_track_has_merged`.
+
 ## v0.181.96 — a Lead case waiting for its worktree is not handed back
 
 An automation decision whose Lead case never made its call (DEFERRED on readiness, quota or admission, or not started) is handed back to the capped self-repair when its timeout comes due (2026-10-28). A case that waited only for its task's worktree was treated the same way. On 2026-11-08, VR-AS14's case opened at 17:01 and waited for vr-e's worktree while VR-AS13 held it. At 17:04 the 3-minute decision timeout handed it back "without a lead call", the self-repair counted the Lead repair as used, and the sprint was parked. While another task holds the task's worktree (`selfheal._ws_lock_held_by_other`, track-aware since v0.181.84), the decision now defers 5 minutes at a time, as it does for a working case.

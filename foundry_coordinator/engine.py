@@ -594,8 +594,10 @@ class Coordinator:
                 return self._block(P, t, f"dependency {d} is not on the approved queue")
             if dt["state"] in (S.FAILED, S.CANCELLED):
                 return self._block(P, t, f"dependency {d} is {dt['state']}")
-            if not self._dep_satisfied(P, dt):
-                waiting.append(f"{d} ({dt['state']})")
+            if not self._dep_satisfied(P, dt, t["task_id"]):
+                tr = self._dep_unmerged_track(P, dt, t["task_id"])
+                waiting.append(f"{d} ({dt['state']}" + (f", track {tr} not merged yet)" if tr
+                                                       else ")"))
         if waiting:
             return self._note(P, t, "waiting for " + ", ".join(waiting))
         try:
@@ -678,8 +680,9 @@ class Coordinator:
             dt = self.store.task(P.id, d)
             if dt is None or dt.get("state") in (S.FAILED, S.CANCELLED):
                 continue                     # not on the queue: the QUEUED check owns that
-            if not self._dep_satisfied(P, dt) and not self._dep_done_outside(P, d):
-                out.append(f"{d} ({dt['state']})")
+            if not self._dep_satisfied(P, dt, t["task_id"]) and not self._dep_done_outside(P, d):
+                tr = self._dep_unmerged_track(P, dt, t["task_id"])
+                out.append(f"{d} ({dt['state']}" + (f", track {tr} not merged yet)" if tr else ")"))
         return out
 
     def _track_fix_round_pending(self, P: Project, t: dict) -> str:
@@ -703,11 +706,28 @@ class Coordinator:
             "t.state=? ORDER BY q.position", (P.id, track, t["task_id"], S.CHANGES_REQUIRED))
         return rows[0]["task_id"] if rows else ""
 
-    def _dep_satisfied(self, P: Project, dt: dict) -> bool:
+    def _dep_unmerged_track(self, P: Project, dt: dict, for_tid: str) -> str:
+        """The live track a COMPLETE dependency's work is still on ('' = merged or none),
+        unless the dependent runs on that same track. 2026-11-08: VR-AS14 completed on vr-e
+        and VR-AS-SYNC (main checkout) started at once while vr-e still waited to merge,
+        regenerating the asset ids without VR-AS11..14's models."""
+        if not for_tid or not dt:
+            return ""
+        try:
+            name = self.store.task_track(P.id, dt["task_id"])
+            if not name or name == self.store.task_track(P.id, for_tid):
+                return ""
+            from .tracks.manager import LIVE_STATES
+            row = self.store.track(P.id, name)
+            return name if row and row["state"] in LIVE_STATES else ""
+        except Exception:                                        # noqa: BLE001
+            return ""
+
+    def _dep_satisfied(self, P: Project, dt: dict, for_tid: str = "") -> bool:
         if not dt:
             return False
         if dt.get("state") == S.COMPLETE:
-            return True
+            return not self._dep_unmerged_track(P, dt, for_tid)
         if dt.get("state") == S.AWAITING_HUMAN and (dt.get("data") or {}).get("stage") == "after_close":
             kinds = (dt.get("data") or {}).get("awaiting_kinds") or []
             return bool(kinds) and all(k in P.profile.deps_accept_pending for k in kinds)

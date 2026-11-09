@@ -1989,3 +1989,31 @@ def test_a_sprint_holding_the_workspace_yields_it_to_a_waiting_lead_at_a_new_att
     assert held and held["case_id"] == "rc-ws2"
     assert ws not in c.store.holds("game", "T2")
     assert c.store.q("SELECT 1 FROM events WHERE kind='workspace_yielded_to_lead'")
+
+
+def test_a_main_sprint_waits_until_its_dependencys_track_has_merged(game):
+    """2026-11-08: VR-AS14 completed on vr-e at 19:59 and VR-AS-SYNC (main checkout,
+    depending on it) started at once while vr-e still waited to merge, so it regenerated
+    the asset ids without VR-AS11..14's models. A COMPLETE dependency on a live track
+    satisfies only sprints on that same track until the track merges."""
+    tmp, root, _, prof = game
+    c = coordinator(tmp, [prof], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "victor")
+    c.approve("game", "T2", ["T1"], "victor")
+    P = c.projects["game"]
+    c.store.add_track("game", "vr-e", "sprint", str(tmp / "wt"), "track/vr-e", "abc", [], ["T1"],
+                      "victor", state="merging")
+    c.store.x("UPDATE queue SET track='vr-e' WHERE project_id='game' AND task_id='T1'")
+    c.store.update_track("game", "vr-e", state="merging")
+    c.store.update_task("game", "T1", state=S.COMPLETE)
+    t1 = c.store.task("game", "T1")
+    assert not c._dep_satisfied(P, t1, "T2")
+    c._queued(P, c.store.task("game", "T2"))
+    t2 = c.store.task("game", "T2")
+    assert t2["state"] == S.QUEUED and "track vr-e not merged yet" in (t2["next_action"] or "")
+    assert c._dep_satisfied(P, t1)                       # no dependent named: as before
+    c.store.x("UPDATE queue SET track='vr-e' WHERE project_id='game' AND task_id='T2'")
+    assert c._dep_satisfied(P, t1, "T2")                  # same track: satisfied
+    c.store.x("UPDATE queue SET track='' WHERE project_id='game' AND task_id='T2'")
+    c.store.update_track("game", "vr-e", state="merged")
+    assert c._dep_satisfied(P, t1, "T2")                  # merged: satisfied
