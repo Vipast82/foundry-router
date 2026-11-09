@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.101 — the gate's end-of-run HEAD check allows docs-only commits; the viewport pin falls back to a listed device
+
+1. v0.181.99 let a docs-only commit keep the host-half verdicts at the start of the Studio half. The end-of-run check still failed: on 2026-11-09 an operator `plans:` commit (docs/progress only) landed during VR-MAP2's 75-minute gate, and the run ended "tooling: HEAD moved during the run (2b5ba63740ec -> 948d2991b635)" and opened a Lead case. When every change between the start and the current HEAD is under `docs/progress/` or `docs/evidence/` (`docs_only_since`), the gate now writes a NOTE line and keeps the run. Any other move is still a tooling error.
+2. A Studio update on slot-1 dropped the `average_laptop` built-in device ("not an available built-in device. Available: ..., average_windows, hd_1080, ..."). FIX-1's client CALLs then ran at 1920x1060, and the sprint stopped. `set_play_viewport` now tries `PLAY_DEVICES` in order (`average_laptop`, `average_windows`, `hd_1080`); the resolution override sets 1920x1080 on any of them. The VIEWPORT line names the device used.
+
+Tests: `tests/coordinator/test_studio_gate_calls.py::test_a_docs_only_commit_during_the_run_keeps_the_lines`, `::test_a_studio_without_average_laptop_uses_the_next_device`.
+
 ## v0.181.100 — slot sprints can bring files Studio saves back into their worktree
 
 On a slot, the Studio MCP servers run inside the slot container, so a tool that saves a file (`export_rbxm`'s `output_path`) writes it there. On 2026-11-09, ART-POI1 (slot-2) passed a workstation path, the file landed at `/home/studio/C:\Roblox\...` in the container, and the sprint reported BLOCKED: "not synced back". Foundry now writes a `foundry-slot-fetch` drop-in for each slot worktree (beside foundry-blender's), and the AU prompt for a sprint whose Studio is on a slot says to save into the slot checkout (`/home/studio/work/AnimalUprising/<repo-relative path>`) and run it to copy the file into the same path in the worktree. `python -m foundry_coordinator.slots fetch --config <json> PATH...` copies only the named repo paths (never `.git` or anything outside the repo). Exit codes: 0 copied, 2 bad path, 3 slot error, 4 missing on the slot.

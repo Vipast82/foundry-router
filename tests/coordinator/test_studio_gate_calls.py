@@ -420,6 +420,28 @@ def test_head_moved_during_the_run_is_a_tooling_error(fakes, repo):
     assert json.load(open(gate_file(repo, "HM", "latest/calls.json")))["result"] == "ERROR"
 
 
+def test_a_docs_only_commit_during_the_run_keeps_the_lines(fakes, repo, monkeypatch):
+    """2026-11-09 VR-MAP2: an operator `plans:` commit (docs/progress only) landed while the
+    gate ran and the run ended as a tooling ERROR; a docs-only move is noted, not an error."""
+    set_rules, calls = fakes
+    set_rules(*rules(UI))
+    host_half(repo, "HD")
+    seen = []
+
+    def run_cmd(argv, cwd, timeout):
+        if argv == ["git", "rev-parse", "HEAD"]:
+            seen.append(1)
+            if len(seen) > 1:
+                return 0, "c" * 40
+        return G.default_run_cmd(argv, cwd, timeout)
+    monkeypatch.setattr(G, "docs_only_since", lambda r, a, b: b == "c" * 40)
+    rc, out = run_calls(repo, "HD", "--regression", "subset:ui", run_cmd=run_cmd)
+    text = lines_of(repo, "HD")
+    assert "FAIL: GATE HEAD moved" not in text
+    assert "NOTE: HEAD moved during the run by docs-only commits" in text
+    assert json.load(open(gate_file(repo, "HD", "latest/calls.json")))["result"] != "ERROR"
+
+
 def test_verify_mismatch_runs_no_call(fakes, repo):
     set_rules, calls = fakes
     bad = {"tool": "execute_luau", "match": "verifyLive",
@@ -616,6 +638,24 @@ def test_each_playtest_pins_the_client_viewport_with_the_device_simulator(fakes,
     i_boot = max(i for i, c in enumerate(log[:i_sim]) if "boot()" in c["args"].get("code", ""))
     assert i_boot < i_sim < i_read < i_seed                # after start + boot, before the suite
     assert "VIEWPORT S49 1920x1080 (set_device_simulator target=client-1" in lines_of(repo, "VP")
+
+
+def test_a_studio_without_average_laptop_uses_the_next_device(fakes, repo):
+    """2026-11-09 FIX-1 (slot-1): a Studio update dropped `average_laptop`; the gate tries the
+    next device in PLAY_DEVICES instead of running the client CALLs at 1920x1060."""
+    set_rules, calls = fakes
+    off, comm = rules(UI, extra_comm=[
+        {"tool": "set_device_simulator", "match": "average_laptop", "is_error": True,
+         "text": '{"error":"tool_failed","message":"set_device_simulator failed for client-1: '
+                 'deviceId \\"average_laptop\\" is not an available built-in device. Available: '
+                 'average_macbook, average_windows, hd_1080"}'}])
+    set_rules(off, comm)
+    host_half(repo, "VD")
+    rc, out = run_calls(repo, "VD", "--regression", "subset:ui")
+    assert rc == 0, out
+    devs = [c["args"]["deviceId"] for c in calls() if c["tool"] == "set_device_simulator"]
+    assert devs[:2] == ["average_laptop", "average_windows"], devs
+    assert "VIEWPORT S49 1920x1080 (set_device_simulator target=client-1 average_windows"         in lines_of(repo, "VD")
 
 
 def test_a_viewport_that_will_not_set_is_a_tooling_unknown_never_a_ui_fail(fakes, repo):

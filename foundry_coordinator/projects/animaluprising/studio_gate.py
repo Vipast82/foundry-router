@@ -94,6 +94,8 @@ BRIDGE_LIMIT = "UNKNOWN: GATE bridge not runner-executable"
 # device-simulator resolution override on the PLAY client, settle >= 1.2 s, re-read.
 PLAY_VIEWPORT = (1920, 1080)
 VIEWPORT_TOLERANCE_PX = 2
+# set_device_simulator devices tried in order (Studio builds list different ones)
+PLAY_DEVICES = ("average_laptop", "average_windows", "hd_1080")
 VIEWPORT_SETTLE_S = 1.2
 DEFAULT_ROJO_PORT = 34872
 WAIT_MAX_MINUTES = 9.0
@@ -2063,18 +2065,27 @@ class Gate:
         `SIZE 1920x1080`). None when verified; else the honest tooling reason (recorded as
         an UNKNOWN check; the group's client CALLs are UNKNOWN, never a product FAIL)."""
         w, h = size or PLAY_VIEWPORT
-        args = {"target": "client-1", "deviceId": "average_laptop",
-                "resolution": {"width": w, "height": h}, "pixelDensity": 96,
-                "scalingMode": "ActualResolution"}
-        set_err = None
-        try:
-            r = self.community.call_tool("set_device_simulator", args, timeout=self.call_timeout)
-            self.raw(f"set_device_simulator [{label}]", json.dumps(args), r["text"])
-            if r["is_error"] or '"success":false' in r["text"].replace(" ", ""):
-                set_err = one_line(r["text"], 200)
-        except M.McpError as e:
-            set_err = one_line(e, 200)
-            self.raw(f"set_device_simulator [{label}] [tool error]", json.dumps(args), set_err)
+        set_err, device = None, PLAY_DEVICES[0]
+        # 2026-11-09 FIX-1 (slot-1): a Studio update dropped `average_laptop` from the built-in
+        # devices ("not an available built-in device ... Available: ..., average_windows, ...");
+        # the next device in PLAY_DEVICES that Studio lists is used (the resolution override
+        # sets the size either way)
+        for device in PLAY_DEVICES:
+            args = {"target": "client-1", "deviceId": device,
+                    "resolution": {"width": w, "height": h}, "pixelDensity": 96,
+                    "scalingMode": "ActualResolution"}
+            set_err = None
+            try:
+                r = self.community.call_tool("set_device_simulator", args, timeout=self.call_timeout)
+                self.raw(f"set_device_simulator [{label}]", json.dumps(args), r["text"])
+                if r["is_error"] or '"success":false' in r["text"].replace(" ", ""):
+                    set_err = one_line(r["text"], 200)
+                    if "not an available built-in device" in r["text"]:
+                        continue
+            except M.McpError as e:
+                set_err = one_line(e, 200)
+                self.raw(f"set_device_simulator [{label}] [tool error]", json.dumps(args), set_err)
+            break
         time.sleep(VIEWPORT_SETTLE_S)
         text, err = self.vm("client", VIEWPORT_READ, f"viewport [{label}]", 30)
         m = re.search(r"VIEWPORT (\d+)x(\d+)", flatten_value(text) or "")
@@ -2084,7 +2095,7 @@ class Gate:
             sink.append(check(f"regression.viewport.{label}", "PASS",
                               f"play client viewport {got} (set_device_simulator client-1, settled "
                               f"{VIEWPORT_SETTLE_S:g}s)", required=False))
-            self.emit(f"VIEWPORT {label} {got} (set_device_simulator target=client-1 average_laptop "
+            self.emit(f"VIEWPORT {label} {got} (set_device_simulator target=client-1 {device} "
                       f"{w}x{h} ActualResolution, settled {VIEWPORT_SETTLE_S:g}s)")
             return None
         why = (f"the play client viewport is {got or 'unreadable (' + one_line(text, 120) + ')'}, not "
@@ -4209,11 +4220,17 @@ def _run_calls(a, sprint, run_id, out, official, community, run_cmd) -> int:
             g.add(check(f"regression.{e['id']}", "SKIP", f"MANUAL: {MANUAL_WHY}", required=False))
         rc2, now = run_cmd(["git", "rev-parse", "HEAD"], g.repo, 30)
         now = (now or "").strip()
-        if now != head:
+        if now != head and docs_only_since(g.repo, head, now):
+            # 2026-11-09 VR-MAP2: an operator `plans:` commit (docs/progress only) landed while
+            # the gate ran; it cannot change what the lines describe (v0.181.99 for the start)
+            g.emit(f"NOTE: HEAD moved during the run by docs-only commits: {head[:12]} -> "
+                   f"{now[:12]} (docs/progress, docs/evidence); the lines describe {head[:12]}")
+        elif now != head:
             g.emit(f"FAIL: GATE HEAD moved during the run: {head[:12]} -> {now[:12] or '?'}")
             raise GateTooling(f"HEAD moved during the run ({head[:12]} -> {now[:12] or '?'}): the "
                               f"lines describe no single commit")
-        g.add(check("calls.head", "PASS", f"HEAD {head[:12]} unchanged through the run"))
+        g.add(check("calls.head", "PASS", f"HEAD {head[:12]} unchanged through the run" if now == head
+                    else f"HEAD {head[:12]} -> {now[:12]} by docs-only commits during the run"))
         covered = {f"regression.{s}" for s in (g.regression or {}).get("suites") or {}} | {
             "regression.verdict"}
         bad = [c for c in g.checks if c.get("required") and c.get("result") != "PASS"
