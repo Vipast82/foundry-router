@@ -17,6 +17,16 @@ import re
 from .adapters.foundry import FoundryDenied, FoundryError
 from .profile import matches_any
 
+# 2026-11-09 UI-SQHP1: the judge kept failing HUD frames on Studio's viewport navigation
+# widget and the Roblox core topbar, which no sprint can remove, and the sprint stopped to
+# ask the owner to change Studio settings. They are the capture environment, not the product.
+ENV_CHROME = ("Capture-environment chrome is never a defect: the Roblox core topbar (the "
+              "menu, chat and backpack buttons Roblox draws in every experience), Studio's "
+              "viewport navigation widget, view cube or axis gizmo, the device simulator's touch "
+              "thumbstick and jump button, and Studio window chrome. Never report them, or "
+              "anything Studio draws over the game, as defects. The game's own UI placed under "
+              "the core topbar is still a defect (the topbar is in the live client too).")
+
 
 def enabled(P) -> bool:
     return (P.profile.raw.get("approval") or {}).get("visual_model") is True
@@ -473,7 +483,7 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
         'object per image with path, sha256, image_seen, subject_present, validity, '
         'observation and findings), and "limitations". ' + FRAME_FIELDS + " "
         "Approve only if every required frame is valid, actually seen and has no visible "
-        f"defect.\n\nSprint criteria:\n{spec.spec[:10000]}")}]
+        f"defect. {ENV_CHROME}\n\nSprint criteria:\n{spec.spec[:10000]}")}]
     for rel, mime, blob in frames:
         parts.append({"type": "text", "text": f"Required frame {rel}, SHA256 {arts[rel]}"})
         parts.append({"type": "image_url", "image_url": {

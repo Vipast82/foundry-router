@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.106 — the visual judge ignores capture-environment chrome
+
+UI-SQHP1's HUD frames were sent back round after round for Studio's viewport navigation widget and the Roblox core topbar drawn over the capture. No sprint can remove either. On 2026-11-09 the sprint stopped as an owner step, asking Victor to change Studio settings. The review prompt now carries `visual_approval.ENV_CHROME`: the Roblox core topbar, Studio's navigation widget, view cube and axis gizmo, the device simulator's touch thumbstick and jump button, and Studio window chrome are never defects, and neither is anything Studio draws over the game. The game's own UI placed under the core topbar is still a defect, since the topbar is in the live client too.
+
+Test: `tests/coordinator/test_visual_env_chrome.py`.
+
 ## v0.181.105 — a Lead question whose user action is "none" takes the Lead's recommendation
 
 A Lead escalation with any `user_action` text counted as an owner step, and an owner step may only time out to PARK. v0.181.80 exempted texts that ask for a decision ("Decide whether ..."). On 2026-11-09 VQ-14's Lead wrote "none; a scope decision only. Grant or deny adding assets/roblox/Enemies/EN-OWL.rbxm ...". The question timed out to "stop the task", and VQ-14 was parked instead of getting the recommended Grant. `_decision_only` now also treats a user action that starts "none", "n/a" or "no action", or that offers "grant or deny" (allow / refuse / accept / reject), as a decision. A named human act ("Victor uploads ...") stays the owner's.
