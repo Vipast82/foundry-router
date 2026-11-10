@@ -157,6 +157,14 @@ class TrackManager:
             return max(1, int(ov))
         vals = []
         for P in self.c.projects.values():
+            # 2026-11-09: a cap set from another process (the CLI's `tracks set-max-agents`)
+            # is in the store, not in this process's profile; the stored value wins, so the
+            # running coordinator follows it at once. (It is cleared when a router revision
+            # or the profile file changes max_agents, see after_config_apply / restore.)
+            stored = self.store.meta(f"max_agents:{P.id}")
+            if stored and str(stored).isdigit():
+                vals.append(int(stored))
+                continue
             try:
                 vals.append(int(self.setting(P, "max_agents") or 1))
             except (TypeError, ValueError):

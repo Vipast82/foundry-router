@@ -205,6 +205,19 @@ def test_restart_keeps_the_chat_set_max_agents(tmp_path):
     assert c3.max_writers == 1
 
 
+def test_a_cap_set_from_another_process_reaches_the_running_coordinator(tmp_path):
+    """2026-11-09: `tracks set-max-agents` from the CLI wrote the store, but the running
+    coordinator kept its in-memory 4 and started VQ-13 on a track at a cap of 1."""
+    c, P, _ = env(tmp_path, extra="\n[automation]\nmax_agents = 4\n")
+    assert c.max_writers == 4
+    cli = coordinator(tmp_path, [tmp_path / "profiles" / "game" / "project.toml"],
+                      {"game": by_task({})}, store_path=c.store.path, max_writers=None)
+    cli.tracks.set_max_agents(cli.projects["game"], 1, "victor")
+    assert c.max_writers == 1                                 # no restart needed
+    row = c.tracks.create(P, "blender", ["B1"])
+    assert list(c.tracks.writer_slots(c.tracks.track_project(P, row))) == []
+
+
 # ------------------------------------------------------------------ stop / fail
 
 def test_stop_cancels_the_running_sprint_and_keeps_the_worktree(tmp_path):

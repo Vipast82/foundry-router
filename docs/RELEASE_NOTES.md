@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.113 — a CLI-set agent cap reaches the running coordinator
+
+On 2026-11-09 Victor asked for one sprint at a time. `tracks set-max-agents animaluprising 1` from the CLI printed "max_agents 1" and wrote the store, but the running coordinator kept its in-memory cap of 4 (the CLI changes only its own copy of the profile), and VQ-13 started on the vq track 80 minutes later. The cap took effect only after a coordinator restart. `TrackManager.max_agents()` now reads the stored cap on every call, so the running coordinator follows a CLI change at once. A router revision or a profile-file change still clears the stored value, as before.
+
+Test: `tests/coordinator/test_tracks_manager.py::test_a_cap_set_from_another_process_reaches_the_running_coordinator`.
+
 ## v0.181.112 — many more tool rounds per request, set globally and per persona
 
 The worker tool loop and direct mode stopped after 6 tool rounds (`agent_brain.worker_tool_max_steps`), and the brain after 12 steps. Those limits date from when local workers looped on tool calls. Since then the poll guard, the paid-call cap, the context guard and the wrap-up round at the cap stop a runaway loop, and Victor's intricate tasks use many tools in one request.
