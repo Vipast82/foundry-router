@@ -2774,6 +2774,16 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if finish:
             logger.finish("error", str(e))
 
+    def _refit_for(mid: str) -> None:
+        """v0.181.114: the context guard sized the conversation for the FIRST candidate
+        (e.g. Claude's 200k window). When failover moves to another model (NW-1a: Claude
+        and GPT budget-denied, local Qwen with 262k served), fit the client's untrimmed
+        history to THAT model's window, so a model with room gets the whole history and
+        a stable prompt prefix instead of a fresh trim (and a full re-read) every turn."""
+        nonlocal base_convo
+        base_convo, _note = _apply_context_guard(svc, persona, mid, client_convo, all_tools,
+                                                 _opts_for(mid), logger, out_cap)
+
     async def _run_with_failover(narrate=None):
         """_run() over the failover list: a model whose backends all fail is
         recorded and the next allowed model is tried. Re-raises the last error
@@ -2795,6 +2805,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             + f" — failing over to {mid}\n")
             prev = mid
             model_id, options = mid, _opts_for(mid)
+            if i:
+                _refit_for(mid)
             try:
                 return await _run(narrate)
             except AllBackendsFailed as e:
@@ -2875,6 +2887,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                     binfo0 = svc.pool.backend_info(mid) or {}
                     _btype = binfo0.get("type")
                     backend_name = binfo0.get("name") or mid
+                    _refit_for(mid)
                 produced = False         # any output sent -> no failover possible
                 text_chars = think_chars = 0
                 convo = list(base_convo)

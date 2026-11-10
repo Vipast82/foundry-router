@@ -1667,16 +1667,20 @@ class Coordinator:
             # E (2026-10-28): the newest messages only; the whole transcript just when
             # none of them is an assistant turn with token counts yet
             recent = getattr(P.client, "recent", None)
-            ctx = CW.context_of(recent(sid, directory=P.profile.workspace, n=6)) \
-                if callable(recent) else None
+            msgs = recent(sid, directory=P.profile.workspace, n=6) if callable(recent) else None
+            ctx = CW.context_of(msgs)
             if ctx is None:
-                ctx = CW.context_of(P.client.transcript(sid, directory=P.profile.workspace))
+                msgs = P.client.transcript(sid, directory=P.profile.workspace)
+                ctx = CW.context_of(msgs)
+            # the wrap-up's hard stop reads the reported counts only: a router guard note
+            # (the size before ITS trim) must not stop the turn that commits the work
+            reported = CW.context_of(msgs, guard_notes=False)
         except Exception:                                         # noqa: BLE001
             return False
         w = (t["data"] or {}).get("context_wrapup") or {}
         if w.get("session_id") == sid:
             # asked to wrap up and still running: stop it outright before Kilo overflows
-            if ctx is not None and ctx >= CW.hard_stop(P, persona):
+            if reported is not None and reported >= CW.hard_stop(P, persona):
                 P.client.abort(sid, directory=P.profile.workspace)
                 self._end_session(P, sid, "context_handoff")
                 self.store.merge_data(P.id, t["task_id"], context_wrapup=None)

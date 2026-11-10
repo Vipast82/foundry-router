@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.114 — a session that outgrows the window is handed off, and failover gets the whole history
+
+NW-1a ran three hours on local Qwen without a commit (2026-11-09). Its Kilo history reached about 203k tokens. The Implementer's chain is Claude, then ChatGPT, then local Qwen; both paid steps were budget-denied, so Qwen (262k window) served every turn. Two faults made it crawl:
+
+- **The router trimmed for the wrong model.** The direct path's context guard fits the conversation to the first candidate's window (Claude's 200k) before dispatch. When failover moved to Qwen, Qwen still got that trimmed history. Each turn's trim rewrote the start of the prompt, so Qwen re-read 75-145k tokens every request (5-11 minutes a turn). Now, when failover moves to another model, the client's untrimmed history is fitted to that model's window (`_refit_for`, buffered and streaming paths). A model with room gets the whole history and a stable, cached prefix.
+- **The coordinator never saw the real size.** Kilo recorded only the trimmed prompt size (125-145k), under the 167.8k handoff line, so the session was never wrapped up and handed off. The router writes "context guard: ~203k tokens would overflow …" into the reply's reasoning. `context_window.context_of` now takes that real size when it is larger than the reported counts, so the wrap-up and handoff fire. The wrap-up turn's hard stop still reads the reported counts only, so the note cannot stop the turn that commits the work.
+
+Tests: `tests/test_thinking_context.py::test_failover_refits_the_history_for_the_model_that_serves`, `tests/coordinator/test_context_guard.py::test_a_router_trimmed_session_is_handed_off_by_the_guard_note`.
+
+The router half needs a router rebuild; the coordinator half applies on the coordinator deploy.
+
 ## v0.181.113 — a CLI-set agent cap reaches the running coordinator
 
 On 2026-11-09 Victor asked for one sprint at a time. `tracks set-max-agents animaluprising 1` from the CLI printed "max_agents 1" and wrote the store, but the running coordinator kept its in-memory cap of 4 (the CLI changes only its own copy of the profile), and VQ-13 started on the vq track 80 minutes later. The cap took effect only after a coordinator restart. `TrackManager.max_agents()` now reads the stored cap on every call, so the running coordinator follows a CLI change at once. A router revision or a profile-file change still clears the stored value, as before.

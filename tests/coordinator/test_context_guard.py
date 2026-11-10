@@ -110,3 +110,42 @@ def test_under_the_stop_line_nothing_happens(tmp_path):
         clock.advance(31)
     assert not k.aborts and not events(c, "context_wrapup")
     assert c.store.task("game", "T1")["state"] == S.IMPLEMENTING
+
+
+class TrimmedKilo(BusyKilo):
+    """The router trims every turn and reports only the trimmed size (125k), while its
+    guard note says the real history is 215k (2026-11-09 NW-1a)."""
+
+    def transcript(self, session_id, *, directory):
+        return [{"info": {"role": "assistant", "tokens": {
+                    "input": 500, "output": 90, "cache": {"read": 124500, "write": 0}}},
+                 "parts": [{"type": "reasoning", "text": (
+                     "⚠️ context guard: ~215k tokens would overflow the 200k window "
+                     "— collapsed 46 older message(s) into a tool ledger → ~124k sent.")}]}]
+
+
+def test_a_router_trimmed_session_is_handed_off_by_the_guard_note(tmp_path):
+    """v0.181.114: the token counts stayed at 125k (the router's trimmed size), so the
+    handoff never fired; the router's guard note carries the real size."""
+    clock = Clock()
+    n = []
+
+    def script(ctx):
+        n.append(ctx["prompt"])
+        if "The coordinator stopped your last step" in ctx["prompt"]:
+            return {"writes": {"src/a.txt": "half\n"}, "commit": "T1: wip",
+                    "final": NOT_DONE}
+        return good(ctx)
+    k = TrimmedKilo(script, [125000, 125000, 125000])
+    c = env(tmp_path, k, clock)
+    for _ in range(30):
+        c.tick()
+        clock.advance(31)
+    t = c.store.task("game", "T1")
+    assert t["state"] == S.COMPLETE, (t["state"], t["next_action"])
+    [w] = events(c, "context_wrapup")
+    assert w["context"] == 215000
+    # the wrap-up turn itself is not hard-stopped by the note (it commits the work)
+    assert len(k.aborts) == 1
+    assert not [e for e in events(c, "context_handoff") if "hard stop" in e["why"]]
+    assert CW.context_of(k.transcript("x", directory=""), guard_notes=False) == 125000

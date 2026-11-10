@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Optional
 
@@ -87,9 +88,39 @@ WRAPUP_MARGIN = 24000      # one large tool result (a Studio call returned ~22k 
 HARD_MARGIN = 6000         # past this, a still-running session is stopped outright
 
 
-def context_of(transcript: list) -> Optional[int]:
+_GUARD_NOTE = re.compile(r"context guard: ~(\d+(?:\.\d+)?)k tokens would overflow")
+
+
+def guard_size(transcript: list) -> Optional[int]:
+    """The real history size the router's context guard reported in a recent message
+    ("context guard: ~203k tokens would overflow ..."), or None. 2026-11-09 NW-1a: the
+    router trimmed every turn and reported only the trimmed size, so the token counts
+    never reached the handoff line while the real history was ~203k."""
+    best = None
+    for m in transcript or []:
+        for p in (m or {}).get("parts") or []:
+            t = (p or {}).get("text") or ""
+            if "context guard" not in t:
+                continue
+            for hit in _GUARD_NOTE.finditer(t):
+                n = int(float(hit.group(1)) * 1000)
+                best = n if best is None else max(best, n)
+    return best
+
+
+def context_of(transcript: list, guard_notes: bool = True) -> Optional[int]:
     """The context of the session's latest assistant turn (input + cache read/write),
-    from a Kilo transcript (GET /session/{id}/message), or None."""
+    from a Kilo transcript (GET /session/{id}/message), or None. A router context-guard
+    note in the same messages (the real size before its trim) wins when it is larger;
+    guard_notes=False reads the reported counts only (the wrap-up's hard stop)."""
+    guard = guard_size(transcript) if guard_notes else None
+    seen = _reported_context(transcript)
+    if guard and (seen is None or guard > seen):
+        return guard
+    return seen
+
+
+def _reported_context(transcript: list) -> Optional[int]:
     for m in reversed(transcript or []):
         info = (m or {}).get("info") or {}
         if info.get("role") != "assistant":

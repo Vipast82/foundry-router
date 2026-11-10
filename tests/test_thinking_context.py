@@ -400,3 +400,45 @@ def test_client_cap_cut_is_blamed_on_the_client_not_the_server(app, client):
     assert ev and "client cap" in ev[-1]["message"]
     ids = {f["id"] for f in perf_advisor._event_rules(svc.db, 24)}
     assert "backend_output_cap" not in ids and "client_output_cap" in ids
+
+
+class FailoverPool(CapturePool):
+    """Two models: 'small' (16k window) refuses, 'big' (128k) serves."""
+
+    def __init__(self):
+        super().__init__("openai-compatible")
+        self.models = []
+
+    def available_models(self):
+        return {"small": ["b1"], "big": ["b1"]}
+
+    async def chat(self, model, messages, **kw):
+        from foundry_router.pool.base import AllBackendsFailed
+        from foundry_router.pool.protocols import ChatResult
+        self.models.append(model)
+        if model == "small":
+            raise AllBackendsFailed("budget rule 'x': denied")
+        self.sent.append(messages)
+        return ChatResult(content="ok", prompt_tokens=900, completion_tokens=3), "b1"
+
+
+def test_failover_refits_the_history_for_the_model_that_serves(app, client):
+    """v0.181.114 (NW-1a): the guard trimmed for the first candidate's window (Claude
+    200k); local Qwen (262k) then served a trimmed history every turn and re-read it in
+    full each time. On failover the client's history is fitted to the new model."""
+    svc = app.state.services
+    pool = FailoverPool()
+    real, svc.pool = svc.pool, pool
+    svc.registry.upsert_auto("small", source="discovery", context_length=16384)
+    svc.registry.upsert_auto("big", source="discovery", context_length=131072)
+    svc.personas.upsert("Chain", execution_mode="direct", routing="strict",
+                        model_allowlist=["small", "big"], pinned_models=["small", "big"])
+    convo = _convo(10, tool_chars=12000)
+    try:
+        client.post("/api/chat", json={"model": "Chain", "stream": False, "messages": convo})
+    finally:
+        svc.pool = real
+    assert pool.models[:1] == ["small"] and "big" in pool.models
+    sent = pool.sent[-1]
+    assert len(sent) == len(convo)                       # the whole history fits 'big'
+    assert context_guard.estimate(convo, None, "big") > 16384   # it did not fit 'small'
