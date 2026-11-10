@@ -507,6 +507,14 @@ class EvidenceLedger:
             if rep["stopped"]:
                 break
             srow = srows.get(sid) or self.store.session(sid)
+            if srow is not None and str(srow.get("client") or "").startswith("foundry-"):
+                # v0.181.115: the judges' and helpers' calls go straight to the router
+                # (client foundry-direct; ids like visual-approval-... / asset-judge-...).
+                # They are not Kilo sessions: asking Kilo for them failed 12,108 times in a
+                # day and grew its log past 1 GB
+                rep["sessions"].append({"session_id": sid, "from": "", "status": "skipped",
+                                        "parts": 0, "skipped": "not a Kilo session"})
+                continue
             if srow is not None and srow.get("project_id") not in (None, P.id):
                 rep["errors"].append(f"{sid}: not a session of project {P.id}")
                 continue

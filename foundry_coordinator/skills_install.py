@@ -148,8 +148,9 @@ def sync(profile, state_dir: str, store=None, clock=time.time, force: bool = Fal
     if bad:
         out["refused"] = (f"{len(bad)} file(s) under {target_rel} are tracked in git (e.g. "
                           f"{bad[0]}): installing there would change the game repo")
-        _event(store, pid, "skills_install_refused", out)
+        _event_once(store, pid, "skills_install_refused", out, out["refused"])
         return out
+    _event_once(store, pid, "skills_install_refused", None, "")     # the refusal ended
     wanted = set(cfg["install"])
     now = clock()
     for name in cfg["install"]:
@@ -196,6 +197,22 @@ def sync(profile, state_dir: str, store=None, clock=time.time, force: bool = Fal
     if any(out[k] for k in ("installed", "updated", "removed", "errors", "missing")):
         _event(store, pid, "skills_installed", out)
     return out
+
+
+def _event_once(store, pid: str, kind: str, detail, reason: str) -> None:
+    """Log `kind` only when `reason` changes (v0.181.115: the same refusal was logged every
+    sync, 115 times a day); an empty reason clears it so the next refusal logs again."""
+    if store is None:
+        return
+    key = f"{kind}:{pid}"
+    try:
+        if (store.meta(key) or "") == reason:
+            return
+        store.set_meta(key, reason)
+    except Exception:                                            # noqa: BLE001
+        pass
+    if reason and detail is not None:
+        _event(store, pid, kind, detail)
 
 
 def _event(store, pid: str, kind: str, detail: dict) -> None:

@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.115 — issue sweep: cleared pins stay cleared, unconfirmed aborts are retried, chat limits are settings
+
+Victor paused everything for a local model upgrade on 2026-11-10 and asked for an issue sweep. Fixes:
+
+- **Re-enabling a backend re-pinned eight personas** (router). `profiles.fill_placeholders` treated an empty `backend` as an install placeholder. On 2026-11-09 re-enabling meridian and cliproxyapi pinned Haiku, Opus, Sonnet and Vision to meridian and Astra, Luna, Sol and Vision-Deep to cliproxyapi, which made them strict to one backend and cut off their local fallback (Victor's rule since 2026-11-06). An emptied backend on an edited persona is now the operator's choice and is never refilled. Test: `tests/test_persona_profiles.py::test_a_cleared_backend_is_not_refilled_when_backends_change`.
+- **A pause or cancel the CLI could not confirm left the session running** (coordinator). The CLI has no Kilo password, so its abort failed silently: VQ-13's session kept calling models for 45 minutes after its pause. `engine._abort_or_queue` records an unconfirmed abort (`abort_pending:<session>` + event `abort_pending`), and the running coordinator's self-heal sweep retries it (`selfheal.pending_aborts`) until Kilo confirms or no longer has the session (20 tries). Test: `tests/coordinator/test_selfheal.py::test_an_abort_kilo_did_not_confirm_is_retried_by_the_sweep`.
+- **12,108 Kilo errors a day from judge "sessions"** (coordinator). Evidence recovery asked Kilo for every stored session of a sprint, including the visual / asset judges' and helpers' router calls (client `foundry-direct`, ids like `visual-approval-…`). Kilo has no such sessions; each lookup was an error line, and Kilo's log reached 1.1 GB. Those rows are skipped. Test: `tests/coordinator/test_evidence_ledger.py::test_recover_never_asks_kilo_for_a_judge_session`.
+- **The same skills-install refusal was logged 115 times a day** (coordinator). It is logged once per reason now. Test: `tests/coordinator/test_skills_install.py::test_a_tracked_target_is_refused`.
+- **The Automation chat stopped at 8 tool calls / 4 model rounds** (router). Both were constants; a model-swap check needed more reads. They are now `operator_chat.max_tool_calls` (default 30) and `max_model_calls` (default 10), set in Automation → Chat → Settings → *Limits for one turn*.
+- **The new local model** `qwen3.8-flash-next-unsloth-ud-iq3_xxs` (Strata, 2026-11-10). The chat's built-in chain no longer names a Qwen build: its local step is the first model an enabled local backend serves. The AU profile's `training.local_models` and `lead_manager.expected_models`, and the router's Kilo profile default for Foundry-Kilo-Local, name the new id. (Every live persona's chain was switched to it through the admin API.)
+
+The router half needs a router rebuild; the coordinator half applies on the coordinator deploy.
+
 ## v0.181.114 — a session that outgrows the window is handed off, and failover gets the whole history
 
 NW-1a ran three hours on local Qwen without a commit (2026-11-09). Its Kilo history reached about 203k tokens. The Implementer's chain is Claude, then ChatGPT, then local Qwen; both paid steps were budget-denied, so Qwen (262k window) served every turn. Two faults made it crawl:

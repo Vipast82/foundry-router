@@ -2229,7 +2229,7 @@ const CH = {
   del: id => api(`chat/threads/${encodeURIComponent(id)}/delete`, {method: "POST", body: {}}),
   rename: (id, title) => api(`chat/threads/${encodeURIComponent(id)}/rename`, {method: "POST", body: {title}}),
   settings: () => api("chat/settings"),
-  saveSettings: auto => api("chat/settings", {method: "PUT", body: {auto_classes: auto}}),
+  saveSettings: (auto, lim) => api("chat/settings", {method: "PUT", body: {auto_classes: auto, ...(lim || {})}}),
   backend: () => api("chat/backend"),
   saveBackend: routes => api("chat/backend", {method: "PUT", body: {routes}}),
   audit: id => api("chat/audit?thread=" + encodeURIComponent(id)),
@@ -2425,6 +2425,9 @@ async function openAutoDrawer() {
   d.innerHTML = `<button class="ic x" type="button" data-close-drawer aria-label="Close">✕</button><h3 id="drawer-h">Auto-run</h3>
     <p class="hint">Reads, drafts and previews always run at once. Each class below shows a confirm card unless you switch it to auto. Global for every operator; saved on the router.</p>
     <fieldset><legend>Run without a card</legend>${(s.classes || []).map(c => `<label class="sw" style="display:flex;margin:6px 0"><input type="checkbox" data-cls="${esc(c.id)}" ${s.auto_classes[c.id] ? "checked" : ""}><span><b>${esc(c.id)}</b> — ${esc(c.label)}</span></label>`).join("")}</fieldset>
+    <fieldset><legend>Limits for one turn</legend>
+      <label title="Tool calls (reads, drafts, changes) the chat may make while answering one message; calls over it are refused and listed. Was a fixed 8.">tool calls <input type="number" min="1" max="200" id="ch-max-tools" value="${esc(String(s.max_tool_calls || 30))}" style="width:70px"></label>
+      <label title="Model rounds for one message (each round can make several tool calls). Was a fixed 4.">model rounds <input type="number" min="1" max="50" id="ch-max-models" value="${esc(String(s.max_model_calls || 10))}" style="width:60px"></label></fieldset>
     <div class="row"><span class="grow"></span><span class="hint" id="auto-msg" style="margin:0"></span><button class="act primary" type="button" data-save-auto>Save</button></div>
     <h4 style="margin:14px 0 4px">Chat model</h4>
     <p class="hint">The backend and model that answer this chat, in order: the first that answers wins. It never goes through a persona, so persona edits can't break the chat. Empty = the built-in chain (Claude Sonnet, GPT-6.1 Sol, local Qwen).</p>
@@ -2435,7 +2438,9 @@ async function openAutoDrawer() {
   $("[data-close-drawer]", d).onclick = closeDrawer;
   $("[data-save-auto]", d).onclick = async () => {
     const auto = Object.fromEntries($$("[data-cls]", d).map(c => [c.dataset.cls, c.checked]));
-    try { await CH.saveSettings(auto); $("#auto-msg").textContent = "Saved"; toast("Auto-run classes saved"); }
+    const lim = {max_tool_calls: parseInt($("#ch-max-tools", d).value, 10) || 30,
+                 max_model_calls: parseInt($("#ch-max-models", d).value, 10) || 10};
+    try { await CH.saveSettings(auto, lim); $("#auto-msg").textContent = "Saved"; toast("Chat settings saved"); }
     catch (e) { toast(e.message, true); }
   };
   renderChatBackend();

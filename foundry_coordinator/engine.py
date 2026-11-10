@@ -3933,7 +3933,7 @@ class Coordinator:
         P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] in S.WRITING and t["session_id"]:
-            P.client.abort(t["session_id"], directory=P.profile.workspace)
+            self._abort_or_queue(P, task_id, t["session_id"], "paused")
             self._release_session(P, t)
         self.helpers.abort_running(P, task_id, "cancelled", f"task paused: {reason}"[:300])
         return self.store.transition(project_id, task_id, S.PAUSED, {
@@ -3941,11 +3941,30 @@ class Coordinator:
             data={**t["data"], "resume_action": "continue" if t["state"] in S.WRITING else None,
                   "resume_session": t["session_id"] if t["state"] in S.WRITING else None})
 
+    def _abort_or_queue(self, P: Project, task_id: str, sid: str, why: str) -> bool:
+        """Abort a Kilo session; when Kilo does not confirm it (2026-11-09: a CLI pause /
+        cancel has no Kilo password, and VQ-13's session kept calling models for 45 minutes
+        after its pause), record it so the running coordinator's self-heal sweep retries
+        the abort (selfheal.pending_aborts)."""
+        ok = False
+        try:
+            ok = bool(P.client.abort(sid, directory=P.profile.workspace))
+        except Exception:                                         # noqa: BLE001
+            ok = False
+        if not ok:
+            self.store.set_meta(f"abort_pending:{sid}", json.dumps(
+                {"project": P.id, "task": task_id, "directory": P.profile.workspace,
+                 "why": why, "ts": self.clock(), "tries": 0}))
+            self.store.event(P.id, task_id, "abort_pending", session_id=sid,
+                             detail={"why": why, "note": "Kilo did not confirm the abort; "
+                                                         "the coordinator retries it"})
+        return ok
+
     def cancel(self, project_id: str, task_id: str, reason: str, actor: str = "operator") -> dict:
         P = self._task_project(project_id, task_id)
         t = self.store.task(project_id, task_id)
         if t["state"] in S.WRITING and t["session_id"]:
-            P.client.abort(t["session_id"], directory=P.profile.workspace)
+            self._abort_or_queue(P, task_id, t["session_id"], "cancelled")
             self._end_session(P, t["session_id"], "cancelled")
         self.helpers.abort_running(P, task_id, "cancelled", f"task cancelled: {reason}"[:300])
         if self.fast_lane.on(P, task_id):

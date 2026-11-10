@@ -13,7 +13,7 @@ from foundry_router.pool.internal import InternalPool
 HITS: list = []
 STATE: dict = {}
 KILO = "animaluprising-kilo"
-MODELS = {"strata": ["qwen3.8-flash-next-iq3_s"],
+MODELS = {"strata": ["qwen3.8-flash-next-unsloth-ud-iq3_xxs"],
           "meridian": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
           "cliproxy": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "claude-sonnet-5-5",
                        "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]}
@@ -95,7 +95,7 @@ def fleet(app, client):
     svc.pool, svc.http = pool, http
     svc.config_store.config.agent_brain.direct_stream = False
     svc.register_discovered()
-    svc.registry.upsert_auto("qwen3.8-flash-next-iq3_s", source="discovery", context_length=131072)
+    svc.registry.upsert_auto("qwen3.8-flash-next-unsloth-ud-iq3_xxs", source="discovery", context_length=131072)
     # the test pool marks Meridian by type in real deployments; map the profile's
     # "meridian" kind onto this backend for the test
     orig = profiles._resolve_backend
@@ -223,7 +223,7 @@ def test_models_metadata_reports_effective_limits(fleet, client):
     # Strata's qwen3.8 reasons; the registry just doesn't say so (audit C2)
     assert local["capabilities"] == {"tools": True, "vision": False, "reasoning": True}
     assert local["foundry"]["routing"] == "strict" and local["foundry"]["backend"] == "strata"
-    assert local["foundry"]["served_model"] == "qwen3.8-flash-next-iq3_s"
+    assert local["foundry"]["served_model"] == "qwen3.8-flash-next-unsloth-ud-iq3_xxs"
     vis = data["Foundry-Kilo-Vision"]
     assert vis["capabilities"]["vision"] and "image" in vis["architecture"]["input_modalities"]
     show = client.post("/api/show", json={"model": "Foundry-Kilo-Vision"}).json()
@@ -249,7 +249,7 @@ def test_validate_local_persona_passes_every_check(fleet, client):
     assert [checks[n]["status"] for n in ("route", "text", "stream", "tools", "length")] == \
         ["ok"] * 5
     assert checks["image_input"]["status"] == "skip"
-    assert res["served_models"] == ["qwen3.8-flash-next-iq3_s"] and res["backends"] == ["strata"]
+    assert res["served_models"] == ["qwen3.8-flash-next-unsloth-ud-iq3_xxs"] and res["backends"] == ["strata"]
     assert {b for b, _ in HITS} == {"strata"}
     stored = json.loads(fleet.personas.get("Foundry-Kilo-Local")["validation"])
     assert stored["status"] == "passed"
@@ -450,7 +450,7 @@ def test_structured_output_keeps_the_schema_on_a_persona_with_mcp_tools(fleet, c
             return {"type": "function", "function": {"name": self.name, "parameters": {}}}
     monkeypatch.setattr(ollama_api, "_direct_mcp_split",
                         lambda svc, p, ct: ({"searxng_search": _Tool()}, 0, "all"))
-    fleet.personas.upsert("Tooly", execution_mode="direct", model_allowlist=["qwen3.8-flash-next-iq3_s"])
+    fleet.personas.upsert("Tooly", execution_mode="direct", model_allowlist=["qwen3.8-flash-next-unsloth-ud-iq3_xxs"])
     schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
     r = client.post("/v1/chat/completions", json={
         "model": "Tooly", "messages": [{"role": "user", "content": "hi"}],
@@ -462,3 +462,15 @@ def test_structured_output_keeps_the_schema_on_a_persona_with_mcp_tools(fleet, c
     client.post("/v1/chat/completions", json={"model": "Tooly", "messages": [{"role": "user", "content": "hi"}]})
     assert [t["function"]["name"] for t in STATE["last_body"]["tools"]] == ["searxng_search"]
     assert "response_format" not in STATE["last_body"]
+
+
+def test_a_cleared_backend_is_not_refilled_when_backends_change(fleet, client):
+    """v0.181.115: Victor cleared the backend pins so each persona falls back from Claude
+    to ChatGPT to local; re-enabling a backend refilled eight of them (strict to one
+    backend again). An emptied backend on an edited persona stays empty."""
+    client.post(f"/admin/api/profiles/{KILO}/apply")
+    row = fleet.personas.get("Foundry-Kilo-Sol")
+    assert row["backend"] == "cliproxy"
+    fleet.personas.upsert("Foundry-Kilo-Sol", backend="")
+    assert profiles.fill_placeholders(fleet) == []
+    assert not fleet.personas.get("Foundry-Kilo-Sol")["backend"]

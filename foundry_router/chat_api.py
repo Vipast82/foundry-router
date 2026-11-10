@@ -107,8 +107,10 @@ async def decide(request: Request, confirm_id: str):
 async def get_settings(request: Request):
     _op(request)
     eng = _eng(request)
+    tools, models = eng.limits()
     return {"auto_classes": eng.auto_classes(), "classes": [
-        {"id": c, "label": CLASS_LABEL[c]} for c in CONFIRM_CLASSES], "catalog": eng.catalog()}
+        {"id": c, "label": CLASS_LABEL[c]} for c in CONFIRM_CLASSES], "catalog": eng.catalog(),
+        "max_tool_calls": tools, "max_model_calls": models}
 
 
 @router.put(P + "/settings")
@@ -119,7 +121,22 @@ async def put_settings(request: Request):
         raise ControlError("auto-run classes are global; they need an operator session that is not "
                            "restricted to projects", "forbidden", 403)
     b = await _body(request)
-    return {"auto_classes": _eng(request).set_auto_classes(b.get("auto_classes") or {}, s["actor"])}
+    eng = _eng(request)
+    lim = {k: b[k] for k in ("max_tool_calls", "max_model_calls") if b.get(k) is not None}
+    if lim:
+        hi = {"max_tool_calls": 200, "max_model_calls": 50}
+        try:
+            lim = {k: max(1, min(hi[k], int(v))) for k, v in lim.items()}
+        except (TypeError, ValueError):
+            raise ControlError("limits must be whole numbers", "bad_request", 400) from None
+
+        def mutate(raw):
+            raw.setdefault("operator_chat", {}).update(lim)
+        eng.svc.config_store.save(mutate)
+    out = {"auto_classes": eng.set_auto_classes(b.get("auto_classes") or {}, s["actor"])
+           if b.get("auto_classes") is not None else eng.auto_classes()}
+    out["max_tool_calls"], out["max_model_calls"] = eng.limits()
+    return out
 
 
 @router.get(P + "/backend")

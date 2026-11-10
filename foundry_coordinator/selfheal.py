@@ -153,7 +153,8 @@ def sweep(c, P, force: bool = False) -> list[dict]:
         _log(c, f"{P.id}: self-heal sweep failed: {type(e).__name__}: {e}")
         return []
     out: list[dict] = []
-    for name, fn in (("dead_session", dead_sessions), ("stuck_case", stuck_cases),
+    for name, fn in (("pending_abort", pending_aborts),
+                     ("dead_session", dead_sessions), ("stuck_case", stuck_cases),
                      ("fixed_release", fixed_releases), ("stale_lock", stale_locks),
                      ("hold", holds)):
         try:
@@ -277,6 +278,46 @@ def dead_sessions(c, P) -> list[dict]:
 
 
 ORPHAN_QUIET_S = 1800
+
+
+ABORT_TRIES = 20
+
+
+def pending_aborts(c, P) -> list[dict]:
+    """v0.181.115: retry each Kilo abort a pause / cancel could not get confirmed (a CLI
+    has no Kilo password). Done once Kilo confirms or no longer has the session; given up
+    after ABORT_TRIES sweeps."""
+    import json as _json
+    out = []
+    rows = c.store.q("SELECT key, value FROM meta WHERE key LIKE 'abort_pending:%'")
+    for r in rows:
+        sid = r["key"].split(":", 1)[1]
+        try:
+            d = _json.loads(r["value"] or "{}")
+        except ValueError:
+            d = {}
+        if d.get("project") not in (None, P.id):
+            continue
+        directory = d.get("directory") or P.profile.workspace
+        done, why = False, ""
+        try:
+            gone = getattr(P.client, "exists", None)
+            if callable(gone) and not gone(sid, directory=directory):
+                done, why = True, "no longer in Kilo"
+            elif P.client.abort(sid, directory=directory):
+                done, why = True, "aborted"
+        except Exception as e:                                   # noqa: BLE001
+            why = f"{type(e).__name__}: {e}"[:200]
+        tries = int(d.get("tries") or 0) + 1
+        if done or tries >= ABORT_TRIES:
+            c.store.x("DELETE FROM meta WHERE key=?", (r["key"],))
+            out.append(_record(c, P, d.get("task") or "", "pending_abort",
+                               "aborted a session a pause / cancel left running" if done
+                               else "gave up aborting a session", {
+                                   "session_id": sid, "why": why, "tries": tries}))
+        else:
+            c.store.set_meta(r["key"], _json.dumps({**d, "tries": tries, "last": why}))
+    return out
 
 
 def _task_sessions(t: dict) -> set:

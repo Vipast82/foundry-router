@@ -123,6 +123,10 @@ def test_a_tracked_target_is_refused(ws, src, tmp_path):
     assert "tracked in git" in out["refused"] and not out["installed"]
     assert not (ws / ".kilo" / "skills" / "demo-skill").exists()
     assert st.events[0][0] == "skills_install_refused"
+    # v0.181.115: the same refusal is logged once, not on every sync
+    SI.sync(prof(ws, ["demo-skill"]), str(tmp_path / "state"), st)
+    SI.sync(prof(ws, ["demo-skill"]), str(tmp_path / "state"), st)
+    assert [k for k, _ in st.events].count("skills_install_refused") == 1
 
 
 def test_due_runs_at_once_on_a_list_change_then_waits(ws):

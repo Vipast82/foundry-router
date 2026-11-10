@@ -112,18 +112,22 @@ def test_invalid_calls_are_refused_deterministically(chat, app):
     assert t["tool_calls"] == 0 and t["model_calls"] == 1
 
 
-def test_tool_call_cap_per_turn(chat):
+def test_tool_call_cap_per_turn(chat, app):
+    cfg = app.state.services.config_store.config.operator_chat
+    assert (cfg.max_tool_calls, cfg.max_model_calls) == (30, 10)    # v0.181.115 defaults
+    cfg.max_tool_calls = 8                                             # a setting, not a constant
     t = chat("read everything ten times",
              reply("", [call("get_stack", f"c{i}") for i in range(10)]), reply("done"))
-    assert t["tool_calls"] == CE.MAX_TOOL_CALLS
+    assert t["tool_calls"] == 8
     assert len(t["refused"]) == 2 and "limit" in t["refused"][0]["reason"]
 
 
-def test_model_call_cap_and_json_repair(chat):
+def test_model_call_cap_and_json_repair(chat, app):
+    app.state.services.config_store.config.operator_chat.max_model_calls = 4
     t = chat("loop", "this is not json", reply("fixed", [call("get_stack")]),
              reply("", [call("get_stack", "c2")]), reply("", [call("get_stack", "c3")]),
              reply("never reached"))
-    assert t["model_calls"] == CE.MAX_MODEL_CALLS and t["status"] == "ok"
+    assert t["model_calls"] == 4 and t["status"] == "ok"
     t2 = chat("garbage", "nope", "still nope")
     assert t2["status"] == "error" and "not valid" in t2["error"] and t2["model_calls"] == 2
 

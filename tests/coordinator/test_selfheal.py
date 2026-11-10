@@ -542,3 +542,25 @@ def cli_args(argv):
     import argparse
     ns = argparse.Namespace(state=argv[1], cmd=argv[4], force_version=False)
     return ns
+
+
+def test_an_abort_kilo_did_not_confirm_is_retried_by_the_sweep(tmp_path):
+    """v0.181.115: a CLI pause has no Kilo password, so its abort failed and VQ-13's session
+    kept calling models for 45 minutes after the pause. The unconfirmed abort is recorded and
+    the running coordinator's sweep retries it."""
+    c, P, clk, client, _, _ = game(tmp_path)
+    sid = client.start_session(directory=P.profile.workspace, title="x", persona="p",
+                               agent="code", metadata={}, permissions=[])
+    real = client.abort
+    client.abort = lambda s, *, directory: False                # the CLI: 401, unconfirmed
+    try:
+        assert c._abort_or_queue(P, "T1", sid, "paused") is False
+    finally:
+        client.abort = real
+    assert c.store.meta(f"abort_pending:{sid}")
+    tried = []
+    client.abort = lambda s, *, directory: tried.append(s) or True
+    acts = selfheal.pending_aborts(c, P)
+    assert tried == [sid] and [a["rule"] for a in acts] == ["pending_abort"]
+    assert not c.store.meta(f"abort_pending:{sid}")
+    assert selfheal.pending_aborts(c, P) == []

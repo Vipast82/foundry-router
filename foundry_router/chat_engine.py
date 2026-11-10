@@ -55,9 +55,11 @@ log = logging.getLogger(__name__)
 PERSONA = "Foundry-Operator-Chat"      # older versions routed the chat through it
 # The built-in chain when operator_chat.routes is empty: Claude Sonnet, then
 # GPT-6.1 Sol, then the local Qwen, each on the first enabled backend serving it
-PERSONA_CHAIN = ["claude-sonnet-5-5", "gpt-6.1-sol", "qwen3.8-flash-next-iq3_s"]
-MAX_MODEL_CALLS = 4
-MAX_TOOL_CALLS = 8
+# the local step is whatever an enabled local backend serves (v0.181.115: it named one
+# Qwen build, which broke when Strata was moved to another model)
+PERSONA_CHAIN = ["claude-sonnet-5-5", "gpt-6.1-sol"]
+MAX_MODEL_CALLS = 10                   # defaults; operator_chat.max_* override them
+MAX_TOOL_CALLS = 30
 MAX_TEXT = 4000
 MAX_TOKENS = 1400
 HISTORY_TURNS = 6                      # verbatim; older turns are summarised
@@ -252,7 +254,7 @@ def parse_reply(raw: str) -> tuple[Optional[dict], str]:
     if not isinstance(calls, list):
         return None, "calls must be a list"
     clean = []
-    for i, c in enumerate(calls[:MAX_TOOL_CALLS * 2]):
+    for i, c in enumerate(calls[:200]):
         if not isinstance(c, dict):
             continue
         clean.append({"id": _s(c.get("id") or f"c{i + 1}", 40), "tool": _s(c.get("tool"), 60),
@@ -837,7 +839,35 @@ class ChatEngine:
             hosts = [h for h in route_resolve.served_by(bmap, m) if bmap[h]["enabled"]]
             if hosts:
                 out.append((hosts[0], m))
+        local = self._local_route(bmap)
+        if local:
+            out.append(local)
         return out
+
+    def _local_route(self, bmap: dict):
+        """(backend, model) of the first enabled local backend that serves a model."""
+        for name, b in bmap.items():
+            if not b.get("enabled") or b.get("family") not in ("local", "llamacpp", "ollama",
+                                                               "vllm", "unsloth"):
+                continue
+            models = list(b.get("models") or [])
+            if models:
+                return name, models[0]
+        try:
+            for info in self.svc.pool.backend_status():
+                if info.get("enabled") and not info.get("subscription") and \
+                        info.get("flavor") in ("llamacpp", "vllm", "unsloth", "ollama") and \
+                        info.get("models"):
+                    return info["name"], info["models"][0]
+        except Exception:                                         # noqa: BLE001
+            pass
+        return None
+
+    def limits(self) -> tuple[int, int]:
+        """(max tool calls, max model calls) for one turn (operator_chat.max_*)."""
+        cfg = getattr(self.svc.config_store.config, "operator_chat", None)
+        return (int(getattr(cfg, "max_tool_calls", 0) or MAX_TOOL_CALLS),
+                int(getattr(cfg, "max_model_calls", 0) or MAX_MODEL_CALLS))
 
     # ------------------------------------------------------------------ validation
 
@@ -945,7 +975,8 @@ class ChatEngine:
         say, ask, served, error = "", None, "", ""
         repaired = False
         final_calls: list[dict] = []
-        while model_calls < MAX_MODEL_CALLS:
+        max_tools, max_models = self.limits()
+        while model_calls < max_models:
             try:
                 raw, meta = await self._call_model(messages)
             except ChatError as e:
@@ -977,9 +1008,10 @@ class ChatEngine:
                     ask = ask or {"text": _s(a.get("text"), 1000),
                                   "options": [str(o)[:200] for o in (a.get("options") or [])][:8]}
                     continue
-                if tool_calls + len(auto_now) + len(confirm_calls) >= MAX_TOOL_CALLS:
+                if tool_calls + len(auto_now) + len(confirm_calls) >= max_tools:
                     refused.append({"id": c["id"], "tool": c["tool"],
-                                    "reason": f"over the {MAX_TOOL_CALLS}-call limit for one turn"})
+                                    "reason": f"over the {max_tools}-call limit for one turn "
+                                              "(Automation -> Chat -> Settings)"})
                     continue
                 clean, why = self.validate_call(c, ctx)
                 if clean is None:
@@ -996,7 +1028,7 @@ class ChatEngine:
                 results.append(r)
                 executed.append(r)
                 changes += r.get("changed") or []
-            if model_calls >= MAX_MODEL_CALLS:
+            if model_calls >= max_models:
                 break
             fed = [{"id": r["id"], "tool": r["tool"], "ok": r["ok"],
                     "result": r.get("result") if r["ok"] else r.get("error")} for r in results]

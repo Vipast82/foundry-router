@@ -867,3 +867,15 @@ def test_a_newer_prerequisite_run_is_not_an_order_violation(store, led, tmp_path
     (cs,) = led.chain_status(P, spec(), r1)
     assert cs["status"] == "complete", cs
     assert led.missing(P, spec(), r1) == []
+
+
+def test_recover_never_asks_kilo_for_a_judge_session(store, led):
+    """v0.181.115: visual-approval / asset-judge runs are stored as sessions of client
+    foundry-direct; Kilo has no such session and logged an error for every lookup."""
+    tr, _ = _two_session_task(store)
+    store.add_session("visual-approval-8971f4b610227e9bd26e", "p", "T1", "run1",
+                      "visual_reviewer", "visual_approval", 1, "foundry-direct", "x")
+    P = make_P("p", None, tr)
+    rep = led.recover(P, {"task_id": "T1", "run_id": "run1"})
+    assert [c[0] for c in P.client.calls] == ["s1", "s2"]
+    assert not rep["errors"]

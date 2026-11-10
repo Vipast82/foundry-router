@@ -1033,6 +1033,10 @@ class OperatorChatConfig(BaseModel):
     (Claude Sonnet, then GPT-6.1 Sol, then the local Qwen) on whichever enabled
     backend serves each."""
     routes: list[OperatorChatRoute] = Field(default_factory=list)
+    # v0.181.115: per-turn limits (were hard-coded 8 tool calls / 4 model calls; a model-swap
+    # check needed more reads than that). Set in Automation -> Chat -> Settings.
+    max_tool_calls: int = Field(default=30, ge=1, le=200)
+    max_model_calls: int = Field(default=10, ge=1, le=50)
 
 
 # the classes that may push an alert (alerts.py); everything else is digest-only

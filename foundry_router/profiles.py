@@ -50,7 +50,7 @@ PROFILES = {
                        "Every persona uses strict routing: its one backend and model, or a "
                        "clear refusal.",
         "personas": [
-            _p("Foundry-Kilo-Local", "local", "qwen3.8-flash-next-iq3_s",
+            _p("Foundry-Kilo-Local", "local", "qwen3.8-flash-next-unsloth-ud-iq3_xxs",
                "Primary coding, planning, exploration and summaries (local Strata).",
                ["text", "tools"], enabled=True, out=32768),
             _p("Foundry-Kilo-Haiku", "meridian", "claude-haiku-5-5",
@@ -288,6 +288,12 @@ def fill_placeholders(svc) -> list[str]:
             if not _fillable(row, d, fields):
                 continue
             edited = values_hash(row) != row.get("profile_hash")
+            if edited and not row.get("backend"):
+                # v0.181.115: an EMPTY backend on an edited persona is the operator's
+                # choice (2026-11-06: pins cleared so Claude -> ChatGPT -> local can fall
+                # back), not an install placeholder; re-enabling a backend on 2026-11-09
+                # put eight pins back and cut those personas off from local
+                continue
             svc.personas.upsert(d["virtual_name"], backend=fields["backend"])
             if not edited:
                 _stamp(svc, d["virtual_name"], row["profile"])
