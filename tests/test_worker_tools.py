@@ -278,3 +278,31 @@ async def test_find_turns_do_not_use_up_the_worker_step_cap(tmp_path):
     answers = [ev.text for ev in events if ev.kind == "answer"]
     assert answers == ["done after four searches"]               # 9 turns, cap 6: not handed off
     assert [c[2]["query"] for c in mcp.calls] == ["q0", "q1", "q2", "q3"]
+
+
+async def test_a_persona_tool_step_limit_overrides_the_global_one(tmp_path):
+    """v0.181.112: max_tool_steps on the persona sets that persona's tool rounds."""
+    script = [_tool("searxng_web_search", query=f"q{i}") for i in range(3)]
+    runner, ctx, pool, mcp = _make(tmp_path, worker_script=script,
+                                   brain_script=[_tool("return_to_user", answer="brain")])
+    ctx.persona = {**ctx.persona, "max_tool_steps": 2}
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    thinks = " | ".join(ev.text for ev in events if ev.kind == "think")
+    assert "2-step tool cap" in thinks and len(mcp.calls) == 2
+
+
+def test_tool_step_defaults_and_the_migration():
+    from foundry_router.config import AgentBrainConfig, GuardrailsConfig, migrate_raw
+    from foundry_router.guardrails import tool_steps
+    assert AgentBrainConfig().worker_tool_max_steps == 25
+    assert GuardrailsConfig().max_steps_per_request == 30
+    raw, notes = migrate_raw({"config_version": 4,
+                              "agent_brain": {"worker_tool_max_steps": 6},
+                              "guardrails": {"max_steps_per_request": 12}})
+    assert raw["agent_brain"]["worker_tool_max_steps"] == 25
+    assert raw["guardrails"]["max_steps_per_request"] == 30 and raw["config_version"] >= 5
+    edited, _ = migrate_raw({"config_version": 4, "agent_brain": {"worker_tool_max_steps": 9}})
+    assert edited["agent_brain"]["worker_tool_max_steps"] == 9          # an edit stays
+    assert tool_steps({"max_tool_steps": 40}, 25) == 40
+    assert tool_steps({"max_tool_steps": None}, 25) == 25
+    assert tool_steps({"max_tool_steps": 999}, 25) == 200

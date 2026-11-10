@@ -60,7 +60,8 @@ STR_LIST_FIELDS = ("pinned_models", "model_allowlist", "required_tags", "escalat
 DICT_FIELDS = ("guardrail_overrides", "selection_weights", "client_compat",
                "sampling_options", "assist")
 # (min, max); context_window 0 = auto (advertise the largest worker window)
-INT_RANGES = {"context_window": (0, 10_000_000), "max_output_tokens": (256, 1_000_000)}
+INT_RANGES = {"context_window": (0, 10_000_000), "max_output_tokens": (256, 1_000_000),
+              "max_tool_steps": (1, 200)}
 TEXT_LIMITS = {"description": 2000, "review_model": 200, "agent_backend": 120,
                "backend": 120, "output_format": 20000}
 

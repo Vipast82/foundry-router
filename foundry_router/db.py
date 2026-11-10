@@ -608,6 +608,9 @@ class Database:
             # v0.181.109: "finder" = the model gets foundry_find_tools / foundry_call_tool
             # instead of every granted MCP tool (tool_finder.py); NULL / "full" = all of them
             ("personas", "mcp_tool_mode", "TEXT"),
+            # v0.181.112: tool rounds per request for this persona (NULL = the global
+            # agent_brain.worker_tool_max_steps); also the brain's step limit for it
+            ("personas", "max_tool_steps", "INTEGER"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

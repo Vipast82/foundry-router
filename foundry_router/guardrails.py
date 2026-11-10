@@ -40,6 +40,16 @@ def effective_cutoff(config, backend_name: str) -> float:
     return float(config.subscription_usage.limit_pct)
 
 
+def tool_steps(persona: Optional[dict], default):
+    """Tool rounds per request: the persona's max_tool_steps when set (1-200), else
+    `default` (agent_brain.worker_tool_max_steps)."""
+    try:
+        v = int((persona or {}).get("max_tool_steps") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return min(200, v) if v > 0 else default
+
+
 @dataclass
 class RequestGuardState:
     """Per-request counters, owned by the agent loop."""
@@ -91,6 +101,10 @@ class GuardrailEngine:
             "daily_spend_cap_usd": self.cfg.daily_spend_cap_usd,
             "weekly_spend_cap_usd": self.cfg.weekly_spend_cap_usd,
         }
+        steps = tool_steps(persona, None)
+        if steps:
+            # v0.181.112: the persona's tool-step limit is also its brain step limit
+            base["max_steps_per_request"] = steps + 2      # + routing and the final answer
         base.update({k: v for k, v in PersonaStore.guardrail_overrides(persona).items()
                      if k in base})
         return base

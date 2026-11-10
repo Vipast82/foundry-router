@@ -4169,7 +4169,9 @@ async function tabBackends() {
         <label>mcp_result_limit_chars</label><input id="brain-mrl" type="number" size="8">
         <label title="Ollama output cap (num_predict) + Claude/OpenAI max_tokens — the ceiling on a worker's generated tokens. Prevents a runaway (esp. with heavy reasoning).">worker_max_tokens</label><input id="brain-wmt" type="number" size="8">
         <label title="Caps what the brain sees of a large pasted user message before routing — the worker still receives the complete original (include_full_user_message)">user_input_preview_chars</label>
-        <input id="brain-uip" type="number" size="8"></div>
+        <input id="brain-uip" type="number" size="8">
+        <label title="How many tool rounds a model may run in ONE request before Foundry asks it for its final answer (worker tool loop, direct mode; the brain gets this + 2 steps). High by default so an intricate task can use many tools at once. Turns that only search for a tool (find on demand) do not count, up to 6. A persona's own 'tool steps' overrides this. Runaway loops are still stopped by the poll guard, the paid-call cap and the context guard.">tool steps per request</label>
+        <input id="brain-tsteps" type="number" min="1" max="200" size="5"></div>
       <div class="hint" style="font-weight:600;margin:6px 0 2px">Keep-alive / streaming</div>
       <div class="row tight">
         <label title="While a worker/brain/MCP call is in flight, emit a 'still working' narration line every N seconds so reverse proxies and clients never mistake a slow request (failover + cold model load) for a dead one. 0 disables. (AGENT-mode narration.)">heartbeat_seconds (agent)</label>
@@ -4257,6 +4259,7 @@ async function tabBackends() {
   $("#brain-mrl").value = cfg.agent_brain.mcp_result_limit_chars;
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
   $("#brain-uip").value = cfg.agent_brain.user_input_preview_chars;
+  $("#brain-tsteps").value = cfg.agent_brain.worker_tool_max_steps;
   $("#brain-hb").value = cfg.agent_brain.heartbeat_seconds;
   $("#brain-ka").value = cfg.agent_brain.worker_keep_alive || "";
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
@@ -4489,6 +4492,7 @@ async function tabBackends() {
       mcp_result_limit_chars: +$("#brain-mrl").value,
       worker_max_tokens: +$("#brain-wmt").value,
       user_input_preview_chars: +$("#brain-uip").value,
+      worker_tool_max_steps: Math.max(1, Math.min(200, parseInt($("#brain-tsteps").value, 10) || 25)),
       heartbeat_seconds: +$("#brain-hb").value,
       worker_keep_alive: $("#brain-ka").value.trim() || null,
       direct_stream: $("#brain-ds").checked,
@@ -5047,7 +5051,9 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-mcp-all">
         <span class="hint">every connected server, now and later; untick a server or tool below to exclude it</span>
         <label title="How this persona's granted MCP tools reach the model. all up front (default) = every granted tool definition is in the prompt on every turn (Foundry-Chat's 58 were ~13k tokens). find on demand = the model gets two tools, foundry_find_tools and foundry_call_tool (~400 tokens): it searches the granted tools when it needs one, reads that tool's schema, then runs it. Search and calls only ever reach the tools granted above. The two tools never change between turns, so the prompt prefix stays cached. Applies to plain chat, the worker tool loop, direct mode and the /mcp/persona/&lt;name&gt; endpoint.">MCP tool loading</label>
-        <select id="pe-mcp-loading"><option value="">all up front (default)</option><option value="finder">find on demand (2 tools)</option></select></div>
+        <select id="pe-mcp-loading"><option value="">all up front (default)</option><option value="finder">find on demand (2 tools)</option></select>
+        <label title="Tool rounds this persona may run in one request before it is asked for its final answer. Empty = the global 'tool steps per request' (Agent brain settings). Also sets this persona's brain step limit (+2).">tool steps</label>
+        <input id="pe-tsteps" type="number" min="1" max="200" placeholder="(global)" style="width:80px"></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
       <div class="row"><label title="Ordered list of model ids tried in priority order. In brain (agent) mode: boosted to the top of candidates, guardrail/quota denial falls to the next pin, then the normal pool. In DIRECT mode (Cline) with local_bias_strength=prefer_paid: the paid pins are tried top-down as a cascade — each usage/cost-gated — before degrading to a local model on exhaustion (e.g. Opus 4.8 → Sonnet 5 → local). Local pins are honored as the local fallback, not the paid cascade.">pinned_models (priority order)</label>
@@ -5159,6 +5165,7 @@ async function tabPersonas() {
     preferred_mcp_tools: readPreferredMcp(
       parseTags((window._personas[$("#pe-name").value.trim()] || {}).preferred_mcp_tools)),
     mcp_tool_mode: $("#pe-mcp-loading").value || null,
+    max_tool_steps: $("#pe-tsteps").value ? parseInt($("#pe-tsteps").value, 10) : null,
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
     model_allowlist: JSON.parse($("#pe-allow").value || "[]"),
@@ -5423,6 +5430,7 @@ window.editPersona = name => {
   const excluded = new Set([...bare].filter(b => b.startsWith("!")).map(b => b.slice(1)));
   if ($("#pe-mcp-all")) $("#pe-mcp-all").checked = every;
   if ($("#pe-mcp-loading")) $("#pe-mcp-loading").value = p.mcp_tool_mode === "finder" ? "finder" : "";
+  if ($("#pe-tsteps")) $("#pe-tsteps").value = p.max_tool_steps || "";
   document.querySelectorAll("#pe-mcp .mcp-item").forEach(item => {
     const s = item.dataset.server;
     if (every) {

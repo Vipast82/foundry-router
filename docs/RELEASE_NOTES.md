@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.112 — many more tool rounds per request, set globally and per persona
+
+The worker tool loop and direct mode stopped after 6 tool rounds (`agent_brain.worker_tool_max_steps`), and the brain after 12 steps. Those limits date from when local workers looped on tool calls. Since then the poll guard, the paid-call cap, the context guard and the wrap-up round at the cap stop a runaway loop, and Victor's intricate tasks use many tools in one request.
+
+- **Higher defaults:** 25 tool rounds and 30 brain steps. Config migration v5 raises a file that still has the shipped 6 or 12; a value you edited stays.
+- **Per persona:** the new `max_tool_steps` (persona editor: *tool steps*, 1-200; empty = global) sets that persona's tool rounds in the worker loop and direct mode, and its brain step limit (+2 for routing and the final answer). A `max_steps_per_request` in the persona's guardrail_overrides still wins for the brain.
+- **In the UI:** *tool steps per request* in Agent brain settings (it had no control before) and *tool steps* in the persona editor. The chat's `set_persona_fields` takes `max_tool_steps`.
+
+Search-only turns with find on demand still do not count (v0.181.111).
+
+Tests: `tests/test_worker_tools.py::test_a_persona_tool_step_limit_overrides_the_global_one`, `::test_tool_step_defaults_and_the_migration`.
+
 ## v0.181.111 — looking a tool up no longer uses up the tool-step limit
 
 With find on demand (v0.181.109) every tool costs two model turns, a search and a call. The worker tool loop stops at `worker_tool_max_steps` (6) and hands the request to the brain, so a find-on-demand persona could run only about three tools per request. Three fixes:

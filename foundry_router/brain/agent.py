@@ -1722,7 +1722,8 @@ class AgentRunner:
         messages += [m for m in prompts.sanitize_history(ctx.messages)
                      if m.get("role") != "system"]
         images = self._attached_images(ctx)
-        cap = int(self.brain.cfg.worker_tool_max_steps or 6)
+        from ..guardrails import tool_steps
+        cap = int(tool_steps(ctx.persona, self.brain.cfg.worker_tool_max_steps or 25))
         expose_trail = bool((ctx.persona or {}).get("expose_tool_trail"))
         trail: list = []            # (label, result excerpt) for the answer footer
         seen_calls: dict = {}       # tool_call_key -> result, for the poll guard

@@ -212,7 +212,7 @@ guardrails:
   # "defer_to_pool": skip spend/rate enforcement, trust LiteLLM/Olla budgets.
   #   Only meaningful with mode: olla/litellm; inert under mode: internal.
   authority: "internal"
-  max_steps_per_request: 12        # hard stop on the agent loop
+  max_steps_per_request: 30        # hard stop on the agent loop
   max_paid_calls_per_request: 3    # Claude/metered calls per single request
   daily_spend_cap_usd: null        # null = no cap; applies to metered backends only
   weekly_spend_cap_usd: null

@@ -195,7 +195,10 @@ class AgentBrainConfig(BaseModel):
     # the MCP tool loop itself, this bounds its tool-call turns before the
     # request is handed to the brain to finish — mirrors the brain's own step
     # cap, prevents a worker looping indefinitely on tool calls.
-    worker_tool_max_steps: int = 6
+    # v0.181.112: 25 (was 6) so an intricate task can use many tools in one request; a
+    # persona's max_tool_steps overrides it. The poll guard, the paid-call cap, the context
+    # guard and the wrap-up round at the cap still stop a runaway loop.
+    worker_tool_max_steps: int = 25
     # Input-side twin of tool_result_limit_chars: caps what the brain sees of
     # a large pasted user message (file/code) before its FIRST routing
     # decision — otherwise a 23k-char paste blows the brain's context before
@@ -353,7 +356,7 @@ class BackendPoolConfig(BaseModel):
 
 class GuardrailsConfig(BaseModel):
     authority: Literal["internal", "defer_to_pool"] = "internal"
-    max_steps_per_request: int = 12
+    max_steps_per_request: int = 30
     max_paid_calls_per_request: int = 3
     daily_spend_cap_usd: Optional[float] = None
     weekly_spend_cap_usd: Optional[float] = None
@@ -1174,7 +1177,23 @@ def _m4_helpers_on_backends(raw: dict) -> list[str]:
     return notes
 
 
-MIGRATIONS = [(2, _m2_stamp), (3, _m3_helper_per_account), (4, _m4_helpers_on_backends)]
+def _m5_higher_tool_steps(raw: dict) -> list[str]:
+    """v5: tool loops may run longer: worker_tool_max_steps 6 -> 25 and the brain's
+    max_steps_per_request 12 -> 30. Only the shipped values are raised; an edited one stays."""
+    notes = []
+    brain = raw.get("agent_brain") if isinstance(raw.get("agent_brain"), dict) else None
+    if brain is not None and brain.get("worker_tool_max_steps") == 6:
+        brain["worker_tool_max_steps"] = 25
+        notes.append("agent_brain.worker_tool_max_steps 6 -> 25")
+    guard = raw.get("guardrails") if isinstance(raw.get("guardrails"), dict) else None
+    if guard is not None and guard.get("max_steps_per_request") == 12:
+        guard["max_steps_per_request"] = 30
+        notes.append("guardrails.max_steps_per_request 12 -> 30")
+    return notes
+
+
+MIGRATIONS = [(2, _m2_stamp), (3, _m3_helper_per_account), (4, _m4_helpers_on_backends),
+              (5, _m5_higher_tool_steps)]
 CONFIG_VERSION = MIGRATIONS[-1][0]
 
 
