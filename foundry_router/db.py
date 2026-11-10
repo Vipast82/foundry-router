@@ -611,6 +611,8 @@ class Database:
             # v0.181.112: tool rounds per request for this persona (NULL = the global
             # agent_brain.worker_tool_max_steps); also the brain's step limit for it
             ("personas", "max_tool_steps", "INTEGER"),
+            # v0.181.117: chat attachments -> media-gen references (NULL = on)
+            ("personas", "media_attachments", "INTEGER"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

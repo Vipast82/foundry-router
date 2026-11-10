@@ -687,6 +687,13 @@ async def _chat_dispatch(svc, body: dict):
                          f"not used — {refusal}; routing to a model instead")
 
     exec_mode = persona.get("execution_mode") or "agent"
+    # v0.181.117: chat attachments -> media-gen references when Media_Gen is in this request's
+    # tool set (media_attachments.py); the same list comes back when nothing applies
+    from .. import media_attachments
+    messages = await media_attachments.apply(
+        svc, persona, body.get("messages") or [], messages, client_tools,
+        direct=bool(is_strict(persona) or client_tools or exec_mode == "direct"
+                    or client_format is not None))
     # `direct` = thin proxy: pick ONE model per the persona's static policy and
     # forward the client's request verbatim. Triggered by client-supplied tools
     # (Kilo/Cline agent loops) OR by an explicit `direct` execution_mode — the

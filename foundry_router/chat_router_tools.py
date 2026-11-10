@@ -90,7 +90,7 @@ TEMPLATES = {
 FIELD_KEYS = ("context_window", "max_output_tokens", "reasoning_effort", "force_reasoning_effort",
               "local_bias_strength", "routing", "backend", "description", "preferred_mcp_tools",
               "mcp_tools_in_direct", "mcp_with_client_tools", "mcp_tool_mode",
-              "max_tool_steps",
+              "max_tool_steps", "media_attachments",
               "fallback_policy", "execution_mode", "capabilities",
               "enabled", "benchmark_category", "expose_tool_trail", "quiet_narration",
               "output_style", "sampling_options", "escalate_when_local_busy", "outcome_judge")

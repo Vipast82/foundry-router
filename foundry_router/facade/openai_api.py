@@ -162,7 +162,13 @@ def _to_ollama_messages(raw: list) -> list[dict]:
             role = "system"
         content = m.get("content")
         images: list[str] = []
+        side_urls: list = []
+        side_parts: list = []
         if isinstance(content, list):
+            # v0.181.117: http(s) image URLs and audio / video / file parts were dropped here;
+            # they ride on the side for media_attachments (models never see these keys)
+            from ..media_attachments import openai_side_parts
+            side_urls, side_parts = openai_side_parts(content)
             texts = []
             for part in content:
                 if not isinstance(part, dict):
@@ -178,6 +184,10 @@ def _to_ollama_messages(raw: list) -> list[dict]:
         mm: dict = {"role": role, "content": content or ""}
         if images:
             mm["images"] = images
+        if side_urls:
+            mm["_media_urls"] = side_urls
+        if side_parts:
+            mm["_media_parts"] = side_parts
         if m.get("tool_calls"):
             mm["tool_calls"] = [
                 {"id": tc.get("id"), "type": "function",

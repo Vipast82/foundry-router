@@ -5088,6 +5088,8 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-trail">
         <label title="Direct mode = a client that sends its OWN tools (Cline, OpenCode, Kilo). When ON and this persona has MCP tools attached above, those tools are offered to the model ALONGSIDE the client's tools: Foundry runs its own tool calls and keeps going; the client's tool calls go back to the client as usual. Leave the persona's tool list empty (or turn this off) to keep direct mode client-tools-only — e.g. a Cline persona that uses Cline's own MCP servers and wants minimum context.">persona tools in direct mode</label>
         <input type="checkbox" id="pe-mcp-direct">
+        <label title="When this persona has Media_Gen tools and the chat carries attachments (pictures, audio, video), upload them to media-gen and add a line like [Attached for media tools: image 1 = upload:...] to the message, so the model can pass the picture to a media tool. The picture stays in the message. Default on.">media attachments</label>
+        <input type="checkbox" id="pe-media-att">
         <label title="When the CLIENT sends its own tools (AnythingLLM @agent, Cline, Kilo, Open WebUI tools), which of this persona's MCP tools still ride along. all (default) = every attached tool. off = none, the client's own only. auto-dedupe = all except ones that duplicate a client tool by name or purpose (web search, page fetch, files, shell, SQL, image / speech / music generation). only these = the server or tool names you list (comma-separated). Each tool definition is prompt the model reads cold on a new chat (Foundry-Chat's 58 were ~13k tokens, ~11 s on Strata; the 4 media tools ~1.5k). A client key's own setting (Clients &amp; keys) wins over this. Never chosen per message, so the prompt prefix stays cached. Plain chat (no client tools) always gets the attached tools.">MCP tools with client tools</label>
         <span id="pe-mcp-client-box">${_mcpPolicyHTML("pe-mcp-client", null, "all (default)")}</span></div>
       <div class="row"><label title="Serve this persona with an external AGENT (Hermes) instead of a model: the whole conversation is forwarded to it, its answer streams back and its tool activity shows as thinking. Model-routing fields above then only apply as the fallback when the agent is down or the request came from an agent (loop protection). Client tools are not forwarded — the agent uses its own. Configure agents in Tools &amp; MCP → Agents.">served by agent</label>
@@ -5165,6 +5167,7 @@ async function tabPersonas() {
     preferred_mcp_tools: readPreferredMcp(
       parseTags((window._personas[$("#pe-name").value.trim()] || {}).preferred_mcp_tools)),
     mcp_tool_mode: $("#pe-mcp-loading").value || null,
+    media_attachments: $("#pe-media-att").checked ? 1 : 0,
     max_tool_steps: $("#pe-tsteps").value ? parseInt($("#pe-tsteps").value, 10) : null,
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
@@ -5431,6 +5434,7 @@ window.editPersona = name => {
   if ($("#pe-mcp-all")) $("#pe-mcp-all").checked = every;
   if ($("#pe-mcp-loading")) $("#pe-mcp-loading").value = p.mcp_tool_mode === "finder" ? "finder" : "";
   if ($("#pe-tsteps")) $("#pe-tsteps").value = p.max_tool_steps || "";
+  if ($("#pe-media-att")) $("#pe-media-att").checked = p.media_attachments == null ? true : !!p.media_attachments;
   document.querySelectorAll("#pe-mcp .mcp-item").forEach(item => {
     const s = item.dataset.server;
     if (every) {
@@ -6927,6 +6931,8 @@ function mediaCard(md) {
       <label title="Per client key, 24 h; 0 = no cap">per client / day</label><input id="md-client" type="number" min="0" style="width:70px" value="${c.client_jobs_per_day}">
       <label>at once</label><input id="md-conc" type="number" min="1" max="8" style="width:60px" value="${c.max_concurrent}">
       <button id="md-save">Save</button></div>
+    <div class="row"><label title="Chat attachments (pictures, audio, video) are uploaded here so Media_Gen tools get a reference (upload:...) instead of base64. Empty = the Media_Gen MCP server's URL with /mcp replaced by /upload. The MEDIA_GEN_UPLOAD_URL environment variable wins over this.">attachment upload URL</label><input id="md-att-url" size="40" value="${esc(c.attachments_upload_url || "")}" placeholder="auto (Media_Gen /mcp → /upload)">
+      <label title="Attachment URLs on these hosts (e.g. a chat front end's file store) are fetched by Foundry and uploaded; other public URLs go to media-gen as they are. Foundry's own /media/a/ links are always fetched. Comma-separated.">fetch hosts</label><input id="md-att-hosts" size="30" value="${esc((c.attachments_fetch_hosts || []).join(", "))}" placeholder="none"></div>
     <p class="hint">A timeout is never resubmitted, the same request within ${c.dedupe_minutes} min returns the existing job, and a refused or unavailable model fails without falling back to another model or provider. Kilo/Cline save results into the project via the local media adapter (contrib/media-adapter).</p>
     ${jobs ? `<table><tr><th>time (UTC)</th><th>client</th><th>model</th><th>status</th><th>prompt</th><th>time</th><th>result</th></tr>${jobs}</table>` : '<p class="hint">No image jobs yet.</p>'}
   </div>`;
@@ -6942,7 +6948,9 @@ function bindMediaCard() {
         backend: $("#md-backend").value, default_model: $("#md-final").value.trim(),
         draft_model: $("#md-draft").value.trim(), models: $("#md-models").value,
         jobs_per_5h: +$("#md-5h").value, jobs_per_day: +$("#md-day").value,
-        client_jobs_per_day: +$("#md-client").value, max_concurrent: +$("#md-conc").value}});
+        client_jobs_per_day: +$("#md-client").value, max_concurrent: +$("#md-conc").value,
+        attachments_upload_url: $("#md-att-url").value.trim(),
+        attachments_fetch_hosts: $("#md-att-hosts").value}});
       toast("Image settings saved"); render();
     } catch (e) { toast(e.message, true); }
   };

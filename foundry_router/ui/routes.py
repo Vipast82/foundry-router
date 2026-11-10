@@ -1516,9 +1516,18 @@ async def set_media(request: Request):
     for k in ("enabled", "allow_paid_api", "mcp_tools"):
         if k in body:
             updates[k] = bool(body[k])
-    for k in ("backend", "default_model", "draft_model"):
+    for k in ("backend", "default_model", "draft_model", "attachments_upload_url"):
         if k in body:
             updates[k] = str(body[k] or "").strip()
+    if "attachments_fetch_hosts" in body:
+        hosts = body["attachments_fetch_hosts"]
+        if isinstance(hosts, str):
+            hosts = hosts.replace("\n", ",").split(",")
+        if not isinstance(hosts, list):
+            return JSONResponse({"error": "attachments_fetch_hosts must be a list"},
+                                status_code=400)
+        updates["attachments_fetch_hosts"] = [str(h).strip().lower() for h in hosts
+                                              if str(h).strip()]
     if "models" in body:
         models = body["models"]
         if isinstance(models, str):

@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.117 — chat attachments reach media-gen as references
+
+A picture attached in a chat (AnythingLLM, Open WebUI, anything on the OpenAI or Ollama facade) arrives as base64 inside the message, and a model can't copy megabytes of base64 into a tool argument, so "use this photo as the singer" or "make this picture talk" failed. media-gen v5.11 takes media as references and has a JSON upload endpoint (`POST <media-gen>/upload {"files": [{name, type, data}]}` → `{"uploads": [{ref, kind, file, sha256}], "errors": [...]}`).
+
+New `media_attachments.py`, called once per chat request in `_chat_dispatch` (after the persona is resolved, before the strict / direct / agent / pipeline paths split), so it works for every client and backend:
+
+- **When:** the persona's new `media_attachments` setting is on (default on; persona editor, next to the tool settings), this request's tool set includes a Media_Gen tool after tool policy and dedupe (direct mode: what `_direct_mcp_split` offers, or the finder pair that reaches it; agent mode: the persona's grants), and a user message carries media.
+- **What:** `data:` images (Ollama `images` too) are uploaded; a URL on Foundry's own file store (`/media/a/`) or a host in `media.attachments_fetch_hosts` is fetched here and uploaded; any other public http(s) URL is passed as its own reference (media-gen fetches URLs). `input_audio` parts and file parts with an image, audio or video type are handled the same way. Every user message is processed, not just the last, so "the photo I sent earlier" works. The OpenAI facade now keeps http(s) image URLs and audio / video / file parts on the side (`_media_urls`, `_media_parts`); `_canonical_messages` drops those keys, so models never see them.
+- **Injection:** in the same user message, after its attachments, one line: `[Attached for media tools: image 1 = upload:...; image 2 = ...]`, numbered per kind across the conversation. The pictures stay in place for vision models. The system prompt is unchanged; one sentence telling the model to pass the references to Media_Gen tools goes after the last line.
+- **Cache:** sha256 → reference, an in-memory LRU of 400, so the same picture is uploaded once (media-gen also dedupes by sha256).
+- **Failures never block the chat:** 15 s upload timeout; an unreachable media-gen, a rejected file, an attachment over 50 MB or unreadable data becomes `[image 1 couldn't be passed to media tools: <reason>]` plus a warning event (persona and reason, never the data). Uploads are batched under media-gen's limits (20 files, 64 MB).
+- **Config:** `MEDIA_GEN_UPLOAD_URL` (env) wins; else `media.attachments_upload_url`; else the Media_Gen MCP server's URL with `/mcp` (or `/sse`) replaced by `/upload`. Both media settings are in Settings → Images (*attachment upload URL*, *fetch hosts*). One INFO event per request that injected references (count, kinds, size, time).
+- **Unchanged:** requests without attachments (the same message list goes through), streaming, tool policy and dedupe, the Media_Gen server and tool names, and the speech facade.
+
+Tests: `tests/test_media_attachments.py` (extraction from string / list content, several images, earlier turns, http URLs, audio, non-media parts; injection and numbering; the LRU; failure notes; own-store vs public URLs; the upload address; a real local fake `/upload` server; and an end-to-end chat through `/v1/chat/completions` with cache reuse, no-attachment and setting-off cases).
+
 ## v0.181.116 — a budget rule no longer waits the backend's queue timeout
 
 On 2026-11-09 a budget rule (`implementer-local-only`: paid calls of Foundry-Kilo-Implementer, 1 token per minute) kept the Implementer on local Qwen. `Ledger.reserve_wait` treated every denial with no reset time as a slot worth waiting for, up to the backend's `queue_timeout_seconds` (300 s). So each paid candidate in the Implementer's strict chain (Claude, then ChatGPT) waited five minutes before failing over, and every Implementer request sat about 10 minutes before reaching Strata (NW-1b: 682 s for a 73k-token prompt the model reads in about a minute; Strata showed no activity).

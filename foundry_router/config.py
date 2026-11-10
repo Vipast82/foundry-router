@@ -875,6 +875,14 @@ class MediaConfig(BaseModel):
     # Long-running tools (mcp_servers[].long_running): how long a chat request
     # waits before handing the model a job id instead.
     tool_inline_wait_seconds: int = 90
+    # -- chat attachments for media-gen (media_attachments.py, v0.181.117) ----
+    # Where attachments are uploaded: "" = the Media_Gen MCP server's URL with /mcp -> /upload
+    # (env MEDIA_GEN_UPLOAD_URL wins over both).
+    attachments_upload_url: str = ""
+    # Hosts whose attachment URLs Foundry fetches and uploads itself (e.g. a chat front end's
+    # file store); other public URLs are passed to media-gen as they are. /media/a/ links
+    # (Foundry's own store) are always fetched.
+    attachments_fetch_hosts: list[str] = Field(default_factory=list)
     # -- fallback (Victor 2026-10-27: "ChatGPT first, Media_Gen fallback") --
     # When gpt-image can't make the image (backend down or removed, timeout,
     # 5xx, its quota or the image budget used up) the job runs on this MCP

@@ -52,6 +52,7 @@ ALIASES: dict[str, dict] = {
 }
 CAPABILITIES = ("text", "tools", "image_input", "image_output")
 BOOL_FIELDS = ("enabled", "force_reasoning_effort", "mcp_tools_in_direct", "quiet_narration",
+               "media_attachments",
                "brain_handles_tools", "pipeline_check_enabled", "prefer_permissive",
                "prefer_loaded", "escalate_when_local_busy", "expose_tool_trail",
                "review_enabled", "review_prefilter", "route_footer")
