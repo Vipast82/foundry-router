@@ -29,6 +29,10 @@ CALL_TOOL = "foundry_call_tool"
 MODES = ("full", "finder")
 DEFAULT_LIMIT = 8
 MAX_LIMIT = 20
+# v0.181.111: a search result keeps its schemas whole (the brain's MCP preview is 2k chars),
+# and turns that only search do not use up a loop's step cap (at most this many per request)
+RESULT_CHARS = 12000
+FREE_FINDS = 6
 _DESC_CHARS = 400
 
 FIND_PARAMS = {

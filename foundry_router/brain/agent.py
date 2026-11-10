@@ -741,6 +741,14 @@ class AgentRunner:
         async def tools_node(state: AgentState) -> AgentState:
             msgs = list(state["messages"])
             done = False
+            from .. import tool_finder
+            calls = msgs[-1].get("tool_calls") or []
+            if calls and all(tc["function"]["name"] == tool_finder.FIND_TOOL for tc in calls) \
+                    and flags.get("free_finds", 0) < tool_finder.FREE_FINDS:
+                # v0.181.111: looking a tool up is not a step of the task; a turn that only
+                # searched gives its routing step back (at most FREE_FINDS times)
+                flags["free_finds"] = flags.get("free_finds", 0) + 1
+                ctx.guard.steps = max(0, ctx.guard.steps - 1)
             for tc in msgs[-1].get("tool_calls") or []:
                 name = tc["function"]["name"]
                 args = tc["function"].get("arguments") or {}
@@ -757,6 +765,8 @@ class AgentRunner:
                 # explicit truncation notice matters: without it a small brain
                 # assumes the preview IS the output and retypes it, truncated.
                 limit = self.brain.cfg.tool_result_limit_chars
+                if name == tool_finder.FIND_TOOL:
+                    limit = max(limit, tool_finder.RESULT_CHARS)   # schemas arrive whole
                 if len(result_text) > limit:
                     result_text = (
                         result_text[:limit]
@@ -1099,6 +1109,10 @@ class AgentRunner:
                                     arguments=args, executes_code=ex_code)
         emit("think", f"MCP tool {tool.server}/{tool.mcp_tool} completed in "
                       f"{dur_ms / 1000:.1f}s ({len(out)} chars).")
+        if name == tool_finder.FIND_TOOL:
+            # a tool search: its schemas must arrive whole (never the 2k MCP preview), and
+            # it is not an answer the user should get via use_last_result
+            return out[:tool_finder.RESULT_CHARS] or "(no tools found)", False
         flags["last_tool_result"] = out  # media artifacts (URLs) forward via use_last_result
         flags["tool_trail"].append((tool.mcp_tool, out))   # answer footer (opt-in)
         flags["last_worker_local"] = False  # MCP results aren't judged
@@ -1737,7 +1751,10 @@ class AgentRunner:
         # so the loop still gets the whole turn to act on.
         stream_reason = (getattr(self.brain.cfg, "stream_worker_reasoning", False)
                          and wt_info and wt_info.get("type") == "ollama")
-        for step in range(1, cap + 1):
+        from .. import tool_finder
+        step, free_finds = 0, 0
+        while step < cap:
+            step += 1
             result = backend = None
             err = None
             t_step = time.monotonic()
@@ -1848,7 +1865,7 @@ class AgentRunner:
                 # burning steps toward the cap (which would hand off to the brain
                 # and risk a duplicate job). The user re-checks in a NEXT turn.
                 key = _tool_call_key(tc["name"], tc.get("arguments") or {})
-                if key in seen_calls:
+                if key in seen_calls and tc["name"] != tool_finder.FIND_TOOL:
                     yield AgentEvent("think",
                                      f"{worker} re-called {tc['name']} with identical "
                                      f"arguments — stopping the in-loop poll and "
@@ -1931,6 +1948,11 @@ class AgentRunner:
                 if rich.images() and _model_has_vision(self.model_registry, worker):
                     tool_msg["images"] = rich.images()[:4]
                 messages.append(tool_msg)
+            if result.tool_calls and free_finds < tool_finder.FREE_FINDS and all(
+                    tc["name"] == tool_finder.FIND_TOOL for tc in result.tool_calls):
+                # v0.181.111: a turn that only looked tools up is not a task step
+                free_finds += 1
+                step -= 1
 
         # Step cap hit without a final answer.
         async for ev in hand_to_brain(f"{worker} hit the {cap}-step tool cap"):

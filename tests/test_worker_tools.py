@@ -256,3 +256,25 @@ async def test_no_trail_when_disabled(tmp_path):
     events = [ev async for ev in runner.run_worker_tools(ctx)]
     ans = [ev for ev in events if ev.kind == "answer"][0].text
     assert ans == "Clean answer."                                # no footer by default
+
+
+async def test_find_turns_do_not_use_up_the_worker_step_cap(tmp_path):
+    """v0.181.111: a find-on-demand worker that looks each tool up before calling it
+    (find, call, find, call, ...) is not handed to the brain after 3 tools."""
+    import types as _t
+    from foundry_router import tool_finder as TF
+    script = []
+    for i in range(4):
+        script += [_tool(TF.FIND_TOOL, query="web search"),
+                   ChatResult(tool_calls=[{"id": "1", "name": TF.CALL_TOOL, "arguments": {
+                       "name": "searxng_web_search", "arguments": {"query": f"q{i}"}}}])]
+    script.append(ChatResult(content="done after four searches"))
+    runner, ctx, pool, mcp = _make(tmp_path, worker_script=script)
+    ctx.persona = {**ctx.persona, "mcp_tool_mode": "finder"}
+    mcp.foundry_svc = _t.SimpleNamespace(
+        personas=_t.SimpleNamespace(get=lambda n: ctx.persona),
+        tool_registry=runner.tool_registry)
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    answers = [ev.text for ev in events if ev.kind == "answer"]
+    assert answers == ["done after four searches"]               # 9 turns, cap 6: not handed off
+    assert [c[2]["query"] for c in mcp.calls] == ["q0", "q1", "q2", "q3"]

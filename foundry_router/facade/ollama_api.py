@@ -2283,6 +2283,10 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     if mcp_defs:
         fmt = None                        # structured output would break tool calls
     tool_cap = int(getattr(brain_cfg, "worker_tool_max_steps", 6) or 6)
+    from .. import tool_finder
+    if tool_finder.FIND_TOOL in mcp_defs:
+        # v0.181.111: rounds spent looking tools up are not task rounds
+        tool_cap += tool_finder.FREE_FINDS
     base_convo = prompts.sanitize_history(messages)
     if mcp_defs:
         # persona calls of earlier mixed turns go back into their turns (A4)

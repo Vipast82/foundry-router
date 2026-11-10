@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.111 — looking a tool up no longer uses up the tool-step limit
+
+With find on demand (v0.181.109) every tool costs two model turns, a search and a call. The worker tool loop stops at `worker_tool_max_steps` (6) and hands the request to the brain, so a find-on-demand persona could run only about three tools per request. Three fixes:
+
+- **Search turns are free, up to `tool_finder.FREE_FINDS` (6) per request.** In the worker tool loop and the brain's loop, a turn whose only calls are `foundry_find_tools` gives its step back. Direct mode adds the same 6 rounds to its limit whenever the finder tools are offered. Real tool calls still count as before.
+- **Search results arrive whole.** The brain saw at most 2,000 characters of an MCP result (`mcp_result_limit_chars`), which cut the returned argument schemas mid-JSON. A search result now gets up to 12,000 characters, and it no longer becomes the "last tool result" that `return_to_user(use_last_result)` would send to the user.
+- **A repeated search is not a stuck poll.** The worker loop's poll guard stopped the loop on a second identical call, which ended a request that looked the same tool up twice. Searches are exempt; tool calls are still guarded.
+
+Test: `tests/test_worker_tools.py::test_find_turns_do_not_use_up_the_worker_step_cap`.
+
 ## v0.181.110 — the finder accepts the call shapes small models get wrong
 
 Local models (Qwen on Strata) handle a two-step "find, then call" well when the schema comes back in the result, but they often get the shape of the second call slightly wrong. Each of these used to cost a turn on an error; `foundry_call_tool` now accepts them:
