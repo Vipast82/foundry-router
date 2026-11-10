@@ -445,12 +445,19 @@ class Ledger:
         against the quota as it is when it actually starts."""
         import asyncio
         cfg = self.cfg
-        wait = max([r.wait_seconds for r in (cfg.rules if cfg and cfg.enabled else [])
-                    if r.enabled and matches(r.match, ctx)] or [0])
+        rule_wait = max([r.wait_seconds for r in (cfg.rules if cfg and cfg.enabled else [])
+                         if r.enabled and matches(r.match, ctx)] or [0])
+        # v0.181.116: the backend's queue_timeout is how long a call waits for a STREAM slot
+        # (backend-helpers). A rule's own denial waits only that rule's wait_seconds: a
+        # "deny paid for the Implementer" rule (2026-11-10) made every paid candidate wait
+        # the 300 s queue timeout before failover, 10 minutes per request on Strata.
+        queue_wait = 0.0
         if self._helpers_allowed(ctx.backend) is not None:
             c = (self.get_backends() or {}).get(ctx.backend)
-            wait = max(wait, float(getattr(c, "queue_timeout_seconds", 300) or 0))
-        deadline = time.monotonic() + wait
+            queue_wait = float(getattr(c, "queue_timeout_seconds", 300) or 0)
+        wait = max(rule_wait, queue_wait)
+        start = time.monotonic()
+        deadline = start + wait
         while True:
             opt = await self.optional_denial(ctx)
             if opt is not None:
@@ -460,8 +467,10 @@ class Ledger:
             denial = self.check(ctx)
             if denial is None:
                 return self.reserve(ctx)
-            slot = denial.rule != "paused" and (denial.reset_s is None or denial.reset_s <= wait)
-            if not slot or time.monotonic() >= deadline:
+            limit = queue_wait if denial.rule == "backend-helpers" else rule_wait
+            slot = (denial.rule != "paused" and limit > 0
+                    and (denial.reset_s is None or denial.reset_s <= limit))
+            if not slot or time.monotonic() >= min(deadline, start + limit):
                 self.record(ctx, "denied", denial.rule, denial.message)
                 raise denial
             await asyncio.sleep(0.5)

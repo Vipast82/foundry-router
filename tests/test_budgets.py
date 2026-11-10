@@ -431,3 +431,25 @@ def test_session_hold_is_set_in_the_limits_ui(streams, client):
     html = open(__import__("foundry_router").__path__[0] + "/ui/static/index.html",
                 encoding="utf-8").read()
     assert 'data-f="session_hold_seconds"' in html
+
+
+def test_a_rule_denial_does_not_wait_the_backends_queue_timeout():
+    """v0.181.116 (2026-11-10): a "deny paid for the Implementer" rule made each paid
+    candidate wait the backend's 300 s queue_timeout before failover, 10 minutes per request.
+    Only a stream-slot denial (backend-helpers) waits queue_timeout; a rule waits its own
+    wait_seconds (0 here)."""
+    from foundry_router.budget import Ledger
+    from foundry_router.db import Database
+    from types import SimpleNamespace
+    import tempfile, os
+    db = Database(os.path.join(tempfile.mkdtemp(), "w.sqlite"))
+    cfg = BudgetsConfig(rules=[BudgetRule(name="impl-local", match={"paid": True},
+                                          window_minutes=1, max_tokens=1)])
+    backends = {"meridian": SimpleNamespace(helpers_allowed=0, queue_timeout_seconds=300,
+                                            session_hold_seconds=60)}
+    led = Ledger(lambda: cfg, db, get_backends=lambda: backends)
+    t = time.monotonic()
+    with pytest.raises(BudgetDenied):
+        asyncio.run(led.reserve_wait(CallCtx(model="claude-sonnet-5-5", backend="meridian",
+                                             paid=True, est_tokens=25000)))
+    assert time.monotonic() - t < 2

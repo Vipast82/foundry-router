@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.116 — a budget rule no longer waits the backend's queue timeout
+
+On 2026-11-09 a budget rule (`implementer-local-only`: paid calls of Foundry-Kilo-Implementer, 1 token per minute) kept the Implementer on local Qwen. `Ledger.reserve_wait` treated every denial with no reset time as a slot worth waiting for, up to the backend's `queue_timeout_seconds` (300 s). So each paid candidate in the Implementer's strict chain (Claude, then ChatGPT) waited five minutes before failing over, and every Implementer request sat about 10 minutes before reaching Strata (NW-1b: 682 s for a 73k-token prompt the model reads in about a minute; Strata showed no activity).
+
+Now `queue_timeout_seconds` applies only to a stream-slot denial (`backend-helpers`: the backend serves the main stream plus `helpers_allowed`). Any other rule denial waits only the matching rules' own `wait_seconds` (default 0), so a "deny" rule fails over at once.
+
+Test: `tests/test_budgets.py::test_a_rule_denial_does_not_wait_the_backends_queue_timeout`.
+
+Live change the same night: the rule was removed and Foundry-Kilo-Implementer's chain set to the local model only (it was claude-sonnet-5-5 → gpt-6.1-sol → local).
+
 ## v0.181.115 — issue sweep: cleared pins stay cleared, unconfirmed aborts are retried, chat limits are settings
 
 Victor paused everything for a local model upgrade on 2026-11-10 and asked for an issue sweep. Fixes:
