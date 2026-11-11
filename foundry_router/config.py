@@ -257,6 +257,15 @@ class BackendConfig(BaseModel):
     # that ended in a final answer frees the stream at once, so a new task
     # never waits for a finished one.
     session_hold_seconds: float = Field(default=60.0, ge=0, le=3600)
+    # v0.181.118 (lanes.py): a LANE is a small local backend for short jobs. Its
+    # models are left out of automatic routing; a persona reaches it by naming its
+    # model, or through divert-when-busy. A request must fit the limits below.
+    lane: bool = False
+    lane_max_prompt_tokens: int = Field(default=3000, ge=0, le=2_000_000)
+    # output cap for a call served by the lane (0 = the persona's own cap)
+    lane_max_output_tokens: int = Field(default=400, ge=0, le=200_000)
+    lane_allow_tools: bool = False
+    lane_thinking: bool = False
     # Optional discovery fallback ONLY — used if the backend exposes no
     # model-list endpoint (§4.3: "do not hardcode model lists for backends
     # that can be discovered").
@@ -758,6 +767,10 @@ class ClientConfig(BaseModel):
     # Optional: only these personas are visible/usable for this client.
     personas: list[str] = Field(default_factory=list)
     enabled: bool = True
+    # v0.181.118: this client's place in a backend queue (queue_class.py): A interactive,
+    # B required, C optional, D background. None = queue.default_class. A coordinator
+    # purpose or a persona's own class wins over it.
+    queue_class: Optional[Literal["A", "B", "C", "D"]] = None
     # Show which model and backend answered: a "— via <model> @ <backend>" line
     # under each answer, and the route line in a buffered reply's reasoning.
     # For clients that hide reasoning (AnythingLLM's agent view, Open WebUI).
@@ -1075,6 +1088,37 @@ class AlertsConfig(BaseModel):
         return bool(self.classes.get(cls, True)) if cls in ALERT_CLASSES else False
 
 
+class QueueClassConfig(BaseModel):
+    # How long this class waits for a slot: the backend's queue_timeout_seconds times this.
+    wait_factor: float = Field(default=1.0, ge=0.1, le=100)
+    # A waiter counts as the next better class after this long (never above B). 0 = never.
+    promote_after_seconds: float = Field(default=0.0, ge=0, le=86400)
+
+
+def _queue_classes() -> dict:
+    return {"A": QueueClassConfig(wait_factor=1, promote_after_seconds=0),
+            "B": QueueClassConfig(wait_factor=2, promote_after_seconds=0),
+            "C": QueueClassConfig(wait_factor=3, promote_after_seconds=600),
+            "D": QueueClassConfig(wait_factor=6, promote_after_seconds=900)}
+
+
+class QueueConfig(BaseModel):
+    """Who goes first when a backend is full (queue_class.py, v0.181.118)."""
+    # Off = every waiter is class A: the old first come, first served order and
+    # the backend's own queue timeout for everyone.
+    enabled: bool = True
+    # The class of traffic nothing else classifies (no coordinator purpose, no
+    # persona or client class). A = treat it as a person waiting.
+    default_class: Literal["A", "B", "C", "D"] = "A"
+    classes: dict[str, QueueClassConfig] = Field(default_factory=_queue_classes)
+    # A strict persona whose only models sit on a backend that just went down
+    # (restart, a blip) is held this long for the backend to come back instead of
+    # being refused at once. 0 = refuse at once. A person (class A) is held for the
+    # shorter interactive time.
+    recovery_hold_seconds: float = Field(default=90.0, ge=0, le=1800)
+    recovery_hold_interactive_seconds: float = Field(default=20.0, ge=0, le=1800)
+
+
 class AppConfig(BaseModel):
     # Config file format version (see migrate_raw); stamped on load.
     config_version: int = 1
@@ -1111,6 +1155,7 @@ class AppConfig(BaseModel):
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    queue: QueueConfig = Field(default_factory=QueueConfig)
 
 
 # --------------------------------------------------------------------------- #

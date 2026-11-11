@@ -44,7 +44,7 @@ def gated(fleet):
     svc.quota_gate.evaluate = evaluate               # evaluate_fresh() uses it too
     svc.pool.ledger = svc.ledger                     # as main.py wires the real pool
     real_get = svc.registry.get
-    vision = {"claude-sonnet-5-5", "gpt-6.1-sol", "qwen3.8-flash-next-iq3_s"}
+    vision = {"claude-sonnet-5-5", "gpt-6.1-sol", "qwen3.8-flash-next-unsloth-ud-iq3_xxs"}
     svc.registry.get = lambda m: ({**(real_get(m) or {}), "capabilities": '["vision"]'}
                                   if m in vision else real_get(m))
     yield svc, states, vision
@@ -149,13 +149,13 @@ def test_local_fallback_is_never_used(gated, client):
     svc.personas.upsert("Helper-Local-Fallback", routing="strict", enabled=1,
                         execution_mode="direct", fallback_policy="refuse",
                         pinned_models=json.dumps(["claude-sonnet-5-5",
-                                                  "qwen3.8-flash-next-iq3_s"]),
+                                                  "qwen3.8-flash-next-unsloth-ud-iq3_xxs"]),
                         model_allowlist=json.dumps(["claude-sonnet-5-5",
-                                                    "qwen3.8-flash-next-iq3_s"]))
+                                                    "qwen3.8-flash-next-unsloth-ud-iq3_xxs"]))
     a = _adm(client, persona="Helper-Local-Fallback")
     assert [r["backend"] for r in a["routes"]] == ["meridian", "strata"]
     assert a["admit"] is False and a["reason"] == "usage endpoint HTTP 429"
-    assert a["fallbacks_ineligible"] == ["strata/qwen3.8-flash-next-iq3_s: local backend "
+    assert a["fallbacks_ineligible"] == ["strata/qwen3.8-flash-next-unsloth-ud-iq3_xxs: local backend "
                                          "(held by the primary)"]
 
 

@@ -211,6 +211,7 @@ class Ledger:
         self.db = db
         self.get_backends = get_backends          # () -> {name: BackendConfig}
         self._active: dict[int, CallCtx] = {}    # event id -> in-flight call
+        self._stream_waiting: dict[int, dict] = {}   # calls waiting for a backend stream
         self._recorded: dict = {}
         # quota_gate.QuotaGate (helper policy): optional-purpose calls are
         # admitted only on fresh, below-cutoff quota. None = not wired (tests).
@@ -451,29 +452,106 @@ class Ledger:
         # (backend-helpers). A rule's own denial waits only that rule's wait_seconds: a
         # "deny paid for the Implementer" rule (2026-11-10) made every paid candidate wait
         # the 300 s queue timeout before failover, 10 minutes per request on Strata.
+        # v0.181.118: the stream wait is ordered by queue class (queue_class.py). It was
+        # an unordered 0.5 s poll: whoever looked first after a stream came free took it,
+        # so a background job could beat a person who had waited longer. A class also
+        # scales the wait limit (A x1, B x2, C x3, D x6 of the backend's queue timeout).
+        from . import queue_class
+        cls = queue_class.current()
         queue_wait = 0.0
         if self._helpers_allowed(ctx.backend) is not None:
             c = (self.get_backends() or {}).get(ctx.backend)
-            queue_wait = float(getattr(c, "queue_timeout_seconds", 300) or 0)
+            queue_wait = queue_class.wait_seconds(
+                cls, float(getattr(c, "queue_timeout_seconds", 300) or 0))
         wait = max(rule_wait, queue_wait)
         start = time.monotonic()
         deadline = start + wait
-        while True:
-            opt = await self.optional_denial(ctx)
-            if opt is not None:
-                # deferred, not queued: the coordinator retries after next_eligible
-                self.record(ctx, "denied", opt.rule, opt.message)
-                raise opt
-            denial = self.check(ctx)
-            if denial is None:
-                return self.reserve(ctx)
-            limit = queue_wait if denial.rule == "backend-helpers" else rule_wait
-            slot = (denial.rule != "paused" and limit > 0
-                    and (denial.reset_s is None or denial.reset_s <= limit))
-            if not slot or time.monotonic() >= min(deadline, start + limit):
-                self.record(ctx, "denied", denial.rule, denial.message)
-                raise denial
-            await asyncio.sleep(0.5)
+        me: Optional[dict] = None
+        try:
+            while True:
+                opt = await self.optional_denial(ctx)
+                if opt is not None:
+                    # deferred, not queued: the coordinator retries after next_eligible
+                    self.record(ctx, "denied", opt.rule, opt.message)
+                    raise opt
+                denial = self.check(ctx)
+                if denial is None:
+                    ahead = self._stream_ahead(ctx, cls, me)
+                    if not ahead:
+                        return self.reserve(ctx)
+                    # the stream is free, but someone better placed is waiting for it
+                    denial = BudgetDenied(
+                        f"backend {ctx.backend!r}: {ahead} request(s) ahead in the queue for "
+                        f"its stream (this request is class {cls}).", rule="backend-helpers")
+                limit = queue_wait if denial.rule == "backend-helpers" else rule_wait
+                slot = (denial.rule != "paused" and limit > 0
+                        and (denial.reset_s is None or denial.reset_s <= limit))
+                if not slot or time.monotonic() >= min(deadline, start + limit):
+                    self.record(ctx, "denied", denial.rule, denial.message)
+                    raise denial
+                if denial.rule == "backend-helpers":
+                    if me is None:
+                        me = self._stream_wait_enter(ctx, cls)
+                    me["seen"] = time.monotonic()
+                await asyncio.sleep(0.5)
+        finally:
+            if me is not None:
+                self._stream_waiting.pop(me["id"], None)
+
+    # -- the ordered wait for a backend stream (v0.181.118) --------------------------
+
+    STREAM_WAITER_STALE_S = 3.0      # a waiter that stopped polling no longer counts
+
+    def _stream_wait_enter(self, ctx: CallCtx, cls: str) -> dict:
+        self._stream_seq = getattr(self, "_stream_seq", 0) + 1
+        now = time.monotonic()
+        w = {"id": self._stream_seq, "backend": ctx.backend, "cls": cls, "since": now,
+             "seen": now, "client": ctx.client_id, "persona": ctx.persona,
+             "session": ctx.key("session"), "request_id": ctx.request_id}
+        self._stream_waiting[w["id"]] = w
+        return w
+
+    def _stream_live(self, backend: str) -> list[dict]:
+        """Waiters for a stream on `backend`, in the order they will be served."""
+        from . import queue_class
+        now = time.monotonic()
+        live = [w for w in self._stream_waiting.values()
+                if w["backend"] == backend and now - w["seen"] <= self.STREAM_WAITER_STALE_S]
+        return sorted(live, key=lambda w: (queue_class.rank(w["cls"], now - w["since"]),
+                                           w["since"]))
+
+    def _stream_ahead(self, ctx: CallCtx, cls: str, me: Optional[dict]) -> int:
+        """How many waiters go before this call for a free stream on its backend.
+        0 for a session that already holds a stream (it isn't taking a new one)."""
+        if self._helpers_allowed(ctx.backend) is None or ctx.client_id in SLOT_EXEMPT_CLIENTS:
+            return 0
+        order = self._stream_live(ctx.backend)
+        if me is not None:
+            return next((i for i, w in enumerate(order) if w["id"] == me["id"]), 0)
+        if not order:
+            return 0
+        if ctx.key("session") in self.sessions(ctx.backend):
+            return 0
+        from . import queue_class
+        mine = queue_class.rank(cls)
+        # a newcomer goes behind everyone already waiting in its class or a better one
+        return sum(1 for w in order
+                   if queue_class.rank(w["cls"], time.monotonic() - w["since"]) <= mine)
+
+    def stream_waiters(self) -> dict:
+        """{backend: [{position, client, persona, class, counts_as, waited_s, ...}]}"""
+        from . import queue_class
+        now = time.monotonic()
+        out: dict = {}
+        for b in {w["backend"] for w in self._stream_waiting.values()}:
+            rows = self._stream_live(b)
+            if rows:
+                out[b] = [{"position": i + 1, "client": w["client"], "persona": w["persona"],
+                           "class": w["cls"],
+                           "counts_as": queue_class.effective(w["cls"], now - w["since"]),
+                           "waited_s": round(now - w["since"], 1), "session": w["session"],
+                           "request_id": w["request_id"]} for i, w in enumerate(rows)]
+        return out
 
     def settle(self, eid: Optional[int], status: str, input_tokens: int = 0,
                output_tokens: int = 0, detail: str = "", final: bool = False) -> None:

@@ -90,7 +90,8 @@ TEMPLATES = {
 FIELD_KEYS = ("context_window", "max_output_tokens", "reasoning_effort", "force_reasoning_effort",
               "local_bias_strength", "routing", "backend", "description", "preferred_mcp_tools",
               "mcp_tools_in_direct", "mcp_with_client_tools", "mcp_tool_mode",
-              "max_tool_steps", "media_attachments",
+              "max_tool_steps", "media_attachments", "queue_class",
+              "divert_when_busy", "pin_conversation",
               "fallback_policy", "execution_mode", "capabilities",
               "enabled", "benchmark_category", "expose_tool_trail", "quiet_narration",
               "output_style", "sampling_options", "escalate_when_local_busy", "outcome_judge")
@@ -780,7 +781,8 @@ def register(eng) -> None:                    # noqa: C901 - the catalog in one 
     def _unresearched(svc) -> list[dict]:
         served = set()
         try:
-            served = set(svc.pool.available_models())
+            from .lanes import all_models as _all_models
+            served = set(_all_models(svc.pool))
         except Exception:                                        # noqa: BLE001
             pass
         rows = svc.db.query("SELECT id, provider, research_status, research_note, enabled, source "

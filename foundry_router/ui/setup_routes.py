@@ -79,6 +79,7 @@ def _view(c, usage: dict, seen: dict) -> dict:
             "secret_names": list(getattr(c, "secret_names", None) or []),
             "slots": list(getattr(c, "slots", None) or []),
             "route_footer": bool(getattr(c, "route_footer", False)),
+            "queue_class": getattr(c, "queue_class", None),
             "mcp_with_client_tools": getattr(c, "mcp_with_client_tools", None),
             "key_kind": client_keys.key_kind(c),
             "key_hint": c.key_hint,
@@ -211,6 +212,13 @@ async def update_client(request: Request, name: str):
         upd["enabled"] = bool(body["enabled"])
     if "route_footer" in body:
         upd["route_footer"] = bool(body["route_footer"])
+    if "queue_class" in body:
+        from .. import queue_class as _qc
+        raw_cls = body["queue_class"]
+        cls = _qc.normalize(raw_cls)
+        if raw_cls not in (None, "") and cls is None:
+            return _err("queue_class must be A, B, C, D or empty")
+        upd["queue_class"] = cls
     tool_warnings: list = []
     if "mcp_with_client_tools" in body:
         from .. import persona_rules
@@ -308,10 +316,80 @@ async def clear_rejected(request: Request, fingerprint: str = ""):
     return {"ok": True}
 
 
+# -- queue classes (queue_class.py) -------------------------------------------------
+
+@router.get("/admin/api/setup/queue")
+async def get_queue(request: Request):
+    """Queue settings plus who is waiting right now, per backend."""
+    svc = _svc(request)
+    from .. import queue_class as _qc
+    from .. import lanes as _lanes
+    return {"settings": _qc.describe(svc.config_store.config.queue),
+            "queues": getattr(svc.pool, "queue_status", lambda: [])(),
+            "lanes": _lanes.describe(svc)}
+
+
+@router.post("/admin/api/setup/queue")
+async def set_queue(request: Request):
+    """{enabled?, default_class?, classes?: {A: {wait_factor?, promote_after_seconds?}, ...}}"""
+    svc = _svc(request)
+    body = await request.json()
+    from .. import queue_class as _qc
+    upd: dict = {}
+    try:
+        if "enabled" in body:
+            upd["enabled"] = bool(body["enabled"])
+        if "default_class" in body:
+            cls = _qc.normalize(body["default_class"])
+            if cls is None:
+                raise ValueError("default_class must be A, B, C or D")
+            upd["default_class"] = cls
+        for k in ("recovery_hold_seconds", "recovery_hold_interactive_seconds"):
+            if k in body and body[k] not in (None, ""):
+                h = float(body[k])
+                if not 0 <= h <= 1800:
+                    raise ValueError(f"{k} must be between 0 and 1800")
+                upd[k] = h
+        classes = {}
+        for name, row in (body.get("classes") or {}).items():
+            cls = _qc.normalize(name)
+            if cls is None or not isinstance(row, dict):
+                raise ValueError(f"unknown queue class {name!r}")
+            out = {}
+            if "wait_factor" in row:
+                f = float(row["wait_factor"])
+                if not 0.1 <= f <= 100:
+                    raise ValueError("wait_factor must be between 0.1 and 100")
+                out["wait_factor"] = f
+            if "promote_after_seconds" in row:
+                p = float(row["promote_after_seconds"])
+                if not 0 <= p <= 86400:
+                    raise ValueError("promote_after_seconds must be between 0 and 86400")
+                out["promote_after_seconds"] = p
+            classes[cls] = out
+    except (ValueError, TypeError) as e:
+        return _err(str(e))
+
+    def mutate(raw):
+        q = raw.setdefault("queue", {})
+        q.update(upd)
+        if classes:
+            cur = q.setdefault("classes", {})
+            for cls, row in classes.items():
+                base = dict(_qc.DEFAULTS[cls])
+                base.update(cur.get(cls) or {})
+                base.update(row)
+                cur[cls] = base
+    svc.config_store.save(mutate)
+    svc.db.log_event("info", "backend_pool", "queue classes changed", str({**upd, **classes})[:300])
+    return {"ok": True, "settings": _qc.describe(svc.config_store.config.queue)}
+
+
 # -- backend limits -----------------------------------------------------------------
 
 LIMIT_FIELDS = ("max_concurrent", "helpers_allowed", "queue_timeout_seconds",
-                "session_hold_seconds")
+                "session_hold_seconds", "lane", "lane_max_prompt_tokens",
+                "lane_max_output_tokens", "lane_allow_tools", "lane_thinking")
 
 
 @router.get("/admin/api/setup/limits")
@@ -370,6 +448,15 @@ async def set_limits(request: Request):
             if not 0 <= h <= 3600:
                 raise ValueError("session_hold_seconds must be between 0 and 3600")
             upd["session_hold_seconds"] = h
+        for k in ("lane", "lane_allow_tools", "lane_thinking"):
+            if k in body:
+                upd[k] = bool(body[k])
+        for k, hi in (("lane_max_prompt_tokens", 2_000_000), ("lane_max_output_tokens", 200_000)):
+            if k in body and body[k] not in (None, ""):
+                n = int(body[k])
+                if not 0 <= n <= hi:
+                    raise ValueError(f"{k} must be between 0 and {hi}")
+                upd[k] = n
     except (ValueError, TypeError) as e:
         return _err(str(e))
 

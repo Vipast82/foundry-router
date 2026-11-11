@@ -148,6 +148,7 @@ def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[O
             if matches(k, c):
                 return ({"client_id": c.name, "scopes": list(c.scopes or ["inference"]),
                          "personas": list(c.personas or []),
+                         "queue_class": getattr(c, "queue_class", None),
                          "projects": list(getattr(c, "projects", None) or []),
                          "secret_names": list(getattr(c, "secret_names", None) or []),
                          "slots": list(getattr(c, "slots", None) or [])}, True)
@@ -261,6 +262,9 @@ def correlation(headers: dict, client_id: str = "") -> dict:
     """Correlation fields for a request: explicit x-foundry-* headers, else the
     client's own session header, plus what a registered work binding adds."""
     corr = {f: headers[h][:120] for h, f in CORRELATION_HEADERS.items() if headers.get(h)}
+    if headers.get("x-foundry-priority"):
+        # v0.181.118: a request may lower its own queue class (queue_class.py)
+        corr["priority"] = headers["x-foundry-priority"][:20]
     if "session_id" not in corr:
         for h in SESSION_FALLBACK_HEADERS:
             if headers.get(h):

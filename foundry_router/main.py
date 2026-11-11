@@ -111,6 +111,9 @@ class Services:
                                       (getattr(self.pool, "backends", None) or {}).items()})
         self.guardrails.ledger = self.ledger
         self.pool.ledger = self.ledger
+        from . import queue_class
+        from .lanes import all_models as _all_models
+        queue_class.configure(lambda: self.config_store.config.queue)
         from .capture import Capture
         from .configops import secret_values
         self.capture = Capture(lambda: self.config_store.config.training_capture,
@@ -131,7 +134,7 @@ class Services:
         self.brain.capture = self.capture
         self.research = ResearchAgent(
             cfg.registry.research, db, self.registry, self.mcp,
-            llm=self._research_llm, available_models=lambda: list(self.pool.available_models()))
+            llm=self._research_llm, available_models=lambda: list(_all_models(self.pool)))
         self.agent = AgentRunner(self.brain, self.pool, self.tool_registry,
                                  self.registry, self.guardrails, self.meridian_usage,
                                  research=self.research)
@@ -297,6 +300,13 @@ class Services:
                         ctx = subscription_context(model_id)
                         if ctx:
                             fields["context_length"] = ctx
+                    elif s.config.type == "openai-compatible" and getattr(
+                            s.config, "effective_flavor", None) in ("llamacpp", "vllm", "unsloth"):
+                        # v0.181.118: a local llama.cpp / vLLM / Unsloth server is free too.
+                        # Only Ollama backends were marked, so Strata's model had no cost
+                        # and the brain ranked it as "unknown cost".
+                        fields.update(relative_cost_tier="free",
+                                      cost_per_1k_input=0.0, cost_per_1k_output=0.0)
                     if not refined:
                         tags = tags_from_name(model_id)
                         if tags:

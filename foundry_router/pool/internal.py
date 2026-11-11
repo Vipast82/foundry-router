@@ -26,6 +26,9 @@ from .protocols import BaseProtocol, ChatResult, ProtocolError, make_protocol
 
 log = logging.getLogger(__name__)
 
+# how often a queued streaming call reports its place in the queue
+QUEUE_REPORT_SECONDS = 5.0
+
 
 @dataclass
 class BackendState:
@@ -45,32 +48,52 @@ class QueueTimeout(Exception):
     pass
 
 
+@dataclass
+class _Waiter:
+    fut: Any
+    client: str
+    cls: str
+    since: float
+    info: dict = field(default_factory=dict)
+
+
 class FairGate:
     """At most `capacity` calls on one backend at a time. Callers beyond that
-    wait; a freed slot goes to the next CLIENT in turn (round robin), FIFO
-    within a client, so one client's burst can't starve another."""
+    wait. A freed slot goes to the best queue class waiting (queue_class.py:
+    A interactive, B required, C optional, D background, with aging), then to
+    the next CLIENT in turn inside that class (round robin), first in first
+    out within a client, so one client's burst can't starve another."""
 
     def __init__(self, capacity: int):
         self.capacity = max(1, int(capacity))
         self.active = 0
-        self.waiting: dict = {}                 # client -> deque[(future, since)]
-        self.order: deque = deque()             # clients with waiters, in turn order
+        self.waiters: list[_Waiter] = []        # arrival order
+        self.order: deque = deque()             # clients, in turn order
         self.served_from_queue = 0
         self.timeouts = 0
 
     def waiting_count(self) -> int:
-        return sum(len(q) for q in self.waiting.values())
+        return len(self.waiters)
 
-    async def acquire(self, client: str, timeout: float) -> float:
+    @property
+    def waiting(self) -> dict:
+        """client -> how many of its calls wait (status / older callers)."""
+        out: dict = {}
+        for w in self.waiters:
+            out[w.client] = out.get(w.client, 0) + 1
+        return out
+
+    async def acquire(self, client: str, timeout: float, cls: str = "A",
+                      info: Optional[dict] = None) -> float:
         """Seconds waited. Raises QueueTimeout."""
-        if self.active < self.capacity and not self.waiting:
+        if self.active < self.capacity and not self.waiters:
             self.active += 1
             return 0.0
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         t0 = time.monotonic()
-        q = self.waiting.setdefault(client, deque())
-        q.append((fut, t0))
+        w = _Waiter(fut, client, cls or "A", t0, dict(info or {}))
+        self.waiters.append(w)
         if client not in self.order:
             self.order.append(client)
         try:
@@ -80,52 +103,88 @@ class FairGate:
                 self.release()                  # the slot arrived just as we gave up
             else:
                 fut.cancel()
-                self._forget(client, fut)
+                self._forget(w)
             if isinstance(e, asyncio.TimeoutError):
                 self.timeouts += 1
                 raise QueueTimeout(f"waited {int(timeout)}s for a free slot") from None
             raise
         return time.monotonic() - t0
 
-    def _forget(self, client, fut) -> None:
-        q = self.waiting.get(client)
-        if q is None:
-            return
-        for item in list(q):
-            if item[0] is fut:
-                q.remove(item)
-        if not q:
-            self.waiting.pop(client, None)
+    def _forget(self, w: _Waiter) -> None:
+        if w in self.waiters:
+            self.waiters.remove(w)
+        if not any(x.client == w.client for x in self.waiters):
             try:
-                self.order.remove(client)
+                self.order.remove(w.client)
             except ValueError:
                 pass
 
+    def _ordered(self) -> list[_Waiter]:
+        """Waiters in the order they will be served: class (aged), then the
+        clients' turn order, then arrival."""
+        from .. import queue_class
+        now = time.monotonic()
+        turn = {c: i for i, c in enumerate(self.order)}
+        left = sorted(self.waiters, key=lambda w: (queue_class.rank(w.cls, now - w.since),
+                                                    w.since))
+        out: list[_Waiter] = []
+        while left:
+            best = queue_class.rank(left[0].cls, now - left[0].since)
+            tier = [w for w in left if queue_class.rank(w.cls, now - w.since) == best]
+            left = [w for w in left if w not in tier]
+            # round robin between the clients of this tier
+            per: dict = {}
+            for w in tier:
+                per.setdefault(w.client, deque()).append(w)
+            clients = sorted(per, key=lambda c: turn.get(c, len(turn)))
+            while clients:
+                for c in list(clients):
+                    out.append(per[c].popleft())
+                    if not per[c]:
+                        clients.remove(c)
+        return out
+
+    def ahead_of(self, fut) -> int:
+        """How many waiters are served before the one holding `fut`."""
+        for i, w in enumerate(self._ordered()):
+            if w.fut is fut:
+                return i
+        return 0
+
     def release(self) -> None:
-        while self.order:
-            client = self.order.popleft()
-            q = self.waiting.get(client)
-            if not q:
-                self.waiting.pop(client, None)
-                continue
-            fut, _t0 = q.popleft()
-            if q:
-                self.order.append(client)       # back of the line for its next waiter
-            else:
-                self.waiting.pop(client, None)
-            if not fut.done():
-                fut.set_result(True)            # slot handed over: active unchanged
+        for w in self._ordered():
+            self.waiters.remove(w)
+            # its client goes to the back of the line for its next waiter
+            try:
+                self.order.remove(w.client)
+            except ValueError:
+                pass
+            if any(x.client == w.client for x in self.waiters):
+                self.order.append(w.client)
+            if not w.fut.done():
+                w.fut.set_result(True)          # slot handed over: active unchanged
                 self.served_from_queue += 1
                 return
         self.active = max(0, self.active - 1)
 
     def status(self) -> dict:
+        from .. import queue_class
         now = time.monotonic()
-        oldest = min([t for q in self.waiting.values() for _f, t in q] or [now])
+        ordered = self._ordered()
+        by_class: dict = {}
+        for w in ordered:
+            by_class[w.cls] = by_class.get(w.cls, 0) + 1
         return {"capacity": self.capacity, "active": self.active,
-                "waiting": {c: len(q) for c, q in self.waiting.items()},
+                "waiting": self.waiting,
                 "waiting_total": self.waiting_count(),
-                "oldest_wait_s": round(now - oldest, 1) if self.waiting else 0,
+                "by_class": by_class,
+                "waiters": [{"position": i + 1, "client": w.client, "class": w.cls,
+                             "counts_as": queue_class.effective(w.cls, now - w.since),
+                             "waited_s": round(now - w.since, 1),
+                             "persona": w.info.get("persona") or "",
+                             "session": w.info.get("session") or ""}
+                            for i, w in enumerate(ordered)],
+                "oldest_wait_s": round(now - min(w.since for w in ordered), 1) if ordered else 0,
                 "served_from_queue": self.served_from_queue, "timeouts": self.timeouts}
 
 
@@ -302,10 +361,14 @@ class InternalPool(BackendPool):
             return [s for s in out if s.config.name == pin]
         return out
 
-    def available_models(self) -> dict[str, list[str]]:
+    def available_models(self, lanes: bool = False) -> dict[str, list[str]]:
+        """Healthy backends' models. Lane backends (lanes.py) are left out unless
+        `lanes` is set: nothing routes to a lane by ranking, only by name or divert."""
         out: dict[str, list[str]] = {}
         for s in sorted(self.backends.values(), key=lambda s: -s.config.priority):
             if not s.healthy:
+                continue
+            if not lanes and getattr(s.config, "lane", False):
                 continue
             for m in s.models:
                 out.setdefault(m, []).append(s.config.name)
@@ -328,6 +391,7 @@ class InternalPool(BackendPool):
         # backend_info is internal plumbing, never serialized to the UI.
         return {"name": c.name, "type": c.type, "url": c.url, "api_key": c.api_key,
                 "flavor": getattr(c, "effective_flavor", None),
+                "lane": bool(getattr(c, "lane", False)),
                 "subscription": bool(getattr(c, "is_subscription", False)),
                 "call_budget_5h": getattr(c, "call_budget_5h", None),
                 "call_budget_daily": getattr(c, "call_budget_daily", None),
@@ -574,9 +638,16 @@ class InternalPool(BackendPool):
         g = self._gate(s)
         if g is None:
             return
-        from .. import client_auth, request_context
-        waited = await g.acquire(client_auth.current().get("client_id") or "anonymous",
-                                 float(getattr(s.config, "queue_timeout_seconds", 300) or 300))
+        from .. import client_auth, queue_class, request_context
+        who = client_auth.current()
+        cls = queue_class.current()
+        # v0.181.118: the class decides the turn order and how long this call waits
+        waited = await g.acquire(
+            who.get("client_id") or "anonymous",
+            queue_class.wait_seconds(cls, float(getattr(s.config, "queue_timeout_seconds", 300)
+                                                or 300)),
+            cls=cls, info={"persona": request_context.route().get("persona") or "",
+                           "session": who.get("session_id") or ""})
         if waited >= 0.05:
             r = request_context.route()
             request_context.note_route(queue_ms=round((r.get("queue_ms") or 0) + waited * 1000))
@@ -588,16 +659,47 @@ class InternalPool(BackendPool):
 
     def queue_status(self) -> list[dict]:
         out = []
+        streams = {}
+        if self.ledger is not None and hasattr(self.ledger, "stream_waiters"):
+            streams = self.ledger.stream_waiters()
         for s in self.backends.values():
             cap = getattr(s.config, "max_concurrent", None)
             g = self.gates.get(s.config.name)
             out.append({"backend": s.config.name, "limited": bool(cap),
                         **(g.status() if g else {"capacity": cap, "active": s.busy if cap else None,
                                                  "waiting": {}, "waiting_total": 0,
+                                                 "by_class": {}, "waiters": [],
                                                  "oldest_wait_s": 0, "served_from_queue": 0,
                                                  "timeouts": 0}),
+                        # sessions waiting for one of the backend's streams (budget.py)
+                        "stream_waiters": streams.get(s.config.name) or [],
                         "busy": s.busy})
         return out
+
+    def queue_position(self, s: BackendState) -> dict:
+        """Where THIS request stands in the wait for backend `s`: how many are
+        ahead (stream wait first, then the slot gate) and its class."""
+        from .. import client_auth, queue_class, request_context
+        cls = queue_class.current()
+        who = client_auth.current()
+        ahead = 0
+        waiting_for = "slot"
+        me = request_context.request_id() or ""
+        if self.ledger is not None and hasattr(self.ledger, "stream_waiters"):
+            rows = self.ledger.stream_waiters().get(s.config.name) or []
+            mine = next((i for i, r in enumerate(rows) if me and r.get("request_id") == me), None)
+            if mine is not None:
+                ahead, waiting_for = mine, "stream"
+        g = self.gates.get(s.config.name)
+        if g is not None and waiting_for == "slot":
+            sid = who.get("session_id") or ""
+            rows = g.status()["waiters"]
+            mine = next((i for i, r in enumerate(rows)
+                         if r["client"] == (who.get("client_id") or "anonymous")
+                         and r["session"] == sid), None)
+            ahead = mine if mine is not None else 0
+        return {"backend": s.config.name, "class": cls, "ahead": int(ahead),
+                "for": waiting_for, "running": int(s.busy)}
 
     def breaker_status(self) -> list[dict]:
         """closed = in use; open = failing, skipped until the cooldown ends;
@@ -671,16 +773,57 @@ class InternalPool(BackendPool):
         from .. import request_context
         from ..budget import ended_final
         t_wait = time.monotonic()
-        eid = await self._reserve(model, s, _estimate(messages) if self.ledger else 0)
+        est = _estimate(messages) if self.ledger else 0
+
+        async def _admit():
+            eid_ = await self._reserve(model, s, est)
+            try:
+                await self._acquire(s)
+            except QueueTimeout as e:
+                self._settle(eid_, "released", detail=f"queue — {e}")
+                raise AllBackendsFailed(f"{s.config.name}: queue — {e}") from None
+            except BaseException:
+                self._settle(eid_, "released", detail="cancelled while queued")
+                raise
+            return eid_
+
+        # v0.181.118: while this call waits for a stream or a slot it reports its
+        # place in the queue as a progress chunk every few seconds. Progress counts
+        # as proof of life, so time spent queued no longer runs the stall clock, and
+        # the client's status line reads "queued behind N" instead of "still working".
+        admit = asyncio.ensure_future(_admit())
+        reported = False
         try:
-            await self._acquire(s)
-        except QueueTimeout as e:
-            self._settle(eid, "released", detail=f"queue — {e}")
-            raise AllBackendsFailed(f"{s.config.name}: queue — {e}") from None
+            while True:
+                done, _ = await asyncio.wait({admit}, timeout=QUEUE_REPORT_SECONDS)
+                if done:
+                    break
+                reported = True
+                yield {"content": "", "done": False,
+                       "progress": {"queued": self.queue_position(s)}}
         except BaseException:
+            if not admit.done():
+                admit.cancel()
+                try:
+                    await admit
+                except BaseException:                             # noqa: BLE001
+                    pass
+            elif not admit.cancelled() and admit.exception() is None:
+                # admitted just as the caller went away: give the slot back
+                self._release(s)
+                self._settle(admit.result(), "released", detail="cancelled while queued")
+            raise
+        eid = admit.result()
+        from ..budget import BudgetDenied
+        try:
+            await self._recheck_optional(s, eid)
+        except BudgetDenied:
+            raise                       # _recheck_optional gave the slot back itself
+        except BaseException:
+            # cancelled between admission and the call: don't leak the slot
+            self._release(s)
             self._settle(eid, "released", detail="cancelled while queued")
             raise
-        await self._recheck_optional(s, eid)
         request_context.slot_wait_note((time.monotonic() - t_wait) * 1000.0)
         usage = {"pt": 0, "ct": 0, "status": "error", "detail": "stream did not complete"}
         tools_seen: list = []
@@ -693,6 +836,9 @@ class InternalPool(BackendPool):
         s.busy += 1
         calls = getattr(self, "_calls", None) or {}
         try:
+            if reported:
+                # admitted: clear the "queued behind N" status the client was shown
+                yield {"content": "", "done": False, "progress": {"queued": None}}
             async for chunk in s.protocol.chat_stream(model, messages, tools=tools,
                                                       options=options,
                                                       keep_alive=keep_alive,

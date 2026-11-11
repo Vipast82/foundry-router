@@ -687,6 +687,10 @@ async def _chat_dispatch(svc, body: dict):
                          f"not used — {refusal}; routing to a model instead")
 
     exec_mode = persona.get("execution_mode") or "agent"
+    # v0.181.118: this request's queue class (purpose, persona, client, default), read by
+    # the pool's slot gate and the ledger's stream wait
+    from .. import client_auth as _ca, queue_class as _qc
+    request_context.note_route(queue_class=_qc.classify(_ca.current(), persona))
     # v0.181.117: chat attachments -> media-gen references when Media_Gen is in this request's
     # tool set (media_attachments.py); the same list comes back when nothing applies
     from .. import media_attachments
@@ -983,6 +987,45 @@ class _LazyFailover:
 _LOCAL_OPENAI_FLAVORS = ("llamacpp", "vllm", "unsloth")
 
 
+def _recovering_backends(svc, persona) -> list[str]:
+    """Enabled backends that serve a model on the persona's allowlist (or are its
+    pinned backend) but are unhealthy right now: down, restarting, in cooldown."""
+    allow = {str(a) for a in _jl_list((persona or {}).get("model_allowlist"))}
+    pinned = ((persona or {}).get("backend") or "").strip()
+    out = []
+    for name, s in (getattr(svc.pool, "backends", None) or {}).items():
+        if s.healthy or not s.ever_checked:
+            continue
+        if pinned and name != pinned:
+            continue
+        if allow & (set(s.models) | set(s.config.models or [])):
+            out.append(name)
+    return out
+
+
+async def _await_recovery(svc, persona) -> list[str]:
+    """v0.181.118: a strict persona with nothing reachable, because its backend just
+    went down, waits a short while for it instead of being refused at once (the
+    2026-11-10 Strata outage: 57 refusals, then the coordinator's backoff of up to
+    480 s). Returns the candidates once reachable, [] when the hold runs out."""
+    from .. import queue_class as _qc
+    hold = _qc.recovery_hold(_qc.current())
+    down = _recovering_backends(svc, persona)
+    if hold <= 0 or not down:
+        return []
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < hold:
+        await asyncio.sleep(min(2.0, hold))
+        cands = strict_candidates(svc, persona)
+        if cands:
+            svc.db.log_event(
+                "info", "routing",
+                f"{(persona or {}).get('virtual_name')}: held {int(time.monotonic() - t0)}s "
+                f"for {', '.join(down)} to come back, then routed normally")
+            return cands
+    return []
+
+
 def _is_paid_backend(info: dict) -> bool:
     """A backend whose models cost money or subscription quota: Meridian
     (anthropic-compatible), a subscription proxy flagged cloud (CLIProxyAPI),
@@ -1025,7 +1068,9 @@ def strict_candidates(svc, persona) -> list[str]:
             return []
         avail = set(s.models) | set(s.config.models or [])
     else:
-        avail = set(svc.pool.available_models())
+        # a persona may name a lane's model (lanes.py); ranking never picks one
+        from ..lanes import all_models as _all_models
+        avail = set(_all_models(svc.pool))
     out = []
     for m in order:
         hit = m if m in avail else next(
@@ -1527,6 +1572,9 @@ def _think_for(svc, model_id: str, persona=None, client_think=None):
     else:
         eff = p_eff or getattr(svc.config_store.config.agent_brain,
                                "reasoning_effort", None)
+    from .. import lanes as _lanes
+    if _lanes.thinking_off(svc, model_id):
+        eff = "off"                     # a lane answers short jobs without thinking
     meta = svc.registry.get(model_id) or {}
     btype = (svc.pool.backend_info(model_id) or {}).get("type", "")
     return thinking.think_value(eff, model_id, meta.get("capabilities"), btype)
@@ -1598,10 +1646,17 @@ def _escalate_if_local_busy(svc, persona, model_id, user_text):
     model is idle, or no paid model is reachable."""
     if not (persona or {}).get("escalate_when_local_busy"):
         return model_id
-    if (svc.pool.backend_info(model_id) or {}).get("type") != "ollama":
+    # v0.181.118: any LOCAL backend counts (this only looked at Ollama, so it never
+    # fired for Strata / llama.cpp), and "busy" also means its one stream or its
+    # slots are taken, not only a call in flight at this instant.
+    info = svc.pool.backend_info(model_id) or {}
+    if not info or _is_paid_backend(info):
         return model_id
-    if not any(a["model"] == model_id and a["count"] >= 1
-               for a in svc.pool.active_calls()):
+    busy = any(a["model"] == model_id and a["count"] >= 1 for a in svc.pool.active_calls())
+    if not busy and info.get("name") in (getattr(svc.pool, "backends", None) or {}):
+        from .. import lanes as _lanes
+        busy = not _lanes.model_free(svc, model_id)
+    if not busy:
         return model_id
     paid = _available_paid(svc, persona)
     if not paid:
@@ -1722,6 +1777,8 @@ def _fit_output_cap(svc, persona, model_id: str, convo, tools, out_cap: int) -> 
     whose max_tokens can't fit — and near a full context a 32K-65K persona cap
     can't. Only lowers the cap; never below 1024 (a prompt that leaves less room
     than that is the guard's / client's problem, not something a smaller reply fixes)."""
+    from .. import lanes as _lanes
+    out_cap = _lanes.output_cap(svc, model_id, out_cap)       # a lane caps its replies
     window = _guard_window(svc, persona, model_id)
     if not window or not out_cap:
         return out_cap
@@ -2052,6 +2109,13 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     refuse_local = (persona.get("fallback_policy") or "").strip().lower() == "refuse"
     denials: list[str] = []
     strict = is_strict(persona)
+    # v0.181.118 (lanes.py): what decides whether this request may use a lane, and the
+    # conversation's pin
+    from .. import lanes as _lanes
+    _facts = _lanes.facts_for(
+        persona, messages,
+        bool(client_tools) or (bool(persona.get("mcp_tools_in_direct", 1))
+                               and _persona_has_mcp_tools(persona)))
     pins = [] if strict else _paid_pin_order(svc, persona)
     if strict:
         # From here on the pool may only use this persona's backend (or the
@@ -2067,6 +2131,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         # (shown to the client), never outside the list. Nothing listed is
         # reachable / allowed -> a clear refusal, never a substitute.
         cands = strict_candidates(svc, persona)
+        if not cands and not _route_pin:
+            cands = await _await_recovery(svc, persona)
         if not cands and _route_pin:
             return strict_refusal(svc, persona, logger, "route_unavailable",
                                   f"this session is pinned by helper admission to "
@@ -2077,6 +2143,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             return strict_refusal(svc, persona, logger, "route_unavailable",
                                   ("no model in its allowlist is reachable "
                                    f"({', '.join(map(str, allow)) or 'allowlist is empty'})"))
+        cands, _lane_notes = _lanes.order_chain(svc, persona, cands, _facts)
+        route_notes.extend(_lane_notes)
         resets, paused = [], []
         # 2026-11-03: the paid API hit its daily spend cap and every strict persona dropped
         # to its next MODEL (ChatGPT at its weekly cap, then the one local stream), although
@@ -2162,10 +2230,15 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
             return _model_not_found(model_name)
         # Load-aware: if the chosen local model is busy, try paid (guardrail gates it).
         _picked = model_id
-        model_id = _escalate_if_local_busy(svc, persona, model_id, user_text)
-        if model_id != _picked:
-            route_notes.append(f"local {_picked} is busy with another request → "
-                               f"escalated to {model_id} (escalate when local busy)")
+        # a free local model or lane first (free of charge), then a paid model
+        model_id, _divert_note = _lanes.divert(svc, persona, model_id, _facts)
+        if _divert_note:
+            route_notes.append(_divert_note)
+        else:
+            model_id = _escalate_if_local_busy(svc, persona, model_id, user_text)
+            if model_id != _picked:
+                route_notes.append(f"local {_picked} is busy with another request → "
+                                   f"escalated to {model_id} (escalate when local busy)")
 
         verdict = await svc.guardrails.check_paid_call(
             model_id, svc.pool.backend_info(model_id), svc.registry.get(model_id),
@@ -2208,6 +2281,7 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         route_notes.extend(_local_down_notes(svc, model_id))
     for n in route_notes:
         logger.record_guardrail(n)
+    _lanes.remember(svc, persona, _facts, model_id)
     request_context.note_route(
         served_model=model_id, backend=(svc.pool.backend_info(model_id) or {}).get("name"),
         routing="strict" if strict else "flexible")
@@ -2264,6 +2338,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         lst = await _failover_list(svc, persona, model_id, user_text, eff)
         if need_vision:          # an image request fails over to vision models only
             lst = lst[:1] + [m for m in lst[1:] if not _known_blind(svc, m)]
+        # v0.181.118: failover never puts a request on a lane it doesn't fit
+        lst = lst[:1] + [m for m in lst[1:] if _lanes.fits(svc, m, _facts)]
         return lst
     failover = _LazyFailover(model_id, _failover_factory)
     # Persona MCP tools in direct mode (opt-in per persona by attaching tools):

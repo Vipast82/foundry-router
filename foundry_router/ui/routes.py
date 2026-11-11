@@ -1652,7 +1652,8 @@ async def meridian_reauth_complete(request: Request):
 async def list_models(request: Request):
     from .. import thinking
     svc = _svc(request)
-    reachable = set(svc.pool.available_models().keys())
+    from ..lanes import all_models as _all_models
+    reachable = set(_all_models(svc.pool).keys())
     rows = svc.registry.list_models()
     for r in rows:
         r["reachable"] = r["id"] in reachable

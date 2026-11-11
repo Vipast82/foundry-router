@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.118 — the shared-slot queue: classes, lanes, divert, pinning, recovery hold
+
+Strata serves one stream. Chats, sprints, helper lanes and background jobs all wait for it, and until now the wait was first come, first served with no way around a busy backend. This is phase B of the 2026-11-10 platform audit (`reports/FOUNDRY_ROUTER_PLATFORM_AUDIT_2026-11-10.md`), blueprint build steps 1 to 4. Details: `docs/QUEUE_AND_LANES.md`.
+
+**Queue classes** (`queue_class.py`). Every request has a class: **A** interactive, **B** coordinator required, **C** coordinator optional, **D** background. It comes from the coordinator purpose bound to the session (required purposes are B, optional ones C), else the persona's `queue_class`, else the client's `queue_class`, else `queue.default_class` (A). A request can lower its own class with `x-foundry-priority`, never raise it. Waiters are served by class, then clients take turns inside a class. A class waits the backend's `queue_timeout_seconds` times its `wait_factor` (1 / 2 / 3 / 6, so 300 / 600 / 900 / 1800 s on a 300 s backend) and counts as the next class up after `promote_after_seconds` (C 600 s, D 900 s; never above B).
+
+- `FairGate` (the per-backend slot gate) serves by class, then round robin between clients. Its status lists each waiter with position, class and time waited.
+- The ledger's wait for a backend **stream** (`helpers_allowed`) was an unordered 0.5 s poll: whoever looked first after a stream came free took it. It is now ordered by the same classes, and a newcomer goes behind those already waiting in its class or a better one. A session that already holds a stream is never queued behind anyone.
+- A queued streaming call reports its place every 5 s as a progress chunk. The client's status line reads "queued behind 2 for its stream on strata (class B)" instead of "still working", and time spent queued no longer runs the stall clock.
+- A caller cancelled between admission and the call no longer leaks the slot.
+
+**Lanes** (`lanes.py`). A backend with `lane: true` is a side backend for short jobs (the brain host's llama.cpp is the first candidate). Its models are left out of automatic routing (`available_models()`), so nothing drifts onto a 32k-context model by ranking; a persona reaches it by naming the model, or through divert. A request must fit: at most `lane_max_prompt_tokens` (3,000), no tools unless `lane_allow_tools`, and no earlier assistant turn unless the conversation is pinned to the lane. On a lane the reply is capped at `lane_max_output_tokens` (400) and thinking is off unless `lane_thinking`. Failover never puts a request on a lane it doesn't fit.
+
+**Try, then divert** (persona `divert_when_busy`). When the local model a request would use has no free stream or slot, and another local model on the persona's route (or any lane, for a flexible persona) is free and takes the request, it goes there instead of waiting. Paid models keep their place in a strict chain. Nothing free: it waits in the queue.
+
+**Pinning.** A conversation served by a lane stays on it while it still fits. With persona `pin_conversation`, every direct-mode conversation stays on the model that answered its first turn while that model is on the route and allowed.
+
+**Escalate when local is busy** now works for llama.cpp backends. It only looked at Ollama backends, so it never fired for Strata, although Foundry-Agent, Foundry-Chat, Foundry-Coding and Foundry-Vision have it on. "Busy" also means the backend's stream or slots are taken, not only a call in flight. The usage guardrail still gates the paid model (85% cutoffs).
+
+**Hold for a backend coming back.** A strict persona whose only models sit on a backend that just went down was refused at once (57 refusals during the 2026-11-10 Strata outage, then the coordinator's backoff of up to 480 s). It is now held `queue.recovery_hold_seconds` (90 s; a person 20 s) and routed normally if the backend returns.
+
+**Local llama.cpp models are free.** Discovery marked only Ollama models as free; a model on a local llama.cpp, vLLM or Unsloth backend (Strata) had no cost and the brain ranked it as unknown cost. They are now registered with cost 0 and tier `free`.
+
+**Test fix.** `tests/test_helper_route_fallback.py` still named the pre-upgrade local model id (two tests failed since v0.181.115).
+
+**Settings.** Access → Helpers and Limits: queue classes (on/off, default class, wait factor and aging per class), the recovery hold, a "waiting now" table, lane settings per backend and a lanes table. Clients and Keys: a client's queue class. Persona editor: queue class, divert when busy, pin conversation. API: `GET/POST /admin/api/setup/queue`; lane fields on `POST /admin/api/setup/limits`.
+
+**Unchanged unless configured:** no backend is a lane and no persona diverts or pins until you set it. Queue classes are on: unbound traffic is class A as before; coordinator sessions now wait up to 2x (required) or 3x (optional) the backend's queue timeout instead of 1x.
+
+Tests: `tests/test_queue_classes.py` (10) and `tests/test_lanes.py` (12, including a chat through `/v1/chat/completions` that lands on the lane while a sprint holds Strata).
+
 ## v0.181.117 — chat attachments reach media-gen as references
 
 A picture attached in a chat (AnythingLLM, Open WebUI, anything on the OpenAI or Ollama facade) arrives as base64 inside the message, and a model can't copy megabytes of base64 into a tool argument, so "use this photo as the singer" or "make this picture talk" failed. media-gen v5.11 takes media as references and has a JSON upload endpoint (`POST <media-gen>/upload {"files": [{name, type, data}]}` → `{"uploads": [{ref, kind, file, sha256}], "errors": [...]}`).

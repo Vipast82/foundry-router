@@ -169,6 +169,14 @@ def progress_detail(progress: Optional[dict]) -> str:
     """Status-line detail for what the model is producing unseen."""
     if not progress:
         return ""
+    q = progress.get("queued")
+    if isinstance(q, dict) and not progress.get("prefill") and not progress.get("tool_chars"):
+        # v0.181.118: waiting for a backend stream or slot (pool.queue_position)
+        n = int(q.get("ahead") or 0)
+        what = "its stream" if q.get("for") == "stream" else "a slot"
+        place = "next in line" if n <= 0 else f"queued behind {n}"
+        return (f"{place} for {what} on {q.get('backend') or 'the backend'} "
+                f"(class {q.get('class') or 'A'})")
     pf = progress.get("prefill")
     if isinstance(pf, dict) and pf.get("total") and not progress.get("tool_chars"):
         total, done_, cache = pf["total"], pf.get("processed") or 0, pf.get("cache") or 0

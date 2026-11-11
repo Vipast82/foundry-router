@@ -3259,6 +3259,8 @@ async function tabClients() {
         <label title="secrets scope: only these Studio slots (comma-separated; empty = any slot of its projects)">only slots</label><input id="ed-slots" value="${esc((c.slots || []).join(", "))}" placeholder="any slot"></div>
       <div class="row"><label title="Add '— via <model> @ <backend>' under every answer this client gets (and the route line in buffered replies' reasoning). For AnythingLLM / Open WebUI, which hide reasoning."><input type="checkbox" id="ed-footer" ${c.route_footer ? "checked" : ""}> show which model and backend answered</label></div>
       <div class="row"><label title="When this client sends its own tools (AnythingLLM @agent, Cline, Kilo, Open WebUI tools), which of the persona's MCP tools ride along. Wins over the persona's own setting; never adds a tool the persona isn't granted. e.g. Cline/Kilo: off · AnythingLLM: acestep-music, stable-audio, kokoro-tts, chatterbox-tts, searxng · Open WebUI: all.">MCP tools with client tools</label>${_mcpPolicyHTML("ed-mcp", c.mcp_with_client_tools, "follow the persona")}</div>
+      <div class="row"><label title="This client's place in a backend queue when the backend is full (Access, Helpers and Limits): A interactive (a person is waiting), B required, C optional, D background (scheduled jobs). Empty = the default class. A coordinator purpose or the persona's own class wins.">queue class</label>
+        <select id="ed-qclass">${["", "A", "B", "C", "D"].map(v => `<option value="${v}" ${(c.queue_class || "") === v ? "selected" : ""}>${v ? v + " " + ({A: "interactive", B: "required", C: "optional", D: "background"})[v] : "(default)"}</option>`).join("")}</select></div>
       <div class="row"><label><input type="checkbox" id="ed-enabled" ${c.enabled ? "checked" : ""}> enabled</label>
         <button class="act primary" id="ed-save">Save</button></div>
       <p class="hint">The name is this client's identifier in logs and budget rules, so it isn't renamed; make a new client instead.</p>`);
@@ -3266,6 +3268,7 @@ async function tabClients() {
       scopes: scopesOf(".ed-scope"), personas: list($("#ed-personas", body).value), note: $("#ed-note", body).value,
       projects: list($("#ed-projects", body).value), secret_names: list($("#ed-snames", body).value), slots: list($("#ed-slots", body).value),
       enabled: $("#ed-enabled", body).checked, route_footer: $("#ed-footer", body).checked,
+      queue_class: $("#ed-qclass", body).value || null,
       mcp_with_client_tools: _mcpPolicyRead("ed-mcp", body)}}).then(r => { closeModal(); toast((r.warnings || []).join(" ") || "Saved", !!(r.warnings || []).length); render(); }).catch(e => toast(e.message, true));
   });
   const rc = $("#rej-clear");
@@ -3657,8 +3660,65 @@ async function tabSecrets() {
 
 // Setup → Helpers & Limits: per-backend concurrency and helper streams,
 // edited as a form (stored on each backend in config.yaml).
+// Queue classes (queue_class.py): the order waiters are served in, and who waits now.
+function queueCard(q) {
+  const s = q.settings || {classes: []};
+  const HELP = {A: "a person is waiting: chat front ends, Cline, operator chat",
+    B: "coordinator work a sprint cannot continue without",
+    C: "coordinator helper lanes, exploration, research, pre-work",
+    D: "scheduled pulses, indexing, anything unattended"};
+  const rows = (s.classes || []).map(c => `<tr><td class="nw"><b>${esc(c.class)}</b> ${esc(c.label)}<div class="hint">${esc(HELP[c.class] || "")}</div></td>
+    <td class="nw"><input type="number" min="0.1" max="100" step="0.5" style="width:80px" data-qc="${esc(c.class)}" data-qf="wait_factor" value="${esc(c.wait_factor)}"></td>
+    <td class="nw"><input type="number" min="0" max="86400" step="60" style="width:100px" data-qc="${esc(c.class)}" data-qf="promote_after_seconds" value="${esc(c.promote_after_seconds)}"></td></tr>`).join("");
+  const waiting = [];
+  for (const b of (q.queues || [])) {
+    for (const w of (b.stream_waiters || [])) waiting.push({...w, backend: b.backend, what: "stream"});
+    for (const w of (b.waiters || [])) waiting.push({...w, backend: b.backend, what: "slot"});
+  }
+  const wrows = waiting.map(w => `<tr><td class="nw">${esc(w.backend)}</td><td class="nw">${esc(w.what)} #${esc(w.position)}</td>
+    <td>${esc(w.persona || w.client)}<div class="hint">${esc(w.client)}</div></td>
+    <td class="nw">${esc(w.class)}${w.counts_as && w.counts_as !== w.class ? ` <span class="hint" style="margin:0" title="moved up by waiting">counts as ${esc(w.counts_as)}</span>` : ""}</td>
+    <td class="nw">${esc(Math.round(w.waited_s))} s</td></tr>`).join("");
+  return `<h2 style="margin-top:22px">Queue classes</h2>
+    <p class="hint">When a backend is full, waiters are served by class: <b>A</b> first, then <b>B</b>, <b>C</b>, <b>D</b>; inside a class,
+      clients take turns. A request gets its class from its coordinator purpose (required work is B, optional is C), else the
+      persona, else the client (Clients &amp; Keys), else the default. A request can lower its own class with the
+      <code>x-foundry-priority</code> header, never raise it. <b>Wait factor</b>: this class waits the backend queue timeout
+      times this. <b>Moves up after</b>: seconds of waiting before it counts as the next class up (never above B; 0 = never).</p>
+    <div class="card">
+      <div class="row"><label><input type="checkbox" id="q-enabled" ${s.enabled ? "checked" : ""}> use queue classes</label>
+        <label title="The class of traffic nothing else classifies (no coordinator purpose, no persona or client class).">default class</label>
+        <select id="q-default">${["A", "B", "C", "D"].map(c => `<option ${s.default_class === c ? "selected" : ""}>${c}</option>`).join("")}</select>
+        <label title="A strict persona whose only models sit on a backend that just went down (a restart, a blip) is held this many seconds for it to come back, instead of being refused at once. 0 = refuse at once.">hold for a backend coming back (s)</label>
+        <input type="number" min="0" max="1800" style="width:80px" id="q-hold" value="${esc(s.recovery_hold_seconds)}">
+        <label title="The same hold when a person is waiting (class A).">for a person (s)</label>
+        <input type="number" min="0" max="1800" style="width:80px" id="q-hold-a" value="${esc(s.recovery_hold_interactive_seconds)}">
+        <button class="act primary" id="q-save">Save</button></div>
+      <div class="tscroll"><table><tr><th>class</th><th>wait factor</th><th>moves up after (s)</th></tr>${rows}</table></div>
+    </div>
+    ${(q.lanes || []).length ? `<h2 style="margin-top:22px">Lanes</h2><div class="card"><div class="tscroll"><table><tr><th>lane</th><th>models</th><th>now</th><th>takes</th></tr>${q.lanes.map(l => `<tr><td class="nw"><b>${esc(l.backend)}</b></td><td>${esc((l.models || []).join(", ") || "—")}</td>
+      <td class="nw">${!l.healthy ? "down" : l.free ? "free" : "busy"}</td>
+      <td class="hint" style="white-space:normal">prompts up to ${esc(l.max_prompt_tokens)} tokens, replies up to ${esc(l.max_output_tokens)}${l.allow_tools ? ", tools" : ", no tools"}${l.thinking ? ", thinking" : ", no thinking"}</td></tr>`).join("")}</table></div></div>` : ""}
+    <h2 style="margin-top:22px">Waiting now</h2>
+    <div class="card">${wrows ? `<div class="tscroll"><table><tr><th>backend</th><th>waiting for</th><th>who</th><th>class</th><th>waited</th></tr>${wrows}</table></div>`
+      : `<p class="hint" style="margin:0">Nothing is waiting for a backend.</p>`}</div>`;
+}
+function queueCardWire() {
+  const save = $("#q-save");
+  if (!save) return;
+  save.onclick = () => {
+    const classes = {};
+    document.querySelectorAll("input[data-qc]").forEach(i => {
+      (classes[i.dataset.qc] = classes[i.dataset.qc] || {})[i.dataset.qf] = parseFloat(i.value);
+    });
+    run(api("setup/queue", {method: "POST", body: {enabled: $("#q-enabled").checked,
+      default_class: $("#q-default").value, classes,
+      recovery_hold_seconds: $("#q-hold").value, recovery_hold_interactive_seconds: $("#q-hold-a").value}}));
+  };
+}
+
 async function tabLimits() {
-  const d = await api("setup/limits");
+  const [d, q] = await Promise.all([api("setup/limits"), api("setup/queue").catch(() => ({}))]);
   const num = (v, ph) => `value="${v == null ? "" : esc(v)}" placeholder="${ph}"`;
   const rows = d.backends.map(b => {
     const s = d.streams[b.name];
@@ -3669,6 +3729,11 @@ async function tabLimits() {
       <td class="nw"><input type="number" min="1" max="3600" style="width:90px" data-f="queue_timeout_seconds" data-b="${esc(b.name)}" ${num(b.queue_timeout_seconds, "300")}></td>
       <td class="nw"><input type="number" min="0" max="3600" style="width:90px" data-f="session_hold_seconds" data-b="${esc(b.name)}" ${num(b.session_hold_seconds, "60")}></td>
       <td class="hint" style="white-space:normal">${s ? `${(s.active || []).length}${s.streams_allowed != null ? "/" + s.streams_allowed : ""} ${esc(active)}` : "—"}</td>
+      <td class="nw"><label title="A lane is a small local backend for short jobs. Its models are left out of automatic routing: a persona reaches it by naming its model, or through divert when busy. A request must fit the limits to the right."><input type="checkbox" data-f="lane" data-b="${esc(b.name)}" ${b.lane ? "checked" : ""}> lane</label>
+        <input type="number" min="0" style="width:84px" title="Largest prompt (tokens, estimated) the lane takes. 0 = no limit." data-f="lane_max_prompt_tokens" data-b="${esc(b.name)}" ${num(b.lane_max_prompt_tokens, "3000")}>
+        <input type="number" min="0" style="width:74px" title="Output cap (tokens) for a call the lane serves. 0 = the persona's own cap." data-f="lane_max_output_tokens" data-b="${esc(b.name)}" ${num(b.lane_max_output_tokens, "400")}>
+        <label title="Let requests that carry tools use the lane."><input type="checkbox" data-f="lane_allow_tools" data-b="${esc(b.name)}" ${b.lane_allow_tools ? "checked" : ""}> tools</label>
+        <label title="Let the lane's model think. Off = short jobs answer without reasoning."><input type="checkbox" data-f="lane_thinking" data-b="${esc(b.name)}" ${b.lane_thinking ? "checked" : ""}> thinking</label></td>
       <td class="nw"><button class="act primary" data-save="${esc(b.name)}">Save</button></td></tr>`;
   }).join("");
   $("#main").innerHTML = `
@@ -3681,10 +3746,12 @@ async function tabLimits() {
       final answer frees the slot at once, so a new task never waits for a finished one.
       <b>Max concurrent</b>: calls running at once (e.g. llama.cpp <code>-np</code> slots); more wait in a fair queue.
       Call/token caps per account, client or task are budget rules (Logs → Usage Log).</p>
-    <div class="card">${rows ? `<div class="tscroll"><table><tr><th>backend</th><th>helpers allowed</th><th>max concurrent</th><th>queue timeout s</th><th>session hold s</th><th>sessions now</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>`;
+    <div class="card">${rows ? `<div class="tscroll"><table><tr><th>backend</th><th>helpers allowed</th><th>max concurrent</th><th>queue timeout s</th><th>session hold s</th><th>sessions now</th><th title="lane · max prompt tokens · max output tokens · tools · thinking">lane for short jobs</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>
+    ${queueCard(q)}`;
+  queueCardWire();
   document.querySelectorAll("[data-save]").forEach(b => b.onclick = () => {
     const name = b.dataset.save, body = {name};
-    document.querySelectorAll(`input[data-b="${CSS.escape(name)}"]`).forEach(i => { body[i.dataset.f] = i.value; });
+    document.querySelectorAll(`input[data-b="${CSS.escape(name)}"]`).forEach(i => { body[i.dataset.f] = i.type === "checkbox" ? i.checked : i.value; });
     if (body.queue_timeout_seconds === "") delete body.queue_timeout_seconds;
     if (body.session_hold_seconds === "") delete body.session_hold_seconds;
     run(api("setup/limits", {method: "POST", body}));
@@ -5090,6 +5157,12 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-mcp-direct">
         <label title="When this persona has Media_Gen tools and the chat carries attachments (pictures, audio, video), upload them to media-gen and add a line like [Attached for media tools: image 1 = upload:...] to the message, so the model can pass the picture to a media tool. The picture stays in the message. Default on.">media attachments</label>
         <input type="checkbox" id="pe-media-att">
+        <label title="This persona's place in a backend queue when the backend is full: A interactive (a person is waiting), B required, C optional, D background. Empty = the client's class, else the default. A coordinator purpose wins over it.">queue class</label>
+        <select id="pe-qclass"><option value="">(client / default)</option><option value="A">A interactive</option><option value="B">B required</option><option value="C">C optional</option><option value="D">D background</option></select>
+        <label title="When the local model this request would use has no free stream or slot right now, use another local model on this persona's route that is free (or a free lane for short jobs) instead of waiting. Nothing free: it waits in the queue as before.">divert when busy</label>
+        <input type="checkbox" id="pe-divert">
+        <label title="Keep a conversation on the model that answered its first turn while that model is still on the route and allowed, so the prompt cache stays warm and the model doesn't change mid-conversation. Conversations served by a lane are always kept on it.">pin conversation</label>
+        <input type="checkbox" id="pe-pinconv">
         <label title="When the CLIENT sends its own tools (AnythingLLM @agent, Cline, Kilo, Open WebUI tools), which of this persona's MCP tools still ride along. all (default) = every attached tool. off = none, the client's own only. auto-dedupe = all except ones that duplicate a client tool by name or purpose (web search, page fetch, files, shell, SQL, image / speech / music generation). only these = the server or tool names you list (comma-separated). Each tool definition is prompt the model reads cold on a new chat (Foundry-Chat's 58 were ~13k tokens, ~11 s on Strata; the 4 media tools ~1.5k). A client key's own setting (Clients &amp; keys) wins over this. Never chosen per message, so the prompt prefix stays cached. Plain chat (no client tools) always gets the attached tools.">MCP tools with client tools</label>
         <span id="pe-mcp-client-box">${_mcpPolicyHTML("pe-mcp-client", null, "all (default)")}</span></div>
       <div class="row"><label title="Serve this persona with an external AGENT (Hermes) instead of a model: the whole conversation is forwarded to it, its answer streams back and its tool activity shows as thinking. Model-routing fields above then only apply as the fallback when the agent is down or the request came from an agent (loop protection). Client tools are not forwarded — the agent uses its own. Configure agents in Tools &amp; MCP → Agents.">served by agent</label>
@@ -5168,6 +5241,9 @@ async function tabPersonas() {
       parseTags((window._personas[$("#pe-name").value.trim()] || {}).preferred_mcp_tools)),
     mcp_tool_mode: $("#pe-mcp-loading").value || null,
     media_attachments: $("#pe-media-att").checked ? 1 : 0,
+    queue_class: $("#pe-qclass").value || null,
+    divert_when_busy: $("#pe-divert").checked ? 1 : 0,
+    pin_conversation: $("#pe-pinconv").checked ? 1 : 0,
     max_tool_steps: $("#pe-tsteps").value ? parseInt($("#pe-tsteps").value, 10) : null,
     guardrail_overrides: JSON.parse($("#pe-guard").value || "{}"),
     pinned_models: JSON.parse($("#pe-pins").value || "[]"),
@@ -5435,6 +5511,9 @@ window.editPersona = name => {
   if ($("#pe-mcp-loading")) $("#pe-mcp-loading").value = p.mcp_tool_mode === "finder" ? "finder" : "";
   if ($("#pe-tsteps")) $("#pe-tsteps").value = p.max_tool_steps || "";
   if ($("#pe-media-att")) $("#pe-media-att").checked = p.media_attachments == null ? true : !!p.media_attachments;
+  if ($("#pe-qclass")) $("#pe-qclass").value = p.queue_class || "";
+  if ($("#pe-divert")) $("#pe-divert").checked = !!p.divert_when_busy;
+  if ($("#pe-pinconv")) $("#pe-pinconv").checked = !!p.pin_conversation;
   document.querySelectorAll("#pe-mcp .mcp-item").forEach(item => {
     const s = item.dataset.server;
     if (every) {

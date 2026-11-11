@@ -33,6 +33,7 @@ ENUMS: dict[str, tuple] = {
     "output_style": (None, "plain_text"),
     "outcome_judge": (None, "paid", "local_large", "brain"),
     "mcp_tool_mode": (None, "finder"),
+    "queue_class": (None, "A", "B", "C", "D"),
     "benchmark_category": (None, "coding", "reasoning", "general_chat", "tool_calling",
                            "agentic"),
 }
@@ -48,11 +49,13 @@ ALIASES: dict[str, dict] = {
     "mcp_tool_mode": {"full": None, "all": None, "find": "finder", "on_demand": "finder",
                       "": None},
     "local_bias_strength": {"": None},
+    "queue_class": {"": None, "a": "A", "b": "B", "c": "C", "d": "D", "interactive": "A",
+                    "required": "B", "optional": "C", "background": "D"},
     "benchmark_category": {"": None},
 }
 CAPABILITIES = ("text", "tools", "image_input", "image_output")
 BOOL_FIELDS = ("enabled", "force_reasoning_effort", "mcp_tools_in_direct", "quiet_narration",
-               "media_attachments",
+               "media_attachments", "divert_when_busy", "pin_conversation",
                "brain_handles_tools", "pipeline_check_enabled", "prefer_permissive",
                "prefer_loaded", "escalate_when_local_busy", "expose_tool_trail",
                "review_enabled", "review_prefilter", "route_footer")

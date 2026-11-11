@@ -613,6 +613,12 @@ class Database:
             ("personas", "max_tool_steps", "INTEGER"),
             # v0.181.117: chat attachments -> media-gen references (NULL = on)
             ("personas", "media_attachments", "INTEGER"),
+            # v0.181.118: queue class A-D (NULL = the client's / the default)
+            ("personas", "queue_class", "TEXT"),
+            # v0.181.118 (lanes.py): use a free local model / lane when the first is busy;
+            # keep a conversation on the model that answered its first turn
+            ("personas", "divert_when_busy", "INTEGER DEFAULT 0"),
+            ("personas", "pin_conversation", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]
