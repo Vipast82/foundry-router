@@ -203,6 +203,13 @@ def sanitize_history(messages: list[dict]) -> list[dict]:
         if m.get("role") == "assistant":
             content = _THINK_RE.sub("", content)
             content = _COMMENT_RE.sub("", content)
+            # v0.181.129: a past reply that was only tool-call text (it reached the chat
+            # as raw markup and nothing ran) is an example the model copies on the next
+            # turn; it is replaced by a plain note
+            if not m.get("tool_calls"):
+                from .. import toolcall_text
+                if toolcall_text.only_calls(content.strip()):
+                    content = toolcall_text.UNRUN_NOTE
         out.append({**m, "content": content.strip()})
     # image-only messages (photo with no caption) must survive the filter
     return [m for m in out if m["content"] or m.get("tool_calls") or m.get("images")]

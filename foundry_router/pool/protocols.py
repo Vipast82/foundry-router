@@ -29,6 +29,7 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 
 from . import tcpinfo
+from .. import toolcall_text
 
 log = logging.getLogger(__name__)
 
@@ -1144,6 +1145,16 @@ class OpenAIProtocol(BaseProtocol):
         tm = _llamacpp_timings(data.get("timings"))
         _c, _t = ThinkSplitter.split(msg.get("content") or "",
                                      msg.get("reasoning_content") or msg.get("reasoning") or "")
+        finish = choice.get("finish_reason") or ""
+        if not tool_calls and tools and toolcall_text.has_marker(_c):
+            # the model wrote its calls as text and the server left them there
+            # (toolcall_text.py): read them, or the text goes out as the answer
+            found, rest = toolcall_text.extract(_c, tools)
+            if found:
+                tool_calls = [_tool_call(None, c["name"], c["arguments"]) for c in found]
+                _c, finish = rest, "tool_calls"
+                log.info("openai-compat %s: %s wrote %d tool call(s) as text (%s); recovered",
+                         self.url, model, len(found), ", ".join(c["name"] for c in found))
         return ChatResult(
             content=_c,
             # Reasoning models on llama.cpp/vLLM separate their chain-of-thought
@@ -1159,7 +1170,7 @@ class OpenAIProtocol(BaseProtocol):
             # fields Ollama uses so decode/prefill tok/s are computed identically.
             eval_duration_ns=tm["eval_duration_ns"],
             prompt_eval_duration_ns=tm["prompt_eval_duration_ns"],
-            finish_reason=choice.get("finish_reason") or "",
+            finish_reason=finish,
             draft_n=tm["draft_n"],
             draft_n_accepted=tm["draft_n_accepted"],
             cached_tokens=_cached_tokens(usage) or tm["cache_n"],
@@ -1213,6 +1224,8 @@ class OpenAIProtocol(BaseProtocol):
                     raise ProtocolError(f"openai-compat {self.url} HTTP {r.status_code}: {body[:300]!r}")
                 frags: dict = {}          # tool-call index -> {id,name,arguments(str)}
                 splitter = ThinkSplitter()
+                # a call the model writes as TEXT is held back, not shown (toolcall_text.py)
+                gate = toolcall_text.Gate(active=bool(tools))
                 pt = ct = 0
                 cached = reasoning_tok = 0
                 finish = ""
@@ -1279,12 +1292,19 @@ class OpenAIProtocol(BaseProtocol):
                     if content:
                         content, inline = splitter.feed(content)
                         reasoning = reasoning + inline
-                    if content or reasoning or delta.get("tool_calls"):
+                    produced = bool(content or reasoning or delta.get("tool_calls"))
+                    if content:
+                        content = gate.feed(content)
+                    if produced:
                         now = time.perf_counter_ns()
                         t_first = t_first or now
                         t_last = now
                     if content or reasoning:
                         yield {"content": content, "done": False, "thinking": reasoning}
+                    elif produced and gate.holding and not delta.get("tool_calls"):
+                        # generating a call as text: progress, nothing rendered
+                        yield {"content": "", "done": False,
+                               "progress": {"tool_chars": gate.held_chars, "tool": ""}}
                     elif delta.get("tool_calls"):
                         # Tool-call arguments stream token by token but are only
                         # delivered whole at done. Report the progress (nothing
@@ -1296,10 +1316,20 @@ class OpenAIProtocol(BaseProtocol):
                 tcp = tcpinfo.request_delta(tcpinfo.socket_of(r))
                 break
         fc, ft = splitter.flush()
+        if fc:
+            fc = gate.feed(fc)
         if fc or ft:
             yield {"content": fc, "done": False, "thinking": ft}
         tool_calls = [_tool_call(f["id"], f["name"], f["arguments"])
                       for f in frags.values() if f["name"]] or None
+        found, owed = gate.finish(tools)
+        if found and not tool_calls:
+            tool_calls = [_tool_call(None, c["name"], c["arguments"]) for c in found]
+            finish = "tool_calls"
+            log.info("openai-compat %s: %s wrote %d tool call(s) as text (%s); recovered",
+                     self.url, model, len(found), ", ".join(c["name"] for c in found))
+        if owed:                      # held text that was not a call after all
+            yield {"content": owed, "done": False, "thinking": ""}
         pt = pt or (tm["prompt_n"] + tm["cache_n"])
         ct = ct or tm["predicted_n"]
         cached = cached or tm["cache_n"]

@@ -2,6 +2,32 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.129 — a chat that answered with its tool calls as text and did nothing
+
+**What happened.** In AnythingLLM, persona Foundry-Chat, every turn on 2026-11-11 ended like this and nothing ran:
+
+    <tool_call> <function=find_tools> <parameter=query> web search </tool_call>
+
+Foundry-Chat's first model is `qwen3.8-flash-next-unsloth-ud-iq3_xxs` on Strata, with tools found on demand (`foundry_find_tools`, `foundry_call_tool`). The model wrote its calls with shortened names (`find_tools`, `call_tool`) and without the closing `</parameter>` and `</function>` tags. The engine converts only calls in the exact format, so it left the text in the answer; the router saw a finished answer with zero tool calls (request log: steps 0, tools 0) and sent the text to the chat.
+
+**The fix** (`toolcall_text.py`, used by the llama.cpp / vLLM / OpenAI-style backend adapter). When tools were offered and a reply has no structured calls, the router reads calls written as text and runs them:
+
+- both formats local models use: `<function=NAME><parameter=KEY>value` (closing tags optional) and `{"name": ..., "arguments": {...}}`, inside `<tool_call>` or bare;
+- a shortened name is matched to the one offered tool it can mean (`find_tools` to `foundry_find_tools`); an ambiguous or unknown name is not guessed;
+- values take the type the tool's schema asks for (an object parameter is read as JSON, a string stays a string);
+- strict otherwise: every block must parse and name an offered tool, or the text is left exactly as it was;
+- streaming: the text of a call is held back, never shown, and arrives as a tool call at the end; text that only looked like the start of one is delivered whole.
+
+**The thread that already failed.** The model has 3,672 good tool calls on record and one bad: it is not broken in general. The failed replies stayed in the AnythingLLM thread as history, and each one was an example the model copied on the next turn. When history goes to a model, a past assistant reply that is nothing but tool-call text is now replaced by a one-line note that the tool did not run.
+
+Each recovery writes a line to the Dev Log ("wrote 2 tool call(s) as text ... recovered"), so how often a model does this is visible.
+
+This applies to every path that uses that adapter: chat personas, the worker tool loop, and direct clients (Kilo, Cline) on a local model.
+
+**Also in v0.181.128, not listed in its notes:** a coordinator change made in another session rode along with that release: the Claude agent cap ignores usage windows the router marks as not applying to the persona's model (the Fable-only weekly window at 75 % had cut the sprint cap from 4 to 2 while the sprints ran on Sonnet). It is in the repository; the coordinator picks it up on its next deploy.
+
+Tests: `tests/test_toolcall_text.py`.
+
 ## v0.181.128 — cleanup slices sized by time; Performance and Data in sections; the scorecard kept for a minute
 
 Checked on the live router with v0.181.127: no freeze at startup (it was 92.6 s), and none when Work, Training, Data, Performance, Live, Model Registry, Usage Log and Compare were opened one after another.
