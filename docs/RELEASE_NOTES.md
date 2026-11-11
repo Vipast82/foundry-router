@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.123 — redesign, step 2: Live and Performance
+
+**Live.** The tab was twelve cards in one column, 2,470 px tall, opening with the advisor. It now opens with **Running now**: one chip per backend (slots filled, who waits, lane or not) and a table of the requests in flight (who, persona, model, backend, what it is doing, for how long, request id). A call reading its prompt shows a progress bar and the token counts. Under it, two columns: recent performance, recently finished and loaded models on the left; inference servers, routing brain, tools (running and recent, one card) and backends on the right. On a window under 1,250 px the columns stack. The advisor is folded at the bottom with its counts on the fold line. A model's usual speed is shown only while it generates, and stream estimates in the thousands are not shown at all (a waiting Claude call read "~9938.2 tok/s").
+
+**Performance.** The charts come right after the summary tiles; then the per-model breakdown, the advisor, the routing brain and the inference servers. Run label and performance settings sit together under a new Settings heading, before the details.
+
+**Charts.**
+- A few extreme points flattened every chart (a stream-estimated speed of 1.4 million tok/s, one 97 s wait). When the maximum is more than three times the 98th percentile, the scale ends just above that percentile, the spikes are drawn at the top edge, and the legend says how many. Hovering still shows the real values.
+- Each series' latest value is marked on the line and written at the right edge in the series' colour.
+- Wide charts carry five time labels (three before).
+
+Tests: `tests/test_ui_kit.py`.
+
 ## v0.181.122 — an embeddings-only backend is healthy, and untagged embedding names resolve
 
 Found on the live router right after the CPU embeddings service went in (2026-11-11): `nomic-embed-text` answered every request (768 dimensions, about half a second), but the backend showed **failing**.

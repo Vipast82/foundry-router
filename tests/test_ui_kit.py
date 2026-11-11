@@ -71,3 +71,26 @@ def test_the_compose_file_has_a_cpu_embeddings_service():
     assert "deploy" not in svc and "runtime" not in svc and "devices" not in svc      # CPU only
     assert any("/root/.ollama" in v for v in svc["volumes"])
     assert "foundry-router" in d["services"]
+
+
+def test_live_and_performance_are_laid_out_for_reading():
+    """v0.181.123: Live leads with the requests in flight (a table, with backend slots)
+    over a two-column dashboard and folds the advisor away; Performance shows its
+    charts before the breakdowns and keeps settings at the bottom; charts label their
+    latest values and are not flattened by a few extreme points."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    live = html[html.index("async function tabLive()"):html.index("async function tabCompare()")]
+    assert live.index('id="live-models"') < live.index('class="lv-grid"') < live.index('id="live-advisor"')
+    assert 'id="live-queues"' in live and "queueChipsHtml(q)" in live
+    assert '<details class="card lv-adv">' in live and 'id="live-adv-count"' in live
+    assert "<th>who</th><th>persona</th><th>model</th><th>backend</th><th>doing</th>" in live
+    assert "_tps[c.model] < 2000" in live                       # no bogus stream estimates
+    perf = html[html.index("async function tabPerformance()"):html.index("function renderServerHistory(")]
+    order = [perf.index(x) for x in ('id="perf-summary"', 'id="perf-sec-charts"', 'id="perf-bymodel"',
+                                     'id="perf-advisor"', 'id="perf-sec-servers"',
+                                     'id="perf-sec-settings"', 'id="perf-label"', 'id="perf-sec-detail"')]
+    assert order == sorted(order)
+    chart = html[html.index("function lineChart("):html.index("function lineChart(") + 6000]
+    assert "p98 * 3" in chart and "Math.min(v, hi)" in chart and "above the scale" in chart
+    assert "${paths}${ends}${hits}" in chart
+    assert html.count("function queueChipsHtml(q)") == 1

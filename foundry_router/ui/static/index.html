@@ -433,6 +433,17 @@
   .ov-queues .q.wait .w { color:var(--warn); font-weight:600; }
   @media (max-width: 999px) { #nav-mode-btn { display:none; } }
   #pal-btn[hidden], #nav-mode-btn[hidden] { display:none; }
+  /* -- v0.181.123 Live: running now on top, then two columns ------------------------------ */
+  .lv-grid { display:grid; grid-template-columns:minmax(0, 1.5fr) minmax(0, 1fr); gap:0 14px; align-items:start; }
+  @media (max-width: 1250px) { .lv-grid { grid-template-columns:minmax(0, 1fr); } }
+  .lv-ph { display:inline-flex; align-items:center; gap:7px; }
+  .lv-ph::before { content:""; flex:none; width:8px; height:8px; border-radius:50%; background:var(--warn); }
+  .lv-ph.gen::before { background:var(--ok); animation:ovpulse 1.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .lv-ph.gen::before { animation:none; } }
+  .lv-bar { display:inline-block; vertical-align:middle; width:120px; height:6px; margin-left:10px;
+            border-radius:3px; background:var(--panel-2); overflow:hidden; }
+  .lv-bar i { display:block; height:100%; background:var(--info); border-radius:3px; }
+  details.lv-adv > summary { cursor:pointer; color:var(--fg); }
 </style>
 <link rel="stylesheet" href="/ui/kit.css?v=120">
 </head>
@@ -1735,16 +1746,10 @@ async function tabOverview() {
     if (++tick % 3 === 0) load().catch(() => {});  // the numbers: every 30 s, as before
   }, 10000);
 }
-// v0.181.121: what is moving through the router right now. Each backend's slots and who
-// waits for them, then the route map of the last half hour (observed traffic only).
-async function ovTraffic() {
-  if (!$("#ov-flow")) return;
-  let g, q;
-  try { [g, q] = await Promise.all([api("routes?hours=0.5&all=0&active=1"), api("setup/queue").catch(() => ({}))]); }
-  catch (e) { return; }
-  const host = $("#ov-flow"); if (!host || current !== "Overview") return;
+// One chip per backend: its slots (filled = running), who waits and in which queue class.
+function queueChipsHtml(q) {
   const lanes = Object.fromEntries(((q && q.lanes) || []).map(l => [l.backend, l]));
-  $("#ov-queues").innerHTML = ((q && q.queues) || []).filter(x => x.limited || (x.stream_waiters || []).length || lanes[x.backend]).map(x => {
+  return ((q && q.queues) || []).filter(x => x.limited || (x.stream_waiters || []).length || lanes[x.backend]).map(x => {
     const cap = x.capacity || 0, busy = x.busy || 0;
     const waiters = (x.waiters || []).concat(x.stream_waiters || []);
     const byCls = {}; waiters.forEach(w => { byCls[w.class] = (byCls[w.class] || 0) + 1; });
@@ -1753,6 +1758,16 @@ async function ovTraffic() {
     return `<span class="q${waiters.length ? " wait" : ""}" title="${esc(tip)}"><b>${esc(x.backend)}</b>${lanes[x.backend] ? ' <span class="hint" style="margin:0">lane</span>' : ""}${slots}
       <span>${busy}${cap ? " of " + cap : ""} running</span>${waiters.length ? `<span class="w">${waiters.length} waiting (${Object.entries(byCls).sort().map(([c, n]) => c + " " + n).join(", ")})</span>` : ""}</span>`;
   }).join("") || '<span class="hint" style="margin:0">No backend has a slot limit set (Access → Helpers &amp; Limits).</span>';
+}
+// v0.181.121: what is moving through the router right now. Each backend's slots and who
+// waits for them, then the route map of the last half hour (observed traffic only).
+async function ovTraffic() {
+  if (!$("#ov-flow")) return;
+  let g, q;
+  try { [g, q] = await Promise.all([api("routes?hours=0.5&all=0&active=1"), api("setup/queue").catch(() => ({}))]); }
+  catch (e) { return; }
+  const host = $("#ov-flow"); if (!host || current !== "Overview") return;
+  $("#ov-queues").innerHTML = queueChipsHtml(q);
   $("#ov-flow-stat").textContent = `${g.requests} requests · ${g.live || 0} running now`;
   if (!g.nodes.length) { host.innerHTML = '<span class="hint">Nothing has moved through the router in the last 30 minutes.</span>'; return; }
   const {nodes, KINDS, edges} = routeFlowParts(g);
@@ -1796,7 +1811,7 @@ function _chartW(cols) {
 }
 function lineChart(rows, seriesDefs, opts) {
   opts = opts || {};
-  const W = opts.w || _chartW(2), H = 220, padL = 50, padR = 12, padT = 12, padB = 28;
+  const W = opts.w || _chartW(2), H = 230, padL = 50, padR = 54, padT = 12, padB = 28;
   if (!rows || rows.length < 2)
     return '<div class="hint" style="padding:18px 0">Not enough data in this window yet.</div>';
   let vals = [];
@@ -1804,10 +1819,19 @@ function lineChart(rows, seriesDefs, opts) {
   if (!vals.length) return '<div class="hint" style="padding:18px 0">No data for this metric.</div>';
   let lo = opts.yMin != null ? opts.yMin : Math.min(0, ...vals);
   let hi = opts.yMax != null ? opts.yMax : Math.max(...vals);
+  // v0.181.123: a handful of extreme points (a stream-estimated speed in the hundreds of
+  // thousands, one 90 s wait) flattened every chart. When the maximum is more than three
+  // times the 98th percentile, the scale ends just above that percentile and the spikes
+  // are drawn at the top edge; hovering still shows their real values.
+  let clipped = 0;
+  if (opts.yMax == null && vals.length >= 20) {
+    const sorted = vals.slice().sort((a, b) => a - b), p98 = sorted[Math.floor(sorted.length * 0.98)];
+    if (p98 > 0 && hi > p98 * 3) { hi = p98 * 1.25; clipped = vals.filter(v => v > hi).length; }
+  }
   if (hi <= lo) hi = lo + 1;
   const n = rows.length;
   const x = i => padL + i * (W - padL - padR) / (n - 1);
-  const y = v => H - padB - (v - lo) / (hi - lo) * (H - padT - padB);
+  const y = v => H - padB - (Math.min(v, hi) - lo) / (hi - lo) * (H - padT - padB);
   const grid = _css("--line", "#333"), dim = _css("--dim", "#999");
   // horizontal gridlines + y labels
   let g = "";
@@ -1817,7 +1841,9 @@ function lineChart(rows, seriesDefs, opts) {
     g += `<text x="${padL - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="11" fill="${dim}">${_num(v, opts.yUnit)}</text>`;
   }
   // x labels: first / middle / last timestamps
-  const xl = [0, Math.floor((n - 1) / 2), n - 1].map(i =>
+  const xi = W >= 640 && n >= 9 ? [0, Math.floor((n - 1) / 4), Math.floor((n - 1) / 2), Math.floor(3 * (n - 1) / 4), n - 1]
+                               : [0, Math.floor((n - 1) / 2), n - 1];
+  const xl = xi.map(i =>
     `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? "start" : i === n - 1 ? "end" : "middle"}" font-size="11" fill="${dim}">${_tsLabel(rows[i].ts)}</text>`).join("");
   // one polyline per series, split on null gaps; a single series also gets a
   // faint area under it so its level reads at a glance
@@ -1839,6 +1865,21 @@ function lineChart(rows, seriesDefs, opts) {
     rows.forEach((r, i) => { if (r[s.key] == null) { flush(); } else { seg.push(`${x(i).toFixed(1)},${y(r[s.key]).toFixed(1)}`); } });
     flush();
   });
+  // v0.181.123: each series' latest value is marked on the line and written at the right
+  // edge in the series' colour, so the current level reads without hovering
+  let ends = "";
+  const placed = [];
+  seriesDefs.forEach(sd => {
+    let j = n - 1;
+    while (j >= 0 && rows[j][sd.key] == null) j--;
+    if (j < 0) return;
+    const cy = y(rows[j][sd.key]);
+    let ty = cy;
+    placed.forEach(t => { if (Math.abs(t - ty) < 13) ty = t + (ty >= t ? 13 : -13); });
+    placed.push(ty);
+    ends += `<circle cx="${x(j).toFixed(1)}" cy="${cy.toFixed(1)}" r="3" fill="${sd.color}"/>`
+      + `<text x="${W - padR + 6}" y="${(ty + 4).toFixed(1)}" font-size="11.5" font-weight="600" fill="${sd.color}">${_num(rows[j][sd.key], opts.yUnit)}</text>`;
+  });
   // hover columns: each shows its time and every series' value (styled #tip)
   const step = Math.max(1, Math.ceil(n / 160));
   let hits = "";
@@ -1852,8 +1893,8 @@ function lineChart(rows, seriesDefs, opts) {
   }
   const legend = seriesDefs.map(s =>
     `<span style="margin-right:14px;white-space:nowrap"><span style="display:inline-block;width:10px;height:10px;background:${s.color};border-radius:2px;vertical-align:middle;margin-right:4px"></span>${esc(s.label)}</span>`).join("");
-  return `<div class="hint" style="margin:2px 0 4px">${legend}<span style="opacity:.7">· hover the chart for values</span></div>`
-    + `<svg class="lc" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="${esc(seriesDefs.map(sd => sd.label).join(", "))} over time"><rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="${grid}" stroke-width="0.5"/>${g}${xl}${paths}${hits}</svg>`;
+  return `<div class="hint" style="margin:2px 0 4px">${legend}<span style="opacity:.7">· hover the chart for values${clipped ? ` · ${clipped} spike${clipped === 1 ? "" : "s"} above the scale drawn at the top edge` : ""}</span></div>`
+    + `<svg class="lc" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="${esc(seriesDefs.map(sd => sd.label).join(", "))} over time"><rect x="${padL}" y="${padT}" width="${W - padL - padR}" height="${H - padT - padB}" fill="none" stroke="${grid}" stroke-width="0.5"/>${g}${xl}${paths}${ends}${hits}</svg>`;
 }
 // Scatter — correlate a metric (y) against context fill / any x. Reveals e.g.
 // "acceptance falls as prompt tokens climb toward the context cap".
@@ -1910,6 +1951,23 @@ async function tabPerformance() {
       <button class="act" id="perf-clear" title="Delete performance data (all, or the current model/backend/run) to start clean">Clear data…</button>
       <span class="hint" id="perf-count" style="margin:0"></span>
     </div>
+    <div id="perf-summary"></div>
+    <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a>, <a href="#perf-sec-servers" data-jump>inference servers</a>, <a href="#perf-sec-settings" data-jump>settings</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
+    <h2 id="perf-sec-charts">Speed and latency over time</h2>
+    <div class="chart-grid">
+    <div class="card">${cardH("Generation speed (tok/s)", "charts", "decode vs effective, which includes waiting")}<div id="perf-c-tps"></div></div>
+    <div class="card">${cardH("Time to first token", "charts", "streamed calls")}<div id="perf-c-ttft"></div></div>
+    <div class="card">${cardH("Prompt processing speed (tok/s)", "charts")}<div id="perf-c-prefill"></div></div>
+    <div class="card">${cardH("Cache reuse and draft acceptance (%)", "charts", "KV prefix-cache hit, speculative decoding")}<div id="perf-c-pct"></div></div>
+    <div class="card">${cardH("Context fill: prompt tokens per call", "charts", "climbs toward the cap, drops on compaction")}<div id="perf-c-ctx"></div></div>
+    </div>
+    <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
+    <div class="card">${cardH("🩺 Performance advisor", "advisor", "possible problems in this window — click one for what to do")}<div id="perf-advisor" class="hint">…</div></div>
+    <div class="card">${cardH("🧠 Routing brain", "", "every call to the brain model: speed, failures, and requests that fell back to the simple rule")}<div id="perf-brain" class="hint">…</div></div>
+    <h2 id="perf-sec-servers">Inference servers</h2>
+    <p class="hint">What each engine reports about itself, sampled in the background and kept (Strata / llama.cpp: KV cache, slots, queue, tokens/s; Meridian: requests and latency). These are the engine's own figures — lifetime averages and gauges — not the per-call timings above.</p>
+    <div id="perf-servers"></div>
+    <h2 id="perf-sec-settings">Settings</h2>
     <div class="card">
       ${cardH("🏷 Run label", "runlabel", "stamped on every new sample so hardware/config changes stay comparable")}
       <div class="row" style="margin:0">
@@ -1919,22 +1977,6 @@ async function tabPerformance() {
         <span class="hint" id="perf-label-cur" style="margin:0"></span>
       </div>
     </div>
-    <div id="perf-summary"></div>
-    <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a>, <a href="#perf-sec-servers" data-jump>inference servers</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
-    <div class="card">${cardH("🩺 Performance advisor", "advisor", "possible problems in this window — click one for what to do")}<div id="perf-advisor" class="hint">…</div></div>
-    <div class="card">${cardH("🧠 Routing brain", "", "every call to the brain model: speed, failures, and requests that fell back to the simple rule")}<div id="perf-brain" class="hint">…</div></div>
-    <div class="card">${cardH("Per-model breakdown", "bymodel", "model × backend × run, every call in the window")}<div id="perf-bymodel"></div></div>
-    <h2 id="perf-sec-charts">Speed and latency over time</h2>
-    <div class="chart-grid">
-    <div class="card">${cardH("Generation speed (tok/s)", "charts", "decode vs effective, which includes waiting")}<div id="perf-c-tps"></div></div>
-    <div class="card">${cardH("Time to first token", "charts", "streamed calls")}<div id="perf-c-ttft"></div></div>
-    <div class="card">${cardH("Prompt processing speed (tok/s)", "charts")}<div id="perf-c-prefill"></div></div>
-    <div class="card">${cardH("Cache reuse and draft acceptance (%)", "charts", "KV prefix-cache hit, speculative decoding")}<div id="perf-c-pct"></div></div>
-    <div class="card">${cardH("Context fill: prompt tokens per call", "charts", "climbs toward the cap, drops on compaction")}<div id="perf-c-ctx"></div></div>
-    </div>
-    <h2 id="perf-sec-servers">Inference servers</h2>
-    <p class="hint">What each engine reports about itself, sampled in the background and kept (Strata / llama.cpp: KV cache, slots, queue, tokens/s; Meridian: requests and latency). These are the engine's own figures — lifetime averages and gauges — not the per-call timings above.</p>
-    <div id="perf-servers"></div>
     <div class="card">${cardH("Performance settings", null, "retention and subscription cost per call")}<div id="perf-settings"></div></div>
     <h2 id="perf-sec-detail">Details</h2>
     <div class="card">${cardH("Correlation — does it degrade as context fills?", "charts")}
@@ -2833,18 +2875,28 @@ async function tabLive() {
       <span style="flex:1"></span>
       <span id="live-run"></span>
       <button class="act" id="live-clear" title="Reset performance stats (all models or one) — e.g. after a GPU or config change">Clear stats…</button></h2>
-    <p class="hint">Auto-refreshing every 2s — what's generating right now, measured speed per model, engine load on each inference server, and the last few finished requests. Hover anything underlined for a definition; <b>?</b> opens a longer explanation.</p>
-    <div class="card">${ch("🩺 Performance advisor", "advisor", "possible problems found in the last 24h — click one for what to do")}<div id="live-advisor" class="hint">…</div></div>
-    <div class="card">${ch("▶ Models generating now", "generating")}<div id="live-models" class="hint">…</div></div>
-    <div class="card">${ch("📊 Recent performance", "perfstrip", "last N finished requests")}<div id="live-perf" class="hint">…</div></div>
-    <div class="card">${ch("🖥 Inference servers", "servers", "engine-level load from llama.cpp / vLLM")}<div id="live-servers" class="hint">…</div></div>
-    <div class="card">${ch("Loaded models — per-model performance", "loaded")}<div id="live-loaded"></div></div>
-    <div class="card">${ch("⚙ Tool calls / jobs running", null)}<div id="live-tools" class="hint">…</div>
-      <div class="hint" style="margin-top:4px">A long one (e.g. <code>acestep-music/generate_music</code>) staying here for minutes means a media job is actively rendering — not hung.</div></div>
-    <div class="card">${ch("🔧 Tool activity", "toolstats", "recent, by call count")}<div id="live-toolstats"></div></div>
-    <div class="card">${ch("🧠 Routing brain", "brain")}<div id="live-brain" class="hint">…</div></div>
-    <div class="card">${ch("Backends", null)}<div id="live-backends"></div></div>
-    <div class="card">${ch("Recently finished", "recent")}<div id="live-recent"></div></div>`;
+    <p class="hint">Refreshes every 2 s. Hover anything underlined for a definition; <b>?</b> opens a longer explanation.</p>
+    <div class="card">${ch("Running now", "generating", "each request in flight: who asked, where it runs, what it is doing")}
+      <div id="live-queues" class="ov-queues"></div>
+      <div id="live-models" class="hint">…</div></div>
+    <div class="lv-grid">
+      <div>
+        <div class="card">${ch("Recent performance", "perfstrip", "last N finished requests")}<div id="live-perf" class="hint">…</div></div>
+        <div class="card">${ch("Recently finished", "recent")}<div id="live-recent"></div></div>
+        <div class="card">${ch("Loaded models", "loaded", "per-model performance")}<div id="live-loaded"></div></div>
+      </div>
+      <div>
+        <div class="card">${ch("Inference servers", "servers", "engine-level load from llama.cpp / vLLM")}<div id="live-servers" class="hint">…</div></div>
+        <div class="card">${ch("Routing brain", "brain")}<div id="live-brain" class="hint">…</div></div>
+        <div class="card">${ch("Tools", "toolstats", "running now, then recent activity by call count")}<div id="live-tools" class="hint">…</div>
+          <div class="hint" style="margin:4px 0 8px">A long tool call that stays here for minutes (a media job) is rendering, not hung.</div>
+          <div id="live-toolstats"></div></div>
+        <div class="card">${ch("Backends", null)}<div id="live-backends"></div></div>
+      </div>
+    </div>
+    <details class="card lv-adv"><summary><b>Performance advisor</b> <span id="live-adv-count" class="pill"></span>
+        <span class="hint" style="margin:0">possible problems in the last 24 h</span></summary>
+      <div id="live-advisor" class="hint" style="margin-top:8px">…</div></details>`;
   $("#live-clear").onclick = () => openClearDialog({});
   if (window._liveTimer) clearInterval(window._liveTimer);
   const paint = async () => {
@@ -2860,16 +2912,28 @@ async function tabLive() {
     const _tps = Object.fromEntries((a.models || []).map(m => [m.model, m.tps]));
     const calls = a.calls || [];
     $("#live-models").innerHTML = calls.length
-      ? calls.map(c => {
-          const pf = (c.progress || {}).prefill;
-          const phase = pf && pf.total ? (() => { const n = Math.max(1, pf.total - (pf.cache || 0)), d = Math.max(0, (pf.processed || 0) - (pf.cache || 0));
-              return ` · reading prompt ${Math.floor(100 * d / n)}% (${d.toLocaleString()}/${n.toLocaleString()} new tok)`; })()
-            : c.phase ? " · " + esc(c.phase) : "";
-          return `<span class="pill ok" title="request ${esc(c.request_id || "?")} on backend ${esc(c.backend || "?")} — the client's '⏳ … still working' line shows the same id (first thinking line) and the same clock">▶ ${esc(c.model)} · ${_el(c.seconds)}${phase}${_tps[c.model] ? " · ~" + _tps[c.model] + " tok/s" : ""} <span class="mono" style="opacity:.75">req ${esc((c.request_id || "").slice(0, 8))}</span></span>`;
-        }).join(" ")
+      ? `<table><tr><th>who</th><th>persona</th><th>model</th><th>backend</th><th>doing</th><th>for</th><th>request</th></tr>` + calls.map(c => {
+          const pf = (c.progress || {}).prefill, gen = c.phase === "generating";
+          let doing = c.phase || "working", bar = "";
+          if (pf && pf.total) {
+            const nn = Math.max(1, pf.total - (pf.cache || 0)), d = Math.max(0, (pf.processed || 0) - (pf.cache || 0)), pct = Math.floor(100 * d / nn);
+            doing = `reading the prompt ${pct}%`;
+            bar = `<span class="lv-bar" aria-hidden="true"><i style="width:${pct}%"></i></span> <span class="hint" style="margin:0">${d.toLocaleString()} of ${nn.toLocaleString()} new tokens</span>`;
+          }
+          // a model's usual speed, shown only while it is generating (stream estimates
+          // for paid models can read in the thousands: not shown)
+          const tps = gen && _tps[c.model] && _tps[c.model] < 2000 ? ` <span class="hint" style="margin:0">about ${_tps[c.model]} tok/s</span>` : "";
+          return `<tr><td class="nw">${esc(c.client || "anonymous")}</td><td class="nw">${esc(c.persona || "—")}</td>
+            <td class="nw mono">${esc(c.model)}</td><td class="nw">${esc(c.backend || "")}</td>
+            <td><span class="lv-ph${gen ? " gen" : ""}">${esc(doing)}</span>${tps}${bar}</td><td class="nw">${_el(c.seconds)}</td>
+            <td class="nw mono hint" title="The client's 'still working' line shows the same id and the same clock">${esc((c.request_id || "").slice(0, 8))}</td></tr>`;
+        }).join("") + `</table>`
       : (a.models || []).length
-      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${_el(m.seconds)}${m.count > 1 ? " ×" + m.count : ""}${m.tps ? " · ~" + m.tps + " tok/s" : ""}</span>`).join(" ")
-      : '<span class="hint">idle — no model generating</span>';
+      ? a.models.map(m => `<span class="pill ok">▶ ${esc(m.model)} · ${_el(m.seconds)}${m.count > 1 ? " ×" + m.count : ""}</span>`).join(" ")
+      : '<span class="hint">Idle: nothing is generating.</span>';
+    // backend slots and queues: every third paint (6 s)
+    window._liveQ = (window._liveQ || 0) + 1;
+    if (window._liveQ % 3 === 1) api("setup/queue").then(q => { const el = $("#live-queues"); if (el) el.innerHTML = queueChipsHtml(q); }).catch(() => {});
     $("#live-tools").innerHTML = (a.tools || []).length
       ? a.tools.map(t => `<span class="pill warn">⚙ ${esc(t.server)}/${esc(t.tool)} · ${t.seconds}s</span>`).join(" ")
       : '<span class="hint">idle — no tool/job running</span>';
@@ -3036,7 +3100,13 @@ async function tabLive() {
   if (window._advTimer) clearInterval(window._advTimer);
   const paintAdv = async () => {
     if (!$("#live-advisor")) { clearInterval(window._advTimer); return; }
-    try { renderAdvisor($("#live-advisor"), await api("perf/advisor?hours=24")); } catch (e) {}
+    try {
+      const adv = await api("perf/advisor?hours=24"), c = adv.counts || {}, n = (adv.findings || []).length;
+      renderAdvisor($("#live-advisor"), adv);
+      const cnt = $("#live-adv-count");
+      if (cnt) { cnt.className = "pill " + (c.critical ? "bad" : c.warning ? "warn" : "ok");
+                 cnt.textContent = n ? [c.critical && c.critical + " critical", c.warning && c.warning + " warning", c.info && c.info + " tip"].filter(Boolean).join(" · ") : "nothing found"; }
+    } catch (e) {}
   };
   paintAdv();
   window._advTimer = setInterval(paintAdv, 30000);
