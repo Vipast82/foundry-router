@@ -195,6 +195,8 @@
   .step-btn:active { filter:brightness(.9); }
   /* Dev-log rows: time / level / logger / message on one wrapping line, with an
      expandable traceback spanning the full width below. */
+  .dev-pane { max-height:max(360px, calc(100vh - 330px)); overflow-y:auto; border:1px solid var(--line);
+              border-radius:6px; padding:2px 10px; background:var(--panel); }
   .dev-rec { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline;
              padding:5px 2px; border-bottom:1px solid var(--line); font-size:13px; }
   .dev-rec details, .dev-rec pre { flex-basis:100%; }
@@ -1461,6 +1463,15 @@ const TAB_SECTIONS = {
                 ["Images", /^Images \(/], ["Code runs", /^⚠ Code-execution audit/], ["MCP tools", /^MCP tool usage/]],
   Guardrails: [["Limits", /^authority/], ["Claude window", /^Claude window conservation/],
                ["Semantic cache", /^Semantic cache/], ["Turn assist", /^Turn assist/]],
+  // v0.181.127
+  Work: [["Sprint scorecard", /^Sprint scorecard/], ["Tasks", /^Tasks/], ["Sessions", /^Sessions/], ["Events", /^Events/]],
+  Training: [["Capture", /^Foundry capture/], ["Datasets", /^Fine-tuning datasets/], ["Pipelines", /^Pipeline/],
+             ["Episodes", /^Episodes/]],
+  Secrets: [["Store and values", null], ["Client keys", /^Keys with the secrets scope/], ["Transport", /^Transport/],
+            ["Pull log", /^Pull log/], ["Provider keys", /^Provider keys/]],
+  "Clients & Keys": [["Clients", null], ["Add a client", /^Add a client/], ["Unmatched keys", /^Keys that matched no client/]],
+  Machines: [["Machines", null], ["Blender pool", /^Blender pool/], ["Studio slots", /^(Add a Studio slot|Which workstation)/],
+             ["Workstations", /^(Add a workstation|Workstations|Extra ssh keys)/], ["Recent events", /^Recent events/]],
 };
 function sectionTabs() {
   const defs = TAB_SECTIONS[current], main = $("#main");
@@ -3590,7 +3601,11 @@ async function tabClients() {
     const s = c.seen || {}, u = c.usage || {};
     return `<tr><td class="nw"><b>${esc(c.name)}</b>${c.name === d.you ? ' <span class="hint">(this browser)</span>' : ""}<div class="hint">${esc(c.note || "")}</div></td>
       <td class="nw">${c.scopes.map(x => pill(x, x === "admin" ? "warn" : "")).join(" ")}</td>
-      <td class="hint" style="white-space:normal">${c.personas.length ? esc(c.personas.join(", ")) : "all"}${(c.role_gaps || []).map(g => `<div><span class="pill warn" title="${esc(g.message)}">missing ${esc(g.persona)} (${esc(g.role)})</span></div>`).join("")}</td>
+      <td class="hint" style="white-space:normal;min-width:150px">${c.personas.length > 3
+          ? `<details><summary class="nw">${c.personas.length} personas</summary>${esc(c.personas.join(", "))}</details>`
+          : c.personas.length ? esc(c.personas.join(", ")) : "all"}${(g => !g.length ? "" : g.length <= 2
+          ? g.map(x => `<div><span class="pill warn" title="${esc(x.message)}">missing ${esc(x.persona)} (${esc(x.role)})</span></div>`).join("")
+          : `<details><summary class="nw"><span class="pill warn">${g.length} roles without a persona</span></summary>${g.map(x => `<div><span class="pill warn" title="${esc(x.message)}">missing ${esc(x.persona)} (${esc(x.role)})</span></div>`).join("")}</details>`)(c.role_gaps || [])}</td>
       <td class="nw"><code>${esc(c.key_hint || (c.key_kind === "config" ? "••••" : "no key"))}</code><div class="hint">${c.key_kind === "managed" ? "made here" + (c.created ? " " + esc(c.created.slice(0, 10)) : "") : c.key_kind === "config" ? "in config.yaml" : ""}</div></td>
       <td class="nw">${u.calls_24h || 0}</td>
       <td class="hint" style="white-space:normal">${s.last_ts ? `${when(s.last_ts)} · ${esc(s.addr || "")}<div>${esc((s.agent || "").slice(0, 60))}</div>` : (u.last_logged ? esc(_tsText(u.last_logged)) : "not since restart")}</td>
@@ -8024,7 +8039,7 @@ async function tabDevLog() {
       <input type="checkbox" id="dev-live">
       <span id="dev-count" class="hint"></span>
     </div>
-    <div id="dev-list"></div>`;
+    <div id="dev-list" class="dev-pane"></div>`;
   let after = 0;
   const seen = new Map();                       // id -> record (accumulate + dedupe)
   const list = $("#dev-list");

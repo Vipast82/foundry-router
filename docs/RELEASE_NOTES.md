@@ -2,6 +2,33 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.127 — redesign, step 5: the remaining long tabs; three more pauses removed
+
+**Tabs.** Each of these now shows one section at a time (the same switch as Pool and Model Registry):
+
+| Tab | Was | Sections |
+|---|---|---|
+| Work | 8,695 px | Sprint scorecard, Tasks, Sessions, Events (the project and window filters stay in view) |
+| Training | 4,590 px | Capture, Datasets, Pipelines, Episodes |
+| Secrets | 4,327 px | Store and values, Client keys, Transport, Pull log, Provider keys |
+| Clients & Keys | 3,138 px | Clients, Add a client, Unmatched keys |
+| Machines | 2,896 px | Machines, Blender pool, Studio slots, Workstations, Recent events |
+
+- **Dev Log** was 13,241 px: the log now scrolls inside its own pane, with the level, search and live-tail controls always above it.
+- **Clients & Keys**: a client limited to more than three personas shows "12 personas" (open it for the list), and more than two roles without a persona fold into one line. Two rows were 622 and 918 px tall.
+
+**Pauses**, from the live router's records after v0.181.125:
+
+| What it recorded | Cause | Fix |
+|---|---|---|
+| 3.2 s on the event loop inside `jsonable_encoder` | FastAPI copies every value of a response in Python before it becomes JSON; a response of a few megabytes takes seconds | `fastjson.py`: a response made only of dicts, lists, strings, numbers, booleans and None is checked by the C serializer and passed through untouched. Anything else (a datetime, a model, a set, bytes) is encoded as before. The JSON sent is the same |
+| 3.0 s when the Work tab was opened | The sprint scorecard, a fortnight of events and usage on the loop | `/admin/api/work`, `/admin/api/work/scorecard` and `/admin/api/compare` run on a worker thread; the scorecard reads on the second connection |
+| 1.5 s with the lock held on each watchdog round that had open alerts | Alert auto-clear read every task's state from the table, past every task's data | A covering index (`idx_cc_tasks_state`) |
+
+**Stall reports** now name the HTTP request the loop was serving ("router stalled for 3.2 s in ... (GET /admin/api/work)"), and a stall deep inside a library keeps the Foundry frames that led to it.
+
+Tests: `tests/test_stall_fixes.py`, `tests/test_ui_kit.py`.
+
 ## v0.181.126 — the last startup freeze and two slow reads, from v0.181.125's own records
 
 v0.181.125 went live and its record of slow database calls (`slow_db`) named what was left. Telemetry batches no longer freeze the router (none in the first minutes, where there was one every two).

@@ -57,6 +57,30 @@ def _where(stack: list) -> str:
     return "unknown"
 
 
+def _stack_text(stack: list) -> str:
+    """The last 14 frames; when none of them is Foundry code (a stall deep inside a
+    library, such as response encoding) the innermost Foundry frames come first."""
+    tail = stack[-14:]
+    head = [] if any(_ours(f.filename) for f in tail) else [f for f in stack[:-14] if _ours(f.filename)][-4:]
+    return "".join(traceback.format_list(head)) + ("  ...\n" if head else "") \
+        + "".join(traceback.format_list(tail))
+
+
+def _request(frame) -> str:
+    """"GET /admin/api/work" for the HTTP request the loop was serving, read from the
+    ASGI `scope` in one of the stalled frames; "" when it was not serving one."""
+    try:
+        seen = 0
+        while frame is not None and seen < 200:
+            scope = frame.f_locals.get("scope")
+            if isinstance(scope, dict) and scope.get("type") == "http" and scope.get("path"):
+                return f"{scope.get('method', '')} {scope['path']}"[:200]
+            frame, seen = frame.f_back, seen + 1
+    except Exception:                                             # noqa: BLE001
+        pass
+    return ""
+
+
 def _others(frames: dict, loop_thread: Optional[int]) -> list:
     """Other threads that were inside Foundry code at that moment, as
     "thread-name: function (file.py:line)". When the loop is waiting for a lock, the
@@ -96,8 +120,8 @@ class LoopWatch:
             frame = frames.get(self._loop_thread)
             stack = traceback.extract_stack(frame) if frame is not None else []
             self._pending = {"since": self._last_tick, "wall": time.time() - behind,
-                             "where": _where(stack),
-                             "stack": "".join(traceback.format_list(stack[-14:])),
+                             "where": _where(stack), "stack": _stack_text(stack),
+                             "request": _request(frame),
                              "others": _others(frames, self._loop_thread)}
 
     # -- the task: stamps the time, reports once the loop moves again ----------------------
@@ -112,7 +136,8 @@ class LoopWatch:
 
     def _report(self, pending: dict, seconds: float) -> None:
         row = {"at": pending["wall"], "seconds": round(seconds, 1), "where": pending["where"],
-               "stack": pending["stack"], "others": pending.get("others") or []}
+               "stack": pending["stack"], "others": pending.get("others") or [],
+               "request": pending.get("request") or ""}
         self.stalls.append(row)
         log.warning("event loop stalled for %.1f s in %s", seconds, pending["where"])
         if self.on_stall is not None:
@@ -141,3 +166,4 @@ class LoopWatch:
         last = self.stalls[-1] if self.stalls else None
         return {"count": len(self.stalls),
                 "last": ({k: last[k] for k in ("at", "seconds", "where")} if last else None)}
+        # (the request, the other threads and the stack are in /admin/api/health/stalls)

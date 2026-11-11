@@ -1119,15 +1119,16 @@ async def diagnostics(request: Request):
 async def compare_clients(request: Request, hours: float = 168, group: str = "client"):
     """Client (or persona) comparison from Foundry's own records."""
     from .. import compare
-    return compare.report(_svc(request), hours=max(1.0, min(2160.0, hours)),
-                          group="persona" if group == "persona" else "client")
+    return await asyncio.to_thread(compare.report, _svc(request), hours=max(1.0, min(2160.0, hours)),
+                                   group="persona" if group == "persona" else "client")
 
 
 @router.get("/admin/api/work")
 async def work_view(request: Request, project: str = "", hours: float = 72):
     """Coordinator tasks, bound sessions with their measured usage, and
     lifecycle events (orchestration.py)."""
-    return _svc(request).work.view(project, hours=max(1.0, min(2160.0, hours)))
+    return await asyncio.to_thread(_svc(request).work.view, project,
+                                   hours=max(1.0, min(2160.0, hours)))
 
 
 @router.get("/admin/api/work/usage")
@@ -1143,8 +1144,9 @@ async def work_scorecard(request: Request, project: str = "", task: str = "",
     gates run / passed, reviews, vision rounds, helpers used / integrated, speeds
     (measured apart from estimated), cost and outcome."""
     from .. import scorecard
-    return scorecard.build(_svc(request).db, project, task,
-                           hours=max(0.0, min(float(hours), 24 * 365)), limit=limit)
+    # 3 s on the event loop with a fortnight of sprints: a worker thread, second connection
+    return await asyncio.to_thread(scorecard.build, _svc(request).db.reader(), project, task,
+                                   hours=max(0.0, min(float(hours), 24 * 365)), limit=limit)
 
 
 def _episode_card(r) -> dict:

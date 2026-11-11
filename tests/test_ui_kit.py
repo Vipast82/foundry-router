@@ -165,3 +165,23 @@ def test_long_tabs_have_sections_and_the_model_editor_is_a_side_panel():
     events = html[html.index("async function tabEvents()"):html.index("backup & restore (backup.py)")]
     assert 'id="ev-levels"' in events and 'id="ev-source"' in events and '<table id="ev-table">' in events
     assert '["problems", "Warnings and errors"]' in events
+
+
+def test_the_remaining_long_tabs_have_sections_and_the_dev_log_scrolls_in_place():
+    """v0.181.127: Work (8,695 px), Training (4,590), Secrets (4,327), Clients & Keys
+    (3,138) and Machines (2,896) show one section at a time; the Dev Log (13,241 px)
+    scrolls inside its own pane; a client's long persona list folds away."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    sec = html[html.index("const TAB_SECTIONS = {"):html.index("function sectionTabs()")]
+    for tab in ('Work: [["Sprint scorecard", /^Sprint scorecard/]', 'Training: [["Capture", /^Foundry capture/]',
+                'Secrets: [["Store and values", null]', '"Clients & Keys": [["Clients", null]',
+                'Machines: [["Machines", null]'):
+        assert tab in sec, tab
+    # every sectioned tab is a real tab
+    import re
+    tabs = html[html.index("const TABS = {"):html.index("const GROUPS = [")]
+    for name in re.findall(r'^  "?([A-Za-z &]+?)"?: \[\[', sec, re.M):
+        assert f'"{name}":' in tabs, name
+    assert '<div id="dev-list" class="dev-pane"></div>' in html and ".dev-pane { max-height:" in html
+    clients = html[html.index("async function tabClients()"):html.index("window._pickerOptions.personas = d.personas;")]
+    assert "${c.personas.length} personas</summary>" in clients and "roles without a persona" in clients

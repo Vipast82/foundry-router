@@ -380,3 +380,106 @@ def test_backend_health_evidence_is_summed_by_the_database(app):
     assert len(asked) == 2 and "GROUP BY backend" in asked[0]   # the day is never fetched row by row
     svc.db.execute("DELETE FROM usage_events")
     assert svc.health._ledger_evidence(now - 86400) == {}
+
+
+# ---- v0.181.127 ---------------------------------------------------------------------------------
+
+def test_plain_responses_skip_the_slow_encoder_and_other_types_still_convert(app, client):
+    """3.2 s of event loop went into fastapi.encoders.jsonable_encoder for one large
+    response. Plain dicts and lists pass through; anything else is encoded as before."""
+    import datetime
+    import enum
+    from pathlib import Path
+
+    from fastapi import routing
+
+    from foundry_router import fastjson
+    assert routing.jsonable_encoder.__wrapped__.__name__ == "jsonable_encoder"
+    fastjson.install()                                        # a second install changes nothing
+    assert routing.jsonable_encoder.__wrapped__.__name__ == "jsonable_encoder"
+    big = {"rows": [{"id": i, "name": f"r{i}", "ok": True, "v": 1.5, "none": None, "t": [1, 2]}
+                    for i in range(2000)]}
+    assert routing.jsonable_encoder(big) is big               # untouched: no copy, no walk
+    assert routing.jsonable_encoder([1, "a", {"k": (1, 2)}]) == [1, "a", {"k": (1, 2)}]
+
+    class Colour(enum.Enum):
+        RED = "red"
+    when = datetime.datetime(2026, 11, 11, 15, 0, 0)
+    mixed = {"when": when, "path": Path("a") / "b", "set": {1}, "colour": Colour.RED, "raw": b"x"}
+    out = routing.jsonable_encoder(mixed)
+    assert out is not mixed and out["when"] == "2026-11-11T15:00:00" and out["set"] == [1]
+    assert out["colour"] == "red" and out["raw"] == "x" and out["path"].replace("\\", "/") == "a/b"
+    assert fastjson.is_plain({"a": [1, {"b": None}]}) and not fastjson.is_plain({"a": when})
+    assert not fastjson.is_plain({("t", 1): 1})               # a key JSON cannot carry
+    # the filtering form (a response model) always goes to the real encoder
+    assert routing.jsonable_encoder({"a": 1, "b": None}, exclude_none=True) == {"a": 1}
+
+    @app.get("/_test/plain")
+    async def plain():
+        return {"n": 1, "rows": [{"x": None, "y": [1.5, "s"], 3: "int key"}]}
+
+    @app.get("/_test/typed")
+    async def typed():
+        return {"when": when, "tags": {"a"}}
+    assert client.get("/_test/plain").json() == {"n": 1, "rows": [{"x": None, "y": [1.5, "s"], "3": "int key"}]}
+    assert client.get("/_test/typed").json() == {"when": "2026-11-11T15:00:00", "tags": ["a"]}
+    assert client.get("/admin/api/models").status_code == 200
+
+
+def test_a_stall_report_names_the_request_being_served():
+    import asyncio
+
+    seen = []
+
+    async def app_call(scope):
+        time.sleep(0.6)                                       # synchronous work while serving it
+
+    async def run(monkey):
+        lw = loopwatch.LoopWatch(on_stall=seen.append, threshold=0.25)
+        lw.start()
+        await asyncio.sleep(0.1)
+        await app_call({"type": "http", "method": "GET", "path": "/admin/api/work"})
+        await asyncio.sleep(0.15)
+        lw.stop()
+    old = loopwatch.CHECK_S, loopwatch.TICK_S
+    loopwatch.CHECK_S, loopwatch.TICK_S = 0.05, 0.02
+    try:
+        asyncio.run(run(None))
+    finally:
+        loopwatch.CHECK_S, loopwatch.TICK_S = old
+    assert len(seen) == 1 and seen[0]["request"] == "GET /admin/api/work"
+    assert loopwatch._request(None) == ""
+
+
+def test_a_stall_inside_a_library_keeps_the_foundry_frames_in_its_stack():
+    import traceback as tb
+    lib = [tb.FrameSummary("/usr/lib/python3.12/site-packages/fastapi/encoders.py", 289 + i,
+                           "jsonable_encoder", line="x") for i in range(20)]
+    ours = [tb.FrameSummary("/app/foundry_router/ui/routes.py", 1130, "work_view", line="return view()")]
+    text = loopwatch._stack_text(ours + lib)
+    assert text.index("work_view") < text.index("...") < text.index("jsonable_encoder")
+    assert text.count("jsonable_encoder") == 14
+    assert "..." not in loopwatch._stack_text(lib[:5] + ours)
+
+
+def test_the_stall_event_names_the_request(app):
+    svc = app.state.services
+    svc.loopwatch.on_stall({"at": time.time(), "seconds": 3.2, "where": "__call__ (client_auth.py:256)",
+                            "stack": "STACK", "others": [], "request": "GET /admin/api/work"})
+    e = svc.db.query_one("SELECT message, detail FROM event_log WHERE source='stall'")
+    assert e["message"] == "router stalled for 3.2 s in __call__ (client_auth.py:256) (GET /admin/api/work)"
+    assert e["detail"].startswith("request: GET /admin/api/work")
+
+
+def test_work_and_compare_are_read_off_the_event_loop_and_task_states_come_from_an_index(app, client):
+    import inspect
+    from foundry_router.ui import routes
+    assert "asyncio.to_thread(scorecard.build, _svc(request).db.reader()" in inspect.getsource(routes.work_scorecard)
+    assert "asyncio.to_thread(_svc(request).work.view" in inspect.getsource(routes.work_view)
+    assert "asyncio.to_thread(compare.report" in inspect.getsource(routes.compare_clients)
+    for path in ("/admin/api/work", "/admin/api/work/scorecard", "/admin/api/compare"):
+        assert client.get(path).status_code == 200, path
+    db = app.state.services.db
+    plan = " ".join(r["detail"] for r in db.query(
+        "EXPLAIN QUERY PLAN SELECT project_id, task_id, state FROM cc_tasks"))
+    assert "COVERING INDEX" in plan and "idx_cc_tasks_state" in plan

@@ -126,8 +126,11 @@ class Services:
                 extra += "database lock: " + "; ".join(
                     f"{c['thread']} held {c['held']} s, waited {c['waited']} s: {c['what'][:90]}"
                     for c in slow[-4:]) + chr(10)
+            if row.get("request"):
+                extra = "request: " + row["request"] + chr(10) + extra
             self.db.log_event("warning", "stall",
-                              f"router stalled for {row['seconds']} s in {row['where']}",
+                              f"router stalled for {row['seconds']} s in {row['where']}"
+                              + (f" ({row['request']})" if row.get("request") else ""),
                               extra + row["stack"])
         self.loopwatch = LoopWatch(on_stall=_stalled)
         queue_class.configure(lambda: self.config_store.config.queue)
@@ -736,6 +739,9 @@ class Services:
 def create_app(config_path: Optional[Path] = None,
                database_path: Optional[Path] = None) -> FastAPI:
     config_store = ConfigStore(config_path)
+    # plain dict / list responses skip FastAPI's slow encoder (fastjson.py, v0.181.127)
+    from . import fastjson as _fastjson
+    _fastjson.install()
     # a restore staged from a backup (backup.py) goes in place before anything is opened
     from . import backup as _backup
     _data = Path(database_path).parent if database_path else data_dir()

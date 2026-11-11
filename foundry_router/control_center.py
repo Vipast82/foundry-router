@@ -65,6 +65,9 @@ SCHEMA = [
       ended_ts REAL, outcome TEXT, last_activity_ts REAL, updated_ts REAL, data TEXT,
       seq INTEGER)""",
     "CREATE INDEX IF NOT EXISTS idx_cc_sessions_task ON cc_sessions(project_id, task_id)",
+    # v0.181.127: the alert auto-clear reads every task's state on each watchdog round; from
+    # the table that meant reading past every task's data (1.5 s with the lock held)
+    "CREATE INDEX IF NOT EXISTS idx_cc_tasks_state ON cc_tasks(project_id, task_id, state)",
     "CREATE INDEX IF NOT EXISTS idx_cc_sessions_parent ON cc_sessions(parent_id)",
     """CREATE TABLE IF NOT EXISTS cc_messages (
       message_id TEXT PRIMARY KEY, session_id TEXT, project_id TEXT, role TEXT,
