@@ -637,6 +637,10 @@ class MCPManager:
                 for name, h in self._holders.items()}
 
 
+PING_IDLE_SECONDS = 20.0      # a pooled session idle this long is pinged before reuse
+PING_TIMEOUT_SECONDS = 4.0    # no answer to the ping in this time = the connection is dead
+
+
 class _SessionHolder:
     """Keeps one MCP ClientSession open in a background task (anyio cancel
     scopes must be entered and exited in the same task, so the session lives in
@@ -653,11 +657,43 @@ class _SessionHolder:
         self.last_used = 0.0
         self.connects = 0
 
+    async def _alive(self, session) -> bool:
+        """Does the pooled session still answer? A ping, a few seconds at most."""
+        ping = getattr(session, "send_ping", None)
+        if ping is None:
+            return True
+        try:
+            await asyncio.wait_for(ping(), timeout=PING_TIMEOUT_SECONDS)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        except Exception as e:                                    # noqa: BLE001
+            # an error REPLY (a server that does not implement ping) came back over
+            # a live connection; anything else means the connection is gone
+            return type(e).__name__ == "McpError"
+
     async def ensure(self):
-        """(session, fresh) — fresh=True when a new session had to be opened."""
+        """(session, fresh) — fresh=True when a new session had to be opened.
+
+        v0.181.132: a session that sat idle is pinged before it is reused. A
+        connection that died while idle raises nothing: the call was sent into it and
+        waited the server's whole time budget for an answer that could not come
+        (searxng_web_search "timed out after 300s", 2026-11-09 and 2026-11-11, while
+        the server answered a fresh connection in 0.3 s)."""
+        idle = time.monotonic() - self.last_used if self.last_used else 0.0
         self.last_used = time.monotonic()
         if self.session is not None and self.task is not None and not self.task.done():
-            return self.session, False
+            if idle < PING_IDLE_SECONDS or await self._alive(self.session):
+                return self.session, False
+            log.info("MCP %s: the pooled connection did not answer a ping after %.0f s "
+                     "idle; reconnecting", self.name, idle)
+            try:
+                self.mgr.db.log_event(
+                    "info", "mcp", f"{self.name}: the pooled connection had died while idle "
+                                   f"({idle:.0f} s); reconnected before the call")
+            except Exception:                                     # noqa: BLE001
+                pass
+            await self.reset()
         async with self._lock:
             if self.session is not None and self.task is not None and not self.task.done():
                 return self.session, False

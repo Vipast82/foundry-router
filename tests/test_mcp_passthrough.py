@@ -93,6 +93,56 @@ async def test_stale_pooled_session_retries_fresh(tmp_path):
     await mgr.close_sessions()
 
 
+async def test_a_pooled_session_that_died_while_idle_is_replaced_before_the_call(tmp_path, monkeypatch):
+    """v0.181.132: searxng_web_search waited 300 s on a connection that had died while
+    idle (no error is raised on a dead stream; the answer just never comes)."""
+    import asyncio
+    import time as _time
+
+    from foundry_router.tools import mcp_client
+    monkeypatch.setattr(mcp_client, "PING_IDLE_SECONDS", 0.0)
+    monkeypatch.setattr(mcp_client, "PING_TIMEOUT_SECONDS", 0.05)
+    mgr, db, opened, sess = _mgr(tmp_path)
+    pings = []
+
+    async def dead_ping():
+        pings.append("dead")
+        await asyncio.sleep(30)                             # never answers
+
+    async def live_ping():
+        pings.append("live")
+    sess.send_ping = live_ping
+    await mgr.call_tool("s", "t", {})                       # opens the pool
+    assert await mgr.call_tool("s", "t", {}) == "ok t" and opened["n"] == 1    # pinged, alive: reused
+    sess.send_ping = dead_ping
+    t0 = _time.monotonic()
+    assert await mgr.call_tool("s", "t", {}) == "ok t"      # dead: a new connection, then the call
+    assert _time.monotonic() - t0 < 2.0 and opened["n"] == 2
+    assert [r["session"] for r in db.query("SELECT session FROM mcp_call_log ORDER BY id")] == ["new", "reused", "new"]
+    assert pings == ["live", "dead"]
+    assert "had died while idle" in db.query_one("SELECT message FROM event_log WHERE source='mcp'")["message"]
+
+    # a server that answers the ping with an error is alive (it does not implement ping)
+    class McpError(Exception):
+        pass
+
+    async def unsupported():
+        raise McpError("Method not found")
+    sess.send_ping = unsupported
+    assert await mgr.call_tool("s", "t", {}) == "ok t" and opened["n"] == 2
+    # a connection error on the ping: dead
+    async def broken():
+        raise RuntimeError("closed")
+    sess.send_ping = broken
+    assert await mgr.call_tool("s", "t", {}) == "ok t" and opened["n"] == 3
+    # a session that was used a moment ago is not pinged at all
+    monkeypatch.setattr(mcp_client, "PING_IDLE_SECONDS", 60.0)
+    sess.send_ping = dead_ping
+    n = len(pings)
+    assert await mgr.call_tool("s", "t", {}) == "ok t" and opened["n"] == 3 and len(pings) == n
+    await mgr.close_sessions()
+
+
 async def test_failed_call_logged_with_error(tmp_path):
     mgr, db, _, sess = _mgr(tmp_path, persistent=False)
 

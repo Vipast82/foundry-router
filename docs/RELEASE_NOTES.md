@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.132 — a tool call that waited five minutes on a dead connection
+
+**What happened.** With v0.181.130 the AnythingLLM thread got further: the model's text calls were read, `foundry_find_tools` answered, `foundry_call_tool` started `searxng_web_search`, and then nothing moved. The router's log has it: `searxng/searxng_web_search timed out after 300s` (and the same on 2026-11-09). Called directly with the same arguments, the search server answers in 0.3 s.
+
+**Cause.** The router keeps one connection to each MCP server open and reuses it. That connection had died while idle (19 minutes since its last call). A dead stream raises no error: the call was sent into it and waited for an answer that could not come, for the server's whole time budget. The existing retry on a fresh connection only happens when the reused one raises.
+
+**Fix.** A pooled connection that sat idle for 20 s or more is pinged before it is reused. No answer within 4 s (or a connection error) and it is replaced by a new one, then the call goes out. A server that answers the ping with an error (it does not implement ping) counts as alive. Events gets a line each time ("searxng: the pooled connection had died while idle (1130 s); reconnected before the call").
+
+Not changed: the search server's own time budget is still 300 s (Tools & MCP, the server's connection). A search does not need more than a minute; lowering it would make any other hang fail fast.
+
+Tests: `tests/test_mcp_passthrough.py`.
+
 ## v0.181.131 — two short pauses at a restart
 
 The v0.181.130 start recorded two pauses of 2.2 s and 2.9 s. Both happened while the disk was busy with the cleanup that runs at every start.
