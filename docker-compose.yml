@@ -32,3 +32,22 @@ services:
     # The container needs LAN access to your Ollama instances and Meridian;
     # default bridge networking is fine as long as those are reachable by IP
     # or resolvable hostname from inside the container.
+
+  # Embeddings on CPU (v0.181.121). A small Ollama that only serves an embedding
+  # model, for /v1/embeddings and /api/embed (document search, Open WebUI knowledge,
+  # the semantic cache). No GPU is requested, so it runs on the CPU; move it to a GPU
+  # host later by changing the backend's URL in Backends -> Pool.
+  #   1. docker compose up -d            (starts this next to the router)
+  #   2. Backends -> Pool: add  {"name": "embeddings", "type": "ollama",
+  #                              "url": "http://embeddings:11434", "priority": 50}
+  #   3. Backends -> Host Admin: pull  nomic-embed-text  on "embeddings" (about 275 MB)
+  embeddings:
+    image: ollama/ollama:${OLLAMA_TAG:-latest}
+    container_name: foundry-embeddings
+    restart: unless-stopped
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=2
+    volumes:
+      - ${FOUNDRY_EMBEDDINGS_DIR:-./embeddings}:/root/.ollama

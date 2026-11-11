@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.121 — redesign, step 1: side menu, quick search, live traffic on the home page; CPU embeddings
+
+**Side menu.** On a window 1,000 px or wider the sections are a menu down the left side; the open group lists its pages. "Use top tabs" at the bottom of the menu (or in quick search) brings the tab bar back, and the choice is remembered in the browser. Narrower windows always get the top tabs.
+
+**Quick search.** Ctrl+K (or `/` when not typing) opens a search over every page, persona, backend and MCP server, plus the control center, automation, setup, the theme switch and the menu choice. Arrow keys move, Enter opens, Esc closes.
+
+**Home page: traffic.** A new card at the top of Overview shows what is moving through the router: one chip per backend with its slots (filled = running), how many are waiting and their queue classes, and whether it is a lane; under it the route map of the last 30 minutes (observed traffic only), with the same hover path highlight as the Routes tab. The chips and the map refresh every 10 s, the numbers below every 30 s as before.
+
+**Fix.** In live mode the route map labelled every client "no key", because live data carries no key details. A client known by name has a key and now says so; only an untracked IP reads "no key — make one".
+
+**Embeddings on CPU.** `docker-compose.yml` gains an `embeddings` service: a small Ollama with no GPU requested, for `/v1/embeddings` and `/api/embed`. After `docker compose up -d`: add the backend `{"name": "embeddings", "type": "ollama", "url": "http://embeddings:11434", "priority": 50}` under Backends, Pool, then pull `nomic-embed-text` (about 275 MB) on it under Backends, Host Admin. To move it to a GPU later, change the backend's URL. Whatever is indexed with one embedding model has to be re-indexed if the model changes.
+
+Tests: `tests/test_ui_kit.py` (shell, quick search, traffic card, the compose service).
+
 ## v0.181.120 — UI pass: resizing, tables, dropdowns, the route map and the control center graph
 
 Victor, 2026-11-11: "when I change window sizes, some things don't scale up and down very well", plus a request for better-looking charts, route and activity maps, dropdowns and adjustable tables. Checked in a local preview against the live router's data at 1500, 1000, 780, 700 and 600 px wide.

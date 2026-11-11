@@ -372,10 +372,72 @@
     table { font-size:11.5px; }
     th, td { padding:5px 6px; }
   }
+  /* -- v0.181.121 shell: a side menu on wide windows (Top tabs remains a choice) ------- */
+  #side { display:none; }
+  body.nav-side { display:grid; grid-template-columns:214px minmax(0, 1fr);
+                  grid-template-areas:"hdr hdr" "side main"; align-items:start; }
+  body.nav-side > header { grid-area:hdr; }
+  body.nav-side > nav { display:none; }
+  body.nav-side > main { grid-area:main; min-width:0; }
+  body.nav-side > #side { grid-area:side; display:flex; flex-direction:column; gap:1px;
+    position:sticky; top:0; height:100vh; overflow-y:auto; padding:10px 8px 12px;
+    border-right:1px solid var(--line); background:var(--panel); }
+  #side .find, #pal-btn { display:flex; align-items:center; gap:8px; padding:7px 10px;
+    border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--dim);
+    cursor:pointer; font:12.5px var(--ui-font); }
+  #side .find { width:100%; margin:0 0 8px; }
+  #side .find:hover, #pal-btn:hover { border-color:var(--accent); color:var(--fg); }
+  kbd { font:11px var(--num-font); border:1px solid var(--line); border-radius:4px;
+        padding:1px 5px; color:var(--dim); margin-left:auto; white-space:nowrap; }
+  #side .sg { display:flex; align-items:center; gap:8px; width:100%; background:none; border:0;
+    text-align:left; padding:8px 10px; border-radius:5px; cursor:pointer; color:var(--dim);
+    font:600 13.5px/1.2 var(--num-font); letter-spacing:.02em; }
+  #side .sg:hover { color:var(--fg); background:var(--panel-2); }
+  #side .sg.active { color:var(--fg); }
+  #side .sg.solo.active { color:var(--accent); background:color-mix(in srgb, var(--accent) 9%, transparent); }
+  #side .sg .car { margin-left:auto; font-size:9px; opacity:.6; }
+  #side .sl { display:block; width:calc(100% - 16px); margin-left:16px; background:none; border:0;
+    border-left:2px solid var(--line); border-radius:0 5px 5px 0; text-align:left;
+    padding:6px 10px 6px 12px; cursor:pointer; color:var(--dim); font:13px/1.2 var(--ui-font); }
+  #side .sl:hover { color:var(--fg); background:var(--panel-2); }
+  #side .sl.active { color:var(--accent); border-left-color:var(--accent); font-weight:600;
+    background:color-mix(in srgb, var(--accent) 9%, transparent); }
+  #side .sfoot { margin-top:auto; padding-top:12px; display:flex; flex-direction:column; gap:6px; }
+  #side .sfoot .act { text-align:left; }
+  /* -- quick search (Ctrl+K) ------------------------------------------------------------ */
+  #pal-back { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:60; display:none;
+              align-items:flex-start; justify-content:center; padding-top:12vh; }
+  #pal-back.show { display:flex; }
+  .pal { width:min(640px, 92vw); background:var(--panel); border:1px solid var(--line);
+         border-radius:8px; box-shadow:0 18px 50px rgba(0,0,0,.5); overflow:hidden; }
+  .pal input { width:100%; border:0; border-bottom:1px solid var(--line); border-radius:0;
+               padding:13px 14px; font-size:15px; background:transparent; max-width:none; }
+  .pal input:focus { box-shadow:none; }
+  .pal ul { list-style:none; margin:0; padding:6px; max-height:54vh; overflow-y:auto; }
+  .pal li { display:flex; gap:10px; align-items:baseline; padding:7px 10px; border-radius:5px; cursor:pointer; }
+  .pal li.sel { background:color-mix(in srgb, var(--accent) 14%, transparent); }
+  .pal li b { font-weight:600; white-space:nowrap; }
+  .pal li span { color:var(--dim); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .pal li i { margin-left:auto; font-style:normal; color:var(--dim); font-size:11.5px; white-space:nowrap; }
+  .pal .empty { padding:14px; color:var(--dim); cursor:default; }
+  .pal .pfoot { padding:6px 12px; border-top:1px solid var(--line); color:var(--dim); font-size:11.5px; }
+  /* -- overview: traffic now ---------------------------------------------------------------- */
+  .ov-queues { display:flex; flex-wrap:wrap; gap:6px; margin:2px 0 8px; }
+  .ov-queues .q { display:inline-flex; align-items:center; gap:8px; padding:4px 10px; border:1px solid var(--line);
+                  border-radius:6px; background:var(--bg); font-size:12.5px; white-space:nowrap; }
+  .ov-queues .q b { font-family:var(--num-font); }
+  .ov-queues .q .slots { display:inline-flex; gap:3px; }
+  .ov-queues .q .slots i { width:9px; height:9px; border-radius:2px; background:var(--panel-2); border:1px solid var(--line); }
+  .ov-queues .q .slots i.on { background:var(--ok); border-color:var(--ok); }
+  .ov-queues .q.wait { border-color:var(--warn); }
+  .ov-queues .q.wait .w { color:var(--warn); font-weight:600; }
+  @media (max-width: 999px) { #nav-mode-btn { display:none; } }
+  #pal-btn[hidden], #nav-mode-btn[hidden] { display:none; }
 </style>
 <link rel="stylesheet" href="/ui/kit.css?v=120">
 </head>
 <body>
+<aside id="side" aria-label="Sections"></aside>
 <header>
   <img id="brand-logo" alt="" hidden>
   <div class="brand">
@@ -385,6 +447,8 @@
   <div class="hdr-tools">
     <a class="act cc-link" href="/ui/control" title="Open the coordinator control center: live sprint progress, sessions and operator actions">Control center</a>
     <a class="act" href="/ui/setup" title="The setup wizard: restore a backup, admin key, secret store, backends, personas, budgets, game, machines">Setup</a>
+    <button id="pal-btn" title="Jump to any page, persona or backend">Search <kbd>Ctrl K</kbd></button>
+    <button class="act" id="nav-mode-btn" title="Show the sections as a menu down the left side">☰ Side menu</button>
     <button class="act" id="logo-btn" title="Upload or change the header logo (PNG/SVG, under 512 KB)">Logo…</button>
     <button class="act" id="logo-clear" title="Remove the custom logo" hidden>✕</button>
     <button class="act" id="theme-btn" title="Toggle light / dark theme">🌙 Dark</button>
@@ -394,6 +458,10 @@
 <nav id="nav"></nav>
 <main id="main"></main>
 <div id="toast"></div>
+<div id="pal-back"><div class="pal" role="dialog" aria-label="Quick search">
+  <input id="pal-q" placeholder="Go to a page, persona or backend…" autocomplete="off" spellcheck="false">
+  <ul id="pal-list"></ul>
+  <div class="pfoot">↑ ↓ to move · Enter to open · Esc to close</div></div></div>
 
 <script src="/ui/kit.js?v=120"></script>
 <script>
@@ -1123,10 +1191,51 @@ if (window.FK) FK.onResize(() => {
   render();
   setTimeout(() => window.scrollTo(0, y), 450);
 });
+// v0.181.121: on a wide window the sections are a menu down the left side (the open
+// group lists its pages); "Top tabs" brings the old tab bar back. Remembered per browser.
+function navMode() {
+  let m = "side";
+  try { m = localStorage.getItem("fr.nav") || "side"; } catch (e) {}
+  return m === "side" && window.innerWidth >= 1000 ? "side" : "top";
+}
+function setNavMode(m) { try { localStorage.setItem("fr.nav", m); } catch (e) {} render(); }
+function renderSide(activeGroup) {
+  const side = $("#side"); side.innerHTML = "";
+  const mk = (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text != null) e.textContent = text; return e; };
+  const find = mk("button", "find"); find.innerHTML = "Search <kbd>Ctrl K</kbd>";
+  find.title = "Jump to any page, persona or backend"; find.onclick = openPalette;
+  side.appendChild(find);
+  for (const [gname, leaves] of GROUPS) {
+    const open = gname === activeGroup, solo = leaves.length <= 1;
+    const b = mk("button", "sg" + (open ? " active" : "") + (solo ? " solo" : ""), gname);
+    if (GROUP_HELP[gname]) b.title = GROUP_HELP[gname];
+    if (!solo) { const c = mk("span", "car", open ? "▾" : "▸"); c.setAttribute("aria-hidden", "true"); b.appendChild(c); }
+    b.setAttribute("aria-expanded", open ? "true" : "false");
+    b.onclick = leaves.length ? () => { current = _lastLeaf[gname] || leaves[0]; render(); }
+                              : () => { location.href = "/ui/automation"; };
+    side.appendChild(b);
+    if (open && !solo) for (const leaf of leaves) {
+      const l = mk("button", "sl" + (leaf === current ? " active" : ""), tabLabel(leaf));
+      if (TAB_HELP[leaf]) l.title = TAB_HELP[leaf];
+      if (leaf === current) l.setAttribute("aria-current", "page");
+      l.onclick = () => { current = leaf; render(); };
+      side.appendChild(l);
+    }
+  }
+  const foot = mk("div", "sfoot");
+  const top = mk("button", "act", "Use top tabs"); top.title = "Show the sections as tabs across the top instead";
+  top.onclick = () => setNavMode("top");
+  foot.appendChild(top); side.appendChild(foot);
+}
 function render() {
   const nav = $("#nav"); nav.innerHTML = "";
   const activeGroup = _groupOf(current);
   _lastLeaf[activeGroup] = current;
+  const sideMode = navMode() === "side";
+  document.body.classList.toggle("nav-side", sideMode);
+  if (sideMode) renderSide(activeGroup);
+  const nmb = $("#nav-mode-btn"); if (nmb) { nmb.hidden = sideMode; nmb.onclick = () => setNavMode("side"); }
+  const pb = $("#pal-btn"); if (pb) { pb.hidden = sideMode; pb.onclick = openPalette; }
   if (_hashTab() !== current) history.replaceState(null, "", "#" + encodeURIComponent(current));
   // primary group row
   const groupRow = document.createElement("div");
@@ -1166,6 +1275,72 @@ function render() {
     $("#main").innerHTML = `<p class="hint">failed to load: ${esc(why)}</p>`;
   });
 }
+
+// ---- quick search (Ctrl+K or /): jump to any page, persona or backend ----------------------
+const _pal = {shown: [], sel: 0, names: null};
+function palItems() {
+  const out = [];
+  for (const [g, leaves] of GROUPS) for (const leaf of leaves)
+    out.push({t: tabLabel(leaf), s: TAB_HELP[leaf] || "", k: g, go: () => { current = leaf; render(); }});
+  out.push({t: "Automation", s: GROUP_HELP.Automation || "", k: "page", go: () => { location.href = "/ui/automation"; }},
+           {t: "Control center", s: "Live sprint progress, sessions and operator actions", k: "page", go: () => { location.href = "/ui/control"; }},
+           {t: "Setup wizard", s: "Restore a backup, admin key, backends, personas, budgets, machines", k: "page", go: () => { location.href = "/ui/setup"; }},
+           {t: "Switch light or dark theme", s: "", k: "action", go: () => $("#theme-btn").click()},
+           {t: navMode() === "side" ? "Use top tabs" : "Use the side menu", s: "Where the sections are listed", k: "action",
+            go: () => setNavMode(navMode() === "side" ? "top" : "side")});
+  const n = _pal.names || {};
+  for (const p of n.personas || []) out.push({t: p, s: "persona", k: "Personas", go: () => { current = "Personas"; render(); }});
+  for (const b of n.backends || []) out.push({t: b, s: "backend", k: "Backend pool", go: () => { current = "Pool"; render(); }});
+  for (const m of n.mcp || []) out.push({t: m, s: "MCP server", k: "MCP Servers", go: () => { current = "MCP Servers"; render(); }});
+  return out;
+}
+function palPaint() {
+  const q = $("#pal-q").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const all = palItems();
+  const hit = all.filter(it => { const hay = (it.t + " " + it.s + " " + it.k).toLowerCase(); return q.every(w => hay.includes(w)); });
+  const first = q[0] || "";
+  hit.sort((a, b) => (b.t.toLowerCase().startsWith(first) - a.t.toLowerCase().startsWith(first)));
+  _pal.shown = hit.slice(0, 40);
+  _pal.sel = Math.min(_pal.sel, Math.max(0, _pal.shown.length - 1));
+  $("#pal-list").innerHTML = _pal.shown.length
+    ? _pal.shown.map((it, i) => `<li data-i="${i}" class="${i === _pal.sel ? "sel" : ""}"><b>${esc(it.t)}</b><span>${esc(it.s)}</span><i>${esc(it.k)}</i></li>`).join("")
+    : `<li class="empty">Nothing matches. Try a page name, a persona or a backend.</li>`;
+  const sel = $("#pal-list .sel"); if (sel) sel.scrollIntoView({block: "nearest"});
+}
+function palRun(i) { const it = _pal.shown[i]; if (!it) return; closePalette(); it.go(); }
+function closePalette() { $("#pal-back").classList.remove("show"); }
+function openPalette() {
+  $("#pal-back").classList.add("show");
+  const q = $("#pal-q"); q.value = ""; _pal.sel = 0; palPaint(); q.focus();
+  if (!_pal.names) {                       // personas, backends and MCP servers, fetched once
+    _pal.names = {};
+    Promise.all([api("personas").catch(() => null), api("status").catch(() => null), api("mcp_servers").catch(() => null)]).then(([p, st, m]) => {
+      const ps = p ? (p.personas || p) : [];
+      _pal.names = {personas: (Array.isArray(ps) ? ps : []).map(x => x.virtual_name).filter(Boolean),
+                    backends: ((st && st.backends) || []).map(x => x.name),
+                    mcp: (((m && m.servers) || [])).map(x => x.name)};
+      if ($("#pal-back").classList.contains("show")) palPaint();
+    });
+  }
+}
+document.addEventListener("keydown", e => {
+  const open = $("#pal-back").classList.contains("show");
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); open ? closePalette() : openPalette(); return; }
+  if (!open) {
+    const a = document.activeElement;
+    if (e.key === "/" && !(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openPalette(); }
+    return;
+  }
+  if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); _pal.sel = Math.min(_pal.shown.length - 1, _pal.sel + 1); palPaint(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); _pal.sel = Math.max(0, _pal.sel - 1); palPaint(); }
+  else if (e.key === "Enter") { e.preventDefault(); palRun(_pal.sel); }
+});
+document.addEventListener("DOMContentLoaded", () => {
+  $("#pal-q").addEventListener("input", () => { _pal.sel = 0; palPaint(); });
+  $("#pal-list").addEventListener("click", e => { const li = e.target.closest("li[data-i]"); if (li) palRun(+li.dataset.i); });
+  $("#pal-back").addEventListener("mousedown", e => { if (e.target.id === "pal-back") closePalette(); });
+});
 
 // Wrap every rendered table in a horizontal-scroll box so a wide table scrolls
 // inside its own container on narrow screens instead of forcing the whole page
@@ -1470,6 +1645,9 @@ async function tabOverview() {
         <button class="act" id="ov-refresh" title="Reload every number on this page">Refresh</button></div>
     </section>
     <div id="ov-attn"></div>
+    <div class="card"><div class="card-h">Traffic, last 30 minutes<span class="grow"></span><span id="ov-flow-stat" class="hint" style="margin:0 12px 0 0"></span>${go("Routes", "Route map")}</div>
+      <div id="ov-queues" class="ov-queues"></div>
+      <div id="ov-flow" class="tscroll"><span class="hint">…</span></div></div>
     <div class="ov-kpis" id="ov-kpis"></div>
     <div class="ov-grid">
       <div class="card"><div class="card-h">Backends<span class="grow"></span>${go("Pool", "Backend pool")}</div><div id="ov-backends" class="hint">…</div></div>
@@ -1545,13 +1723,42 @@ async function tabOverview() {
         <span class="ov-bt"><i style="width:${(100 * g.n / maxN).toFixed(1)}%"></i></span><b>${esc(g.n)}</b></li>`).join("")}</ul>`
       : '<span class="hint">No timed calls in the last 24 h.</span>';
   };
-  $("#ov-refresh").onclick = () => load().catch(() => {});
+  $("#ov-refresh").onclick = () => { load().catch(() => {}); ovTraffic(); };
+  ovTraffic();
   await load();
   clearInterval(window._ovTimer);
+  let tick = 0;
   window._ovTimer = setInterval(() => {
     if (current !== "Overview") { clearInterval(window._ovTimer); return; }
-    if (!document.hidden) load().catch(() => {});
-  }, 30000);
+    if (document.hidden) return;
+    ovTraffic();                                  // the map and the queues: every 10 s
+    if (++tick % 3 === 0) load().catch(() => {});  // the numbers: every 30 s, as before
+  }, 10000);
+}
+// v0.181.121: what is moving through the router right now. Each backend's slots and who
+// waits for them, then the route map of the last half hour (observed traffic only).
+async function ovTraffic() {
+  if (!$("#ov-flow")) return;
+  let g, q;
+  try { [g, q] = await Promise.all([api("routes?hours=0.5&all=0&active=1"), api("setup/queue").catch(() => ({}))]); }
+  catch (e) { return; }
+  const host = $("#ov-flow"); if (!host || current !== "Overview") return;
+  const lanes = Object.fromEntries(((q && q.lanes) || []).map(l => [l.backend, l]));
+  $("#ov-queues").innerHTML = ((q && q.queues) || []).filter(x => x.limited || (x.stream_waiters || []).length || lanes[x.backend]).map(x => {
+    const cap = x.capacity || 0, busy = x.busy || 0;
+    const waiters = (x.waiters || []).concat(x.stream_waiters || []);
+    const byCls = {}; waiters.forEach(w => { byCls[w.class] = (byCls[w.class] || 0) + 1; });
+    const slots = cap && cap <= 8 ? `<span class="slots" aria-hidden="true">${Array.from({length: cap}, (_, i) => `<i class="${i < busy ? "on" : ""}"></i>`).join("")}</span>` : "";
+    const tip = `${x.backend}: ${busy} of ${cap || "no limit"} running` + (waiters.length ? "\n" + waiters.map(w => `#${w.position} ${w.persona || w.client} · class ${w.class} · ${Math.round(w.waited_s)} s`).join("\n") : "");
+    return `<span class="q${waiters.length ? " wait" : ""}" title="${esc(tip)}"><b>${esc(x.backend)}</b>${lanes[x.backend] ? ' <span class="hint" style="margin:0">lane</span>' : ""}${slots}
+      <span>${busy}${cap ? " of " + cap : ""} running</span>${waiters.length ? `<span class="w">${waiters.length} waiting (${Object.entries(byCls).sort().map(([c, n]) => c + " " + n).join(", ")})</span>` : ""}</span>`;
+  }).join("") || '<span class="hint" style="margin:0">No backend has a slot limit set (Access → Helpers &amp; Limits).</span>';
+  $("#ov-flow-stat").textContent = `${g.requests} requests · ${g.live || 0} running now`;
+  if (!g.nodes.length) { host.innerHTML = '<span class="hint">Nothing has moved through the router in the last 30 minutes.</span>'; return; }
+  const {nodes, KINDS, edges} = routeFlowParts(g);
+  host.innerHTML = FK.flow({label: "traffic in the last 30 minutes", width: ($("#main").clientWidth || 1200) - 34, kinds: KINDS, nodes, edges,
+    columns: [{key: "client", title: "clients"}, {key: "persona", title: "personas"}, {key: "model", title: "models"}, {key: "backend", title: "backends"}]});
+  FK.flowWire(host);
 }
 
 // =========================================================================
@@ -3883,9 +4090,9 @@ async function tabAlerts() {
 // Route view (routes_view.py): the routing graph generated from the live
 // configuration, overlaid with traffic, budget denials, failures and image jobs.
 window._routeOpts = window._routeOpts || {hours: 24, all: false, active: false};
-async function tabRoutes() {
-  const o = window._routeOpts;
-  const g = await api(`routes?hours=${o.hours}&all=${o.all ? 1 : 0}&active=${o.active ? 1 : 0}`);
+// The boxes, lines and line kinds of a route graph (from /admin/api/routes), ready for
+// FK.flow. Used by the Routes tab and by the overview's "traffic now" map.
+function routeFlowParts(g) {
   const colOf = n => n.kind === "brain" ? "model" : n.kind;
   const healthCls = {serving: "ok", failing: "bad", down: "bad", unverified: "warn", disabled: ""};
   const nodes = g.nodes.slice().sort((x, y) => (y.count - x.count) || x.label.localeCompare(y.label)).map(n => {
@@ -3898,7 +4105,9 @@ async function tabRoutes() {
       sub = [n.flavor, n.health, n.missing ? "not configured" : ""].filter(Boolean).join(" · ");
       dot = healthCls[n.health] || "";
     } else if (n.kind === "client") {
-      sub = n.configured ? `${(n.scopes || []).join("+")}${n.restricted ? " · restricted" : ""}` : n.tracked === false ? "no key — make one" : "no key";
+      // live mode sends no key details (configured is null): a tracked client HAS a key
+      sub = n.configured ? `${(n.scopes || []).join("+")}${n.restricted ? " · restricted" : ""}` : n.tracked === false ? "no key — make one"
+        : n.configured === false ? "no key" : (n.live ? `${n.live} running now` : "has a key");
       if (n.live) dot = "ok";
     } else if (n.kind === "brain") {
       sub = "routing brain";
@@ -3929,6 +4138,12 @@ async function tabRoutes() {
       tip: `${e.kind}: ${e.from} → ${e.to}` + (e.count ? ` · ${e.count}` : "") + (e.avg_ms ? ` · avg ${fmtDur(e.avg_ms)}` : "") + (e.rules ? " · " + Object.keys(e.rules).join(", ") : ""),
       onclick: clickable ? `showRouteEdge(${JSON.stringify(e.kind)}, ${JSON.stringify(e.from)}, ${JSON.stringify(e.to)})` : ""};
   });
+  return {nodes, KINDS, edges};
+}
+async function tabRoutes() {
+  const o = window._routeOpts;
+  const g = await api(`routes?hours=${o.hours}&all=${o.all ? 1 : 0}&active=${o.active ? 1 : 0}`);
+  const {nodes, KINDS, edges} = routeFlowParts(g);
   const seen = new Set(g.edges.map(e => e.kind));
   const legend = Object.entries(KINDS).filter(([k]) => seen.has(k)).map(([k, v]) =>
     `<span><i class="${v.dash ? (v.thin ? "dot" : "dash") : ""}" style="border-top-color:${v.color}"></i>${esc(v.name)}</span>`).join("");
