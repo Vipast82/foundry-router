@@ -444,6 +444,34 @@
             border-radius:3px; background:var(--panel-2); overflow:hidden; }
   .lv-bar i { display:block; height:100%; background:var(--info); border-radius:3px; }
   details.lv-adv > summary { cursor:pointer; color:var(--fg); }
+  /* -- v0.181.124: toolbars, section switches, the persona editor panel -------------------- */
+  .tb { display:flex; flex-wrap:wrap; gap:8px 10px; align-items:center; margin:10px 0 8px; }
+  .tb input[type=search] { flex:1 1 240px; max-width:420px; min-width:0; }
+  .seg { display:inline-flex; flex-wrap:wrap; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg button { background:var(--panel); color:var(--dim); border:0; border-right:1px solid var(--line);
+                padding:6px 13px; cursor:pointer; font:500 13px/1.2 var(--num-font); letter-spacing:.02em; }
+  .seg button:last-child { border-right:0; }
+  .seg button:hover { color:var(--fg); }
+  .seg button.on { background:var(--accent); color:var(--on-accent); }
+  .seg button b { font-weight:500; opacity:.75; margin-left:6px; }
+  .seg.sect { margin:0 0 12px; }
+  .sect-hide { display:none !important; }
+  #pe-back { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:48; display:none; }
+  #pe-back.show { display:block; }
+  #pe-drawer { position:fixed; top:0; right:0; bottom:0; width:min(880px, 100vw); z-index:49;
+               background:var(--panel); border-left:1px solid var(--line); box-shadow:-18px 0 50px rgba(0,0,0,.45);
+               display:flex; flex-direction:column; transform:translateX(102%); visibility:hidden;
+               transition:transform .18s ease, visibility 0s .18s; }
+  #pe-drawer.show { transform:none; visibility:visible; transition:transform .18s ease; }
+  @media (prefers-reduced-motion: reduce) { #pe-drawer, #pe-drawer.show { transition:none; } }
+  #pe-drawer .dr-head { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  #pe-drawer .dr-head h2 { margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #pe-drawer .dr-body { flex:1; min-height:0; overflow-y:auto; padding:2px 16px 18px; }
+  #pe-drawer .dr-foot { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 16px;
+                        border-top:1px solid var(--line); background:var(--panel-2); }
+  #pe-drawer h3.pe-sec { font:600 14px/1.2 var(--num-font); letter-spacing:.03em; color:var(--accent);
+                         margin:18px 0 6px; padding-top:12px; border-top:1px solid var(--line); }
+  #pe-drawer h3.pe-sec:first-child { border-top:0; padding-top:0; margin-top:10px; }
 </style>
 <link rel="stylesheet" href="/ui/kit.css?v=120">
 </head>
@@ -1410,7 +1438,47 @@ function enhanceSteppers() {
     wrap.append(mk("−", -1), inp, mk("+", +1));
   }
 }
-function postRender() { wrapTables(); enhanceSteppers(); enhancePickers($("#main")); groupControls(); }
+function postRender() {
+  wrapTables(); enhanceSteppers(); enhancePickers($("#main")); groupControls();
+  sectionTabs();
+  // cards that a tab adds a moment later (an extra fetch) join their section too
+  clearTimeout(window._sectT1); clearTimeout(window._sectT2);
+  window._sectT1 = setTimeout(sectionTabs, 900); window._sectT2 = setTimeout(sectionTabs, 3000);
+}
+// v0.181.124: a tab that is several pages long shows one section at a time. Each section
+// starts at the first top-level block whose text begins with its pattern; blocks before
+// the first pattern belong to the first section. The choice is kept while the page is open.
+const TAB_SECTIONS = {
+  Pool: [["Backends", null], ["Add or edit", /^Edit backend list/], ["Routing and brain", /^Routing mode/],
+         ["Global settings", /^Global settings/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
+};
+function sectionTabs() {
+  const defs = TAB_SECTIONS[current], main = $("#main");
+  if (!defs || !main) return;
+  let bar = main.querySelector(":scope > .seg.sect");
+  const kids = [...main.children].filter(k => k !== bar);
+  if (!kids.length) return;
+  let cur = 0;
+  const of = new Map();
+  kids.forEach(k => {
+    const t = (k.textContent || "").trim();
+    for (let i = cur + 1; i < defs.length; i++) if (defs[i][1] && defs[i][1].test(t)) { cur = i; break; }
+    of.set(k, cur);
+  });
+  const state = window._sect = window._sect || {};
+  const sel = Math.min(state[current] || 0, defs.length - 1);
+  if (!bar) {
+    bar = document.createElement("div"); bar.className = "seg sect"; bar.setAttribute("role", "tablist");
+    main.insertBefore(bar, main.firstChild);
+    bar.onclick = e => {
+      const b = e.target.closest("button[data-i]"); if (!b) return;
+      state[current] = +b.dataset.i; sectionTabs(); window.scrollTo(0, 0);
+    };
+  }
+  const html = defs.map((d, i) => `<button role="tab" aria-selected="${i === sel}" class="${i === sel ? "on" : ""}" data-i="${i}">${esc(d[0])}</button>`).join("");
+  if (bar.innerHTML !== html) bar.innerHTML = html;
+  kids.forEach(k => k.classList.toggle("sect-hide", of.get(k) !== sel));
+}
 
 // Keep every control visually attached to its label (one place, every tab):
 //  * a checkbox/radio next to its <label> -> both enclosed in one bordered
@@ -5403,7 +5471,10 @@ async function tabPersonas() {
       return "";
     }).join(" ");
   };
-  const rows = d.personas.map(p => `<tr>
+  const pGroup = p => p.kind === "media" ? "media" : /^Foundry-Kilo/.test(p.virtual_name) ? "kilo" : /cline/i.test(p.virtual_name) ? "cline" : "chat";
+  const pCount = {all: d.personas.length, chat: 0, kilo: 0, cline: 0, media: 0};
+  d.personas.forEach(p => { pCount[pGroup(p)]++; });
+  const rows = d.personas.map(p => `<tr data-p="${esc(p.virtual_name)}" data-g="${pGroup(p)}">
     <td class="pname"><b class="nw">${esc(p.virtual_name)}</b><div class="pills">${p.enabled ? "" : '<span class="pill warn">disabled</span>'}
       ${p.context_window ? '<span class="pill ok" title="admin-set context override">ctx: ' + esc(formatCtx(p.context_window)) + '</span>' : ''}
       ${p.routing === "strict" ? (p.backend && p.backend.startsWith("<")
@@ -5425,14 +5496,26 @@ async function tabPersonas() {
         <button class="act" onclick='run(api("personas/delete",{method:"POST",body:{virtual_name:${JSON.stringify(p.virtual_name)}}}))'>delete</button></td>
     </tr>`).join("");
   $("#main").innerHTML = `
-    <h2>Personas — virtual models advertised via /api/tags</h2>
+    <h2 style="margin-top:0">Personas <span class="hint" style="font-weight:normal">— each one is a model name clients can ask for, with its own routing</span></h2>
     <p class="hint">Each row is a routing policy. Adding a workload type (e.g. Foundry-Creative)
     is adding a row here — never a code change (§4.8).</p>
     ${(pf.profiles || []).map(profileCard).join("")}
     <div id="pv-result">${window._pvKeep || ""}</div>
-    <table><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th title="Which clients this persona is tuned for — hover a badge for the note. Documentation metadata: one persona serves multiple clients; only fork a client-specific persona when an existing one genuinely doesn't serve that client well.">clients</th><th>description</th><th></th></tr>${rows}</table>
-    <div class="card">
-      <h2 style="margin-top:0" id="pe-title">Add / edit persona</h2>
+    <div class="tb">
+      <input type="search" id="pe-find" placeholder="Find a persona by name, model, tool or description" value="${esc((window._peFilter || {}).q || "")}" aria-label="Find a persona">
+      <div class="seg" id="pe-groups" role="tablist" aria-label="Persona group">${[["all", "All"], ["chat", "Chat and agent"], ["kilo", "Kilo"], ["cline", "Cline"], ["media", "Media"]].filter(([k]) => k === "all" || pCount[k]).map(([k, l]) =>
+        `<button data-g="${k}" class="${((window._peFilter || {}).g || "all") === k ? "on" : ""}">${l}<b>${pCount[k]}</b></button>`).join("")}</div>
+      <span class="hint" id="pe-count" style="margin:0"></span>
+      <span style="flex:1"></span>
+      <button class="act primary" id="pe-new">New persona</button>
+    </div>
+    <table id="pe-list"><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th title="Which clients this persona is tuned for — hover a badge for the note. Documentation metadata: one persona serves multiple clients; only fork a client-specific persona when an existing one genuinely doesn't serve that client well.">clients</th><th>description</th><th></th></tr>${rows}</table>
+    <div id="pe-back"></div>
+    <aside id="pe-drawer" class="drawer" aria-label="Persona editor">
+      <div class="dr-head"><h2 id="pe-title">New persona</h2>
+        <button class="act" id="pe-close" title="Close without saving (Esc)">Close</button></div>
+      <div class="dr-body">
+      <h3 class="pe-sec">Basics</h3>
       <div class="row"><label>virtual_name</label><input id="pe-name" size="28"></div>
       <div class="row"><label>description</label><input id="pe-desc" size="70"></div>
       <div class="row">
@@ -5440,6 +5523,7 @@ async function tabPersonas() {
         <input id="pe-ctx" type="number" min="0" step="1024" size="14" value="0" placeholder="e.g. 131072">
         <span class="hint">(0 = auto-discover from backends)</span>
       </div>
+      <h3 class="pe-sec">Routing</h3>
       <div class="row"><label>benchmark_category</label>
         <select id="pe-cat"><option>coding</option><option>reasoning</option>
         <option>general_chat</option><option>tool_calling</option><option>agentic</option></select>
@@ -5449,6 +5533,7 @@ async function tabPersonas() {
         <label>enabled</label><input type="checkbox" id="pe-enabled" checked></div>
       <div class="row"><label>escalation_triggers</label>
         <input id="pe-trig" data-multi="json" value="[]" placeholder="type a trigger, Enter to add"></div>
+      <h3 class="pe-sec">Tools</h3>
       <div class="row"><label title="MCP servers preferentially loaded for this persona's sessions (writes to preferred_mcp_tools). Checking a server prefers ALL of its tools. Populated live from the Tools tab's discovered set. Model (ask_*) tools are always available and not listed here. Not auto-attached — checking is a deliberate per-persona context-cost choice.">preferred MCP servers</label>
         <div id="pe-mcp" class="mcp-checklist">${checklist}</div></div>
       <div class="row"><label title="Grant EVERY MCP server, including ones added later. With this on, a server or tool you untick below is excluded (stored as !name), so you can still gate tools away from this persona.">every server</label>
@@ -5460,6 +5545,7 @@ async function tabPersonas() {
         <input id="pe-tsteps" type="number" min="1" max="200" placeholder="(global)" style="width:80px"></div>
       <div class="row"><label>guardrail_overrides (JSON obj)</label>
         <input id="pe-guard" size="70" value="{}"></div>
+      <h3 class="pe-sec">Models</h3>
       <div class="row"><label title="Ordered list of model ids tried in priority order. In brain (agent) mode: boosted to the top of candidates, guardrail/quota denial falls to the next pin, then the normal pool. In DIRECT mode (Cline) with local_bias_strength=prefer_paid: the paid pins are tried top-down as a cascade — each usage/cost-gated — before degrading to a local model on exhaustion (e.g. Opus 4.8 → Sonnet 5 → local). Local pins are honored as the local fallback, not the paid cascade.">pinned_models (priority order)</label>
         <input id="pe-pins" data-multi="json" data-options="models" data-ordered value="[]" placeholder="pick models in priority order"></div>
       <div class="row"><label title="HARD restriction on which models this persona may route to. Empty = no restriction (brain picks from all — the default). ONE id locks the persona to it. A FEW ids limit the brain's choice to just those. Safety valve: if none are reachable, the full pool is used (logged) rather than failing. Use this to force a Cline-plan persona onto your Claude models, or lock/limit Cline-act to specific local coders.">model_allowlist</label>
@@ -5525,6 +5611,7 @@ async function tabPersonas() {
         <label for="pe-cap-image_output">image output</label><input type="checkbox" id="pe-cap-image_output" class="pe-cap" value="image_output">
         <label title="chat = a model clients pick; image = an image policy (generate_image / edit_image with model = this persona), never listed or served as a chat model">kind</label>
         <select id="pe-kind"><option value="">chat</option><option value="media">image</option></select></div>
+      <h3 class="pe-sec">Advanced</h3>
       <div class="row tight"><label title="Turn assist for coding clients in direct mode (Cline Act) — JSON object, every key optional, {} = all off. think_policy: client|persona|adaptive (+ think_levels {routine, after_edit, after_failure}); dedupe_reads; roblox_cleanup; image_keep N; soft_budget_tokens N; prejudge: off|observe|enforce; supervisor: off|observe|nudge|escalate; auditor: off|observe|enforce (+ auditor_min_tool_turns, auditor_max_rejections, auditor_required_patterns [regex]); advisor true + frontier_models [ids, tried in order] + frontier_max_calls per conversation; frontier_rounds. See docs/TURN_ASSIST.md. Results: Dashboard → Scoreboard.">turn assist (JSON obj)</label>
         <textarea id="pe-assist" rows="3" cols="70" placeholder='{"think_policy": "adaptive", "dedupe_reads": true, "prejudge": "observe", "supervisor": "observe", "auditor": "observe"}'>{}</textarea></div>
       <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
@@ -5550,11 +5637,36 @@ async function tabPersonas() {
         <select id="pe-review-model">${reviewOpts}</select>
         <label title="Free pre-filter: the local routing brain screens whether the answer plausibly needs review before the (possibly paid) review model is invoked. Recommended ON — it saves review spend on obviously-fine answers.">review_prefilter</label>
         <input type="checkbox" id="pe-prefilter" checked></div>
-      <div class="row"><button class="act primary" id="pe-save">Save persona</button>
-        <button class="act" id="pe-apply-ctx" title="Set a sensible default context_window on any persona that has none yet (never overwrites a value you've already set). Review the numbers against your workers' real windows afterward.">Apply default context windows</button></div>
-    </div>`;
+      </div>
+      <div class="dr-foot"><button class="act primary" id="pe-save">Save persona</button>
+        <button class="act" id="pe-apply-ctx" title="Set a sensible default context_window on any persona that has none yet (never overwrites a value you've already set). Review the numbers against your workers' real windows afterward.">Apply default context windows</button>
+        <span class="hint" style="margin:0 0 0 auto">Esc closes without saving</span></div>
+    </aside>`;
   window._personas = Object.fromEntries(d.personas.map(p => [p.virtual_name, p]));
   wireMcpChecklist();
+  // v0.181.124: find and group filters above the list; the editor is a side panel
+  window._peFilter = window._peFilter || {q: "", g: "all"};
+  const applyPersonaFilter = () => {
+    const f = window._peFilter, q = (f.q || "").toLowerCase().trim();
+    let shown = 0;
+    document.querySelectorAll("#pe-list tr[data-p]").forEach(tr => {
+      const ok = (f.g === "all" || tr.dataset.g === f.g) && (!q || tr.textContent.toLowerCase().includes(q));
+      tr.style.display = ok ? "" : "none"; shown += ok ? 1 : 0;
+    });
+    $("#pe-count").textContent = shown === d.personas.length ? "" : `${shown} of ${d.personas.length} shown`;
+  };
+  $("#pe-find").oninput = e => { window._peFilter.q = e.target.value; applyPersonaFilter(); };
+  $("#pe-groups").onclick = e => {
+    const b = e.target.closest("button[data-g]"); if (!b) return;
+    window._peFilter.g = b.dataset.g;
+    $("#pe-groups").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    applyPersonaFilter();
+  };
+  applyPersonaFilter();
+  $("#pe-close").onclick = closePersonaDrawer;
+  $("#pe-back").onclick = closePersonaDrawer;
+  $("#pe-new").onclick = () => { window._peOpenNew = true; render(); };       // a clean form
+  if (window._peOpenNew) { window._peOpenNew = false; openPersonaDrawer(); setTimeout(() => $("#pe-name") && $("#pe-name").focus(), 200); }
   api("agents").then(r => {
     const sel = $("#pe-agent");
     if (!sel) return;
@@ -5825,11 +5937,24 @@ window.fillQueries = kind => {
   for (const q of (window._queryPresets[kind] || [])) if (!seen.has(q)) { have.push(q); seen.add(q); }
   ta.value = have.join("\n");
 };
+function openPersonaDrawer() {
+  const d = $("#pe-drawer"); if (!d) return;
+  d.classList.add("show"); $("#pe-back").classList.add("show");
+  const b = d.querySelector(".dr-body"); if (b) b.scrollTop = 0;
+}
+function closePersonaDrawer() {
+  const d = $("#pe-drawer"), k = $("#pe-back");
+  if (d) d.classList.remove("show");
+  if (k) k.classList.remove("show");
+}
+document.addEventListener("keydown", e => {
+  const d = $("#pe-drawer");
+  if (e.key === "Escape" && d && d.classList.contains("show") && !$("#pal-back").classList.contains("show") && _modal.hidden) closePersonaDrawer();
+});
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
   $("#pe-title").textContent = "Edit " + name;
-  document.querySelector("#pe-name").closest(".card")
-    .scrollIntoView({behavior: "smooth", block: "start"});
+  openPersonaDrawer();
   $("#pe-name").value = p.virtual_name;
   $("#pe-desc").value = p.description || "";
   // context_window is nullable — show 0 if unset so the field never reads blank.

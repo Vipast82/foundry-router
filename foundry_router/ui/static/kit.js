@@ -30,7 +30,7 @@
   FK.busy = function () {
     const a = document.activeElement;
     if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== "checkbox") return true;
-    return !!document.querySelector("dialog[open], .modal.open, #modal.open, .modal-back.show");
+    return !!document.querySelector("dialog[open], .modal.open, #modal.open, .modal-back.show, .drawer.show");
   };
 
   // ---- tables ---------------------------------------------------------------------------

@@ -113,6 +113,11 @@ class Services:
         self.pool.ledger = self.ledger
         from . import queue_class
         from .lanes import all_models as _all_models
+        # v0.181.124: names what the event loop was doing whenever it freezes (loopwatch.py)
+        from .loopwatch import LoopWatch
+        self.loopwatch = LoopWatch(on_stall=lambda row: self.db.log_event(
+            "warning", "stall", f"router stalled for {row['seconds']} s in {row['where']}",
+            row["stack"]))
         queue_class.configure(lambda: self.config_store.config.queue)
         from .capture import Capture
         from .configops import secret_values
@@ -432,6 +437,7 @@ class Services:
                                   f"embedding-only models")
         except Exception:
             log.exception("cross-pass conflation sweep failed")
+        self.loopwatch.start()
         self._bg_tasks = [
             asyncio.create_task(self._openrouter_loop()),
             asyncio.create_task(self._tool_sync_loop()),
@@ -697,6 +703,7 @@ class Services:
                 log.exception("subscription usage poll error")
 
     async def shutdown(self) -> None:
+        self.loopwatch.stop()
         for t in [*self._bg_tasks, self._warmup_task]:
             if t is not None:
                 t.cancel()
@@ -790,7 +797,9 @@ def create_app(config_path: Optional[Path] = None,
         w = services.warmup
         return {"status": "ok", "version": __version__, "warmup": w.get("state"),
                 "warming_up": w.get("state") == "running",
-                "warmup_steps": w.get("steps", {})}
+                "warmup_steps": w.get("steps", {}),
+                # freezes of the event loop longer than 2 s (loopwatch.py)
+                "stalls": services.loopwatch.summary()}
 
     app.include_router(facade_router)
     app.include_router(openai_router)

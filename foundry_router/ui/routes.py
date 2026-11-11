@@ -1411,6 +1411,15 @@ async def request_trace(request: Request, request_id: str):
     return t
 
 
+@router.get("/admin/api/health/stalls")
+async def health_stalls(request: Request):
+    """Recent freezes of the event loop (longer than 2 s) with the stack that was
+    running, newest first (loopwatch.py). Empty when the router never froze."""
+    lw = getattr(_svc(request), "loopwatch", None)
+    return {"threshold_seconds": getattr(lw, "threshold", None),
+            "stalls": list(reversed(lw.stalls)) if lw is not None else []}
+
+
 @router.get("/admin/api/health/functional")
 async def functional_health(request: Request):
     """Per backend: reachable (HTTP) vs serving (a real or probe generation

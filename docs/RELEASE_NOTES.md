@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.124 — redesign, step 3: Personas and Pool; a watchdog for router stalls
+
+**Personas.** The tab was 4,260 px tall with the editor at the very bottom. Now:
+
+- A toolbar above the list: a find box (name, model, tool, description) and group buttons with counts (All, Chat and agent, Kilo, Cline, Media). The choice is kept while the page is open.
+- **New persona** and each row's **edit** open the editor as a panel on the right, over the list. It has five sections (Basics, Routing, Tools, Models, Advanced) and Save stays in view at the bottom. Close, Esc or a click outside closes it without saving.
+- Resizing the window never redraws the page while the editor is open.
+
+**Pool.** The tab was 4,230 px of unrelated cards. It now shows one section at a time: Backends, Add or edit, Routing and brain, Global settings, MCP endpoint (`TAB_SECTIONS` and `sectionTabs()`, reusable for other long tabs).
+
+**Stall watchdog** (`loopwatch.py`). On 2026-11-11 the live router went silent for 10 to 30 seconds three times, with nothing in Events to say why. Everything runs on one event loop, so any code that works for seconds without yielding freezes every stream. A task on the loop now stamps the time four times a second and a separate thread watches the stamp; when the loop is stuck for more than 2 s the thread copies the loop's stack. When the loop moves again one warning is written: "router stalled for 12.4 s in graph (routes_view.py:88)", with the stack in its detail. `/health` gains `stalls` (count and the latest), and `GET /admin/api/health/stalls` lists the last 20 with stacks.
+
+Tests: `tests/test_ui_kit.py`, `tests/test_loopwatch.py`.
+
 ## v0.181.123 — redesign, step 2: Live and Performance
 
 **Live.** The tab was twelve cards in one column, 2,470 px tall, opening with the advisor. It now opens with **Running now**: one chip per backend (slots filled, who waits, lane or not) and a table of the requests in flight (who, persona, model, backend, what it is doing, for how long, request id). A call reading its prompt shows a progress bar and the token counts. Under it, two columns: recent performance, recently finished and loaded models on the left; inference servers, routing brain, tools (running and recent, one card) and backends on the right. On a window under 1,250 px the columns stack. The advisor is folded at the bottom with its counts on the fold line. A model's usual speed is shown only while it generates, and stream estimates in the thousands are not shown at all (a waiting Claude call read "~9938.2 tok/s").

@@ -94,3 +94,23 @@ def test_live_and_performance_are_laid_out_for_reading():
     assert "p98 * 3" in chart and "Math.min(v, hi)" in chart and "above the scale" in chart
     assert "${paths}${ends}${hits}" in chart
     assert html.count("function queueChipsHtml(q)") == 1
+
+
+def test_personas_have_a_toolbar_and_a_side_panel_editor_and_pool_has_sections():
+    """v0.181.124: Personas gets find and group filters and its editor moves from the
+    bottom of a 4,000 px page into a side panel with sections; long tabs (Pool) show one
+    section at a time."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    per = html[html.index("async function tabPersonas()"):html.index("function openPersonaDrawer()")]
+    assert 'id="pe-find"' in per and 'id="pe-groups"' in per and 'id="pe-new"' in per
+    assert '<table id="pe-list">' in per and 'data-p="${esc(p.virtual_name)}"' in per
+    assert '<aside id="pe-drawer" class="drawer"' in per and 'class="dr-foot"' in per
+    secs = [per.index(f'<h3 class="pe-sec">{t}</h3>') for t in ("Basics", "Routing", "Tools", "Models", "Advanced")]
+    assert secs == sorted(secs)
+    assert per.index('class="dr-foot"') < per.index('id="pe-save"')            # Save stays in view
+    assert "Add / edit persona" not in html and 'closest(".card")\n    .scrollIntoView' not in html
+    assert "function closePersonaDrawer()" in html and "openPersonaDrawer();" in html
+    assert "TAB_SECTIONS" in html and '["MCP endpoint", /^Foundry-MCP aggregator/]' in html
+    assert "sectionTabs();" in html and ".sect-hide { display:none !important; }" in html
+    # a resize never redraws the page under an open editor
+    assert ".drawer.show" in (STATIC / "kit.js").read_text(encoding="utf-8")
