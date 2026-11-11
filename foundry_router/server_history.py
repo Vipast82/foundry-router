@@ -75,7 +75,8 @@ async def sample_once(svc: Any, now: Optional[float] = None) -> int:
 
 
 def prune(db: Any, days: int) -> int:
-    return db.execute_count("DELETE FROM server_samples WHERE ts < ?", (time.time() - days * 86400,))
+    return db.delete_in_steps("server_samples", "ts < ?", (time.time() - days * 86400,),
+                              ordered=True)
 
 
 def query(db: Any, hours: float = 24, backend: str = "", metrics: Optional[list] = None,

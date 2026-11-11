@@ -17,6 +17,7 @@ What's live vs. restart-required:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -1187,7 +1188,10 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         personas = sorted(p["virtual_name"] for p in svc.personas.list(enabled_only=True))
     except Exception:                                             # noqa: BLE001
         personas = []
-    return {"capture": svc.capture.status(), "pipelines": pipes, "episodes": eps,
+    # wait=False: the per-project counts read every record (49 s on the live store), so
+    # the page gets the last counts and a recount runs in the background
+    return {"capture": await asyncio.to_thread(svc.capture.status, False), "pipelines": pipes,
+            "episodes": eps,
             "options": {"backends": _configured_backends(svc), "personas": personas}}
 
 
@@ -1234,7 +1238,7 @@ async def training_capture_set(request: Request):
     svc.db.log_event("info", "admin", "training capture settings changed: "
                      + ", ".join(sorted(updates)) if updates else "training capture saved")
     return {"ok": True, "training_capture": cfg.training_capture.model_dump(),
-            "capture": svc.capture.status()}
+            "capture": await asyncio.to_thread(svc.capture.status, False)}
 
 
 @router.get("/admin/api/training/capture/download")
@@ -1415,9 +1419,12 @@ async def request_trace(request: Request, request_id: str):
 async def health_stalls(request: Request):
     """Recent freezes of the event loop (longer than 2 s) with the stack that was
     running, newest first (loopwatch.py). Empty when the router never froze."""
-    lw = getattr(_svc(request), "loopwatch", None)
+    svc = _svc(request)
+    lw = getattr(svc, "loopwatch", None)
     return {"threshold_seconds": getattr(lw, "threshold", None),
-            "stalls": list(reversed(lw.stalls)) if lw is not None else []}
+            "stalls": list(reversed(lw.stalls)) if lw is not None else [],
+            # database calls that held the shared lock, or waited for it, for over a second
+            "slow_db": list(reversed(getattr(svc.db, "slow_calls", None) or []))}
 
 
 @router.get("/admin/api/health/functional")
@@ -1914,8 +1921,9 @@ async def data_tables(request: Request):
     from .. import datatools
     svc = _svc(request)
     cfg = svc.config_store.config.data_retention
-    return {"tables": datatools.stats(svc.db, cfg.days), "retention": cfg.model_dump(),
-            "formats": list(datatools.FORMATS)}
+    # counting every table takes seconds on a large database: off the event loop
+    return {"tables": await asyncio.to_thread(datatools.stats, svc.db, cfg.days),
+            "retention": cfg.model_dump(), "formats": list(datatools.FORMATS)}
 
 
 @router.get("/admin/api/data/export")

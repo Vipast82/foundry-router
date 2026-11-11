@@ -63,11 +63,14 @@ def _check(db: Database, table: str) -> None:
 
 def stats(db: Database, retention: Optional[dict] = None) -> list[dict]:
     out = []
+    # counting a large table reads all of it: on the second connection, so the request
+    # path's lock is not held meanwhile (the caller runs this off the event loop)
+    read = getattr(db, "ro_query", None) or db.query
     for t in tables(db):
         ts = ts_column(db, t)
-        row = db.query_one(
+        row = (read(
             f"SELECT COUNT(*) AS n" + (f", MIN({ts}) AS oldest, MAX({ts}) AS newest" if ts else "")
-            + f" FROM {t}")
+            + f" FROM {t}") or [None])[0]
         out.append({"table": t, "rows": row["n"] if row else 0,
                     "ts_column": ts, "oldest": (row or {}).get("oldest"),
                     "newest": (row or {}).get("newest"),
@@ -158,8 +161,9 @@ def clear(db: Database, table: str, older_than_days: float = 0) -> int:
         raise ValueError(f"{table} holds configuration/state, not logs — not clearable here")
     ts = ts_column(db, table)
     if older_than_days and ts:
-        return db.execute_count(f"DELETE FROM {table} WHERE {_ts_sql(ts)} < datetime(?)",
-                          (_cutoff(older_than_days * 24),))
+        # log tables only grow at the new end: stop at the first slice with nothing old
+        return db.delete_in_steps(table, f"{_ts_sql(ts)} < datetime(?)",
+                                  (_cutoff(older_than_days * 24),), ordered=True)
     return db.execute_count(f"DELETE FROM {table}")
 
 

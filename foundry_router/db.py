@@ -14,6 +14,8 @@ import json
 import logging
 import sqlite3
 import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -322,10 +324,18 @@ STARTER_CLIENT_COMPAT = {
 }
 
 
+SLOW_CALL_SECONDS = 1.0      # a lock hold or wait this long is recorded (Database.slow_calls)
+DELETE_STEP = 4000           # rowids per slice in Database.delete_in_steps
+
+
 class Database:
     def __init__(self, path: Path | str):
         self.path = str(path)
         self._lock = threading.Lock()
+        # v0.181.125: calls that held this lock, or waited for it, for over a second
+        self.slow_calls: deque = deque(maxlen=40)
+        self._ro: Optional[sqlite3.Connection] = None
+        self._ro_lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -867,29 +877,103 @@ class Database:
 
     # -- generic helpers --------------------------------------------------------
 
+    # Everything in the router shares ONE connection behind ONE lock, and most callers
+    # are on the event loop. A statement that holds the lock for seconds (from any
+    # thread) therefore freezes every stream at the loop's next database call. Three
+    # tools keep holds short: `note_slow` records the ones that were not, `ro_query`
+    # reads on a second connection, `delete_in_steps` deletes a slice at a time.
+
+    def note_slow(self, what: str, t0: float, t1: float) -> None:
+        """Called after the lock is released: t0 = asked for it, t1 = got it."""
+        now = time.monotonic()
+        waited, held = t1 - t0, now - t1
+        if held < SLOW_CALL_SECONDS and waited < SLOW_CALL_SECONDS:
+            return
+        row = {"at": time.time() - held, "held": round(held, 1), "waited": round(waited, 1),
+               "what": " ".join(str(what).split())[:200],
+               "thread": threading.current_thread().name}
+        self.slow_calls.append(row)
+        log.warning("database lock: held %.1f s, waited %.1f s (%s): %s",
+                    held, waited, row["thread"], row["what"])
+
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
+        t0 = time.monotonic()
         with self._lock:
+            t1 = time.monotonic()
             rows = self._conn.execute(sql, tuple(params)).fetchall()
+        self.note_slow(sql, t0, t1)
         return [dict(r) for r in rows]
+
+    def ro_query(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
+        """A read on a second, read-only connection, for slow reads made off the event
+        loop (table sizes, exports): it does not hold the lock the request path uses,
+        and WAL lets it read while the main connection writes. It sees committed data.
+        An in-memory database has only the one connection."""
+        if self.path == ":memory:" or self.path.startswith("file:"):
+            return self.query(sql, params)
+        with self._ro_lock:
+            if self._ro is None:
+                self._ro = sqlite3.connect(Path(self.path).resolve().as_uri() + "?mode=ro",
+                                           uri=True, check_same_thread=False, timeout=30)
+                self._ro.row_factory = sqlite3.Row
+            rows = self._ro.execute(sql, tuple(params)).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_in_steps(self, table: str, where: str, params: Iterable[Any] = (), *,
+                        ordered: bool = False, step: int = DELETE_STEP) -> int:
+        """DELETE FROM table WHERE <where>, one slice of `step` rowids at a time, letting
+        go of the lock between slices. One DELETE over a large table scans all of it
+        with the lock held (128 s on the live router); a slice holds it for milliseconds.
+
+        `ordered=True` is for append-only tables whose rows get newer as rowid grows
+        (logs): the walk stops at the first slice that has rows but nothing to delete,
+        so an hourly prune reads the old end of the table, not all of it."""
+        params = tuple(params)
+        r = self.query_one(f"SELECT MIN(rowid) AS a, MAX(rowid) AS b FROM {table}")
+        if not r or r["a"] is None:
+            return 0
+        a, last, n = int(r["a"]), int(r["b"]), 0
+        off_loop = threading.current_thread() is not threading.main_thread()
+        while a <= last:
+            b = a + step
+            d = self.execute_count(
+                f"DELETE FROM {table} WHERE rowid >= ? AND rowid < ? AND ({where})",
+                (a, b) + params)
+            n += d
+            if ordered and not d and self.query_one(
+                    f"SELECT 1 AS x FROM {table} WHERE rowid >= ? AND rowid < ? LIMIT 1", (a, b)):
+                break
+            a = b
+            if off_loop:
+                time.sleep(0.004)          # the event loop gets the lock before the next slice
+        return n
 
     def query_one(self, sql: str, params: Iterable[Any] = ()) -> Optional[dict]:
         rows = self.query(sql, params)
         return rows[0] if rows else None
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> int:
+        t0 = time.monotonic()
         with self._lock:
+            t1 = time.monotonic()
             cur = self._conn.execute(sql, tuple(params))
             self._conn.commit()
-            return cur.lastrowid or cur.rowcount
+            out = cur.lastrowid or cur.rowcount
+        self.note_slow(sql, t0, t1)
+        return out
 
     def execute_count(self, sql: str, params: Iterable[Any] = ()) -> int:
         """Run an UPDATE/DELETE and return the number of rows it touched
         (execute() returns lastrowid when there is one, which a DELETE
         inherits from the last INSERT)."""
+        t0 = time.monotonic()
         with self._lock:
+            t1 = time.monotonic()
             cur = self._conn.execute(sql, tuple(params))
             self._conn.commit()
-            return cur.rowcount
+            out = cur.rowcount
+        self.note_slow(sql, t0, t1)
+        return out
 
     def executemany(self, sql: str, seq: Iterable[Iterable[Any]]) -> None:
         with self._lock:
@@ -928,5 +1012,9 @@ class Database:
             log.warning("[%s] %s", source, message)
 
     def close(self) -> None:
+        with self._ro_lock:
+            if self._ro is not None:
+                self._ro.close()
+                self._ro = None
         with self._lock:
             self._conn.close()

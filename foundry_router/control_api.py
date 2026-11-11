@@ -681,8 +681,24 @@ def _client() -> dict:
 @router.post("/v1/foundry/telemetry/batch")
 @_guard
 async def telemetry_batch(request: Request):
+    """A batch takes seconds (redaction, then hundreds of writes): it runs on a worker
+    thread, one batch at a time and in arrival order, so streams keep flowing meanwhile."""
     b = await _body(request)
-    return _cc(request).ingest(b, _client())
+    cc, client = _cc(request), _client()
+    async with _ingest_lock():
+        return await asyncio.to_thread(cc.ingest, b, client)
+
+
+_INGEST_LOCK: dict = {}
+
+
+def _ingest_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()                 # one lock per event loop (tests make several)
+    lock = _INGEST_LOCK.get(loop)
+    if lock is None:
+        _INGEST_LOCK.clear()
+        lock = _INGEST_LOCK[loop] = asyncio.Lock()
+    return lock
 
 
 def _relay_only(c: dict) -> bool:

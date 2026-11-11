@@ -208,6 +208,8 @@ class CaptureStore:
             pass
         new = not self.path.exists()
         self._lock = threading.Lock()
+        self._ro: Optional[sqlite3.Connection] = None
+        self._ro_lock = threading.Lock()
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -235,12 +237,35 @@ class CaptureStore:
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
+    def ro_query(self, sql: str, args=()) -> list[dict]:
+        """A slow read (the per-project counts read every record) on a second,
+        read-only connection: `insert`, which every captured request calls from the
+        event loop, never waits for it. v0.181.125: the counts query held the one
+        lock for 49 s and the router froze for as long."""
+        with self._ro_lock:
+            if self._ro is None:
+                self._ro = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
+                                           check_same_thread=False, timeout=30)
+                self._ro.row_factory = sqlite3.Row
+            return [dict(r) for r in self._ro.execute(sql, args).fetchall()]
+
     def prune(self, days: int) -> int:
+        """Old records go a few hundred at a time (they are large, and one DELETE held
+        the lock for as long as it took to free them all)."""
         if days <= 0:
             return 0
-        with self._lock:
-            return self.conn.execute("DELETE FROM capture_records WHERE ts < ?",
-                                     (time.time() - days * 86400,)).rowcount
+        cut, n = time.time() - days * 86400, 0
+        off_loop = threading.current_thread() is not threading.main_thread()
+        while True:
+            with self._lock:
+                d = self.conn.execute(
+                    "DELETE FROM capture_records WHERE id IN (SELECT id FROM capture_records "
+                    "WHERE ts < ? LIMIT 200)", (cut,)).rowcount
+            n += d
+            if d < 200:
+                return n
+            if off_loop:
+                time.sleep(0.004)
 
 
 class Capture:
@@ -252,6 +277,9 @@ class Capture:
         self._secrets: tuple[float, set] = (0.0, set())
         self.errors = 0
         self.last_error = ""
+        self._counts: Optional[dict] = None          # {"counts", "today", "at"}: see status()
+        self._counting = False
+        self._counter: Optional[threading.Thread] = None
 
     @property
     def cfg(self):
@@ -494,7 +522,7 @@ class Capture:
             args.append(since)
         q += " ORDER BY id LIMIT ?"
         args.append(max(1, min(1000, limit)))
-        rows = self.store.query(q, args)
+        rows = self.store.ro_query(q, args)
         for r in rows:
             r["body"] = json.loads(r["body"] or "{}")
             r["redaction"] = json.loads(r["redaction"] or "{}")
@@ -511,12 +539,12 @@ class Capture:
         out: dict = {"since": midnight, "backends": {}, "personas": {}, "purposes": {},
                      "total": 0}
         for col, key in (("backend", "backends"), ("persona", "personas")):
-            for r in self.store.query(
+            for r in self.store.ro_query(
                     f"SELECT {col} AS k, COUNT(*) AS n FROM capture_records "
                     f"WHERE kind='backend_call' AND ts >= ? GROUP BY {col}", (midnight,)):
                 out[key][r["k"] or ""] = r["n"]
         # every record that stands for a model call or a job (not `received`)
-        for r in self.store.query(
+        for r in self.store.ro_query(
                 "SELECT COALESCE(NULLIF(purpose, ''), 'agent_turn') AS k, COUNT(*) AS n "
                 "FROM capture_records WHERE kind != 'received' AND ts >= ? GROUP BY k",
                 (midnight,)):
@@ -524,7 +552,41 @@ class Capture:
         out["total"] = sum(out["backends"].values())
         return out
 
-    def status(self) -> dict:
+    COUNTS_FRESH_SECONDS = 300
+
+    def _count(self) -> dict:
+        """Records per project and kind. Reads every record (SUM(truncated) sits behind
+        the body column), so it takes as long as the store is big: tens of seconds."""
+        t0 = time.monotonic()
+        rows = self.store.ro_query(
+            "SELECT project_id, kind, COUNT(*) AS n, SUM(truncated) AS truncated, "
+            "SUM(CASE WHEN redaction LIKE '%\"redacted\"%' THEN 1 ELSE 0 END) AS redacted, "
+            "MAX(ts) AS last_ts FROM capture_records GROUP BY project_id, kind")
+        self._counts = {"counts": rows, "today": self.counts_today(), "at": time.time(),
+                        "took": time.monotonic() - t0}
+        return self._counts
+
+    def _count_in_background(self) -> Optional[threading.Thread]:
+        if self._counting:
+            return self._counter
+        self._counting = True
+
+        def run():
+            try:
+                self._count()
+            except Exception as e:                                # noqa: BLE001
+                self.last_error = f"counting records: {e}"[:300]
+            finally:
+                self._counting = False
+        self._counter = threading.Thread(target=run, name="foundry-capture-counts", daemon=True)
+        self._counter.start()
+        return self._counter
+
+    def status(self, wait: bool = True) -> dict:
+        """`wait=False` (the admin page, called off the event loop) gives a recount a
+        second and a half. A small store is always counted fresh. A large one returns
+        its last counts with their age, recounted in the background when they are older
+        than five minutes; `counts_pending` says no counts exist yet."""
         cfg = self.cfg
         out = {"enabled": bool(cfg and cfg.enabled), "projects": list(cfg.projects or []),
                "exclude_projects": list(cfg.exclude_projects or []),
@@ -540,12 +602,16 @@ class Capture:
                "boundary": BOUNDARY, "errors": self.errors, "last_error": self.last_error}
         if self._store is not None or (cfg and cfg.enabled):
             try:
-                rows = self.store.query(
-                    "SELECT project_id, kind, COUNT(*) AS n, SUM(truncated) AS truncated, "
-                    "SUM(CASE WHEN redaction LIKE '%\"redacted\"%' THEN 1 ELSE 0 END) AS redacted, "
-                    "MAX(ts) AS last_ts FROM capture_records GROUP BY project_id, kind")
-                out["counts"] = rows
-                out["today"] = self.counts_today()
+                c = self._count() if wait else self._counts
+                if not wait and (c is None or c["took"] < 1.0
+                                 or time.time() - c["at"] > self.COUNTS_FRESH_SECONDS):
+                    t = self._count_in_background()
+                    if t is not None:
+                        t.join(1.5)
+                    c = self._counts
+                if c is not None:
+                    out["counts"], out["today"], out["counts_at"] = c["counts"], c["today"], c["at"]
+                out["counts_pending"] = c is None
                 out["store"] = str(self.store.path)
             except Exception as e:                                # noqa: BLE001
                 out["store_error"] = str(e)[:200]

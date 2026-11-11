@@ -308,9 +308,9 @@ class WorkRegistry:
 
     def prune(self, days: int = 90) -> int:
         cut = time.time() - days * 86400
-        n = self.db.execute_count("DELETE FROM work_events WHERE ts < ?", (cut,))
-        n += self.db.execute_count("DELETE FROM work_sessions WHERE ended_ts IS NOT NULL "
-                                   "AND ended_ts < ?", (cut,))
+        n = self.db.delete_in_steps("work_events", "ts < ?", (cut,), ordered=True)
+        n += self.db.delete_in_steps("work_sessions", "ended_ts IS NOT NULL AND ended_ts < ?",
+                                     (cut,))
         return n
 
 

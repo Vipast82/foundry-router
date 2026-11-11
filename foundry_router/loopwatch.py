@@ -39,6 +39,11 @@ KEEP = 20
 OUR_FILES = ("foundry_router", "foundry_coordinator", "foundry_automation", "foundry_training")
 
 
+def _ours(filename: str) -> bool:
+    path = filename.replace("\\", "/")
+    return any("/" + p + "/" in path for p in OUR_FILES) and "/loopwatch.py" not in path
+
+
 def _where(stack: list) -> str:
     """The innermost frame in OUR code, as "function (file.py:line)"; a stall inside a
     library call is named by the Foundry function that made it."""
@@ -50,6 +55,22 @@ def _where(stack: list) -> str:
         f = stack[-1]
         return f"{f.name} ({f.filename.replace(chr(92), '/').rsplit('/', 1)[-1]}:{f.lineno})"
     return "unknown"
+
+
+def _others(frames: dict, loop_thread: Optional[int]) -> list:
+    """Other threads that were inside Foundry code at that moment, as
+    "thread-name: function (file.py:line)". When the loop is waiting for a lock, the
+    thread that holds it is in this list (v0.181.125)."""
+    names = {t.ident: t.name for t in threading.enumerate()}
+    me, out = threading.get_ident(), []
+    for ident, frame in frames.items():
+        if ident in (loop_thread, me):
+            continue
+        stack = traceback.extract_stack(frame)
+        if not any(_ours(f.filename) for f in stack):
+            continue
+        out.append(f"{names.get(ident, ident)}: {_where(stack)}")
+    return out[:6]
 
 
 class LoopWatch:
@@ -71,11 +92,13 @@ class LoopWatch:
             behind = time.monotonic() - self._last_tick
             if behind < self.threshold or self._pending is not None or self._loop_thread is None:
                 continue
-            frame = sys._current_frames().get(self._loop_thread)
+            frames = sys._current_frames()
+            frame = frames.get(self._loop_thread)
             stack = traceback.extract_stack(frame) if frame is not None else []
             self._pending = {"since": self._last_tick, "wall": time.time() - behind,
                              "where": _where(stack),
-                             "stack": "".join(traceback.format_list(stack[-14:]))}
+                             "stack": "".join(traceback.format_list(stack[-14:])),
+                             "others": _others(frames, self._loop_thread)}
 
     # -- the task: stamps the time, reports once the loop moves again ----------------------
     async def _tick(self) -> None:
@@ -89,7 +112,7 @@ class LoopWatch:
 
     def _report(self, pending: dict, seconds: float) -> None:
         row = {"at": pending["wall"], "seconds": round(seconds, 1), "where": pending["where"],
-               "stack": pending["stack"]}
+               "stack": pending["stack"], "others": pending.get("others") or []}
         self.stalls.append(row)
         log.warning("event loop stalled for %.1f s in %s", seconds, pending["where"])
         if self.on_stall is not None:

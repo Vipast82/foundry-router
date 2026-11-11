@@ -54,6 +54,19 @@ body.fk-dragging, body.fk-dragging * { cursor: col-resize !important; user-selec
 
 .fk-scroll { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
 
+/* -- long tables: a find box and paging above the table (v0.181.125) ------------------- */
+.fk-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 8px;
+            font: 500 12.5px/1.2 var(--num-font, inherit); color: var(--dim, #999); }
+.fk-tools[hidden] { display: none; }
+.fk-tools.in-box { position: sticky; left: 0; }
+.fk-tools .fk-find { flex: 1 1 220px; max-width: 360px; min-width: 0; }
+.fk-tools .fk-n { letter-spacing: .02em; }
+.fk-tools button { background: var(--panel, #222); color: var(--fg, #eee); border: 1px solid var(--line, #444);
+                   border-radius: 5px; padding: 5px 11px; cursor: pointer; font: inherit; }
+.fk-tools button:hover { border-color: var(--accent, #f80); color: var(--accent, #f80); }
+.fk-tools button[hidden] { display: none; }
+tr.fk-hide { display: none; }
+
 /* -- navigation wraps onto more rows; it never turns into a sideways scroller ---------- */
 nav .navgroups, nav .navsubs { flex-wrap: wrap; overflow-x: visible; }
 

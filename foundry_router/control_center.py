@@ -603,7 +603,9 @@ class ControlCenter:
     @contextlib.contextmanager
     def _tx(self):
         """One immediate transaction on Foundry's connection."""
+        t0 = time.monotonic()
         with self.db._lock:
+            t1 = time.monotonic()
             conn = self.db._conn
             if conn.in_transaction:
                 conn.commit()
@@ -614,6 +616,9 @@ class ControlCenter:
                 conn.rollback()
                 raise
             conn.commit()
+        note = getattr(self.db, "note_slow", None)
+        if note is not None:
+            note("control center transaction", t0, t1)
 
     @staticmethod
     def _rows(conn, sql, args=()) -> list[dict]:
@@ -875,28 +880,32 @@ class ControlCenter:
         red = self._redactor()
         derived: list[tuple] = []
         now = self.clock()
+        # v0.181.125: the slow part (redaction runs regexes over every string) happens
+        # BEFORE the transaction, so the database lock is held for the writes only
+        todo: list[tuple] = []
+        for o in obs:
+            if not isinstance(o, dict):
+                continue
+            t = o.get("type")
+            pid = _s(o.get("project_id"), 120)
+            if allowed and pid and pid not in allowed and \
+                    not (pid == PLAYBOOK_PROJECT and t == "memory"):
+                # the playbook snapshot is cross-project by design: any source
+                # allowed to send memory observations may send it
+                skipped["project_not_allowed"] = skipped.get("project_not_allowed", 0) + 1
+                continue
+            if not pid and (allowed or t in PROJECT_SCOPED_TYPES):
+                # an empty project id would slip past the allowlist
+                skipped["project_id_required"] = skipped.get("project_id_required", 0) + 1
+                continue
+            fn = getattr(self, f"_in_{str(t).replace('-', '_')}", None)
+            if fn is None:
+                # unknown future type: counted, never stored blindly
+                skipped[f"unknown:{_s(t, 30)}"] = skipped.get(f"unknown:{_s(t, 30)}", 0) + 1
+                continue
+            todo.append((t, fn, red.obj(o)[0]))
         with self._tx() as c:
-            for o in obs:
-                if not isinstance(o, dict):
-                    continue
-                t = o.get("type")
-                pid = _s(o.get("project_id"), 120)
-                if allowed and pid and pid not in allowed and \
-                        not (pid == PLAYBOOK_PROJECT and t == "memory"):
-                    # the playbook snapshot is cross-project by design: any source
-                    # allowed to send memory observations may send it
-                    skipped["project_not_allowed"] = skipped.get("project_not_allowed", 0) + 1
-                    continue
-                if not pid and (allowed or t in PROJECT_SCOPED_TYPES):
-                    # an empty project id would slip past the allowlist
-                    skipped["project_id_required"] = skipped.get("project_id_required", 0) + 1
-                    continue
-                fn = getattr(self, f"_in_{str(t).replace('-', '_')}", None)
-                if fn is None:
-                    # unknown future type: counted, never stored blindly
-                    skipped[f"unknown:{_s(t, 30)}"] = skipped.get(f"unknown:{_s(t, 30)}", 0) + 1
-                    continue
-                o, _ = red.obj(o)
+            for t, fn, o in todo:
                 try:
                     d = fn(c, o, st, now, src)
                 except (TypeError, ValueError, KeyError) as e:
@@ -4205,34 +4214,38 @@ class ControlCenter:
     # ------------------------------------------------------------------ retention
 
     def prune(self) -> int:
+        """Retention, a slice of each table at a time (Database.delete_in_steps): one
+        DELETE over cc_parts read the whole table with the database lock held and froze
+        the router for two minutes at startup and again every hour. True = the table
+        only grows at its new end, so the walk stops at the first slice with nothing old."""
         st = self.settings()
         cut = self.clock() - st["retention_days"] * 86400
         acut = self.clock() - st["action_retention_days"] * 86400
         n = 0
-        for sql, arg in (("DELETE FROM cc_parts WHERE received_ts < ?", cut),
-                         ("DELETE FROM cc_messages WHERE COALESCE(completed_ts, created_ts, 0) < ?",
-                          cut),
-                         ("DELETE FROM cc_sessions WHERE updated_ts < ?", cut),
-                         ("DELETE FROM cc_snapshots WHERE confirmed_ts < ? AND id NOT IN (SELECT "
-                          "MAX(id) FROM cc_snapshots GROUP BY kind, project_id, session_id, scope)",
-                          cut),
-                         ("DELETE FROM cc_feed WHERE ts < ?", cut),
-                         ("DELETE FROM cc_pending WHERE status='resolved' AND resolved_ts < ?", cut),
-                         ("DELETE FROM cc_transitions WHERE ts < ?", acut),
-                         ("DELETE FROM cc_alerts WHERE status NOT IN ('new','acknowledged') AND "
-                          "updated_ts < ?", acut),
-                         ("DELETE FROM cc_alert_log WHERE ts < ?", acut),
-                         ("DELETE FROM cc_actions WHERE status IN ('applied','rejected','failed',"
-                          "'expired','cancelled') AND updated_ts < ?", acut),
-                         ("DELETE FROM cc_action_log WHERE ts < ?", acut),
-                         ("DELETE FROM cc_op_sessions WHERE expires_ts < ?", self.clock()),
-                         ("DELETE FROM cc_drafts WHERE updated_ts < ?", cut),
-                         ("DELETE FROM cc_lane_units WHERE received_ts < ?", cut),
-                         ("DELETE FROM cc_artifacts WHERE received_ts < ?", cut),
-                         ("DELETE FROM cc_build_runs WHERE received_ts < ?", cut),
-                         ("DELETE FROM cc_batches WHERE ts < ?", cut),
-                         ("DELETE FROM cc_coord_events WHERE received_ts < ?", cut)):
-            n += self.db.execute_count(sql, (arg,))
+        for table, where, arg, ordered in (
+                ("cc_parts", "received_ts < ?", cut, True),
+                ("cc_messages", "COALESCE(completed_ts, created_ts, 0) < ?", cut, False),
+                ("cc_sessions", "updated_ts < ?", cut, False),
+                ("cc_feed", "ts < ?", cut, True),
+                ("cc_pending", "status='resolved' AND resolved_ts < ?", cut, False),
+                ("cc_transitions", "ts < ?", acut, True),
+                ("cc_alerts", "status NOT IN ('new','acknowledged') AND updated_ts < ?", acut, False),
+                ("cc_alert_log", "ts < ?", acut, True),
+                ("cc_actions", "status IN ('applied','rejected','failed','expired','cancelled') "
+                               "AND updated_ts < ?", acut, False),
+                ("cc_action_log", "ts < ?", acut, True),
+                ("cc_op_sessions", "expires_ts < ?", self.clock(), False),
+                ("cc_drafts", "updated_ts < ?", cut, False),
+                ("cc_lane_units", "received_ts < ?", cut, False),
+                ("cc_artifacts", "received_ts < ?", cut, False),
+                ("cc_build_runs", "received_ts < ?", cut, False),
+                ("cc_batches", "ts < ?", cut, False),
+                ("cc_coord_events", "received_ts < ?", cut, True)):
+            n += self.db.delete_in_steps(table, where, (arg,), ordered=ordered)
+        # the newest snapshot of each kind is kept whatever its age
+        n += self.db.execute_count(
+            "DELETE FROM cc_snapshots WHERE confirmed_ts < ? AND id NOT IN (SELECT "
+            "MAX(id) FROM cc_snapshots GROUP BY kind, project_id, session_id, scope)", (cut,))
         return n
 
     def capture_boundary(self) -> dict:

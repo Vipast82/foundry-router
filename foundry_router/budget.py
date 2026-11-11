@@ -594,8 +594,8 @@ class Ledger:
         days = getattr(self.cfg, "retention_days", 90) or 0
         if days <= 0:
             return 0
-        return self.db.execute_count("DELETE FROM usage_events WHERE ts < ? AND status != "
-                                     "'reserved'", (time.time() - days * 86400,))
+        return self.db.delete_in_steps("usage_events", "ts < ? AND status != 'reserved'",
+                                       (time.time() - days * 86400,))
 
     def active(self) -> list[dict]:
         now = time.time()

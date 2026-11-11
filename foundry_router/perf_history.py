@@ -59,8 +59,8 @@ def configure(retention=None, backend_kind=None) -> None:
 
 def prune(db: Database, days: Optional[int] = None) -> int:
     """Delete samples older than the retention window."""
-    return db.execute_count("DELETE FROM perf_samples WHERE datetime(ts) < datetime('now', ?)",
-                            (f"-{int(days or retention_days())} days",))
+    return db.delete_in_steps("perf_samples", "datetime(ts) < datetime('now', ?)",
+                              (f"-{int(days or retention_days())} days",), ordered=True)
 
 
 RUN_LABEL_KEY = "perf_run_label"

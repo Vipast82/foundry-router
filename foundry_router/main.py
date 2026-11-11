@@ -115,9 +115,21 @@ class Services:
         from .lanes import all_models as _all_models
         # v0.181.124: names what the event loop was doing whenever it freezes (loopwatch.py)
         from .loopwatch import LoopWatch
-        self.loopwatch = LoopWatch(on_stall=lambda row: self.db.log_event(
-            "warning", "stall", f"router stalled for {row['seconds']} s in {row['where']}",
-            row["stack"]))
+        def _stalled(row: dict) -> None:
+            # v0.181.125: with the stack, what other threads were doing and which database
+            # calls held the shared lock during the freeze (the usual cause)
+            extra = ""
+            if row.get("others"):
+                extra += "other threads: " + "; ".join(row["others"]) + chr(10)
+            slow = [c for c in list(self.db.slow_calls) if c["at"] >= row["at"] - 2]
+            if slow:
+                extra += "database lock: " + "; ".join(
+                    f"{c['thread']} held {c['held']} s, waited {c['waited']} s: {c['what'][:90]}"
+                    for c in slow[-4:]) + chr(10)
+            self.db.log_event("warning", "stall",
+                              f"router stalled for {row['seconds']} s in {row['where']}",
+                              extra + row["stack"])
+        self.loopwatch = LoopWatch(on_stall=_stalled)
         queue_class.configure(lambda: self.config_store.config.queue)
         from .capture import Capture
         from .configops import secret_values

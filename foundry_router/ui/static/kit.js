@@ -2,6 +2,9 @@
    - FK.tables(): every data table can be sorted by a column (click the header) and
      its columns resized (drag a header edge; double-click the edge to reset).
      Tables are picked up automatically as pages re-render.
+   - A table of 30 rows or more gets a bar above it: a find box and paging (the first
+     50 rows, "show more", "show all"). <table class="no-tools"> opts a table out;
+     <table data-fk-find="off"> keeps paging only (the page has its own search).
    - FK.onResize(fn): run fn after the window's WIDTH changes, so a page can redraw
      charts and maps at the new size.
    - FK.flow(...): the flow map used for routes and activity. */
@@ -10,6 +13,8 @@
   const FK = window.FK = window.FK || {};
   // <script src="/ui/kit.js" data-no-sort="1">: tables on that page resize but do not sort
   const NO_SORT = !!(document.currentScript && document.currentScript.dataset.noSort);
+  // <script ... data-no-tools="1">: no find-and-paging bar on that page's long tables
+  const NO_TOOLS = !!(document.currentScript && document.currentScript.dataset.noTools);
   const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
     c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   FK.esc = esc;
@@ -100,9 +105,11 @@
     table.classList.remove("fk-fixed");
   }
   function enhance(table) {
-    if (table.classList.contains("fk") || table.classList.contains("no-fk")) return;
+    if (table.classList.contains("no-fk")) return;
     const head = headerRow(table);
-    if (!head) { table.classList.add("no-fk"); return; }
+    if (!head) { if (table.rows.length) table.classList.add("no-fk"); return; }
+    if (head._fk) { tools(table, head); return; }           // already done: only the rows changed
+    head._fk = true;
     table.classList.add("fk");
     const sig = signature(head);
     const dataRows = table.rows.length - 1;
@@ -115,7 +122,7 @@
           if (e.target.closest(".fk-grip")) return;
           const cur = sortState[sig];
           const dir = cur && cur.col === col ? -cur.dir : 1;
-          if (sortTable(table, head, col, dir)) sortState[sig] = {col, dir};
+          if (sortTable(table, head, col, dir)) { sortState[sig] = {col, dir}; tools(table, head); }
         });
       }
       const grip = document.createElement("span");
@@ -149,6 +156,92 @@
     if (Array.isArray(saved) && saved.length === head.cells.length) freeze(table, head, saved);
     const st = sortState[sig];                             // a page that redraws keeps its order
     if (st && st.col < head.cells.length) sortTable(table, head, st.col, st.dir);
+    tools(table, head);
+  }
+
+  // ---- long tables: find and paging -------------------------------------------------------
+  // A table of LONG rows or more shows PAGE rows at a time under a bar with a find box.
+  // The state is kept per table signature, so it survives the page re-rendering the table.
+  const LONG = 30, PAGE = 50;
+  const toolState = {};                                   // signature -> {q, limit, focus}
+  const toolBars = new WeakMap();                         // table -> {bar, find, n, more, all, sig}
+  FK.LONG = LONG; FK.PAGE = PAGE;
+  // a row made of one cell spanning the table (a detail row) stays with the row above it
+  function rowGroups(table, head) {
+    const out = [];
+    Array.from(table.rows).forEach(r => {
+      if (r === head) return;
+      const span = r.cells.length === 1 && r.cells[0].colSpan > 1;
+      if (span && out.length) out[out.length - 1].push(r); else out.push([r]);
+    });
+    return out;
+  }
+  function applyTools(table, head) {
+    const t = toolBars.get(table);
+    if (!t) return;
+    const st = toolState[t.sig], q = (st.q || "").trim().toLowerCase();
+    const groups = rowGroups(table, head);
+    let match = 0, shown = 0;
+    groups.forEach(g => {
+      const ok = !q || g.some(r => (r.textContent || "").toLowerCase().includes(q));
+      if (ok) match++;
+      const show = ok && (!st.limit || shown < st.limit);
+      if (show) shown++;
+      g.forEach(r => { if (r.classList.contains("fk-hide") === show) r.classList.toggle("fk-hide", !show); });
+    });
+    const total = groups.length;
+    t.bar.hidden = (total < LONG && !q) || (!t.find && total <= PAGE);
+    const txt = q ? (match ? (shown < match ? `showing ${shown} of ${match} that match` : `${match} of ${total} match`) : "nothing matches")
+                  : (shown < total ? `showing ${shown} of ${total}` : `all ${total} shown`);
+    if (t.n.textContent !== txt) t.n.textContent = txt;
+    const left = match - shown;
+    t.more.hidden = left <= 0;
+    t.all.hidden = left <= PAGE;
+    t.less.hidden = !(left <= 0 && match > PAGE);
+    const moreTxt = `Show ${Math.min(PAGE, left)} more`;
+    if (t.more.textContent !== moreTxt) t.more.textContent = moreTxt;
+    const allTxt = `Show all ${match}`;
+    if (t.all.textContent !== allTxt) t.all.textContent = allTxt;
+  }
+  function tools(table, head) {
+    if (NO_TOOLS || table.classList.contains("no-tools")) return;
+    let t = toolBars.get(table);
+    if (!t) {
+      if (table.rows.length - 1 < LONG) return;
+      const sig = signature(head) + "#" + (table.id || "");
+      const st = toolState[sig] = toolState[sig] || {q: "", limit: PAGE, focus: false};
+      const bar = document.createElement("div");
+      bar.className = "fk-tools";
+      const noFind = table.dataset.fkFind === "off";
+      bar.innerHTML = (noFind ? "" : '<input type="search" class="fk-find" placeholder="Find in this table" aria-label="Find in this table">')
+        + '<span class="fk-n" aria-live="polite"></span>'
+        + '<button type="button" class="fk-more"></button><button type="button" class="fk-all"></button>'
+        + `<button type="button" class="fk-less">Show the first ${PAGE}</button>`;
+      t = {bar, sig, find: bar.querySelector(".fk-find"), n: bar.querySelector(".fk-n"),
+           more: bar.querySelector(".fk-more"), all: bar.querySelector(".fk-all"), less: bar.querySelector(".fk-less")};
+      toolBars.set(table, t);
+      if (t.find) {
+        t.find.value = st.q;
+        t.find.addEventListener("input", () => { st.q = t.find.value; applyTools(table, headerRow(table) || head); });
+        t.find.addEventListener("focus", () => { st.focus = true; });
+        t.find.addEventListener("blur", () => { if (t.find.isConnected) st.focus = false; });
+      } else st.q = "";
+      const again = () => applyTools(table, headerRow(table) || head);
+      t.more.addEventListener("click", () => { st.limit = (st.limit || 0) + PAGE; again(); });
+      t.all.addEventListener("click", () => { st.limit = 0; again(); });
+      t.less.addEventListener("click", () => { st.limit = PAGE; again(); });
+      // inside the table's scroll box the bar keeps its place while the table scrolls sideways
+      const par = table.parentElement;
+      const stale = table.previousElementSibling;           // left by a table that was replaced
+      if (stale && stale.classList.contains("fk-tools")) stale.remove();
+      par.insertBefore(bar, table);
+      if (par.classList.contains("fk-scroll") || par.classList.contains("tscroll")) bar.classList.add("in-box");
+      // the page redrew the table while its find box was in use: the caret goes back
+      if (t.find && st.focus && (!document.activeElement || document.activeElement === document.body)) {
+        t.find.focus(); t.find.setSelectionRange(st.q.length, st.q.length);
+      }
+    }
+    applyTools(table, head);
   }
   // A table wider than its place scrolls sideways inside its own box; it never pushes
   // the page (or its last columns) past the edge of the window.

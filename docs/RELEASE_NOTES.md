@@ -2,6 +2,33 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.125 — the router freezes found and fixed; redesign, step 4: long tables and long tabs
+
+**The freezes.** The stall watchdog (v0.181.124) named them within ten minutes of going live. Everything shares one database connection behind one lock, and most callers are on the event loop, so any call that holds the lock for seconds freezes every stream.
+
+| What the watchdog reported | Cause | Fix |
+|---|---|---|
+| 128.7 s at startup, then again each hour | Retention: one `DELETE` over a large table (`cc_parts` has no index on its time column) read the whole table with the lock held, in a worker thread; the loop waited for the lock | `Database.delete_in_steps`: a slice of 4,000 rowids at a time, the lock released between slices. For append-only tables the walk stops at the first slice with nothing old, so an hourly prune reads the old end only. Used by every timed prune: log tables, perf and server samples, usage events, work events, the control center's tables, the capture store |
+| About 5 s every couple of minutes while sprints run | A telemetry batch from the coordinator: redaction (regexes over every string) and hundreds of writes on the event loop, inside one transaction | Redaction runs before the transaction, so the lock covers the writes only; the batch is ingested on a worker thread, one at a time and in arrival order |
+| 49.2 s when the Training tab was opened | The capture store's per-project counts read every record under the lock that every captured request needs | Counts are read on a second, read-only connection and kept: the page gets the last counts at once, a recount runs in the background when they are older than five minutes (a small store is counted fresh each time) |
+| 4 s when the Data tab was opened | Counting every table on the event loop | Off the loop, on a read-only connection (`Database.ro_query`) |
+
+Not fixed, measured instead: the telemetry writes still hold the lock while they run. How long is now recorded.
+
+**Seeing the next one.** `Database.slow_calls` records every call that held the lock, or waited for it, for over a second, with the statement and the thread. A stall event's detail now starts with what the other threads were doing and which database calls held the lock during the freeze. `GET /admin/api/health/stalls` gains `slow_db`.
+
+**Long tables** (shared kit, so the control center has it too). A table of 30 rows or more shows 50 at a time under a bar: a find box, "showing 50 of 663", Show 50 more, Show all. The find text and page size survive a re-render and a sort. A table whose header is redrawn keeps its sorting (Model Registry lost it after a search). The Automation page is left as it was.
+
+**Long tabs.**
+
+- **Model Registry** was 32,759 px tall. Two sections under one search box: Reachable now, Known catalog. **edit** opens the editor as a panel on the right (it was under 660 rows), with Save always in view.
+- **Usage Log** was 15,561 px. The request log comes first; budgets and plans, images, code runs and MCP tools are sections. Request text is clamped to two lines (hover for all of it) and model names no longer break across lines.
+- **Events** was 14,007 px. Level buttons with counts (All, Warnings and errors, Errors) and a source list, plus the find box.
+- **Guardrails**: one section per card.
+- A section with nothing in it gets no button; blocks above the first section (a title, a search row) stay in view for every section.
+
+Tests: `tests/test_stall_fixes.py` (new), `tests/test_ui_kit.py`.
+
 ## v0.181.124 — redesign, step 3: Personas and Pool; a watchdog for router stalls
 
 **Personas.** The tab was 4,260 px tall with the editor at the very bottom. Now:

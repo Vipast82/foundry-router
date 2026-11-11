@@ -456,24 +456,27 @@
   .seg button b { font-weight:500; opacity:.75; margin-left:6px; }
   .seg.sect { margin:0 0 12px; }
   .sect-hide { display:none !important; }
-  #pe-back { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:48; display:none; }
-  #pe-back.show { display:block; }
-  #pe-drawer { position:fixed; top:0; right:0; bottom:0; width:min(880px, 100vw); z-index:49;
+  .drawer-back { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:48; display:none; }
+  .drawer-back.show { display:block; }
+  .drawer { position:fixed; top:0; right:0; bottom:0; width:min(880px, 100vw); z-index:49;
                background:var(--panel); border-left:1px solid var(--line); box-shadow:-18px 0 50px rgba(0,0,0,.45);
                display:flex; flex-direction:column; transform:translateX(102%); visibility:hidden;
                transition:transform .18s ease, visibility 0s .18s; }
-  #pe-drawer.show { transform:none; visibility:visible; transition:transform .18s ease; }
-  @media (prefers-reduced-motion: reduce) { #pe-drawer, #pe-drawer.show { transition:none; } }
-  #pe-drawer .dr-head { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); }
-  #pe-drawer .dr-head h2 { margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #pe-drawer .dr-body { flex:1; min-height:0; overflow-y:auto; padding:2px 16px 18px; }
-  #pe-drawer .dr-foot { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 16px;
+  .drawer.show { transform:none; visibility:visible; transition:transform .18s ease; }
+  @media (prefers-reduced-motion: reduce) { .drawer, .drawer.show { transition:none; } }
+  .drawer .dr-head { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  .drawer .dr-head h2 { margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .drawer .dr-body { flex:1; min-height:0; overflow-y:auto; padding:2px 16px 18px; }
+  .drawer .dr-foot { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 16px;
                         border-top:1px solid var(--line); background:var(--panel-2); }
-  #pe-drawer h3.pe-sec { font:600 14px/1.2 var(--num-font); letter-spacing:.03em; color:var(--accent);
+  .drawer h3.pe-sec { font:600 14px/1.2 var(--num-font); letter-spacing:.03em; color:var(--accent);
                          margin:18px 0 6px; padding-top:12px; border-top:1px solid var(--line); }
-  #pe-drawer h3.pe-sec:first-child { border-top:0; padding-top:0; margin-top:10px; }
+  .drawer h3.pe-sec:first-child { border-top:0; padding-top:0; margin-top:10px; }
+  .clamp2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+            min-width:200px; max-width:520px; }
+  .tb .grow { flex:1; }
 </style>
-<link rel="stylesheet" href="/ui/kit.css?v=120">
+<link rel="stylesheet" href="/ui/kit.css?v=125">
 </head>
 <body>
 <aside id="side" aria-label="Sections"></aside>
@@ -502,7 +505,7 @@
   <ul id="pal-list"></ul>
   <div class="pfoot">↑ ↓ to move · Enter to open · Esc to close</div></div></div>
 
-<script src="/ui/kit.js?v=120"></script>
+<script src="/ui/kit.js?v=125"></script>
 <script>
 "use strict";
 const $ = (s, el=document) => el.querySelector(s);
@@ -1446,38 +1449,49 @@ function postRender() {
   window._sectT1 = setTimeout(sectionTabs, 900); window._sectT2 = setTimeout(sectionTabs, 3000);
 }
 // v0.181.124: a tab that is several pages long shows one section at a time. Each section
-// starts at the first top-level block whose text begins with its pattern; blocks before
-// the first pattern belong to the first section. The choice is kept while the page is open.
+// starts at the first top-level block whose text begins with its pattern. When the first
+// section has no pattern it starts at the top of the page; when it has one, the blocks
+// above it (a title, a search row) stay in view for every section. A section with no
+// blocks gets no button. The choice is kept while the page is open.
 const TAB_SECTIONS = {
   Pool: [["Backends", null], ["Add or edit", /^Edit backend list/], ["Routing and brain", /^Routing mode/],
          ["Global settings", /^Global settings/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
+  "Model Registry": [["Reachable now", /^Reachable now/], ["Known catalog", /^Known catalog/]],
+  "Usage Log": [["Requests", null], ["Budgets and plans", /^(Budgets & usage|Claude usage window|Subscription usage)/],
+                ["Images", /^Images \(/], ["Code runs", /^⚠ Code-execution audit/], ["MCP tools", /^MCP tool usage/]],
+  Guardrails: [["Limits", /^authority/], ["Claude window", /^Claude window conservation/],
+               ["Semantic cache", /^Semantic cache/], ["Turn assist", /^Turn assist/]],
 };
 function sectionTabs() {
   const defs = TAB_SECTIONS[current], main = $("#main");
   if (!defs || !main) return;
   let bar = main.querySelector(":scope > .seg.sect");
-  const kids = [...main.children].filter(k => k !== bar);
+  const kids = [...main.children].filter(k => k !== bar && !k.classList.contains("drawer") && !k.classList.contains("drawer-back"));
   if (!kids.length) return;
-  let cur = 0;
-  const of = new Map();
+  let cur = defs[0][1] ? -1 : 0;
+  const of = new Map(), used = new Set();
   kids.forEach(k => {
     const t = (k.textContent || "").trim();
     for (let i = cur + 1; i < defs.length; i++) if (defs[i][1] && defs[i][1].test(t)) { cur = i; break; }
     of.set(k, cur);
+    if (cur >= 0) used.add(cur);
   });
+  if (used.size < 2) { if (bar) bar.remove(); kids.forEach(k => k.classList.remove("sect-hide")); return; }
   const state = window._sect = window._sect || {};
-  const sel = Math.min(state[current] || 0, defs.length - 1);
+  let sel = Math.min(state[current] || 0, defs.length - 1);
+  if (!used.has(sel)) sel = Math.min(...used);
   if (!bar) {
     bar = document.createElement("div"); bar.className = "seg sect"; bar.setAttribute("role", "tablist");
-    main.insertBefore(bar, main.firstChild);
     bar.onclick = e => {
       const b = e.target.closest("button[data-i]"); if (!b) return;
       state[current] = +b.dataset.i; sectionTabs(); window.scrollTo(0, 0);
     };
   }
-  const html = defs.map((d, i) => `<button role="tab" aria-selected="${i === sel}" class="${i === sel ? "on" : ""}" data-i="${i}">${esc(d[0])}</button>`).join("");
+  const first = kids.find(k => of.get(k) >= 0);
+  if (bar.nextElementSibling !== first || bar.parentElement !== main) main.insertBefore(bar, first);
+  const html = defs.map((d, i) => used.has(i) ? `<button role="tab" aria-selected="${i === sel}" class="${i === sel ? "on" : ""}" data-i="${i}">${esc(d[0])}</button>` : "").join("");
   if (bar.innerHTML !== html) bar.innerHTML = html;
-  kids.forEach(k => k.classList.toggle("sect-hide", of.get(k) !== sel));
+  kids.forEach(k => k.classList.toggle("sect-hide", of.get(k) >= 0 && of.get(k) !== sel));
 }
 
 // Keep every control visually attached to its label (one place, every tab):
@@ -3397,7 +3411,9 @@ async function tabTraining() {
         <select id="cap-dl-h"><option value="0">everything kept</option><option value="24">last 24 h</option><option value="168">last 7 days</option></select>
         <button class="act" id="cap-dl">Download JSONL</button>
         <span class="hint">one <code>{messages, tools, meta}</code> line per successful call, secrets redacted, reasoning left out</span></div>
-      ${capRows ? `<div class="tscroll"><table><tr><th>project</th><th>record</th><th>count</th><th>truncated</th><th>redacted</th><th>last</th></tr>${capRows}</table></div>` : '<p class="hint">No capture records.</p>'}</div>
+      ${capRows ? `<div class="tscroll"><table><tr><th>project</th><th>record</th><th>count</th><th>truncated</th><th>redacted</th><th>last</th></tr>${capRows}</table></div>${c.counts_at ? `<p class="hint">counted ${when(c.counts_at)}; recounted in the background when older than five minutes</p>` : ""}`
+        : c.counts_pending ? '<p class="hint">Counting the records in the background (the store is large). Open this tab again in a minute.</p>'
+        : '<p class="hint">No capture records.</p>'}</div>
     <div class="card"><h3>Fine-tuning datasets in Foundry</h3>
       <p class="hint">Uploaded automatically after each sprint by <code>foundry_training auto</code> (validated; secrets re-checked on arrival). If an upload fails, the dataset stays in the workstation library (<code>~/.foundry-training/library/INDEX.json</code>) and is retried after the next sprint.</p>
       ${(up.datasets || []).length ? `<div class="tscroll"><table><tr><th>dataset</th><th>project</th><th>kind</th><th>format</th><th>examples</th><th>episodes</th><th>validation</th><th>uploaded</th><th>download</th></tr>${up.datasets.map(x => `<tr><td class="nw"><code>${esc(x.dataset_id)}</code></td><td class="nw">${esc(x.project_id)}</td><td class="nw">${esc(x.kind)}</td><td class="nw">${esc(x.target)}</td>
@@ -5053,18 +5069,23 @@ async function tabModels() {
     reference-seeded, and research-refined. Disabling a model excludes it from
     the brain's candidates and tools entirely (governance, not capability).${d.research_ready ? "" :
       ` <b>Research is unavailable:</b> ${esc(d.research_reason)}.`}</p>
-    <div class="row">
-      <input id="model-search" size="34" placeholder="filter by id, tag, tier, good_for…">
+    <div class="tb">
+      <input type="search" id="model-search" placeholder="Find a model by id, tag, tier or what it is good for" value="${esc(window._modelQ || "")}" aria-label="Find a model">
+      <span class="grow"></span>
       <button class="act primary" onclick="run(api('models/refresh',{method:'POST'}))">Poll OpenRouter now</button>
       <button class="act" title="Fill tags/good_for/estimated scores for known model families (never overwrites manual edits or real research)"
         onclick="api('models/seed',{method:'POST'}).then(r=>{toast('Reference seed applied to '+r.applied+' models');render()}).catch(e=>toast(e.message,true))">Apply reference seed</button>
     </div>
-    <h2>Live / Available (<span id="live-count"></span>) — reachable through a configured backend right now</h2>
-    <table id="live-table"></table>
-    <h2>Known catalog (<span id="known-count"></span>) — discovered but not currently reachable; reference material</h2>
-    <table id="known-table"></table>
-    <div class="card" id="model-editor" style="display:none">
-      <h2 style="margin-top:0">Edit <span id="me-id" class="mono"></span></h2>
+    <h2>Reachable now (<span id="live-count"></span>) <span class="hint" style="font-weight:normal">— served by a configured backend at this moment</span></h2>
+    <table id="live-table" data-fk-find="off"></table>
+    <h2>Known catalog (<span id="known-count"></span>) <span class="hint" style="font-weight:normal">— discovered but not reachable now; reference material</span></h2>
+    <table id="known-table" data-fk-find="off"></table>
+    <div id="me-back" class="drawer-back"></div>
+    <aside id="model-editor" class="drawer" aria-label="Model editor">
+      <div class="dr-head"><h2>Edit <span id="me-id" class="mono"></span></h2>
+        <button class="act" id="me-close" title="Close without saving (Esc)">Close</button></div>
+      <div class="dr-body">
+      <h3 class="pe-sec">Description</h3>
       <div class="row"><label>relative_cost_tier</label>
         <select id="me-tier"><option value="">-</option><option>free</option>
         <option>low</option><option>medium</option><option>high</option><option>very_high</option></select>
@@ -5077,6 +5098,7 @@ async function tabModels() {
       <div class="row"><label>reasoning_style</label><input id="me-style" size="60"></div>
       <div class="row"><label>benefits_from_explicit_prompting</label>
         <input type="checkbox" id="me-refine"></div>
+      <h3 class="pe-sec">Scores and benchmarks</h3>
       <div class="row"><label>tool-calling reliability</label>
         <span id="me-reliability" class="hint"></span></div>
       <div class="row"><label title="Live benchmark rows. A ⚠ marks two categories sharing the exact same score — the signature of an extractor conflating them; reset to clear it.">benchmark rows</label>
@@ -5096,11 +5118,15 @@ async function tabModels() {
         <select id="nb-scale"><option>percent</option><option>elo</option><option>count</option><option>score</option></select>
         <input id="nb-url" placeholder="https://source" size="16">
         <button class="act" id="nb-add">Add</button></div>
-      <div class="row"><button class="act primary" id="me-save">Save (manual override)</button>
-        <button class="act" id="me-reset-bench" title="Delete this model's automatic benchmark rows (research/seed/observed; manual overrides kept) and re-apply reference-seed defaults — the fix for a row with a wrong number">Reset scores to seed</button></div>
-    </div>`;
+      </div>
+      <div class="dr-foot"><button class="act primary" id="me-save">Save (manual override)</button>
+        <button class="act" id="me-reset-bench" title="Delete this model's automatic benchmark rows (research/seed/observed; manual overrides kept) and re-apply reference-seed defaults — the fix for a row with a wrong number">Reset scores to seed</button>
+        <span class="hint" style="margin:0 0 0 auto">Esc closes without saving</span></div>
+    </aside>`;
   window._models = Object.fromEntries(d.models.map(m => [m.id, m]));
-  $("#model-search").addEventListener("input", renderTables);
+  $("#model-search").addEventListener("input", e => { window._modelQ = e.target.value; renderTables(); });
+  $("#me-close").onclick = closeDrawers;
+  $("#me-back").onclick = closeDrawers;
   renderTables();
 }
 window.toggleModel = async (id, enable) => {
@@ -5120,7 +5146,8 @@ window.doResearch = async id => {
 window.editModel = id => {
   const m = window._models[id] || {};
   const panel = $("#model-editor");
-  panel.style.display = "block";
+  panel.classList.add("show"); $("#me-back").classList.add("show");
+  panel.querySelector(".dr-body").scrollTop = 0;
   $("#me-id").textContent = id;
   $("#me-tier").value = m.relative_cost_tier || "";
   $("#me-policy").value = m.content_policy || "";
@@ -5208,9 +5235,6 @@ window.editModel = id => {
       renderBench(r.benchmarks);
     } catch (e) { toast(e.message, true); }
   };
-  // The panel lives below a potentially very long table — without this,
-  // clicking "edit" appears to do nothing (confirmed deployment bug).
-  panel.scrollIntoView({behavior: "smooth", block: "start"});
   $("#me-save").onclick = () => {
     const tags = $("#me-tags").value.split(",").map(s => s.trim()).filter(Boolean);
     run(api("models/update", {method: "POST", body: {
@@ -5509,8 +5533,8 @@ async function tabPersonas() {
       <span style="flex:1"></span>
       <button class="act primary" id="pe-new">New persona</button>
     </div>
-    <table id="pe-list"><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th title="Which clients this persona is tuned for — hover a badge for the note. Documentation metadata: one persona serves multiple clients; only fork a client-specific persona when an existing one genuinely doesn't serve that client well.">clients</th><th>description</th><th></th></tr>${rows}</table>
-    <div id="pe-back"></div>
+    <table id="pe-list" class="no-tools"><tr><th>name</th><th>category</th><th>local bias</th><th>MCP tools</th><th title="Which clients this persona is tuned for — hover a badge for the note. Documentation metadata: one persona serves multiple clients; only fork a client-specific persona when an existing one genuinely doesn't serve that client well.">clients</th><th>description</th><th></th></tr>${rows}</table>
+    <div id="pe-back" class="drawer-back"></div>
     <aside id="pe-drawer" class="drawer" aria-label="Persona editor">
       <div class="dr-head"><h2 id="pe-title">New persona</h2>
         <button class="act" id="pe-close" title="Close without saving (Esc)">Close</button></div>
@@ -5947,9 +5971,11 @@ function closePersonaDrawer() {
   if (d) d.classList.remove("show");
   if (k) k.classList.remove("show");
 }
+function closeDrawers() {
+  document.querySelectorAll(".drawer.show, .drawer-back.show").forEach(x => x.classList.remove("show"));
+}
 document.addEventListener("keydown", e => {
-  const d = $("#pe-drawer");
-  if (e.key === "Escape" && d && d.classList.contains("show") && !$("#pal-back").classList.contains("show") && _modal.hidden) closePersonaDrawer();
+  if (e.key === "Escape" && document.querySelector(".drawer.show") && !$("#pal-back").classList.contains("show") && _modal.hidden) closeDrawers();
 });
 window.editPersona = name => {
   const p = window._personas[name]; if (!p) return;
@@ -7741,8 +7767,8 @@ async function tabUsage() {
     <td class="mono nw">${esc((r.ts || "").slice(0, 19))}</td>
     <td class="nw">${esc(r.persona || r.client_model)}</td>
     <td>${modeBadge(r.mode)}</td>
-    <td>${esc(r.summary)}</td>
-    <td class="mono">${(r.models_used || []).map(m => esc(m.model)).join(" → ") || '<span class="hint">—</span>'}</td>
+    <td><div class="clamp2" title="${esc(r.summary)}">${esc(r.summary)}</div></td>
+    <td class="mono">${(r.models_used || []).map(m => `<span class="nw">${esc(m.model)}</span>`).join(" → ") || '<span class="hint">—</span>'}</td>
     <td>${toolCell(r)}</td>
     <td>${r.steps ?? ""}</td>
     <td class="nw">${fmtDur(r.duration_ms)}</td>
@@ -7752,22 +7778,21 @@ async function tabUsage() {
     <td>${fbCell(r)}</td>
     </tr>`).join("");
   $("#main").innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h2 style="margin:0">Requests <span class="hint" style="font-weight:normal">— the last ${reqs.length} the router handled</span></h2>
+      <button class="act" onclick="clearLog('usage','usage log entries')"
+        ${reqs.length ? "" : "disabled"}>Clear usage log</button>
+    </div>
+    <p class="hint"><b>model(s)</b> is who answered; <b>tools (MCP)</b> is which of Foundry's own MCP servers
+      the request used (open a badge for each call). A <b>direct · client tools</b> row used the client's own tools.</p>
+    <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
+    <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th><th title="Rate this response — feeds the insight digest and per-persona quality trends">rate</th></tr>${rows}</table>
     ${budgetCard(bg)}
     ${quotaCard(q)}
     ${subUsageCard(su)}
     ${mediaCard(md)}
     ${codeCard}
-    ${mcpCard}
-    <div class="row" style="justify-content:space-between;align-items:baseline">
-      <h2 style="margin-bottom:0">Usage log — every routed request</h2>
-      <button class="act" onclick="clearLog('usage','usage log entries')"
-        ${reqs.length ? "" : "disabled"}>Clear usage log</button>
-    </div>
-    <p class="hint">The <b>model(s)</b> column is who answered; the <b>tools (MCP)</b> column is which of
-      Foundry's own MCP servers that request exercised — expand a badge for the per-call trail. A
-      <b>direct · client tools</b> row bypassed Foundry's tools entirely.</p>
-    <table><tr><th>time (UTC)</th><th>persona</th><th>mode</th><th>request</th>
-    <th>model(s)</th><th>tools (MCP)</th><th>steps</th><th>time</th><th>cost</th><th>guard</th><th>status</th><th title="Rate this response — feeds the insight digest and per-persona quality trends">rate</th></tr>${rows}</table>`;
+    ${mcpCard}`;
   bindSubUsageCard();
   bindMediaCard();
 }
@@ -7785,19 +7810,46 @@ async function sendFeedback(requestLogId, rating) {
 /* ---------------------------------------------------------------- events -- */
 async function tabEvents() {
   const d = await api("events?limit=200");
-  const rows = d.events.map(e => `<tr>
+  const f = window._evFilter = window._evFilter || {level: "all", source: ""};
+  const bad = e => e.level === "error" || e.level === "warning";
+  const n = {all: d.events.length, problems: d.events.filter(bad).length, error: d.events.filter(e => e.level === "error").length};
+  const sources = [...new Set(d.events.map(e => e.source).filter(Boolean))].sort();
+  if (f.source && !sources.includes(f.source)) f.source = "";
+  const head = "<tr><th>time (UTC)</th><th>level</th><th>source</th><th>message</th><th></th></tr>";
+  const row = e => `<tr>
     <td class="mono nw">${esc((e.ts || "").slice(0, 19))}</td>
     <td><span class="pill ${e.level === "error" ? "bad" : e.level === "warning" ? "warn" : "ok"}">${esc(e.level)}</span></td>
     <td class="nw">${esc(e.source)}</td><td>${esc(e.message)}</td>
-    <td><details><summary>detail</summary><span class="mono">${esc(e.detail || "")}</span></details></td>
-    </tr>`).join("");
+    <td>${e.detail ? `<details><summary class="nw">detail</summary><span class="mono" style="white-space:pre-wrap">${esc(e.detail)}</span></details>` : ""}</td>
+    </tr>`;
+  const draw = () => {
+    const ev = d.events.filter(e => (f.level === "all" || (f.level === "problems" ? bad(e) : e.level === "error"))
+      && (!f.source || e.source === f.source));
+    $("#ev-table").innerHTML = head + ev.map(row).join("");
+    $("#ev-none").hidden = !!ev.length;
+  };
   $("#main").innerHTML = `
     <div class="row" style="justify-content:space-between;align-items:baseline">
-      <h2 style="margin-bottom:0">Troubleshooting log — “why did it route weirdly” (§4.9 item 7)</h2>
+      <h2 style="margin:0">Events <span class="hint" style="font-weight:normal">— what the router decided and why, newest first</span></h2>
       <button class="act" onclick="clearLog('events','event log entries')"
         ${d.events.length ? "" : "disabled"}>Clear event log</button>
     </div>
-    <table><tr><th>time (UTC)</th><th>level</th><th>source</th><th>message</th><th></th></tr>${rows}</table>`;
+    <div class="tb">
+      <div class="seg" id="ev-levels" role="tablist" aria-label="Level">${[["all", "All"], ["problems", "Warnings and errors"], ["error", "Errors"]].map(([k, l]) =>
+        `<button data-l="${k}" class="${f.level === k ? "on" : ""}">${l}<b>${n[k]}</b></button>`).join("")}</div>
+      <select id="ev-source" aria-label="Source"><option value="">every source</option>${sources.map(x =>
+        `<option${x === f.source ? " selected" : ""}>${esc(x)}</option>`).join("")}</select>
+    </div>
+    <table id="ev-table"></table>
+    <p class="hint" id="ev-none" hidden>No events match these filters.</p>`;
+  $("#ev-levels").onclick = e => {
+    const b = e.target.closest("button[data-l]"); if (!b) return;
+    f.level = b.dataset.l;
+    $("#ev-levels").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    draw();
+  };
+  $("#ev-source").onchange = e => { f.source = e.target.value; draw(); };
+  draw();
 }
 
 /* ------------------------------------------- backup & restore (backup.py) -- */
