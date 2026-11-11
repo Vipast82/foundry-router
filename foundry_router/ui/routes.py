@@ -59,6 +59,19 @@ async def ui_page():
     return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
 
 
+# The shared UI kit (v0.181.120): styles and behaviour used by every page.
+@router.get("/ui/kit.css")
+async def ui_kit_css():
+    return FileResponse(STATIC_DIR / "kit.css", media_type="text/css",
+                        headers={"cache-control": "no-cache"})
+
+
+@router.get("/ui/kit.js")
+async def ui_kit_js():
+    return FileResponse(STATIC_DIR / "kit.js", media_type="text/javascript",
+                        headers={"cache-control": "no-cache"})
+
+
 # --------------------------------------------------------------------------- #
 # Status / backends (§4.9 item 1)                                             #
 # --------------------------------------------------------------------------- #
@@ -1326,14 +1339,33 @@ async def training_episode(request: Request, episode_id: str):
     return _episode_card(rows[0])
 
 
+_ROUTES_CACHE: dict = {}
+
+
 @router.get("/admin/api/routes")
 async def routes_graph(request: Request, hours: float = 24, all: int = 0, active: int = 0):
     """Routing graph from the live configuration + traffic / denials /
     failures / image jobs / brain calls in the last `hours`, plus calls in
     flight. active=1: only what was observed (no configuration)."""
     from .. import routes_view
-    return routes_view.graph(_svc(request), hours=max(0.02, min(720.0, hours)),
-                             show_all=bool(all), active=bool(active))
+    import asyncio
+    import time as _time
+    # v0.181.120: building the graph scans the request log (5 to 29 s for a day on the
+    # live router, 2026-11-11) and ran ON the event loop, so every stream stalled while
+    # the Routes tab was open. It now runs in a worker thread, and a result is reused
+    # for a few seconds (the tab re-reads every 5 s in live mode).
+    svc = _svc(request)
+    key = (id(svc), round(float(hours), 3), bool(all), bool(active))
+    ttl = 4.0 if active else 12.0
+    hit = _ROUTES_CACHE.get(key)
+    if hit and _time.monotonic() - hit[0] < ttl:
+        return hit[1]
+    data = await asyncio.to_thread(routes_view.graph, svc, hours=max(0.02, min(720.0, hours)),
+                                   show_all=bool(all), active=bool(active))
+    if len(_ROUTES_CACHE) > 24:
+        _ROUTES_CACHE.clear()
+    _ROUTES_CACHE[key] = (_time.monotonic(), data)
+    return data
 
 
 @router.get("/admin/api/brain/metrics")

@@ -1,0 +1,109 @@
+/* Foundry UI kit (v0.181.120): styles shared by /ui, /ui/control and /ui/automation.
+   Each page keeps its own palette variables (--bg, --panel, --line, --fg, --dim,
+   --accent); everything here is built from them, so both themes work. */
+
+/* -- scrollbars: thin, in the page's own colours ------------------------------------ */
+* { scrollbar-width: thin; scrollbar-color: var(--line, #444) transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: var(--line, #444); border-radius: 5px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--dim, #888); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* -- fields and dropdowns ------------------------------------------------------------ */
+select:not([multiple]):not([size]) {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  padding-right: 26px; max-width: 100%; text-overflow: ellipsis;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--dim, #999) 50%),
+    linear-gradient(135deg, var(--dim, #999) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 54%, calc(100% - 9px) 54%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+select:not([multiple]):not([size]):hover {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--accent, #f80) 50%),
+    linear-gradient(135deg, var(--accent, #f80) 50%, transparent 50%);
+}
+input:not([type=checkbox]):not([type=radio]):not([type=range]):hover, select:hover, textarea:hover {
+  border-color: color-mix(in srgb, var(--accent, #f80) 55%, var(--line, #444));
+}
+input:not([type=checkbox]):not([type=radio]):not([type=range]):focus, select:focus, textarea:focus {
+  border-color: var(--accent, #f80); outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #f80) 24%, transparent);
+}
+select option { background: var(--panel, #222); color: var(--fg, #eee); }
+
+/* -- tables: sort by a column, drag a column edge to resize it ------------------------- */
+table.fk th { position: relative; }
+table.fk th.fk-sort { cursor: pointer; user-select: none; -webkit-user-select: none; }
+table.fk th.fk-sort:hover { color: var(--fg, #eee); }
+table.fk th[aria-sort]::after { font-size: 9px; color: var(--accent, #f80); margin-left: 4px; }
+table.fk th[aria-sort="ascending"]::after { content: "\25B2"; }
+table.fk th[aria-sort="descending"]::after { content: "\25BC"; }
+table.fk .fk-grip { position: absolute; top: 0; right: -4px; width: 9px; height: 100%;
+                    cursor: col-resize; z-index: 2; touch-action: none; }
+table.fk .fk-grip::after { content: ""; position: absolute; top: 20%; bottom: 20%; left: 4px;
+                           width: 1px; background: var(--line, #444); }
+table.fk th:last-child .fk-grip { right: 0; }
+table.fk .fk-grip:hover::after, table.fk .fk-grip.on::after {
+  width: 3px; left: 3px; top: 0; bottom: 0; background: var(--accent, #f80); }
+table.fk tr:hover > td { background: color-mix(in srgb, var(--accent, #f80) 6%, transparent); }
+table.fk.fk-fixed { table-layout: fixed; }
+table.fk.fk-fixed th, table.fk.fk-fixed td { overflow: hidden; text-overflow: ellipsis; }
+body.fk-dragging, body.fk-dragging * { cursor: col-resize !important; user-select: none !important; }
+
+.fk-scroll { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
+
+/* -- navigation wraps onto more rows; it never turns into a sideways scroller ---------- */
+nav .navgroups, nav .navsubs { flex-wrap: wrap; overflow-x: visible; }
+
+/* -- flow map (FK.flow) ------------------------------------------------------------------ */
+.fk-flow { display: block; width: 100%; height: auto; font: 12px var(--ui-font, system-ui, sans-serif); }
+.fk-flow .fk-col { fill: var(--dim, #999); font: 500 12px var(--num-font, inherit); letter-spacing: .03em; }
+.fk-flow .fk-node rect.box { fill: var(--panel, #222); stroke: var(--line, #444); }
+.fk-flow .fk-node.err rect.box { stroke: var(--bad, #e55); }
+.fk-flow .fk-node rect.bar { fill: var(--line, #444); }
+.fk-flow .fk-node.ok rect.bar { fill: var(--ok, #6c7); }
+.fk-flow .fk-node.bad rect.bar { fill: var(--bad, #e55); }
+.fk-flow .fk-node.warn rect.bar { fill: var(--warn, #ea3); }
+.fk-flow .fk-node.live rect.bar { fill: var(--ok, #6c7); }
+.fk-flow .fk-name { fill: var(--fg, #eee); font-weight: 600; }
+.fk-flow .fk-sub { fill: var(--dim, #999); font-size: 11px; }
+.fk-flow .fk-count { fill: var(--fg, #eee); font: 600 13px var(--num-font, inherit); text-anchor: end; }
+.fk-flow .fk-gate { fill: var(--warn, #ea3); font-size: 11px; font-weight: 600; text-anchor: end; }
+.fk-flow .fk-edge path.line { fill: none; stroke-linecap: round; transition: opacity .12s ease; }
+.fk-flow .fk-edge.click { cursor: pointer; }
+.fk-flow .fk-lbl { fill: var(--fg, #eee); font: 600 11px var(--num-font, inherit); text-anchor: middle;
+                   paint-order: stroke; stroke: var(--bg, #111); stroke-width: 3px; }
+/* configuration and fallback lines stay quiet until you point at their path */
+.fk-flow .fk-edge.thin .fk-lbl { opacity: 0; }
+.fk-flow.focus .fk-edge.thin.on .fk-lbl { opacity: 1; }
+.fk-flow.focus .fk-edge.thin.on path.line { opacity: .95 !important; }
+.fk-flow.focus .fk-edge:not(.on) path.line { opacity: .06 !important; }
+.fk-flow.focus .fk-edge:not(.on) .fk-lbl { opacity: 0; }
+.fk-flow.focus .fk-node:not(.on) { opacity: .35; }
+.fk-flow .fk-node { transition: opacity .12s ease; cursor: default; }
+.fk-flow .fk-edge.live path.line { animation: fk-pour 1.1s linear infinite; }
+@keyframes fk-pour { to { stroke-dashoffset: -24; } }
+@media (prefers-reduced-motion: reduce) { .fk-flow .fk-edge.live path.line { animation: none; } }
+.fk-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0 10px; font-size: 12px; color: var(--dim, #999); }
+.fk-legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.fk-legend i { display: inline-block; width: 22px; height: 0; border-top: 3px solid; border-radius: 2px; }
+.fk-legend i.dash { border-top-style: dashed; }
+.fk-legend i.dot { border-top-style: dotted; }
+
+/* -- narrow windows ------------------------------------------------------------------------ */
+input, select, textarea { max-width: 100%; }
+@media (max-width: 720px) {
+  .hdr-tools { width: 100%; justify-content: flex-start; }
+  /* a field with a wide fixed size (a prompt box, a JSON field) gives way to the window */
+  input:not([type=checkbox]):not([type=radio]):not([type=number]):not([type=range]), textarea {
+    min-width: 0 !important; }
+  /* a label and its field wrapped together (.fld) take the full row, and the field
+     shrinks inside it instead of keeping its size="90" width */
+  .fld { flex: 1 1 100%; min-width: 0; max-width: 100%; }
+  .fld > input:not([type=checkbox]):not([type=radio]), .fld > select, .fld > textarea {
+    flex: 1 1 0; min-width: 0; width: auto; }
+  .row > input:not([type=checkbox]):not([type=radio]):not([type=number]), .row > textarea {
+    flex: 1 1 160px; min-width: 0; width: auto; }
+}

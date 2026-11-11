@@ -373,6 +373,7 @@
     th, td { padding:5px 6px; }
   }
 </style>
+<link rel="stylesheet" href="/ui/kit.css?v=120">
 </head>
 <body>
 <header>
@@ -394,6 +395,7 @@
 <main id="main"></main>
 <div id="toast"></div>
 
+<script src="/ui/kit.js?v=120"></script>
 <script>
 "use strict";
 const $ = (s, el=document) => el.querySelector(s);
@@ -1113,6 +1115,14 @@ const _lastLeaf = {};        // group name -> last leaf visited (remembered on s
 const _hashTab = () => { try { const h = decodeURIComponent(location.hash.slice(1)); return TABS[h] ? h : ""; } catch (e) { return ""; } };
 let current = _hashTab() || "Overview";
 window.addEventListener("hashchange", () => { const h = _hashTab(); if (h && h !== current) { current = h; render(); } });
+// v0.181.120: charts, the route map and the grids are drawn for the window's width, so a
+// resized window redraws the open tab (not while you are typing or a dialog is open).
+if (window.FK) FK.onResize(() => {
+  if (FK.busy()) return;
+  const y = window.scrollY;
+  render();
+  setTimeout(() => window.scrollTo(0, y), 450);
+});
 function render() {
   const nav = $("#nav"); nav.innerHTML = "";
   const activeGroup = _groupOf(current);
@@ -2011,6 +2021,7 @@ function renderBrainPanel(el, b) {
     ${(b.top_reasons || []).length ? `<p class="hint" style="margin:6px 0 0">Why it failed or was skipped: ${b.top_reasons.map(r => `${esc(r.reason)} (${r.count})`).join(" · ")}</p>` : ""}`;
 }
 
+const ADV_SHOWN = 4;
 function renderAdvisor(el, a) {
   const f = (a && a.findings) || [];
   const sevStyle = {critical: ["bad", "🔴", "Critical"], warning: ["warn", "🟠", "Warning"], info: ["", "🔵", "Tip"]};
@@ -2025,17 +2036,22 @@ function renderAdvisor(el, a) {
       const [cls, icon, label] = sevStyle[x.severity] || sevStyle.info;
       const key = x.id + "|" + (x.scope || "");
       const ev = Object.entries(x.evidence || {}).map(([k, v]) => `<span class="pill" title="${esc(k)}">${esc(k)}: <b>${esc(String(v))}</b></span>`).join(" ");
-      return `<details class="adv" data-k="${esc(key)}" ${open.has(key) ? "open" : ""} style="border-left:3px solid var(--${cls || "accent"});padding:4px 10px;margin:6px 0">
+      // v0.181.120: the first few findings show; the rest fold away so the charts below stay in reach
+      const folded = i >= ADV_SHOWN && !window._advAll && !open.has(key);
+      return `<details class="adv${i >= ADV_SHOWN ? " adv-more" : ""}" data-k="${esc(key)}" ${open.has(key) ? "open" : ""} style="border-left:3px solid var(--${cls || "accent"});padding:4px 10px;margin:6px 0${folded ? ";display:none" : ""}">
         <summary style="cursor:pointer"><span class="pill ${cls}">${icon} ${label}</span> <b>${esc(x.title)}</b>
           ${x.scope ? `<span class="hint">— ${esc(x.scope)}</span>` : ""}<div class="hint" style="margin:2px 0 0 4px">${esc(x.summary)}</div></summary>
         <div style="margin:6px 0 4px"><b>Why it matters:</b> ${esc(x.why)}</div>
         <div><b>What to do:</b><ol style="margin:4px 0 4px 18px">${(x.fix || []).map(s => `<li>${esc(s)}</li>`).join("")}</ol></div>
         ${ev ? `<div class="hint">Evidence: ${ev}</div>` : ""}
       </details>`;
-    }).join("");
+    }).join("")
+    + (f.length > ADV_SHOWN ? `<button class="act" id="adv-all" style="margin-top:4px">${window._advAll ? "Show fewer" : `Show all ${f.length} findings`}</button>` : "");
   el.querySelectorAll("details.adv").forEach(d => d.addEventListener("toggle", () => {
     d.open ? open.add(d.dataset.k) : open.delete(d.dataset.k);
   }));
+  const all = el.querySelector("#adv-all");
+  if (all) all.onclick = () => { window._advAll = !window._advAll; renderAdvisor(el, a); };
 }
 
 async function tabMcpMetrics() {
@@ -3870,38 +3886,9 @@ window._routeOpts = window._routeOpts || {hours: 24, all: false, active: false};
 async function tabRoutes() {
   const o = window._routeOpts;
   const g = await api(`routes?hours=${o.hours}&all=${o.all ? 1 : 0}&active=${o.active ? 1 : 0}`);
-  const cols = ["client", "persona", "model", "backend"];
-  const colName = {client: "clients (key name, or untracked · IP)", persona: "personas · route · budget gate", model: "models · routing brain", backend: "backends"};
   const colOf = n => n.kind === "brain" ? "model" : n.kind;
-  const byCol = Object.fromEntries(cols.map(c => [c, g.nodes.filter(n => colOf(n) === c)
-    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label))]));
-  const W = 1180, NW = 220, NH = 46, GAP = 14, TOP = 34;
-  const colX = i => 10 + i * ((W - NW - 20) / 3);
-  const pos = {};
-  cols.forEach((c, i) => byCol[c].forEach((n, j) => { pos[n.id] = {x: colX(i), y: TOP + j * (NH + GAP)}; }));
-  const H = TOP + Math.max(1, ...cols.map(c => byCol[c].length)) * (NH + GAP) + 10;
-  const style = {
-    traffic: "stroke:#3b82f6;opacity:.8", failed: "stroke:var(--bad)", denied: "stroke:var(--bad);stroke-dasharray:6 4",
-    config: "stroke:var(--dim);stroke-dasharray:3 4;opacity:.6", fallback: "stroke:var(--dim);stroke-dasharray:1 4;opacity:.8",
-    image: "stroke:#a855f7;stroke-dasharray:8 3", brain: "stroke:#f59e0b;stroke-dasharray:4 3",
-    live: "stroke:#22c55e;stroke-dasharray:7 4;animation:rt-flow 1s linear infinite"};
-  const width = e => ["config", "fallback"].includes(e.kind) ? 1.3 : 1.6 + Math.log2((e.count || 0) + 1) * 1.4;
-  const edgesSvg = g.edges.filter(e => pos[e.from] && pos[e.to]).map((e, i) => {
-    const a = pos[e.from], b = pos[e.to];
-    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
-    const d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
-    const clickable = !["config", "fallback"].includes(e.kind);
-    const lbl = e.kind === "fallback" ? `#${e.order}` : clickable ? `${e.count}${e.errors ? " (" + e.errors + "✗)" : ""}` : "";
-    const tip = `${e.kind}: ${e.from} → ${e.to}` + (e.count ? ` · ${e.count}` : "") + (e.avg_ms ? ` · avg ${fmtDur(e.avg_ms)}` : "") + (e.rules ? " · " + Object.keys(e.rules).join(", ") : "");
-    return `<g class="redge${clickable ? " click" : ""}" ${clickable ? `onclick='showRouteEdge(${JSON.stringify(e.kind)}, ${JSON.stringify(e.from)}, ${JSON.stringify(e.to)})'` : ""}>
-      <title>${esc(tip)}</title>
-      <path d="${d}" fill="none" style="${style[e.kind]};stroke-width:${width(e)}"/>
-      ${clickable ? `<path d="${d}" fill="none" stroke="transparent" stroke-width="14"/>` : ""}
-      ${lbl ? `<text x="${mx}" y="${(y1 + y2) / 2 - 4}" class="rlbl">${esc(lbl)}</text>` : ""}</g>`;
-  }).join("");
   const healthCls = {serving: "ok", failing: "bad", down: "bad", unverified: "warn", disabled: ""};
-  const nodesSvg = g.nodes.filter(n => pos[n.id]).map(n => {
-    const p = pos[n.id];
+  const nodes = g.nodes.slice().sort((x, y) => (y.count - x.count) || x.label.localeCompare(y.label)).map(n => {
     let sub = "", dot = "";
     if (n.kind === "persona") {
       const bk = n.backend && n.backend.startsWith("<") ? "no " + n.backend.slice(1, -1) + " backend" : n.backend;
@@ -3919,27 +3906,45 @@ async function tabRoutes() {
     } else if (n.kind === "model") {
       sub = n.image ? "image model" : n.raw ? "raw model (no persona)" : "";
     }
-    const dim = n.enabled === false || n.disabled ? "opacity:.45" : "";
     const gates = n.gates || [];
-    const label = n.kind === "backend" && n.label.startsWith("<") ? `no ${n.label.slice(1, -1)} backend` : n.label;
-    return `<g class="rnode" style="${dim}"><title>${esc(label)}${n.count ? " · " + n.count + " requests" : ""}${n.errors ? " · " + n.errors + " failed" : ""}${n.live ? " · " + n.live + " running now" : ""}${gates.length ? "\nbudget rules: " + gates.join(", ") : ""}${(n.agents || []).length ? "\n" + n.agents.join("\n") : ""}</title>
-      <rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="7" class="rnode-box ${n.errors ? "has-err" : ""}"/>
-      ${dot ? `<circle cx="${p.x + NW - 11}" cy="${p.y + 11}" r="4.5" class="rdot ${dot}"/>` : ""}
-      <text x="${p.x + 9}" y="${p.y + 18}" class="rname">${esc(label.length > 27 ? label.slice(0, 26) + "…" : label)}${n.enabled === false ? " (off)" : ""}</text>
-      ${gates.length ? `<text x="${p.x + NW - (dot ? 22 : 9)}" y="${p.y + 18}" class="rgate" text-anchor="end">⛁${gates.length}</text>` : ""}
-      <text x="${p.x + 9}" y="${p.y + 35}" class="rsub">${esc((sub || "").slice(0, 38))}${n.count ? (sub ? " · " : "") + n.count : ""}</text></g>`;
-  }).join("");
-  const heads = cols.map((c, i) => `<text x="${colX(i)}" y="18" class="rhead">${colName[c]}</text>`).join("");
+    const label = (n.kind === "backend" && n.label.startsWith("<") ? `no ${n.label.slice(1, -1)} backend` : n.label) + (n.enabled === false ? " (off)" : "");
+    const tip = label + (n.count ? " · " + n.count + " requests" : "") + (n.errors ? " · " + n.errors + " failed" : "") + (n.live ? " · " + n.live + " running now" : "")
+      + (gates.length ? "\nbudget rules: " + gates.join(", ") : "") + ((n.agents || []).length ? "\n" + n.agents.join("\n") : "");
+    return {id: n.id, col: colOf(n), label, sub, count: n.count || "", status: dot, live: !!n.live, err: !!n.errors,
+            dim: n.enabled === false || !!n.disabled, gates: gates.length ? "⛁ " + gates.length : "", tip};
+  });
+  const KINDS = {
+    live: {color: "var(--ok)", dash: "9 5", live: true, name: "running now"},
+    traffic: {color: "var(--info)", name: "requests in the window"},
+    brain: {color: "var(--warn)", dash: "5 4", name: "used the routing brain"},
+    image: {color: "#a78bfa", dash: "9 4", name: "image jobs"},
+    failed: {color: "var(--bad)", name: "failed"},
+    denied: {color: "var(--bad)", dash: "6 5", name: "denied by a budget rule"},
+    fallback: {color: "var(--dim)", dash: "1 5", thin: true, name: "fallback order (#1, #2…)"},
+    config: {color: "var(--dim)", dash: "3 5", thin: true, name: "allowed by the configuration"}};
+  const edges = g.edges.map(e => {
+    const clickable = !["config", "fallback"].includes(e.kind);
+    return {from: e.from, to: e.to, kind: e.kind, count: e.count || 0,
+      label: e.kind === "fallback" ? `#${e.order}` : clickable ? `${e.count}${e.errors ? " (" + e.errors + "✗)" : ""}` : "",
+      tip: `${e.kind}: ${e.from} → ${e.to}` + (e.count ? ` · ${e.count}` : "") + (e.avg_ms ? ` · avg ${fmtDur(e.avg_ms)}` : "") + (e.rules ? " · " + Object.keys(e.rules).join(", ") : ""),
+      onclick: clickable ? `showRouteEdge(${JSON.stringify(e.kind)}, ${JSON.stringify(e.from)}, ${JSON.stringify(e.to)})` : ""};
+  });
+  const seen = new Set(g.edges.map(e => e.kind));
+  const legend = Object.entries(KINDS).filter(([k]) => seen.has(k)).map(([k, v]) =>
+    `<span><i class="${v.dash ? (v.thin ? "dot" : "dash") : ""}" style="border-top-color:${v.color}"></i>${esc(v.name)}</span>`).join("");
+  const mainW = ($("#main").clientWidth || 1200) - 4;
   $("#main").innerHTML = `
-    <h2>Routes — generated from the live configuration</h2>
-    <style>@keyframes rt-flow { to { stroke-dashoffset: -22; } }</style>
-    <p class="hint"><b style="color:#22c55e">Green moving</b> = running right now · <b style="color:#f59e0b">amber dashed</b> = requests whose persona used the routing brain · a client without a key shows as <b>untracked · its IP</b> (make it a key in Access → Clients &amp; Keys to see it by name). Dotted grey = what the config allows (persona allowlists in pinned order: #2, #3 are the explicit fallback chain; client persona restrictions; the backend each model is served by — the pinned backend for strict routes). <b style="color:#3b82f6">Blue</b> = requests in the window (thicker = more), <b style="color:var(--bad)">red</b> = failed, red dashed = denied by a budget rule, <b style="color:#a855f7">purple dashed</b> = image jobs. ⛁N = budget rules that gate a client or persona (hover for names); the dot = validation (personas) or serving health (backends). Click a coloured edge for its requests, then a request for its full trace.</p>
-    <div class="row"><label>window</label><select id="rt-hours">${[[1 / 6, "10 min"], [0.5, "30 min"], [2, "2 h"], [6, "6 h"], [24, "1 d"], [168, "7 d"]].map(([h, l]) => `<option value="${h}" ${Math.abs(h - o.hours) < 1e-6 ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <label for="rt-all">all personas</label><input type="checkbox" id="rt-all" ${o.all ? "checked" : ""}>
-      <label for="rt-active" title="Only what was observed (traffic, denials, calls running now), no configuration; refreshes every 5 s">active only (live)</label><input type="checkbox" id="rt-active" ${o.active ? "checked" : ""}>
+    <h2 style="margin-top:0">Routes <span class="hint" style="font-weight:normal">— who sent what, to which persona, model and backend</span></h2>
+    <div class="row"><label style="min-width:0">window</label><select id="rt-hours">${[[1 / 6, "10 min"], [0.5, "30 min"], [2, "2 h"], [6, "6 h"], [24, "1 d"], [168, "7 d"]].map(([h, l]) => `<option value="${h}" ${Math.abs(h - o.hours) < 1e-6 ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <label title="Show personas that had no traffic too"><input type="checkbox" id="rt-all" ${o.all ? "checked" : ""}> all personas</label>
+      <label title="Only what was observed (traffic, denials, calls running now), no configuration; refreshes every 5 s"><input type="checkbox" id="rt-active" ${o.active ? "checked" : ""}> active only (live)</label>
       <span class="stat">${g.requests} requests · ${g.denials} denials · ${g.image_jobs} image jobs · ${g.live || 0} running now</span></div>
-    <div class="tscroll"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="routes-svg">${heads}${edgesSvg}${nodesSvg}</svg></div>
+    <div class="fk-legend">${legend}</div>
+    <div class="tscroll" id="rt-map">${FK.flow({label: "route map", width: mainW, kinds: KINDS, nodes, edges,
+      columns: [{key: "client", title: "clients"}, {key: "persona", title: "personas"}, {key: "model", title: "models"}, {key: "backend", title: "backends"}]})}</div>
+    <p class="hint">Point at a box or a line to follow its path; click a line for its requests. A thicker line carried more requests. The stripe on a box is its state: green serving or running, amber unverified, red failing. ⛁ = budget rules on that persona. A client without a key shows as <b>untracked · its IP</b> (Access → Clients &amp; Keys makes it a named key).</p>
     <div id="rt-detail"></div><div id="rt-trace"></div>`;
+  FK.flowWire($("#rt-map"));
   $("#rt-hours").onchange = e => { o.hours = +e.target.value; render(); };
   $("#rt-all").onchange = e => { o.all = e.target.checked; render(); };
   $("#rt-active").onchange = e => { o.active = e.target.checked; if (o.active && o.hours > 2) o.hours = 0.5; render(); };

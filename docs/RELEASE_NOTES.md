@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.120 — UI pass: resizing, tables, dropdowns, the route map and the control center graph
+
+Victor, 2026-11-11: "when I change window sizes, some things don't scale up and down very well", plus a request for better-looking charts, route and activity maps, dropdowns and adjustable tables. Checked in a local preview against the live router's data at 1500, 1000, 780, 700 and 600 px wide.
+
+**A shared UI kit** (`ui/static/kit.css`, `ui/static/kit.js`, served at `/ui/kit.css` and `/ui/kit.js`) loaded by `/ui`, `/ui/control` and `/ui/automation`:
+
+- **Tables.** Click a column header to sort (numbers, "4.6k", "$2.33" and plain text are compared properly; a page that redraws keeps the order). Drag a header edge to resize a column, double-click the edge to reset; widths are remembered per table in the browser. A table wider than its place scrolls inside its own box. On the automation page tables are resizable but not sortable: their rows are in a deliberate order.
+- **Dropdowns, fields, scrollbars.** One look across the three pages, in each page's own palette.
+- **Navigation wraps** onto more rows in a narrower window. It used to turn into a sideways scroller that hid the last groups.
+- **`FK.flow`**, a flow-map renderer: boxes with a state stripe and a count, lines whose thickness follows the traffic, a legend of only the line kinds on screen, and hover: point at a box or a line and its whole path stays lit while the rest fades.
+
+**Admin page (`/ui`).**
+
+- The open tab redraws when the window's width changes (not while you are typing or a dialog is open). Charts and the route map were drawn once for the width at load and then stretched.
+- **Routes** is drawn by `FK.flow` at the page's width. It was a fixed 1,180 px drawing with thin lines. Configuration and fallback lines stay quiet until you point at their path.
+- **The route graph no longer blocks the router.** `GET /admin/api/routes` scans the request log (5 to 29 s for a one-day window on the live router) and ran on the event loop, so every stream stalled while the Routes tab was open. It now runs in a worker thread and a result is reused for 12 s (4 s in live mode).
+- The performance advisor shows its first four findings and folds the rest ("Show all N findings"), so the charts below stay in reach.
+
+**Control center (`/ui/control`).**
+
+- In a short or narrow window the three work panes were crushed into a strip (213 px tall at 1000 x 800) because the sprint summary and the composer kept their full height. The panes now keep a usable height and the page scrolls.
+- The inspector and graph widths are pixels saved on whatever window they were last dragged in; on a smaller window they added up to more than the page and the graph was pushed off the right edge. They are now fitted to the window: the graph shrinks, then the inspector, and a graph squeezed under 420 px gets its own row under the panes. A changed window width re-fits the panes.
+- A pane that had been a full-width row no longer keeps spanning every column when it moves back beside the others.
+- **Route / activity graph:** a neutral box with a stripe in the kind's colour, rounded lines whose thickness follows the event count, and the same hover path highlight as the route map.
+
+**Automation (`/ui/automation`).** The Memory and Repo changes tables ran off the right edge at 780 px and cut off the Actions column; they now scroll inside their own box.
+
+Tests: `tests/test_ui_kit.py` (the kit is served and loaded by every page before its own script, the admin page redraws on resize and draws routes with the kit, the route graph cache).
+
 ## v0.181.119 — the cost calculator keeps itself current
 
 The Cost tab compared your traffic against a fixed list of paid models. Prices could be refreshed from OpenRouter, but only on request or on an opt-in weekly schedule, and the list itself never changed: on 2026-11-11 it still showed Claude Opus 4.8, Claude Sonnet 5, Claude Haiku 4.5 and GPT-5.6, last refreshed on 30 October.

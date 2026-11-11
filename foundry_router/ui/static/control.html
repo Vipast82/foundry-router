@@ -190,6 +190,16 @@ body.noanim .sp-bar i { transition:none; }
 
 /* ---------------------------------------------------------------- workspace */
 #workspace { flex:1; min-height:0; display:grid; overflow:hidden; }
+/* v0.181.120: in a short or narrow window the summary above and the composer below kept
+   their full height and the three work panes were crushed into a strip (213 px tall at
+   1000 x 800). The panes now keep a usable height and the page scrolls instead. */
+body { overflow-y:auto; }
+body > header, #sprint, #composer, #banner, #narrowTabs { flex:none; }
+#workspace { min-height:clamp(300px, 48vh, 560px); }
+@media (max-height: 860px) {
+  #sprint.show { max-height:32vh; overflow-y:auto; }
+  #composer { max-height:30vh; }
+}
 .resizer { background:var(--line); touch-action:none; position:relative; z-index:2; }
 .resizer.col { cursor:col-resize; width:5px; }
 .resizer.row { cursor:row-resize; height:5px; }
@@ -353,6 +363,20 @@ body.narrow-ui #floatLayer { display:none; }
 .gedge.active { stroke:var(--ok); stroke-width:2.6; stroke-dasharray:6 4; }
 body.anim .gedge.active { animation:flow 0.9s linear infinite; }
 .gedge.kind-tool { stroke-dasharray:3 2; }
+/* v0.181.120: the box outline is neutral and a stripe carries the kind's colour; lines
+   are rounded and fade back when you point at another path */
+.gnode { cursor:pointer; transition:opacity .12s ease; }
+.gnode[class] > rect:first-of-type { stroke:var(--line-2); rx:5; }
+.gnode rect.gk { fill:var(--line-2); stroke:none !important; rx:2; }
+.gnode.k-coordinator rect.gk { fill:var(--accent); } .gnode.k-session rect.gk { fill:var(--info); }
+.gnode.k-mcp rect.gk { fill:var(--syn-ctl); } .gnode.k-media_job rect.gk { fill:var(--syn-type); }
+.gnode.k-model rect.gk { fill:var(--ok); } .gnode.k-artifact rect.gk { fill:var(--syn-str); }
+.gnode.k-lane_unit rect.gk { fill:var(--syn-fn); }
+.gnode:hover > rect:first-of-type, .gnode:focus-visible > rect:first-of-type { stroke:var(--accent); }
+.gedge { stroke-linecap:round; opacity:.85; transition:opacity .12s ease; }
+.gedge:hover, .gedge:focus-visible { opacity:1; filter:brightness(1.35); outline:none; }
+#graph svg.focus .gedge:not(.on) { opacity:.1; }
+#graph svg.focus .gnode:not(.on) { opacity:.35; }
 @keyframes flow { to { stroke-dashoffset:-20; } }
 
 /* ---------------------------------------------------------------- drawers & dialogs */
@@ -398,6 +422,7 @@ a.btnlink:hover { border-color:var(--accent); }
 @media (prefers-reduced-motion: reduce) { body.anim-auto .gedge.active { animation:none; } #bell.critical { animation:none; } }
 body.noanim * { animation:none !important; transition:none !important; }
 </style>
+<link rel="stylesheet" href="/ui/kit.css?v=120">
 </head>
 <body class="anim">
 <div id="login" role="dialog" aria-modal="true" aria-labelledby="login-h">
@@ -496,6 +521,7 @@ body.noanim * { animation:none !important; transition:none !important; }
   </form></dialog>
 <div id="toasts" aria-live="polite"></div>
 
+<script src="/ui/kit.js?v=120"></script>
 <script>
 "use strict";
 /* ======================================================================== basics */
@@ -3315,14 +3341,39 @@ function renderGraph() {
     const a = pos[e.from], b = pos[e.to]; if (!a || !b) return "";
     const x1 = vertical ? a.x + NW / 2 : a.x + NW, y1 = vertical ? a.y + NH : a.y + NH / 2, x2 = vertical ? b.x + NW / 2 : b.x, y2 = vertical ? b.y : b.y + NH / 2;
     const d = vertical ? `M${x1},${y1} C${x1},${(y1 + y2) / 2} ${x2},${(y1 + y2) / 2} ${x2},${y2}` : `M${x1},${y1} C${(x1 + x2) / 2},${y1} ${(x1 + x2) / 2},${y2} ${x2},${y2}`;
-    return `<path class="gedge ${esc(e.state)} kind-${esc(e.kind)}" d="${d}" data-edge="${i}" data-ekey="${esc(edgeKey(e))}" tabindex="0"><title>${esc(e.kind)} ${esc(e.state)} · ${e.count} event(s)${e.label ? " · " + esc(e.label) : ""}</title></path>`;
+    const sw = Math.min(6, 1.4 + Math.log2((e.count || 0) + 1) * 0.9) + (e.state === "active" ? 1 : 0);
+    return `<path class="gedge ${esc(e.state)} kind-${esc(e.kind)}" style="stroke-width:${sw.toFixed(1)}" d="${d}" data-edge="${i}" data-a="${esc(e.from)}" data-b="${esc(e.to)}" data-ekey="${esc(edgeKey(e))}" tabindex="0"><title>${esc(e.kind)} ${esc(e.state)} · ${e.count} event(s)${e.label ? " · " + esc(e.label) : ""}</title></path>`;
   }).join("");
-  const nodes = g.nodes.map(n => { const p = pos[n.id]; return `<g class="gnode k-${esc(n.kind)}" transform="translate(${p.x},${p.y})" data-node="${esc(n.id)}" tabindex="0"><rect width="${NW}" height="${NH}"></rect><text x="6" y="16">${esc(String(n.label).slice(0, 24))}</text><title>${esc(n.kind)}: ${esc(n.label)}</title></g>`; }).join("");
+  const nodes = g.nodes.map(n => { const p = pos[n.id]; return `<g class="gnode k-${esc(n.kind)}" transform="translate(${p.x},${p.y})" data-node="${esc(n.id)}" tabindex="0"><rect width="${NW}" height="${NH}"></rect><rect class="gk" width="4" height="${NH}"></rect><text x="11" y="16">${esc(String(n.label).slice(0, 24))}</text><title>${esc(n.kind)}: ${esc(n.label)}</title></g>`; }).join("");
   host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${Math.round(W * scale)}" height="${Math.round(H * scale)}" role="img" aria-label="Route and activity graph">${edges}${nodes}</svg>`;
   const zl = $("#g-zoom"); if (zl) zl.textContent = `${Math.round(scale * 100)}%${S.graphZoom ? "" : " fit"}${lay.fits ? "" : " · scroll"}`;
   const svg = host.querySelector("svg");
   svg.querySelectorAll("[data-edge]").forEach(p => { p.onclick = () => edgeDetails(g.edges[+p.dataset.edge]); p.onkeydown = e => { if (e.key === "Enter") edgeDetails(g.edges[+p.dataset.edge]); }; });
   svg.querySelectorAll("[data-node]").forEach(n => { const go = () => { const node = g.nodes.find(x => x.id === n.dataset.node); if (node && node.ref && node.ref.session) openBeside(node.ref.session); else if (node) edgeDetails({from: node.id, to: "", kind: node.kind, state: "", refs: [node.ref || {}], count: 0}); }; n.onclick = go; n.onkeydown = e => { if (e.key === "Enter") go(); }; });
+  // v0.181.120: point at a box or a line and everything it connects to stays lit
+  const gEdges = [...svg.querySelectorAll(".gedge")], gNodes = [...svg.querySelectorAll(".gnode")];
+  const lit = (edgeSet, nodeSet) => {
+    svg.classList.add("focus");
+    gEdges.forEach(p => p.classList.toggle("on", edgeSet.has(p)));
+    gNodes.forEach(n => n.classList.toggle("on", nodeSet.has(n.dataset.node)));
+  };
+  const unlit = () => svg.classList.remove("focus");
+  gNodes.forEach(n => {
+    n.addEventListener("mouseenter", () => {
+      const es = new Set(), ns = new Set([n.dataset.node]);
+      const walk = (id, fwd) => gEdges.forEach(p => {
+        const from = fwd ? p.dataset.a : p.dataset.b, to = fwd ? p.dataset.b : p.dataset.a;
+        if (from === id && !es.has(p)) { es.add(p); ns.add(to); walk(to, fwd); }
+      });
+      walk(n.dataset.node, true); walk(n.dataset.node, false);
+      lit(es, ns);
+    });
+    n.addEventListener("mouseleave", unlit);
+  });
+  gEdges.forEach(p => {
+    p.addEventListener("mouseenter", () => lit(new Set([p]), new Set([p.dataset.a, p.dataset.b])));
+    p.addEventListener("mouseleave", unlit);
+  });
   // Ctrl/⌘+wheel zooms (never below the readable minimum); plain wheel scrolls
   svg.onwheel = e => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); graphZoom(e.deltaY > 0 ? 1 / 1.15 : 1.15, scale); };
   let drag = null;
@@ -3425,18 +3476,38 @@ function layout() {
     const gpos = L.graphPos || "bottom";
     const graphWanted = P.graph && !POPOUT && !S.graphHidden && !isPopped("graph");
     const showInsp = !inspHidden && !below;
-    if (!cols.length && !showInsp && !(graphWanted && gpos === "side")) addCol(poppedPlaceholder(), "", "", "1fr");
-    if (showInsp) addCol(insp, `${clamp(L.inspectorW || 340, 220, 900)}px`, "inspectorW");
-    if (graphWanted && gpos === "side") addCol(graph, `${clamp(L.graphW || 560, 260, 1400)}px`, "graphW");
+    // v0.181.120: the inspector and graph widths are pixels saved on whatever window
+    // they were last dragged in. On a smaller window they added up to more than the
+    // page (320 + 340 + 560 on a 1000 px window) and the graph was pushed off the right
+    // edge. Fit them: shrink the graph, then the inspector, toward their minimums; if
+    // that still isn't enough the graph drops to its own row under the panes.
+    const availW = ws.clientWidth || innerWidth;
+    const fixedW = cols.length ? 320 + helpers.filter(h => !panePopped(h)).length * 265 : 0;
+    let inspW = clamp(L.inspectorW || 340, 220, 900), graphW = clamp(L.graphW || 560, 260, 1400);
+    let gposFit = gpos;
+    const needW = () => fixedW + (showInsp ? inspW + 5 : 0) + (graphWanted && gposFit === "side" ? graphW + 5 : 0);
+    if (needW() > availW && graphWanted && gposFit === "side") graphW = Math.max(260, graphW - (needW() - availW));
+    if (needW() > availW && showInsp) inspW = Math.max(220, inspW - (needW() - availW));
+    const squeezed = graphWanted && gposFit === "side" && graphW < 420 && graphW < clamp(L.graphW || 560, 260, 1400);
+    if (squeezed || (needW() > availW && graphWanted && gposFit === "side")) {
+      gposFit = "bottom";
+      inspW = clamp(L.inspectorW || 340, 220, 900);
+      if (needW() > availW && showInsp) inspW = Math.max(220, inspW - (needW() - availW));
+    }
+    if (!cols.length && !showInsp && !(graphWanted && gposFit === "side")) addCol(poppedPlaceholder(), "", "", "1fr");
+    if (showInsp) addCol(insp, `${inspW}px`, "inspectorW");
+    if (graphWanted && gposFit === "side") addCol(graph, `${graphW}px`, "graphW");
     const rows = ["minmax(200px, 1fr)"];
     const extraRows = [];
     if (!inspHidden && below) extraRows.push(["inspectorH", insp, L.inspectorH || 300]);
-    const graphOn = graphWanted && gpos === "bottom" && L.graphH !== 0;
+    const graphOn = graphWanted && gposFit === "bottom" && (L.graphH !== 0 || gposFit !== gpos);
     if (graphOn) extraRows.push(["graphH", graph, L.graphH || 220]);
     for (const [k, el, h] of extraRows) rows.push("5px", `${clamp(h, 90, 900)}px`);
     ws.style.gridTemplateColumns = cols.join(" ");
     ws.style.gridTemplateRows = rows.join(" ");
-    els.forEach(el => { el.style.gridRow = "1"; ws.appendChild(el); el.hidden = false; });
+    // gridColumn is cleared: a pane that was a full-width row before (the graph moving
+    // back beside the panes after a resize) must not keep spanning every column
+    els.forEach(el => { el.style.gridRow = "1"; el.style.gridColumn = ""; ws.appendChild(el); el.hidden = false; });
     let r = 2;
     for (const [k, el] of extraRows) {
       const rz = resizer("row", k, preset); rz.style.gridColumn = "1 / -1"; rz.style.gridRow = String(r); ws.appendChild(rz);
@@ -3444,7 +3515,7 @@ function layout() {
     }
     insp.hidden = inspHidden;
     if (graphWanted && gpos === "float") { floatGraph(preset); }
-    else if (!graphOn && !(graphWanted && gpos === "side")) graph.hidden = true;
+    else if (!graphOn && !(graphWanted && gposFit === "side")) graph.hidden = true;
     const gp = graph.querySelector("#g-pos"); if (gp) gp.value = gpos;
   }
   applyFloats(preset);
@@ -3566,6 +3637,9 @@ function renderFloatSections(s) {
   }
 }
 addEventListener("resize", () => { clearTimeout(S.frz); S.frz = setTimeout(() => applyFloats(effectivePreset()), 150); });
+// v0.181.120: a changed window width re-fits the panes (layout() fits the saved pixel
+// widths to the window), not only a change between portrait, landscape and narrow.
+if (window.FK) FK.onResize(() => { try { layout(); } catch (e) { /* next change retries */ } });
 function poppedPlaceholder() {
   const d = document.createElement("section");
   d.className = "pane"; d.setAttribute("aria-label", "Transcript popped out");
