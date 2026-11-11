@@ -1144,9 +1144,33 @@ async def work_scorecard(request: Request, project: str = "", task: str = "",
     gates run / passed, reviews, vision rounds, helpers used / integrated, speeds
     (measured apart from estimated), cost and outcome."""
     from .. import scorecard
-    # 3 s on the event loop with a fortnight of sprints: a worker thread, second connection
-    return await asyncio.to_thread(scorecard.build, _svc(request).db.reader(), project, task,
-                                   hours=max(0.0, min(float(hours), 24 * 365)), limit=limit)
+    # A fortnight of sprints takes seconds to sum (12 s on the live router): a worker
+    # thread on the second connection, and the answer is kept for a minute. Callers that
+    # ask while it is being built wait for that one build.
+    import time as _time
+    svc = _svc(request)
+    hours = max(0.0, min(float(hours), 24 * 365))
+    key = (project, task, hours, int(limit))
+    cache = svc.__dict__.setdefault("_scorecard_cache", {})
+    hit = cache.get(key)
+    if hit and hit[1] is not None and _time.monotonic() - hit[0] < SCORECARD_KEEP_SECONDS:
+        return hit[1]
+    if hit and hit[2] is not None and not hit[2].done():
+        return await asyncio.shield(hit[2])
+
+    async def build():
+        out = await asyncio.to_thread(scorecard.build, svc.db.reader(), project, task,
+                                      hours=hours, limit=limit)
+        cache[key] = (_time.monotonic(), out, None)
+        for k in [k for k, v in cache.items() if _time.monotonic() - v[0] > 600]:
+            cache.pop(k, None)
+        return out
+    task_ = asyncio.ensure_future(build())
+    cache[key] = (_time.monotonic(), None, task_)
+    return await asyncio.shield(task_)
+
+
+SCORECARD_KEEP_SECONDS = 60.0
 
 
 def _episode_card(r) -> dict:

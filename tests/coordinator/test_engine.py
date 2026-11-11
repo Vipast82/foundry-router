@@ -1633,6 +1633,15 @@ def test_claude_agents_are_capped_and_the_cap_drops_at_the_usage_threshold(game)
         {"backend": "cliproxyapi", "accounts": [{"windows": [{"name": "5h", "used": 99.0}]}]}]}
     assert EN.claude_used_pct(answer) == 78.5
     assert EN.claude_used_pct({"routes": []}) is None
+    # a model-scoped window that does not apply to the asked persona's model is ignored
+    # (2026-11-11: "Fable weekly" at 75 % cut the Sonnet sprints' cap)
+    scoped = {"routes": [{"backend": "meridian", "accounts": [{"windows": [
+        {"name": "weekly", "kind": "weekly", "applies": True, "used": 54.0},
+        {"name": "Fable weekly", "kind": "scoped", "applies": False, "used": 75.0}]}]}]}
+    assert EN.claude_used_pct(scoped) == 54.0
+    only_scoped = {"routes": [{"backend": "meridian", "accounts": [{"windows": [
+        {"name": "Fable weekly", "kind": "scoped", "applies": False, "used": 75.0}]}]}]}
+    assert EN.claude_used_pct(only_scoped) is None
 
     class Router:
         calls = 0

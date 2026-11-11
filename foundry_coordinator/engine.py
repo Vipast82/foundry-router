@@ -102,13 +102,18 @@ ROUTE_RETRY_S = 300
 
 def claude_used_pct(admission: dict, backend: str = "meridian"):
     """The highest window `used` percent of the Claude backend's accounts in a router
-    helper-admission answer (None when it has no reading)."""
+    helper-admission answer (None when it has no reading). A window the router marks
+    `applies: false` for the asked persona's model is not counted: 2026-11-11 the
+    Fable-only weekly window reached 75 % and cut the sprint cap from 4 to 2 while the
+    sprints ran on Sonnet, at 54 % of the all-models week."""
     best = None
     for route in (admission or {}).get("routes") or []:
         if str(route.get("backend") or "") != backend:
             continue
         for acct in route.get("accounts") or []:
             for w in acct.get("windows") or []:
+                if w.get("applies") is False:
+                    continue
                 try:
                     u = float(w.get("used"))
                 except (TypeError, ValueError):

@@ -99,23 +99,26 @@ def test_retention_prunes_go_through_the_stepped_delete(app):
 
 
 def test_a_call_that_holds_the_lock_for_long_is_recorded(tmp_path, monkeypatch):
-    monkeypatch.setattr(dbmod, "SLOW_CALL_SECONDS", 0.15)
+    monkeypatch.setattr(dbmod, "SLOW_CALL_SECONDS", 0.3)
     db = Database(tmp_path / "a.sqlite")
-    db.query("SELECT 1")
-    assert not db.slow_calls                         # a fast call leaves no record
     db._conn.create_function("nap", 1, lambda s: time.sleep(s) or 1)
     got = []
     waiter = threading.Thread(target=lambda: got.append(db.query("SELECT 2 AS x")), name="waiter")
-    holder = threading.Thread(target=lambda: db.query("SELECT   nap(0.5)\n AS slept"), name="holder")
+    holder = threading.Thread(target=lambda: db.query("SELECT   nap(1.0)" + chr(10) + " AS slept"), name="holder")
     holder.start()
-    time.sleep(0.1)
+    time.sleep(0.25)
     waiter.start()
     holder.join()
     waiter.join()
     assert got == [[{"x": 2}]]
     by = {c["thread"]: c for c in db.slow_calls}
-    assert by["holder"]["held"] >= 0.4 and by["holder"]["what"] == "SELECT nap(0.5) AS slept"
-    assert by["waiter"]["waited"] >= 0.2 and by["waiter"]["held"] < 0.15
+    assert by["holder"]["held"] >= 0.8 and by["holder"]["what"] == "SELECT nap(1.0) AS slept"
+    assert by["waiter"]["waited"] >= 0.4 and by["waiter"]["held"] < by["holder"]["held"]
+    # a call that neither held nor waited leaves no record
+    monkeypatch.setattr(dbmod, "SLOW_CALL_SECONDS", 30.0)
+    n = len(db.slow_calls)
+    db.query("SELECT 1")
+    assert len(db.slow_calls) == n
 
 
 def test_a_slow_read_on_the_second_connection_does_not_hold_the_lock(tmp_path):
@@ -474,7 +477,7 @@ def test_the_stall_event_names_the_request(app):
 def test_work_and_compare_are_read_off_the_event_loop_and_task_states_come_from_an_index(app, client):
     import inspect
     from foundry_router.ui import routes
-    assert "asyncio.to_thread(scorecard.build, _svc(request).db.reader()" in inspect.getsource(routes.work_scorecard)
+    assert "asyncio.to_thread(scorecard.build, svc.db.reader()" in inspect.getsource(routes.work_scorecard)
     assert "asyncio.to_thread(_svc(request).work.view" in inspect.getsource(routes.work_view)
     assert "asyncio.to_thread(compare.report" in inspect.getsource(routes.compare_clients)
     for path in ("/admin/api/work", "/admin/api/work/scorecard", "/admin/api/compare"):
@@ -483,3 +486,54 @@ def test_work_and_compare_are_read_off_the_event_loop_and_task_states_come_from_
     plan = " ".join(r["detail"] for r in db.query(
         "EXPLAIN QUERY PLAN SELECT project_id, task_id, state FROM cc_tasks"))
     assert "COVERING INDEX" in plan and "idx_cc_tasks_state" in plan
+
+
+# ---- v0.181.128 ---------------------------------------------------------------------------------
+
+def test_a_stepped_delete_sizes_its_slices_by_how_long_they_take(tmp_path, monkeypatch):
+    """4,000 rows of cc_build_runs per slice held the lock for 5.4 s on the live router:
+    the walk starts at 200 rowids, grows while slices are quick and shrinks when one is slow."""
+    db = Database(tmp_path / "a.sqlite")
+    _log_table(db, 6000, old=6000)
+    sizes = []
+    real = db.execute_count
+
+    def spy(sql, params=()):
+        sizes.append(params[1] - params[0])
+        return real(sql, params)
+    db.execute_count = spy
+    clock = [0.0]
+    monkeypatch.setattr(dbmod.time, "monotonic", lambda: clock[0])    # every slice is instant
+    assert db.delete_in_steps("t_log", "ts < ?", (500.0,)) == 6000
+    assert sizes[:5] == [200, 400, 800, 1600, 3200] and max(sizes) <= dbmod.DELETE_STEP
+    # slow slices (large rows): the size comes down fast and stays down
+    _log_table2 = "CREATE TABLE t_big (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL)"
+    db.execute(_log_table2)
+    db.executemany("INSERT INTO t_big (ts) VALUES (?)", [(100.0,) for _ in range(1200)])
+    sizes.clear()
+
+    def slow(sql, params=()):
+        sizes.append(params[1] - params[0])
+        clock[0] += 0.0013 * (params[1] - params[0])          # 1.3 ms a row, as measured
+        return real(sql, params)
+    db.execute_count = slow
+    assert db.delete_in_steps("t_big", "ts < ?", (500.0,)) == 1200
+    assert sizes[0] == 200 and sizes[1] == 50 and max(sizes[1:]) <= 100
+    assert all(0.0013 * n <= 0.27 for n in sizes)             # no slice holds the lock for long
+
+
+def test_the_scorecard_is_built_once_a_minute_however_often_it_is_asked_for(app, client, monkeypatch):
+    """It takes 12 s on the live router: one build serves everyone for a minute."""
+    from foundry_router import scorecard
+    from foundry_router.ui import routes
+    built = []
+    real = scorecard.build
+    monkeypatch.setattr(scorecard, "build", lambda *a, **k: built.append(k) or real(*a, **k))
+    a = client.get("/admin/api/work/scorecard").json()
+    b = client.get("/admin/api/work/scorecard").json()
+    assert a == b and len(built) == 1
+    client.get("/admin/api/work/scorecard?project=other")     # another question: its own build
+    assert len(built) == 2
+    monkeypatch.setattr(routes, "SCORECARD_KEEP_SECONDS", 0.0)
+    client.get("/admin/api/work/scorecard")
+    assert len(built) == 3

@@ -347,7 +347,11 @@ class _Reader:
 
 
 SLOW_CALL_SECONDS = 1.0      # a lock hold or wait this long is recorded (Database.slow_calls)
-DELETE_STEP = 4000           # rowids per slice in Database.delete_in_steps
+DELETE_STEP = 4000           # most rowids per slice in Database.delete_in_steps
+DELETE_FIRST_STEP = 200      # the first slice; doubled while slices take under DELETE_FAST_SECONDS,
+DELETE_MIN_STEP = 25         # quartered (down to this) when one takes over DELETE_SLOW_SECONDS
+DELETE_FAST_SECONDS = 0.03
+DELETE_SLOW_SECONDS = 0.2
 
 
 class Database:
@@ -965,11 +969,21 @@ class Database:
         hi = (self.query_one(f"SELECT MAX(rowid) AS b FROM {table}") or {}).get("b")
         a, last, n = int(lo), int(hi if hi is not None else lo), 0
         off_loop = threading.current_thread() is not threading.main_thread()
+        # v0.181.128: `step` is the largest slice. The walk starts small and sizes each
+        # slice by how long the last one took: 4,000 rows of cc_build_runs (each with its
+        # thumbnails, stored before the time column) held the lock for 5.4 s
+        size = min(step, DELETE_FIRST_STEP)
         while a <= last:
-            b = a + step
+            b = a + size
+            t0 = time.monotonic()
             d = self.execute_count(
                 f"DELETE FROM {table} WHERE rowid >= ? AND rowid < ? AND ({where})",
                 (a, b) + params)
+            took = time.monotonic() - t0
+            if took > DELETE_SLOW_SECONDS:
+                size = max(DELETE_MIN_STEP, size // 4)
+            elif took < DELETE_FAST_SECONDS:
+                size = min(step, size * 2)
             n += d
             if ordered and not d and self.query_one(
                     f"SELECT 1 AS x FROM {table} WHERE rowid >= ? AND rowid < ? LIMIT 1", (a, b)):

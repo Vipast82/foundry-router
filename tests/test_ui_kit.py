@@ -185,3 +185,25 @@ def test_the_remaining_long_tabs_have_sections_and_the_dev_log_scrolls_in_place(
     assert '<div id="dev-list" class="dev-pane"></div>' in html and ".dev-pane { max-height:" in html
     clients = html[html.index("async function tabClients()"):html.index("window._pickerOptions.personas = d.personas;")]
     assert "${c.personas.length} personas</summary>" in clients and "roles without a persona" in clients
+
+
+def test_performance_and_data_have_sections_and_late_blocks_join_theirs():
+    """v0.181.128: the sprint scorecard arrives seconds after the Work tab is drawn and
+    missed its section; #main is now watched. Performance (5,582 px) and Data (5,794 px)
+    show one section at a time."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    sec = html[html.index("const TAB_SECTIONS = {"):html.index("function sectionTabs()")]
+    assert 'Performance: [["Charts", /^Speed and latency over time/]' in sec
+    assert 'Data: [["Tables and retention", null]' in sec and '["Backup and restore", /^Backup & restore/]' in sec
+    assert "window._sectObs = setTimeout(sectionTabs, 60);" in sec and "observe(main, {childList: true})" in sec
+    assert 'class="jump"' not in html[html.index("async function tabPerformance()"):html.index('id="perf-sec-detail"')]
+    data = html[html.index("async function tabData()"):html.index("function opsCards(cv, sn)")]
+    assert data.index('<h3 style="margin-top:0">Tables</h3>') < data.index("${opsCards(cv, sn)}")
+    backup = html[html.index("async function backupCard()"):html.index("async function providerKeysCard()")]
+    assert '$("#main").appendChild(card);' in backup
+    # the Work intro sentence starts with "Tasks" too: it must not claim the Tasks section
+    import re
+    assert '["Tasks", /^Tasks(?! a development)/]' in sec
+    assert "Tasks a development" in html
+    assert not re.match(r"^Tasks(?! a development)", "Tasks a development coordinator reported")
+    assert re.match(r"^Tasks(?! a development)", "Tasksshowing 50 of 110")

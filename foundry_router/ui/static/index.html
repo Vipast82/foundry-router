@@ -1464,15 +1464,30 @@ const TAB_SECTIONS = {
   Guardrails: [["Limits", /^authority/], ["Claude window", /^Claude window conservation/],
                ["Semantic cache", /^Semantic cache/], ["Turn assist", /^Turn assist/]],
   // v0.181.127
-  Work: [["Sprint scorecard", /^Sprint scorecard/], ["Tasks", /^Tasks/], ["Sessions", /^Sessions/], ["Events", /^Events/]],
+  // (the page's intro sentence starts "Tasks a development coordinator ...": not the Tasks card)
+  Work: [["Sprint scorecard", /^Sprint scorecard/], ["Tasks", /^Tasks(?! a development)/], ["Sessions", /^Sessions/], ["Events", /^Events/]],
   Training: [["Capture", /^Foundry capture/], ["Datasets", /^Fine-tuning datasets/], ["Pipelines", /^Pipeline/],
              ["Episodes", /^Episodes/]],
   Secrets: [["Store and values", null], ["Client keys", /^Keys with the secrets scope/], ["Transport", /^Transport/],
             ["Pull log", /^Pull log/], ["Provider keys", /^Provider keys/]],
   "Clients & Keys": [["Clients", null], ["Add a client", /^Add a client/], ["Unmatched keys", /^Keys that matched no client/]],
+  // v0.181.128
+  Performance: [["Charts", /^Speed and latency over time/], ["By model, advisor, brain", /^Per-model breakdown/],
+                ["Inference servers", /^Inference servers/], ["Settings", /^Settings$/], ["Details", /^Details$/]],
+  Data: [["Tables and retention", null], ["Configuration history", /^Configuration history/],
+         ["Snapshots, export, import", /^Export, import & snapshots/], ["Diagnostics", /^Diagnostics/],
+         ["Backup and restore", /^Backup & restore/]],
   Machines: [["Machines", null], ["Blender pool", /^Blender pool/], ["Studio slots", /^(Add a Studio slot|Which workstation)/],
              ["Workstations", /^(Add a workstation|Workstations|Extra ssh keys)/], ["Recent events", /^Recent events/]],
 };
+document.addEventListener("DOMContentLoaded", () => {
+  const main = $("#main");
+  if (!main || !window.MutationObserver) return;
+  new MutationObserver(() => {
+    clearTimeout(window._sectObs);
+    window._sectObs = setTimeout(sectionTabs, 60);
+  }).observe(main, {childList: true});
+});
 function sectionTabs() {
   const defs = TAB_SECTIONS[current], main = $("#main");
   if (!defs || !main) return;
@@ -2045,7 +2060,6 @@ async function tabPerformance() {
       <span class="hint" id="perf-count" style="margin:0"></span>
     </div>
     <div id="perf-summary"></div>
-    <div class="jump" role="navigation" aria-label="On this page">Jump to <a href="#perf-sec-charts" data-jump>charts over time</a>, <a href="#perf-sec-servers" data-jump>inference servers</a>, <a href="#perf-sec-settings" data-jump>settings</a> or <a href="#perf-sec-detail" data-jump>correlation and recent calls</a></div>
     <h2 id="perf-sec-charts">Speed and latency over time</h2>
     <div class="chart-grid">
     <div class="card">${cardH("Generation speed (tok/s)", "charts", "decode vs effective, which includes waiting")}<div id="perf-c-tps"></div></div>
@@ -6356,13 +6370,13 @@ async function tabData() {
       <button class="act" id="dx-save">Save retention</button>
       <button class="act" id="dx-prune">Prune now</button>
     </div>
-    ${opsCards(cv, sn)}
-    <div class="card"><table><tr><th>table</th><th>rows</th><th>oldest</th><th>newest</th><th>keep days</th><th></th></tr>${
+    <div class="card"><h3 style="margin-top:0">Tables</h3><table><tr><th>table</th><th>rows</th><th>oldest</th><th>newest</th><th>keep days</th><th></th></tr>${
       d.tables.map(t => `<tr><td>${esc(t.table)}${t.log ? "" : ' <span class="hint">state</span>'}</td><td>${t.rows.toLocaleString()}</td>
         <td>${esc(_tsText(t.oldest))}</td><td>${esc(_tsText(t.newest))}</td>
         <td>${t.log ? `<input class="dx-days" data-t="${esc(t.table)}" type="number" min="0" style="width:60px" value="${days[t.table] || 0}">` : "—"}</td>
         <td><button class="act dx-exp" data-t="${esc(t.table)}">Export</button>
-            ${t.log ? `<button class="act dx-clear" data-t="${esc(t.table)}" title="Delete rows (older than N days, or all)">Clear…</button>` : ""}</td></tr>`).join("")}</table></div>`;
+            ${t.log ? `<button class="act dx-clear" data-t="${esc(t.table)}" title="Delete rows (older than N days, or all)">Clear…</button>` : ""}</td></tr>`).join("")}</table></div>
+    ${opsCards(cv, sn)}`;
   const q = () => `format=${$("#dx-fmt").value}&hours=${+$("#dx-hours").value || 0}`;
   $("#dx-all").onclick = () => { location.href = `/admin/api/data/export-all?${q()}`; };
   document.querySelectorAll(".dx-exp").forEach(b => b.onclick = () => {
@@ -7891,7 +7905,7 @@ async function backupCard() {
     <div class="row"><input type="file" id="bk-file" accept=".fbak">
       <input type="password" id="bk-rpass" autocomplete="off" placeholder="its backup passphrase" style="min-width:200px">
       <button class="act danger" id="bk-restore">Restore this backup…</button></div>`;
-  $("#main").insertBefore(card, $("#main").children[2] || null);
+  $("#main").appendChild(card);
   $("#bk-make").onclick = async () => {
     try {
       const r = await api("backup", {method: "POST", body: {passphrase: $("#bk-pass").value,

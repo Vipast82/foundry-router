@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.128 — cleanup slices sized by time; Performance and Data in sections; the scorecard kept for a minute
+
+Checked on the live router with v0.181.127: no freeze at startup (it was 92.6 s), and none when Work, Training, Data, Performance, Live, Model Registry, Usage Log and Compare were opened one after another.
+
+- **Cleanup slices.** One thing was left in the record of slow database calls: 4,000 rows of `cc_build_runs` per slice held the lock for 3.3 s and 5.4 s (each row carries thumbnails stored before its time column). `delete_in_steps` now starts at 200 rowids, doubles while a slice takes under 30 ms and quarters when one takes over 200 ms.
+- **Sprint scorecard.** It takes about 12 s to build on the live router (in the background since v0.181.127). The answer is kept for a minute, and callers that ask while it is being built wait for that one build.
+- **Work.** The scorecard was shown above every section, and "Sprint scorecard" had no button: the page's intro sentence starts with "Tasks" and claimed the Tasks section first. Fixed.
+- **Sections follow late content.** A block added to a page after it is drawn joins its section at once (the page is watched; it was re-checked only 0.9 s and 3 s after drawing).
+- **Performance** (5,582 px): Charts; By model, advisor, brain; Inference servers; Settings; Details. The window buttons and the summary tiles stay in view. The "Jump to" line is gone: the buttons replace it.
+- **Data** (5,794 px): Tables and retention; Configuration history; Snapshots, export, import; Diagnostics; Backup and restore. The table list now sits directly under its export and retention controls.
+
+Tests: `tests/test_stall_fixes.py`, `tests/test_ui_kit.py`.
+
 ## v0.181.127 — redesign, step 5: the remaining long tabs; three more pauses removed
 
 **Tabs.** Each of these now shows one section at a time (the same switch as Pool and Model Registry):
