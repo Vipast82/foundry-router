@@ -2,6 +2,27 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.119 — the cost calculator keeps itself current
+
+The Cost tab compared your traffic against a fixed list of paid models. Prices could be refreshed from OpenRouter, but only on request or on an opt-in weekly schedule, and the list itself never changed: on 2026-11-11 it still showed Claude Opus 4.8, Claude Sonnet 5, Claude Haiku 4.5 and GPT-5.6, last refreshed on 30 October.
+
+- **The schedule is on unless you switch it off, and daily by default** (it was opt-in, every 7 days). The first check runs 90 seconds after the router starts, then hourly; an update runs when one is due. The panel shows the last update and the next one.
+- **Rows follow their model family to the newest version** (`pricing_update.family_of`, `newest_in_family`). A row matched to `anthropic/claude-opus-4.8` belongs to the family `anthropic/claude-opus`; when OpenRouter lists a newer member (by release date, so Grok 4.20 isn't read as newer than 4.7), the row takes its name, id and prices. Batch ids and dated snapshots are not family members. With today's feed: Claude Opus 4.8 → 5.5, Claude Sonnet 5 → 5.5, Claude Haiku 4.5 → 5.5, GPT-5.6 Sol → GPT-6.1 Sol, GPT-5.6 Luna → GPT-6 Luna, Gemini 2.5 Flash → 3.8 Flash, Grok 4.6 → 4.7.
+  - A locked row never moves. "Follow each model to its newest version" in the panel turns it off for all rows.
+  - When two rows are matched to one model, the first takes the new name and the second stays on the model it names (service names are unique).
+  - A price difference of more than 10x is still held back as suspicious for the SAME model; a row that moved to a different model is not held back (Haiku 5.5 is 10x cheaper than 4.5).
+  - A family that is renamed outright (Gemini 3.1 Pro → Gemini 4 Carbon) can't be followed; add that row by hand.
+- **Newly released models join the list** (`new_families`). For each vendor already in the table, a model family that isn't listed and had a release in the last 120 days gets a row: with today's feed Claude Fable 5.2, GPT-6 Astra, GPT-6.1 Terra, Gemini 4 Carbon, Gemini 4 Argon, Gemini Omni 1.2 Flash and Gemini 3.5 Flash Lite, over two runs (at most two per vendor per run, 24 rows in all). Image, audio, embedding, preview and experimental models are left out, and so is a "Pro" variant of a listed family. A row you delete is remembered and not added again; nothing is removed automatically. "Add newly released models" in the panel turns it off.
+- **Head to head with your local model** (`pricing.head_to_head`, a new card under the visual comparison). The window's busiest local model next to each paid service: benchmark score in a category you pick (coding, agentic work, reasoning, general chat, tool calling), points above or below the local model, what the window's tokens would have cost there, the extra over self-hosting, and dollars per point gained. The headline is the like-for-like saving: the cheapest paid model rated at least as high as the local one. Scores are the model registry's ratings (estimates, research, seeds, observed); each shows its source, and a score under 0.3 confidence is marked "rough", never hidden. A model with no score is listed as not rated.
+- **The page refreshes itself.** "Cost for this window", the visual comparison and the rates table are re-read every minute while the tab is open (the rates table is left alone while you type in it).
+- Each move is written to Events ("3 service(s) moved to a newer version") and shown in the update report as "(was …)".
+
+**Brain-routed chats escalate when local is busy.** v0.181.118 made "escalate when local is busy" work for llama.cpp backends, but only on the direct path. A persona the brain routes with tools (Foundry-Chat) still queued behind whatever held Strata. `AgentRunner._busy_local_last` now tries the other models on the route first while the local one is busy (guardrail-checked as before), and falls back to the local queue when none is allowed.
+
+Also in this release: `tests/coordinator/test_revamp_lead.py::test_the_hard_cap_is_absolute` expected the old PARK default for a Lead hard-cap stop. Since the 7 Nov decision-policy change the default is the capped self-repair (Victor, 2026-11-11: keep it); the test now says so. The cap itself is still checked: one lead session.
+
+Tests: `tests/test_routing_modes_pricing.py` (family and newest-version rules, a full update with a locked row and a duplicate match, new families joining and a deleted row staying gone, both switches, the new schedule defaults) and `tests/test_pricing.py` (head to head).
+
 ## v0.181.118 — the shared-slot queue: classes, lanes, divert, pinning, recovery hold
 
 Strata serves one stream. Chats, sprints, helper lanes and background jobs all wait for it, and until now the wait was first come, first served with no way around a busy backend. This is phase B of the 2026-11-10 platform audit (`reports/FOUNDRY_ROUTER_PLATFORM_AUDIT_2026-11-10.md`), blueprint build steps 1 to 4. Details: `docs/QUEUE_AND_LANES.md`.

@@ -719,7 +719,9 @@ async def pricing_settings_set(request: Request):
     try:
         return pricing_update.save_settings(
             _svc(request).db, auto=b.get("auto"),
-            days=(int(b["days"]) if b.get("days") not in (None, "") else None))
+            days=(int(b["days"]) if b.get("days") not in (None, "") else None),
+            follow=(None if b.get("follow") is None else bool(b.get("follow"))),
+            add_new=(None if b.get("add_new") is None else bool(b.get("add_new"))))
     except (TypeError, ValueError):
         return JSONResponse({"error": "days must be a number"}, status_code=400)
 
@@ -757,13 +759,20 @@ async def cost_compare(request: Request):
         if t == "openai-compatible" and info.get("subscription"):
             return "openai-compatible-subscription"
         return t
-    return pricing.compute_costs(
+    d = pricing.compute_costs(
         svc.db, hours=hours, model=(q.get("model") or None),
         watts=max(0.0, _f("watts", pricing.DEFAULT_WATTS)),
         kwh_rate=max(0.0, _f("kwh", pricing.DEFAULT_KWH_RATE)),
         backend=(q.get("backend") or None),
         run_label=(q.get("run_label") if "run_label" in q else None),
         backend_type=_kind)
+    try:
+        d["head_to_head"] = pricing.head_to_head(svc.db, svc.registry, d,
+                                                 category=q.get("category") or "coding")
+    except Exception:                                             # noqa: BLE001
+        log.exception("head-to-head comparison failed")
+        d["head_to_head"] = None
+    return d
 
 
 @router.post("/admin/api/mcp-aggregator")

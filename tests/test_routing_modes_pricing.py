@@ -107,11 +107,185 @@ async def test_update_prices_dry_run_saves_nothing(tmp_path):
 
 def test_schedule_due(tmp_path):
     db = _db(tmp_path)
+    # v0.181.119: the schedule is on unless switched off, daily by default
+    s = pricing_update.settings(db)
+    assert s["auto"] and s["days"] == 1 and s["follow"] and s["next_update"] == ""
+    assert pricing_update.due(db)                      # never updated: due now
+    pricing_update.save_settings(db, auto=False)
     assert not pricing_update.due(db)
     pricing_update.save_settings(db, auto=True, days=7)
     assert pricing_update.due(db)
     db.kv_set(pricing_update.KV_LAST, "2999-01-01T00:00:00+00:00")
     assert not pricing_update.due(db)
+    assert pricing_update.settings(db)["next_update"].startswith("2999-01-08")
+    assert pricing_update.save_settings(db, follow=False)["follow"] is False
+
+
+# -- following a model family to its newest version (v0.181.119) --------------------------
+
+def _entry(mid, name, created, pin, pout, cache=None):
+    p = {"prompt": str(pin / 1e6), "completion": str(pout / 1e6)}
+    if cache is not None:
+        p["input_cache_read"] = str(cache / 1e6)
+    return {"id": mid, "name": name, "created": created, "pricing": p}
+
+
+FAMILY_CATALOG = {"data": [
+    _entry("anthropic/claude-opus-4.8", "Anthropic: Claude Opus 4.8", 100, 5, 25, 0.5),
+    _entry("anthropic/claude-opus-5", "Anthropic: Claude Opus 5", 200, 5, 25, 0.5),
+    _entry("anthropic/claude-opus-5.5", "Anthropic: Claude Opus 5.5", 300, 4, 20, 0.4),
+    _entry("anthropic/claude-opus-5.5:batch", "Anthropic: Claude Opus 5.5 (batch)", 300, 2, 10),
+    _entry("anthropic/claude-haiku-4.5", "Anthropic: Claude Haiku 4.5", 90, 1, 5, 0.1),
+    _entry("anthropic/claude-haiku-5.5", "Anthropic: Claude Haiku 5.5", 310, 0.1, 0.5, 0.01),
+    _entry("openai/gpt-5.6-sol", "OpenAI: GPT-5.6 Sol", 150, 4, 20, 0.4),
+    _entry("openai/gpt-6-sol", "OpenAI: GPT-6 Sol", 250, 2, 10, 0.2),
+    _entry("openai/gpt-6.1-sol", "OpenAI: GPT-6.1 Sol", 260, 2, 10, 0.2),
+    _entry("openai/gpt-6.1-sol-pro", "OpenAI: GPT-6.1 Sol Pro", 270, 2, 10, 0.2),
+    _entry("x-ai/grok-4.20", "SpaceXAI: Grok 4.20", 50, 1.25, 2.5),
+    _entry("x-ai/grok-4.6", "SpaceXAI: Grok 4.6", 180, 2, 6, 0.5),
+    _entry("x-ai/grok-4.7", "SpaceXAI: Grok 4.7", 280, 2, 6, 0.5),
+    _entry("deepseek/deepseek-v4.1-flash", "DeepSeek: DeepSeek V4.1 Flash", 240, 0.05, 0.5, 0.006),
+    _entry("deepseek/deepseek-v4.1-flash-1017", "DeepSeek: DeepSeek V4.1 Flash 1017", 290, 0.006, 0.5),
+    _entry("google/gemini-3.1-pro-preview", "Google: Gemini 3.1 Pro Preview", 170, 2, 12, 0.2),
+    _entry("google/gemini-4-carbon", "Google: Gemini 4 Carbon", 320, 2, 10, 0.2),
+]}
+
+
+def _family_client():
+    return httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=FAMILY_CATALOG)))
+
+
+def _rows(db, *rows):
+    pricing.ensure_seed(db)
+    db.execute("DELETE FROM service_pricing")
+    for name, sid, pin, pout, locked in rows:
+        db.execute("INSERT INTO service_pricing (name, input_per_1m, output_per_1m, "
+                   "cached_input_per_1m, enabled, updated_at, locked, source, source_id) "
+                   "VALUES (?,?,?,?,1,'2026-09-01T00:00:00+00:00',?,'openrouter',?)",
+                   (name, pin, pout, 0.1, locked, sid))
+
+
+def test_family_of_and_newest():
+    f = pricing_update.family_of
+    assert f("anthropic/claude-opus-4.8") == f("anthropic/claude-opus-5.5") == "anthropic/claude-opus"
+    assert f("openai/gpt-5.6-sol") == f("openai/gpt-6.1-sol") == "openai/gpt-sol"
+    assert f("openai/gpt-6.1-sol-pro") == "openai/gpt-sol-pro"            # its own family
+    assert f("deepseek/deepseek-v4.1-flash") == "deepseek/deepseek-flash"
+    assert f("x-ai/grok-4.20") == f("x-ai/grok-4.7") == "x-ai/grok"
+    # variants of another id are not members of any family
+    assert f("openai/gpt-6-sol:batch") is None
+    assert f("deepseek/deepseek-v4.1-flash-1017") is None
+    assert f("openai/gpt-4o-2024-11-20") is None and f("") is None and f("gpt-5") is None
+    cat = [{"id": m["id"], "name": m["name"], "created": m["created"]}
+           for m in FAMILY_CATALOG["data"]]
+    newest = lambda mid: (pricing_update.newest_in_family(mid, cat) or {}).get("id")
+    assert newest("anthropic/claude-opus-4.8") == "anthropic/claude-opus-5.5"
+    assert newest("anthropic/claude-opus-5.5") is None                    # already the newest
+    assert newest("openai/gpt-5.6-sol") == "openai/gpt-6.1-sol"
+    # by release date, not by reading 4.20 as a bigger number than 4.7
+    assert newest("x-ai/grok-4.6") == "x-ai/grok-4.7"
+    assert newest("deepseek/deepseek-v4.1-flash") is None                 # a snapshot is no successor
+    assert newest("google/gemini-3.1-pro-preview") is None                # renamed family: not followed
+    assert newest("anthropic/claude-opus-3") == "anthropic/claude-opus-5.5"   # gone from the feed
+    assert pricing_update.display_name({"name": "Anthropic: Claude Opus 5.5"}) == "Claude Opus 5.5"
+    assert pricing_update.display_name({"id": "x/y"}) == "x/y"
+
+
+async def test_a_row_follows_its_family_to_the_newest_version(tmp_path):
+    db = _db(tmp_path)
+    _rows(db, ("Claude Opus 4.8", "anthropic/claude-opus-4.8", 5.0, 25.0, 0),
+          ("Claude Haiku 4.5", "anthropic/claude-haiku-4.5", 1.0, 5.0, 0),
+          ("GPT-5.6", "openai/gpt-5.6-sol", 4.0, 20.0, 0),
+          ("GPT-5.6 Sol", "openai/gpt-5.6-sol", 4.0, 20.0, 0),
+          ("Grok 4.6", "x-ai/grok-4.6", 2.0, 6.0, 1),                     # locked
+          ("Gemini 3.1 Pro", "google/gemini-3.1-pro-preview", 2.0, 12.0, 0))
+    preview = await pricing_update.update_prices(db, _family_client(), dry_run=True)
+    assert len(preview["replaced"]) == 3
+    assert {r["name"] for r in pricing.list_services(db)} >= {"Claude Opus 4.8"}   # nothing saved
+    rep = await pricing_update.update_prices(db, _family_client())
+    moved = {x["from"]: x["to"] for x in rep["replaced"]}
+    # two rows were matched to one model: the first takes the new name, the second stays
+    assert moved == {"Claude Opus 4.8": "Claude Opus 5.5", "Claude Haiku 4.5": "Claude Haiku 5.5",
+                     "GPT-5.6": "GPT-6.1 Sol"}
+    rows = {r["name"]: r for r in pricing.list_services(db)}
+    assert set(rows) == {"Claude Opus 5.5", "Claude Haiku 5.5", "GPT-6.1 Sol", "GPT-5.6 Sol",
+                         "Grok 4.6", "Gemini 3.1 Pro"}
+    assert rows["Claude Opus 5.5"]["source_id"] == "anthropic/claude-opus-5.5"
+    assert (rows["Claude Opus 5.5"]["input_per_1m"], rows["Claude Opus 5.5"]["output_per_1m"]) == (4.0, 20.0)
+    # a different model may honestly be 10x cheaper: not held back as suspicious
+    assert rows["Claude Haiku 5.5"]["input_per_1m"] == 0.1 and not rep["suspicious"]
+    assert rows["GPT-5.6 Sol"]["source_id"] == "openai/gpt-5.6-sol"       # kept its own model
+    assert rows["Grok 4.6"]["source_id"] == "x-ai/grok-4.6" and "Grok 4.6" in rep["locked"]
+    assert next(u for u in rep["updated"] if u["name"] == "Claude Opus 5.5")["was"] == "Claude Opus 4.8"
+    assert pricing_update.settings(db)["last_report"]["replaced"] == 3
+    ev = db.query("SELECT message, detail FROM event_log WHERE source='pricing' AND "
+                  "message LIKE '%newer version%'")
+    assert ev and "Claude Opus 4.8 → Claude Opus 5.5" in ev[0]["detail"]
+    # a second run has nothing left to move
+    rep2 = await pricing_update.update_prices(db, _family_client())
+    assert rep2["replaced"] == [] and rep2["updated"] == []
+
+
+async def test_newly_released_families_join_the_list(tmp_path):
+    import time
+    now = int(time.time())
+    day = 86400
+    cat = {"data": [
+        _entry("anthropic/claude-opus-5.5", "Anthropic: Claude Opus 5.5", now - 200 * day, 4, 20),
+        _entry("anthropic/claude-fable-5.1", "Anthropic: Claude Fable 5.1", now - 60 * day, 10, 50),
+        _entry("anthropic/claude-fable-5.2", "Anthropic: Claude Fable 5.2", now - 2 * day, 8, 40),
+        _entry("anthropic/claude-fable-5.2:batch", "Anthropic: Claude Fable 5.2 (batch)", now, 4, 20),
+        _entry("openai/gpt-6.1-sol", "OpenAI: GPT-6.1 Sol", now - 40 * day, 2, 10),
+        _entry("openai/gpt-6.1-sol-pro", "OpenAI: GPT-6.1 Sol Pro", now - 39 * day, 2, 10),
+        _entry("openai/gpt-6-astra", "OpenAI: GPT-6 Astra", now - 70 * day, 10, 50),
+        _entry("openai/gpt-6.1-terra", "OpenAI: GPT-6.1 Terra", now - 10 * day, 1, 5),
+        _entry("openai/gpt-6-luna", "OpenAI: GPT-6 Luna", now - 50 * day, 0.1, 0.5),
+        _entry("openai/gpt-5.4-image-2", "OpenAI: GPT-5.4 Image 2", now - 5 * day, 8, 15),
+        _entry("openai/gpt-4.1", "OpenAI: GPT-4.1", now - 500 * day, 2, 8),       # too old
+        _entry("google/gemini-4-carbon", "Google: Gemini 4 Carbon", now - day, 2, 10),  # no Google row
+    ]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=cat)))
+    db = _db(tmp_path)
+    _rows(db, ("Claude Opus 5.5", "anthropic/claude-opus-5.5", 4.0, 20.0, 0),
+          ("GPT-6.1 Sol", "openai/gpt-6.1-sol", 2.0, 10.0, 1))                 # locked still counts
+    preview = await pricing_update.update_prices(db, client, dry_run=True)
+    assert {a["name"] for a in preview["added"]} == {"Claude Fable 5.2", "GPT-6.1 Terra",
+                                                    "GPT-6 Luna"}
+    assert len(pricing.list_services(db)) == 2                                # nothing saved
+    rep = await pricing_update.update_prices(db, client)
+    # the two newest unlisted families per vendor; no Pro twin, no image model, nothing old,
+    # no vendor that isn't in the table
+    assert {a["name"] for a in rep["added"]} == {"Claude Fable 5.2", "GPT-6.1 Terra", "GPT-6 Luna"}
+    rows = {r["name"]: r for r in pricing.list_services(db)}
+    assert rows["Claude Fable 5.2"]["source_id"] == "anthropic/claude-fable-5.2"
+    assert rows["Claude Fable 5.2"]["input_per_1m"] == 8.0
+    assert "added automatically" in rows["GPT-6.1 Terra"]["notes"]
+    # the next run adds the one that didn't fit the per-vendor limit, then nothing more
+    rep2 = await pricing_update.update_prices(db, client)
+    assert [a["name"] for a in rep2["added"]] == ["GPT-6 Astra"]
+    assert (await pricing_update.update_prices(db, client))["added"] == []
+    assert pricing_update.settings(db)["last_report"]["added"] == 0
+    # a deleted row is remembered and stays gone
+    pricing.delete_service(db, rows["Claude Fable 5.2"]["id"])
+    assert "anthropic/claude-fable" in pricing_update.dismissed(db)
+    assert (await pricing_update.update_prices(db, client))["added"] == []
+    # switched off: no rows are added
+    db2 = Database(tmp_path / "p2.sqlite")
+    _rows(db2, ("Claude Opus 5.5", "anthropic/claude-opus-5.5", 4.0, 20.0, 0))
+    assert pricing_update.save_settings(db2, add_new=False)["add_new"] is False
+    assert (await pricing_update.update_prices(db2, client))["added"] == []
+
+
+async def test_following_can_be_switched_off(tmp_path):
+    db = _db(tmp_path)
+    _rows(db, ("Claude Opus 4.8", "anthropic/claude-opus-4.8", 9.0, 9.0, 0))
+    pricing_update.save_settings(db, follow=False)
+    rep = await pricing_update.update_prices(db, _family_client())
+    assert rep["replaced"] == []
+    row = pricing.list_services(db)[0]
+    assert row["name"] == "Claude Opus 4.8" and row["input_per_1m"] == 5.0   # its own price only
 
 
 def test_manual_edit_marks_source(tmp_path):

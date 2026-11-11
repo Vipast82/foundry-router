@@ -583,11 +583,14 @@ class Services:
         return self._brain_health
 
     async def _pricing_loop(self) -> None:
-        """Scheduled automatic price refresh for the cost calculator (opt-in,
-        interval set in the Cost tab). Checked hourly; runs when due."""
+        """Scheduled automatic price refresh for the cost calculator (on unless
+        switched off; interval set in the Cost tab). First check 90 s after start,
+        so a restart doesn't wait an hour, then hourly; runs when due."""
         from . import pricing_update
+        first = True
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(90 if first else 3600)
+            first = False
             try:
                 if pricing_update.due(self.db):
                     await pricing_update.update_prices(self.db, self.http, brain=self.brain)

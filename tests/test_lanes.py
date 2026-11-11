@@ -206,6 +206,25 @@ def test_escalate_when_busy_now_sees_a_llamacpp_backend(rig, monkeypatch):
     assert O._escalate_if_local_busy(svc, {"virtual_name": "P"}, BIG, "hi") == BIG
 
 
+def test_a_brain_routed_chat_tries_paid_models_first_while_local_is_busy(rig):
+    """v0.181.119: Foundry-Chat (brain-routed, with tools) always queued behind whatever
+    held Strata; escalate-when-busy only worked on the direct path."""
+    from foundry_router.brain.agent import AgentRunner
+    svc, _ = rig
+    notes = []
+    ctx = SimpleNamespace(logger=SimpleNamespace(record_guardrail=notes.append))
+    runner = SimpleNamespace(pool=svc.pool)
+    ranked = [{"id": BIG}, {"id": "claude-haiku-5-5"}, {"id": "claude-sonnet-5-5"}]
+    client_auth._client.set({"client_id": "chat", "session_id": "c1"})
+    assert AgentRunner._busy_local_last(runner, ranked, ctx) == ranked      # local is free
+    _hold_strata(svc)
+    out = AgentRunner._busy_local_last(runner, ranked, ctx)
+    assert [r["id"] for r in out] == ["claude-haiku-5-5", "claude-sonnet-5-5", BIG]
+    assert "is busy" in notes[0]
+    # only local models on the route: nothing to try first, it waits in the queue
+    assert AgentRunner._busy_local_last(runner, [{"id": BIG}], ctx) == [{"id": BIG}]
+
+
 # -- a backend that is coming back ----------------------------------------------------------------
 
 def test_a_strict_request_is_held_for_a_backend_coming_back(rig):

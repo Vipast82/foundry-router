@@ -143,10 +143,14 @@ def test_the_hard_cap_is_absolute(tmp_path):
     esc = [a for a in acts(e, k["case_id"]) if a["kind"] == "escalate"][-1]
     assert esc["detail"]["reason"] == "lead_hard_cap"
     assert c.lead.lifetime_calls("game", TID) == 1
-    # W1.2: the escalation carries options and the PARK default with the timeout
+    # W1.2: the escalation carries options and a default with the timeout. Since
+    # v0.181.9x (2026-11-07, decision_policy) a hard-cap stop is an automation decision:
+    # its default is the capped self-repair, which parks quietly only when exhausted
+    # (it was PARK; Victor, 2026-11-11: keep self-repair). The cap itself still holds:
+    # no second lead session started.
     d = c.obligations.decision(k["decision_id"])
     assert d["decision_class"] == "decision" and d["timeout_minutes"] == 30
-    assert json.loads(d["recommended"]).startswith("stop the task (park")
+    assert json.loads(d["recommended"]).startswith("self-repair (automatic and capped")
 
 
 def test_the_hard_cap_derives_from_the_per_task_lead_budget(tmp_path):

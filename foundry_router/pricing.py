@@ -99,6 +99,12 @@ def upsert_service(db: Database, *, id: Optional[int] = None, name: str,
 
 
 def delete_service(db: Database, id: int) -> None:
+    # a deleted row's model family is remembered, so the automatic update doesn't
+    # add it back as a "newly released model" (pricing_update.new_families)
+    row = db.query_one("SELECT source_id FROM service_pricing WHERE id=?", (id,)) or {}
+    if row.get("source_id"):
+        from . import pricing_update
+        pricing_update.dismiss(db, row["source_id"])
     db.execute("DELETE FROM service_pricing WHERE id=?", (id,))
 
 
@@ -197,6 +203,99 @@ def compute_costs(db: Database, *, hours: float = 72, model: Optional[str] = Non
                   "per_month": round(local_cost / span_hours * 720, 2) if span_hours else None},
         "services": services,
     }
+
+
+# -- head to head: the local model against each paid service (v0.181.119) -------------
+
+H2H_CATEGORIES = ("coding", "agentic", "reasoning", "general_chat", "tool_calling")
+H2H_LOW_CONFIDENCE = 0.3
+
+
+def _id_variants(model_id: str) -> list[str]:
+    """Ids a model's benchmark rows may be stored under: the OpenRouter id, the
+    bare slug, and the router's own spelling (dots as hyphens)."""
+    mid = str(model_id or "")
+    if not mid:
+        return []
+    out = [mid]
+    slug = mid.split("/", 1)[1] if "/" in mid else mid
+    for v in (slug, slug.replace(".", "-")):
+        if v not in out:
+            out.append(v)
+    return out
+
+
+def _rating(registry, model_id: str, category: str) -> Optional[dict]:
+    """The model's score in a category (0-100) with where it came from: the most
+    trusted row among the ids it may be stored under."""
+    from .registry.models_db import score_source
+    best = None
+    for mid in _id_variants(model_id):
+        for b in registry.benchmarks(mid) or []:
+            if b.get("category") != category or b.get("score") is None:
+                continue
+            conf = 0.5 if b.get("confidence") is None else float(b["confidence"])
+            if best is None or conf > best["confidence"]:
+                best = {"score": round(float(b["score"]), 1), "confidence": round(conf, 2),
+                        "source": score_source(b), "model_id": mid,
+                        "low_confidence": conf < H2H_LOW_CONFIDENCE}
+    return best
+
+
+def head_to_head(db: Database, registry, costs: dict, category: str = "coding") -> dict:
+    """The window's busiest LOCAL model against each paid service: benchmark
+    score in one category, the gap, and what the same tokens would have cost.
+
+    `like_for_like` is the like-for-like saving: the cheapest paid service
+    rated at least as high as the local model. Scores come from the model
+    registry (estimates, research, seeds, observed); each carries its source and
+    confidence, and a low-confidence score is marked, never hidden."""
+    category = category if category in H2H_CATEGORIES else "coding"
+    out: dict = {"category": category, "categories": list(H2H_CATEGORIES), "local": None,
+                 "rows": [], "like_for_like": None, "nearest": None, "unrated": []}
+    local_rows = [r for r in costs.get("by_model") or [] if r.get("kind") == "local"]
+    if not local_rows:
+        out["note"] = "No local model served calls in this window."
+        return out
+    top = max(local_rows, key=lambda r: (r.get("input") or 0) + (r.get("output") or 0))
+    self_cost = float((costs.get("local") or {}).get("cost") or 0.0)
+    mine = _rating(registry, top["model"], category)
+    out["local"] = {"model": top["model"], "cost": self_cost, **(mine or {"score": None})}
+    source_ids = {s["id"]: s.get("source_id") for s in list_services(db)}
+    rows = []
+    for s in costs.get("services") or []:
+        r = _rating(registry, source_ids.get(s.get("id")) or "", category) \
+            or _rating(registry, s.get("name") or "", category)
+        cost = float(s.get("cost_cached") if s.get("cost_cached") is not None else s.get("cost") or 0)
+        row = {"name": s.get("name"), "cost": round(cost, 4),
+               "extra": round(cost - self_cost, 4),
+               "times": round(cost / self_cost, 1) if self_cost > 0 else None,
+               **(r or {"score": None})}
+        if r is None:
+            out["unrated"].append(s.get("name"))
+        elif mine is not None:
+            row["delta"] = round(r["score"] - mine["score"], 1)
+            # dollars per benchmark point gained over the local model
+            row["per_point"] = (round((cost - self_cost) / row["delta"], 4)
+                                if row["delta"] > 0 and cost > self_cost else None)
+        rows.append(row)
+    rows.sort(key=lambda r: (r.get("score") is None, -(r.get("score") or 0), r["cost"]))
+    out["rows"] = rows
+    if mine is not None:
+        rated = [r for r in rows if r.get("score") is not None]
+        peers = [r for r in rated if r["score"] >= mine["score"]]
+        if peers:
+            p = min(peers, key=lambda r: r["cost"])
+            out["like_for_like"] = {"name": p["name"], "score": p["score"], "cost": p["cost"],
+                                    "saving": round(p["cost"] - self_cost, 4)}
+        if rated:
+            n = min(rated, key=lambda r: (abs(r["score"] - mine["score"]), r["cost"]))
+            out["nearest"] = {"name": n["name"], "score": n["score"], "cost": n["cost"],
+                              "saving": round(n["cost"] - self_cost, 4)}
+    else:
+        out["note"] = (f"{top['model']} has no {category} score in the model registry "
+                       f"(Backends → Model Registry).")
+    return out
 
 
 def _span_hours(first_ts: Optional[str], last_ts: Optional[str]) -> float:

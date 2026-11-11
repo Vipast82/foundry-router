@@ -1653,6 +1653,8 @@ class AgentRunner:
         ranked = _apply_pins(ranked, persona)
         if persona.get("prefer_loaded"):
             ranked = _prefer_loaded(ranked, await self.pool.loaded_models())
+        if persona.get("escalate_when_local_busy"):
+            ranked = self._busy_local_last(ranked, ctx)
         for r in ranked:
             mid = r["id"]
             info = self.pool.backend_info(mid)
@@ -1665,6 +1667,32 @@ class AgentRunner:
                 return mid, meta, info
             ctx.logger.record_guardrail(f"worker-tools: {mid} denied ({verdict.reason})")
         return None, None, None
+
+    def _busy_local_last(self, ranked: list, ctx) -> list:
+        """v0.181.119 (escalate when local busy, on the brain-routed tool path): a
+        local model whose stream or slots are taken right now is tried after the
+        other candidates, so a chat goes "local first, a paid model while local is
+        busy". The usage guardrail still decides each paid candidate; when none is
+        allowed the busy local model is used and the request waits in its queue.
+        The direct path had this (ollama_api._escalate_if_local_busy); this path
+        always queued behind whatever held the local backend."""
+        from types import SimpleNamespace
+        from .. import lanes
+        from ..facade.ollama_api import _is_paid_backend
+        svc = SimpleNamespace(pool=self.pool)
+        known = getattr(self.pool, "backends", None) or {}
+        busy = []
+        for r in ranked:
+            info = self.pool.backend_info(r["id"]) or {}
+            if (info and not _is_paid_backend(info) and info.get("name") in known
+                    and not lanes.model_free(svc, r["id"])):
+                busy.append(r)
+        if not busy or len(busy) == len(ranked):
+            return ranked
+        ctx.logger.record_guardrail(
+            f"worker-tools: local {busy[0]['id']} is busy with another session → the other "
+            f"models on this route are tried first (escalate when local busy)")
+        return [r for r in ranked if r not in busy] + busy
 
     async def run_worker_tools(self, ctx: RequestContext) -> AsyncIterator[AgentEvent]:
         """Opt-out default for tool-attached personas: the brain's job shrinks to
