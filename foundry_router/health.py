@@ -137,6 +137,13 @@ class HealthMonitor:
             return m
         return None
 
+    def _embedding_model(self, s) -> Optional[str]:
+        from .registry.tagging import is_embedding_name
+        for m in s.models:
+            if (self.svc.registry.get(m) or {}).get("embedding") or is_embedding_name(m):
+                return m
+        return None
+
     async def probe(self, name: str, model: Optional[str] = None) -> dict:
         """One tiny real generation on exactly this backend."""
         s = (getattr(self.svc.pool, "backends", None) or {}).get(name)
@@ -144,6 +151,13 @@ class HealthMonitor:
             raise KeyError(name)
         model = model or self._probe_model(s)
         if not model:
+            # v0.181.122: a backend that only serves embeddings (the CPU embeddings
+            # service) has no chat model to probe. It was reported "failing: no chat
+            # model listed" although it answered every embedding request. Probe it
+            # with one tiny embedding instead.
+            emb = self._embedding_model(s)
+            if emb:
+                return await self._probe_embedding(name, s, emb)
             res = {"ok": False, "at": time.time(), "model": None, "ms": None,
                    "detail": "no chat model listed by this backend"}
             self.probes[name] = res
@@ -164,6 +178,24 @@ class HealthMonitor:
             ok = bool((r.content or "").strip() or r.thinking or r.completion_tokens)
             res = {"ok": ok, "detail": "" if ok else "empty reply",
                    "reply": (r.content or "")[:40]}
+        except asyncio.TimeoutError:
+            res = {"ok": False, "detail": f"no reply within {self.cfg.probe_timeout_seconds}s"}
+        except Exception as e:                                    # noqa: BLE001
+            res = {"ok": False, "detail": str(e)[:300]}
+        res.update(at=time.time(), model=model, ms=round((time.monotonic() - t0) * 1000))
+        self.probes[name] = res
+        return res
+
+    async def _probe_embedding(self, name: str, s, model: str) -> dict:
+        t0 = time.monotonic()
+        try:
+            data = await asyncio.wait_for(s.protocol.embed(model, ["ping"]),
+                                          timeout=max(10, self.cfg.probe_timeout_seconds))
+            vecs = (data or {}).get("embeddings") or [
+                d.get("embedding") for d in (data or {}).get("data") or []]
+            ok = bool(vecs and vecs[0])
+            res = {"ok": ok, "detail": "" if ok else "empty embedding",
+                   "reply": f"embedding, {len(vecs[0])} dimensions" if ok else ""}
         except asyncio.TimeoutError:
             res = {"ok": False, "detail": f"no reply within {self.cfg.probe_timeout_seconds}s"}
         except Exception as e:                                    # noqa: BLE001

@@ -289,12 +289,31 @@ def _embed_inputs(v) -> list[str]:
     return []
 
 
+def _resolve_embed_model(svc, model: str) -> str:
+    """v0.181.122: an embedding model asked for without its tag ("nomic-embed-text")
+    resolves to the served one ("nomic-embed-text:latest"), as Ollama itself does.
+    The exact name always wins; nothing else is guessed."""
+    if not model or svc.pool.backend_info(model) is not None:
+        return model
+    try:
+        served = list(svc.pool.available_models())
+    except Exception:                                             # noqa: BLE001
+        return model
+    if ":" not in model:
+        if model + ":latest" in served:
+            return model + ":latest"
+        same = sorted(m for m in served if str(m).split(":")[0] == model)
+        if len(same) == 1:
+            return same[0]
+    return model
+
+
 async def _do_embed(svc, body: dict, inputs: list[str]):
     """Shared by /api/embed and /api/embeddings: route to the backend serving
     the (raw) embedding model with the same failover as chat. Personas are
     chat policies, not embedders, so only real backend model names resolve."""
     from ..usage import RequestLogger
-    model = body.get("model") or ""
+    model = _resolve_embed_model(svc, body.get("model") or "")
     if svc.pool.backend_info(model) is None:
         return None, _model_not_found(model)
     logger = RequestLogger(svc.db, "", model, "embed",

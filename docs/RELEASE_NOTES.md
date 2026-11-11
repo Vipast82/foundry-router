@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.122 — an embeddings-only backend is healthy, and untagged embedding names resolve
+
+Found on the live router right after the CPU embeddings service went in (2026-11-11): `nomic-embed-text` answered every request (768 dimensions, about half a second), but the backend showed **failing**.
+
+- **Health probe.** The functional probe sends a tiny chat. A backend that serves only embedding models has no chat model, so the probe reported "no chat model listed by this backend" and the backend read as failing (red on the route map, a warning in Events). Such a backend is now probed with one tiny embedding (`HealthMonitor._probe_embedding`); a failed or empty answer is still a failure, with its reason.
+- **Model names.** `/v1/embeddings` and `/api/embed` returned 404 for `nomic-embed-text` because the served id is `nomic-embed-text:latest`. An embedding model asked for without a tag now resolves to `<name>:latest`, or to its only served tag, as Ollama itself does. An exact name always wins, a name with a tag is never changed, and nothing is guessed when two tags are served.
+
+Tests: `tests/test_embeddings_backend.py`.
+
 ## v0.181.121 — redesign, step 1: side menu, quick search, live traffic on the home page; CPU embeddings
 
 **Side menu.** On a window 1,000 px or wider the sections are a menu down the left side; the open group lists its pages. "Use top tabs" at the bottom of the menu (or in quick search) brings the tab bar back, and the choice is remembered in the browser. Narrower windows always get the top tabs.
