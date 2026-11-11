@@ -53,7 +53,7 @@ def test_unknown_keys_are_listed_by_fingerprint_and_can_be_allowed(app, client):
     client.post("/admin/api/setup/clients", json={"name": "kilo"})
     wrong = "sk-placeholder-from-cline-123456"
     r = _models(client, wrong)
-    assert r.status_code == 401 and "Clients & keys" in r.json()["error"]["message"]
+    assert r.status_code == 401 and "Access → Clients & Keys" in r.json()["error"]["message"]
     rej = client.get("/admin/api/setup/clients").json()["rejected"]
     assert rej[0]["fingerprint"] == client_keys.fingerprint(wrong)
     assert rej[0]["looks_like"] == "an OpenAI-style key" and rej[0]["outcome"] == "refused"

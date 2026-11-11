@@ -458,6 +458,37 @@
   .seg button b { font-weight:500; opacity:.75; margin-left:6px; }
   .seg.sect { margin:0 0 12px; }
   .sect-hide { display:none !important; }
+  /* v0.181.135: Host Admin, Active Use, Helpers & Limits, MCP Metrics, Cost */
+  .seg button .ov-led { display:inline-block; margin-right:7px; }
+  .seg button.on .ov-led { box-shadow:0 0 0 2px var(--on-accent); }
+  .pickbar { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; margin:0 0 12px; }
+  .pickbar .hint { margin:0; overflow-wrap:anywhere; }
+  .pickbar label { color:var(--dim); font-size:12px; display:inline-flex; align-items:center; gap:6px; }
+  .tile .t-val.sm { font-size:14px; line-height:1.3; overflow-wrap:anywhere; }
+  .kpi-v.sm { font-size:17px; line-height:1.35; white-space:normal; overflow-wrap:anywhere; }
+  div.kpi { cursor:default; }
+  .ratio { display:grid; grid-template-columns:minmax(110px, 260px) minmax(0, 1fr) auto; gap:10px; align-items:center; margin:6px 0; }
+  .ratio .meter { width:100%; }
+  .ratio b { font-family:var(--num-font); text-align:right; white-space:nowrap; }
+  .ratio b small { font-weight:400; color:var(--dim); margin-left:6px; }
+  pre.raw { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
+            border-radius:6px; padding:10px; margin:8px 0 0; max-height:320px; overflow:auto; font-size:12px; }
+  .plain { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+  .plain li { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; }
+  .plain .hint { margin:0; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; }
+  .tgroup { margin:14px 0 6px; color:var(--dim); font:600 12px/1.3 var(--num-font); letter-spacing:.06em; text-transform:uppercase; }
+  .slotdots { display:inline-flex; gap:3px; vertical-align:middle; margin-right:6px; }
+  .slotdots i { width:10px; height:10px; border-radius:2px; background:var(--panel-2); border:1px solid var(--line); }
+  .slotdots i.on { background:var(--ok); border-color:var(--ok); }
+  tr.is-off > td:first-child { opacity:.6; }
+  .cbar { display:grid; grid-template-columns:minmax(90px, 200px) minmax(0, 1fr) 5.5em; gap:10px; align-items:center; margin:4px 0; }
+  .cbar > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cbar .ov-bt { height:14px; }
+  .cbar .ov-bt i.me { background:var(--ok); }
+  .cbar b { font-family:var(--num-font); text-align:right; font-weight:600; }
+  details.how { margin:0 0 12px; }
+  details.how > p { margin:6px 0 0; max-width:1100px; }
   .drawer-back { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:48; display:none; }
   .drawer-back.show { display:block; }
   .drawer { position:fixed; top:0; right:0; bottom:0; width:min(880px, 100vw); z-index:49;
@@ -1479,6 +1510,13 @@ const TAB_SECTIONS = {
          ["Backup and restore", /^Backup & restore/]],
   Machines: [["Machines", null], ["Blender pool", /^Blender pool/], ["Studio slots", /^(Add a Studio slot|Which workstation)/],
              ["Workstations", /^(Add a workstation|Workstations|Extra ssh keys)/], ["Recent events", /^Recent events/]],
+  // v0.181.135 (what stands above the first section, the numbers of the tab, stays in view)
+  "Helpers & Limits": [["Backend limits", /^Backend limits/], ["Lanes", /^Lanes for short jobs/],
+                       ["Queue classes", /^Queue classes/], ["Waiting now", /^Waiting now/]],
+  "MCP Metrics": [["Over time", /^Calls over time/], ["Tools", /^Per tool/], ["Servers and callers", /^Per server/],
+                  ["Context cost", /^Context budget/], ["Recent calls", /^Recent calls/]],
+  Cost: [["Comparison", /^Visual comparison/], ["Head to head", /^Head to head/],
+         ["Tokens by model", /^Where the tokens went/], ["Prices", /^Automatic price updates/]],
 };
 document.addEventListener("DOMContentLoaded", () => {
   const main = $("#main");
@@ -2420,21 +2458,21 @@ async function tabMcpMetrics() {
     <p class="hint">Every MCP tool call that passes through Foundry — from the routing brain, worker tool loops,
       persona tools in direct mode, the Foundry-MCP aggregator (AnythingLLM and other external clients), the research agent
       and gateway admin — plus how much context each set of tool definitions costs.</p>
-    <div class="card" style="display:flex;gap:10px 16px;align-items:center;flex-wrap:wrap">
-      <label>Window <select id="mcpm-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _MCPM.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
-      <label title="Who made the call">Source <select id="mcpm-src"><option value="">all sources</option></select></label>
-      <label>Server <select id="mcpm-srv"><option value="">all servers</option></select></label>
+    <div class="pickbar">
+      <div class="seg" id="mcpm-win" role="tablist" aria-label="window">${winOpts.map(([h, l]) => `<button role="tab" aria-selected="${h === _MCPM.hours}" class="${h === _MCPM.hours ? "on" : ""}" data-h="${h}">${l}</button>`).join("")}</div>
+      <label title="Who made the call">source <select id="mcpm-src"><option value="">all sources</option></select></label>
+      <label>server <select id="mcpm-srv"><option value="">all servers</option></select></label>
       <label title="Your backend's context window, to show tool-definition cost as a % of it">context window
-        <input id="mcpm-ctx" type="number" min="1024" step="1024" style="width:90px" value="${_MCPM.ctx}"></label>
+        <input id="mcpm-ctx" type="number" min="1024" step="1024" style="width:100px" value="${_MCPM.ctx}"></label>
       <button class="act" id="mcpm-refresh">Refresh</button>
       <button class="act" id="mcpm-clear" title="Delete the recorded MCP call metrics (all, or the selected server)">Clear metrics…</button>
     </div>
     <div id="mcpm-tiles"></div>
-    <div class="card">${ch("Context budget — tool definitions", "mcpcontext", "tokens every request pays just to list the tools")}<div id="mcpm-ctxt"></div></div>
+    <div class="card">${ch("Calls over time", null, "calls and errors per hour, then how long a call took")}<div id="mcpm-chart"></div></div>
     <div class="card">${ch("Per tool", "mcptools", "slowest / most-failing tools stand out here")}<div id="mcpm-tools"></div></div>
     <div class="card">${ch("Per server", "mcpservers")}<div id="mcpm-servers"></div></div>
     <div class="card">${ch("Who is calling", "mcpsources")}<div id="mcpm-sources"></div></div>
-    <div class="card">${ch("Calls over time")}<div id="mcpm-chart"></div></div>
+    <div class="card">${ch("Context budget — tool definitions", "mcpcontext", "tokens every request pays just to list the tools")}<div id="mcpm-ctxt"></div></div>
     <div class="card">${ch("Recent calls", null, "newest first")}
       <label class="hint" style="margin:0"><input type="checkbox" id="mcpm-errs"> errors only</label>
       <div id="mcpm-recent"></div></div>`;
@@ -2443,7 +2481,7 @@ async function tabMcpMetrics() {
   const K = v => v == null ? dash : (v >= 1000 ? (v / 1000).toFixed(1) + "k" : "" + v);
   const srcPill = s => `<span class="pill" title="${esc({brain: "The routing brain called it while routing", worker: "A worker model's own tool loop", direct: "Persona tools merged into a client's direct-mode request (Cline/OpenCode)", aggregator: "An external client through the Foundry-MCP endpoint (e.g. AnythingLLM)", research: "The background Research Agent", gateway: "Gateway admin (Host → MCP)", other: "Other"}[s] || s)}">${esc(s)}</span>`;
   const load = async () => {
-    _MCPM.hours = +$("#mcpm-win").value; _MCPM.source = $("#mcpm-src").value;
+    _MCPM.source = $("#mcpm-src").value;
     _MCPM.server = $("#mcpm-srv").value; _MCPM.ctx = +$("#mcpm-ctx").value || 262144;
     try { localStorage.setItem("mcpmCtl", JSON.stringify(_MCPM)); } catch (e) {}
     let d, c, r;
@@ -2493,11 +2531,15 @@ async function tabMcpMetrics() {
             <td class="nw">${(x.sources || []).map(srcPill).join(" ")}</td><td class="nw">${_tsLabel(x.last_used)}</td></tr>`).join("") + `</table>`
       : '<span class="hint">No MCP calls in this window.</span>';
     const bs = d.by_server || [];
+    // v0.181.135: the kept-open connection to each server, and how long it has sat idle
+    const sess = (d.live || {}).sessions || {};
+    const idle = v => v == null ? "" : v >= 3600 ? (v / 3600).toFixed(1) + " h" : v >= 60 ? Math.round(v / 60) + " min" : Math.round(v) + " s";
+    const conn = name => { const c = sess[name]; return !c ? dash : `<span class="pill ${c.open ? "ok" : ""}">${c.open ? "open" : "closed"}</span>${c.idle_s != null ? ` <span class="hint" style="margin:0">idle ${idle(c.idle_s)}</span>` : ""}`; };
     $("#mcpm-servers").innerHTML = bs.length
-      ? `<table><tr><th>server</th><th>calls</th><th>errors</th><th>p50</th><th>p95</th><th>tools used</th><th title="Average time to open a new MCP session">new session</th><th title="Share of calls that reused a pooled session">reuse</th><th>timeouts</th><th>429</th></tr>`
+      ? `<table><tr><th>server</th><th>calls</th><th>errors</th><th>p50</th><th>p95</th><th>tools used</th><th title="Average time to open a new MCP session">new session</th><th title="Share of calls that reused a pooled session">reuse</th><th title="The connection the router keeps open to this server. One that sat idle is checked before it is used again.">kept connection</th><th>timeouts</th><th>429</th></tr>`
         + bs.map(x => `<tr><td class="nw"><b>${esc(x.server)}</b></td><td class="nw">${x.calls}</td><td class="nw">${errCell(x)}</td>
             <td class="nw">${n(x.p50_ms, "ms")}</td><td class="nw">${n(x.p95_ms, "ms")}</td><td class="nw">${x.tools_used}</td>
-            <td class="nw">${n(x.avg_connect_ms, "ms")}</td><td class="nw">${n(x.reuse_pct, "%")}</td>
+            <td class="nw">${n(x.avg_connect_ms, "ms")}</td><td class="nw">${n(x.reuse_pct, "%")}</td><td class="nw">${conn(x.server)}</td>
             <td class="nw">${x.timeouts || '<span class="hint">0</span>'}</td><td class="nw">${x.rate_limited || '<span class="hint">0</span>'}</td></tr>`).join("") + `</table>`
       : '<span class="hint">—</span>';
     const bo = d.by_source || [];
@@ -2525,7 +2567,14 @@ async function tabMcpMetrics() {
       : '<span class="hint">No calls.</span>';
     wrapTables();
   };
-  ["#mcpm-win", "#mcpm-src", "#mcpm-srv", "#mcpm-ctx", "#mcpm-errs"].forEach(id => $(id).onchange = load);
+  ["#mcpm-src", "#mcpm-srv", "#mcpm-ctx", "#mcpm-errs"].forEach(id => $(id).onchange = load);
+  $("#mcpm-win").onclick = e => {
+    const b = e.target.closest("button[data-h]");
+    if (!b) return;
+    _MCPM.hours = +b.dataset.h;
+    $("#mcpm-win").querySelectorAll("button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", x === b); });
+    load();
+  };
   $("#mcpm-refresh").onclick = load;
   $("#mcpm-clear").onclick = async () => {
     const srv = $("#mcpm-srv").value;
@@ -2705,20 +2754,20 @@ async function tabCost() {
   $("#main").innerHTML = `
     <h2 style="margin-top:0;display:flex;align-items:center">Cost calculator ${help("cost")} <span class="hint" id="cost-ts" style="margin:0 0 0 8px"></span></h2>
     <p class="hint">What the tokens in this window would have cost on a paid API vs self-hosting. Token counts are real (measured per call); service rates are editable list prices — a semi-close decision aid, not a bill. Paid-API cost assumes you re-send context each turn (that's how they bill); the “with cache” column applies your measured cache-hit tokens at each vendor's cached-input rate.</p>
-    <div class="card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-      <label>Window <select id="cost-win">${winOpts.map(([h, l]) => `<option value="${h}"${h === _COST.hours ? " selected" : ""}>${l}</option>`).join("")}</select></label>
-      <label>Model <select id="cost-model"><option value="">all models</option></select></label>
-      <label title="Only calls served by one backend">Backend <select id="cost-backend"><option value="">all backends</option></select></label>
-      <label title="Only one run label (hardware / config experiment)">Run <select id="cost-run"><option value="__all__">all runs</option></select></label>
-      <label title="Approx. power draw of your inference box under load">self-host watts <input id="cost-watts" type="number" min="0" style="width:70px" value="${_COST.watts}"></label>
-      <label title="Your electricity price"> $/kWh <input id="cost-kwh" type="number" min="0" step="0.01" style="width:70px" value="${_COST.kwh}"></label>
+    <div class="pickbar">
+      <div class="seg" id="cost-win" role="tablist" aria-label="window">${winOpts.map(([h, l]) => `<button role="tab" aria-selected="${h === _COST.hours}" class="${h === _COST.hours ? "on" : ""}" data-h="${h}">${l}</button>`).join("")}</div>
+      <label>model <select id="cost-model"><option value="">all models</option></select></label>
+      <label title="Only calls served by one backend">backend <select id="cost-backend"><option value="">all backends</option></select></label>
+      <label title="Only one run label (hardware / config experiment)">run <select id="cost-run"><option value="__all__">all runs</option></select></label>
+      <label title="Approx. power draw of your inference box under load">self-host watts <input id="cost-watts" type="number" min="0" style="width:84px" value="${_COST.watts}"></label>
+      <label title="Your electricity price"> $/kWh <input id="cost-kwh" type="number" min="0" step="0.01" style="width:84px" value="${_COST.kwh}"></label>
       <button class="act" id="cost-refresh">Refresh</button>
       <span class="hint" id="cost-count"></span>
     </div>
     <div id="cost-summary"></div>
     <div id="cost-verdict"></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Cost for this window <span class="hint" style="font-weight:normal">— cheapest first; self-host = electricity estimate</span></div><div id="cost-table"></div></div>
-    <div class="card"><div style="font-weight:600;margin-bottom:6px">Visual comparison</div><div id="cost-bars"></div></div>
+    <div class="card"><div class="card-h">Visual comparison <span class="hint">— what this window's tokens would have cost on each service</span></div><div id="cost-bars"></div></div>
+    <div class="card"><div class="card-h">Cost for this window <span class="hint">— cheapest first; self-host = electricity estimate</span></div><div id="cost-table"></div></div>
     <div class="card"><div class="card-h">Head to head with your local model <span class="hint">— benchmark score next to what the same tokens would have cost</span>
         <label style="margin-left:auto;font-weight:normal" title="Which benchmark category to compare on">compare on <select id="cost-cat">${[["coding", "coding"], ["agentic", "agentic work"], ["reasoning", "reasoning"], ["general_chat", "general chat"], ["tool_calling", "tool calling"]].map(([v, l]) => `<option value="${v}"${v === (_COST.cat || "coding") ? " selected" : ""}>${l}</option>`).join("")}</select></label></div>
       <div id="cost-h2h"></div></div>
@@ -2792,7 +2841,7 @@ async function tabCost() {
   };
 
   const loadCosts = async () => {
-    _COST.hours = +$("#cost-win").value; _COST.model = $("#cost-model").value;
+    _COST.model = $("#cost-model").value;
     _COST.backend = $("#cost-backend").value; _COST.run = $("#cost-run").value;
     _COST.watts = +$("#cost-watts").value || 0; _COST.kwh = +$("#cost-kwh").value || 0;
     _COST.cat = ($("#cost-cat") || {}).value || _COST.cat || "coding";
@@ -2820,15 +2869,17 @@ async function tabCost() {
       (hist.run_labels || []).map(r => `<option value="${esc(r.run_label || "__none__")}">${esc(r.run_label || "(unlabelled)")} (${r.n})</option>`), _COST.run);
     const t = d.tokens, L = d.local;
     $("#cost-count").textContent = `${t.calls} calls · span ${d.span_hours}h`;
-    const tile = (label, v, hint) => `<div style="min-width:110px" title="${hint || ""}"><div class="hint" style="margin:0">${label}</div><div style="font-size:18px;font-weight:600">${v}</div></div>`;
-    const K = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : "" + n;
-    $("#cost-summary").innerHTML = `<div class="card" style="display:flex;gap:22px;flex-wrap:wrap">`
+    const tile = (label, v, hint, sub) => `<div class="tile" title="${esc(hint || "")}"><div class="t-lbl">${label}</div><div class="t-val">${v}</div>${sub ? `<div class="t-sub">${sub}</div>` : ""}</div>`;
+    const K = n => n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : "" + n;
+    const paid = (d.services || [])[0];
+    $("#cost-summary").innerHTML = `<div class="card"><div class="tiles">`
       + tile("input tokens", K(t.input), "prompt tokens sent (context re-sent each turn)")
       + tile("output tokens", K(t.output), "generated tokens")
-      + tile("cached (KV hit)", K(t.cached), "prompt tokens served from cache locally")
-      + tile("calls", t.calls, "model calls in window")
-      + tile("self-host est.", _money(L.cost), `${L.watts}W × ${L.active_hours}h active × $${L.kwh}/kWh`)
-      + `</div>`;
+      + tile("from cache", K(t.cached), "prompt tokens served from cache", t.input ? `${(100 * t.cached / t.input).toFixed(0)}% of input` : "")
+      + tile("calls", (t.calls || 0).toLocaleString(), "model calls in window")
+      + tile("self-host est.", _money(L.cost), `${L.watts}W × ${L.active_hours}h active × $${L.kwh_rate ?? L.kwh}/kWh`, L.per_month != null ? `about ${_money(L.per_month)} a month` : "")
+      + (paid ? tile("cheapest paid", _money(paid.cost), "The cheapest service in the rates table for the same tokens", esc(paid.name)) : "")
+      + `</div></div>`;
     // verdict
     const svcs = d.services || [];
     if (svcs.length) {
@@ -2865,12 +2916,9 @@ async function tabCost() {
     const max = Math.max(...items.map(i => i.cost), 0.0001);
     const cAcc = _css("--accent", "#e8833a"), cOk = _css("--ok", "#3fb950");
     $("#cost-bars").innerHTML = items.map(i =>
-      `<div style="display:flex;align-items:center;gap:8px;margin:3px 0">
-        <div style="width:190px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(i.name)}">${esc(i.name)}</div>
-        <div style="flex:1;background:var(--line);border-radius:3px;height:16px">
-          <div style="width:${Math.max(1, i.cost / max * 100).toFixed(1)}%;height:100%;background:${i.me ? cOk : cAcc};border-radius:3px"></div></div>
-        <div style="width:90px;flex:none;text-align:right">${_money(i.cost)}</div>
-      </div>`).join("");
+      `<div class="cbar" title="${esc(i.name)}: ${_money(i.cost)}"><span>${esc(i.name)}</span>
+        <span class="ov-bt"><i class="${i.me ? "me" : ""}" style="width:${Math.max(1, i.cost / max * 100).toFixed(1)}%"></i></span>
+        <b>${_money(i.cost)}</b></div>`).join("");
     // head to head: the busiest local model against each paid service
     const H = d.head_to_head, hEl = $("#cost-h2h");
     if (hEl) {
@@ -2950,9 +2998,16 @@ async function tabCost() {
   $("#pu-run").onclick = () => runUpdate(false);
   $("#pu-preview").onclick = () => runUpdate(true);
 
-  ["cost-win", "cost-model", "cost-backend", "cost-run", "cost-watts", "cost-kwh", "cost-cat"].forEach(id => {
+  ["cost-model", "cost-backend", "cost-run", "cost-watts", "cost-kwh", "cost-cat"].forEach(id => {
     const el = $("#" + id); el.onchange = loadCosts;
   });
+  $("#cost-win").onclick = e => {
+    const b = e.target.closest("button[data-h]");
+    if (!b) return;
+    _COST.hours = +b.dataset.h;
+    $("#cost-win").querySelectorAll("button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", x === b); });
+    loadCosts();
+  };
   $("#cost-refresh").onclick = loadCosts;
   await loadRates();
   await loadCosts();
@@ -3513,7 +3568,7 @@ function showTrainingEpisode(id) {
     <h4>Turns (redacted, first 300 characters)</h4><div class="tscroll"><table><tr><th>role</th><th>author</th><th>content</th></tr>${turns}</table></div>`);
 }
 
-// Setup → Clients & Keys (setup_routes.py): one key per program, made and
+// Access → Clients & Keys (setup_routes.py): one key per program, made and
 // rotated here. Keys are shown once; Foundry stores only their hash.
 function _connectHelp(preset, name, key, ep) {
   const k = key || "<this client's key>";
@@ -4111,9 +4166,11 @@ async function tabSecrets() {
   $("#sx-pl").onclick = showPulls; showPulls();
 }
 
-// Setup → Helpers & Limits: per-backend concurrency and helper streams,
+// Access → Helpers & Limits: per-backend concurrency and helper streams,
 // edited as a form (stored on each backend in config.yaml).
 // Queue classes (queue_class.py): the order waiters are served in, and who waits now.
+// v0.181.135: the queue-class settings and the list of waiters are two blocks, so each
+// can be its own section of Helpers & Limits.
 function queueCard(q) {
   const s = q.settings || {classes: []};
   const HELP = {A: "a person is waiting: chat front ends, Cline, operator chat",
@@ -4123,22 +4180,7 @@ function queueCard(q) {
   const rows = (s.classes || []).map(c => `<tr><td class="nw"><b>${esc(c.class)}</b> ${esc(c.label)}<div class="hint">${esc(HELP[c.class] || "")}</div></td>
     <td class="nw"><input type="number" min="0.1" max="100" step="0.5" style="width:80px" data-qc="${esc(c.class)}" data-qf="wait_factor" value="${esc(c.wait_factor)}"></td>
     <td class="nw"><input type="number" min="0" max="86400" step="60" style="width:100px" data-qc="${esc(c.class)}" data-qf="promote_after_seconds" value="${esc(c.promote_after_seconds)}"></td></tr>`).join("");
-  const waiting = [];
-  for (const b of (q.queues || [])) {
-    for (const w of (b.stream_waiters || [])) waiting.push({...w, backend: b.backend, what: "stream"});
-    for (const w of (b.waiters || [])) waiting.push({...w, backend: b.backend, what: "slot"});
-  }
-  const wrows = waiting.map(w => `<tr><td class="nw">${esc(w.backend)}</td><td class="nw">${esc(w.what)} #${esc(w.position)}</td>
-    <td>${esc(w.persona || w.client)}<div class="hint">${esc(w.client)}</div></td>
-    <td class="nw">${esc(w.class)}${w.counts_as && w.counts_as !== w.class ? ` <span class="hint" style="margin:0" title="moved up by waiting">counts as ${esc(w.counts_as)}</span>` : ""}</td>
-    <td class="nw">${esc(Math.round(w.waited_s))} s</td></tr>`).join("");
-  return `<h2 style="margin-top:22px">Queue classes</h2>
-    <p class="hint">When a backend is full, waiters are served by class: <b>A</b> first, then <b>B</b>, <b>C</b>, <b>D</b>; inside a class,
-      clients take turns. A request gets its class from its coordinator purpose (required work is B, optional is C), else the
-      persona, else the client (Clients &amp; Keys), else the default. A request can lower its own class with the
-      <code>x-foundry-priority</code> header, never raise it. <b>Wait factor</b>: this class waits the backend queue timeout
-      times this. <b>Moves up after</b>: seconds of waiting before it counts as the next class up (never above B; 0 = never).</p>
-    <div class="card">
+  return `<div class="card"><div class="card-h">Queue classes <span class="hint">— who is served first when a backend is full</span></div>
       <div class="row"><label><input type="checkbox" id="q-enabled" ${s.enabled ? "checked" : ""}> use queue classes</label>
         <label title="The class of traffic nothing else classifies (no coordinator purpose, no persona or client class).">default class</label>
         <select id="q-default">${["A", "B", "C", "D"].map(c => `<option ${s.default_class === c ? "selected" : ""}>${c}</option>`).join("")}</select>
@@ -4147,13 +4189,28 @@ function queueCard(q) {
         <label title="The same hold when a person is waiting (class A).">for a person (s)</label>
         <input type="number" min="0" max="1800" style="width:80px" id="q-hold-a" value="${esc(s.recovery_hold_interactive_seconds)}">
         <button class="act primary" id="q-save">Save</button></div>
-      <div class="tscroll"><table><tr><th>class</th><th>wait factor</th><th>moves up after (s)</th></tr>${rows}</table></div>
-    </div>
-    ${(q.lanes || []).length ? `<h2 style="margin-top:22px">Lanes</h2><div class="card"><div class="tscroll"><table><tr><th>lane</th><th>models</th><th>now</th><th>takes</th></tr>${q.lanes.map(l => `<tr><td class="nw"><b>${esc(l.backend)}</b></td><td>${esc((l.models || []).join(", ") || "—")}</td>
-      <td class="nw">${!l.healthy ? "down" : l.free ? "free" : "busy"}</td>
-      <td class="hint" style="white-space:normal">prompts up to ${esc(l.max_prompt_tokens)} tokens, replies up to ${esc(l.max_output_tokens)}${l.allow_tools ? ", tools" : ", no tools"}${l.thinking ? ", thinking" : ", no thinking"}</td></tr>`).join("")}</table></div></div>` : ""}
-    <h2 style="margin-top:22px">Waiting now</h2>
-    <div class="card">${wrows ? `<div class="tscroll"><table><tr><th>backend</th><th>waiting for</th><th>who</th><th>class</th><th>waited</th></tr>${wrows}</table></div>`
+      <div class="tscroll"><table class="no-tools"><tr><th>class</th><th title="This class waits the backend's queue timeout times this">wait factor</th><th title="Seconds of waiting before it counts as the next class up (never above B; 0 = never)">moves up after (s)</th></tr>${rows}</table></div>
+      <details class="how" style="margin:0"><summary>How a request gets its class</summary><p class="hint">When a backend is full, waiters are served by class: <b>A</b> first, then <b>B</b>, <b>C</b>, <b>D</b>; inside a class,
+      clients take turns. A request gets its class from its coordinator purpose (required work is B, optional is C), else the
+      persona, else the client (Clients &amp; Keys), else the default. A request can lower its own class with the
+      <code>x-foundry-priority</code> header, never raise it. <b>Wait factor</b>: this class waits the backend queue timeout
+      times this. <b>Moves up after</b>: seconds of waiting before it counts as the next class up (never above B; 0 = never).</p></details>
+    </div>`;
+}
+function queueWaiting(q) {
+  const waiting = [];
+  for (const b of (q.queues || [])) {
+    for (const w of (b.stream_waiters || [])) waiting.push({...w, backend: b.backend, what: "stream"});
+    for (const w of (b.waiters || [])) waiting.push({...w, backend: b.backend, what: "slot"});
+  }
+  return waiting;
+}
+function waitingCard(q) {
+  const wrows = queueWaiting(q).map(w => `<tr><td class="nw">${esc(w.backend)}</td><td class="nw">${esc(w.what)} #${esc(w.position)}</td>
+    <td>${esc(w.persona || w.client)}<div class="hint">${esc(w.client)}</div></td>
+    <td class="nw">${esc(w.class)}${w.counts_as && w.counts_as !== w.class ? ` <span class="hint" style="margin:0" title="moved up by waiting">counts as ${esc(w.counts_as)}</span>` : ""}</td>
+    <td class="nw">${esc(Math.round(w.waited_s))} s</td></tr>`).join("");
+  return `<div class="card"><div class="card-h">Waiting now <span class="hint">— requests held for a free place on a backend</span></div>${wrows ? `<div class="tscroll"><table><tr><th>backend</th><th>waiting for</th><th>who</th><th>class</th><th>waited</th></tr>${wrows}</table></div>`
       : `<p class="hint" style="margin:0">Nothing is waiting for a backend.</p>`}</div>`;
 }
 function queueCardWire() {
@@ -4173,35 +4230,72 @@ function queueCardWire() {
 async function tabLimits() {
   const [d, q] = await Promise.all([api("setup/limits"), api("setup/queue").catch(() => ({}))]);
   const num = (v, ph) => `value="${v == null ? "" : esc(v)}" placeholder="${ph}"`;
-  const rows = d.backends.map(b => {
+  // backends in use first; a disabled one keeps its settings but stands at the end
+  const bes = [...(d.backends || [])].sort((a, b) => (a.enabled === false) - (b.enabled === false));
+  const laneOf = Object.fromEntries((q.lanes || []).map(l => [l.backend, l]));
+  const dots = (n, cap) => cap && cap <= 16 ? `<span class="slotdots">${Array.from({length: cap}, (_, i) => `<i class="${i < n ? "on" : ""}"></i>`).join("")}</span>` : "";
+  const who = b => `<td class="nw"><b>${esc(b.name)}</b>${b.enabled === false ? ' <span class="pill">disabled</span>' : ""}<div class="hint" style="margin:0">${esc(b.type)}${b.flavor ? " · " + esc(b.flavor) : ""}${b.subscription ? " · subscription" : ""}</div></td>`;
+  const rows = bes.map(b => {
     const s = d.streams[b.name];
-    const active = s ? (s.active || []).map(a => `${a.persona || a.client} (${a.idle_s}s idle)`).join(", ") : "";
-    return `<tr><td class="nw"><b>${esc(b.name)}</b><div class="hint">${esc(b.type)}${b.flavor ? " · " + esc(b.flavor) : ""}${b.subscription ? " · subscription" : ""}${b.enabled === false ? " · disabled" : ""}</div></td>
+    const n = s ? (s.active || []).length : 0;
+    const names = s ? (s.active || []).map(a => `${a.persona || a.client} (${a.idle_s}s idle)`).join(", ") : "";
+    return `<tr class="${b.enabled === false ? "is-off" : ""}">${who(b)}
       <td class="nw"><input type="number" min="0" max="64" style="width:80px" data-f="helpers_allowed" data-b="${esc(b.name)}" ${num(b.helpers_allowed, "no limit")}></td>
       <td class="nw"><input type="number" min="1" max="256" style="width:80px" data-f="max_concurrent" data-b="${esc(b.name)}" ${num(b.max_concurrent, "no limit")}></td>
       <td class="nw"><input type="number" min="1" max="3600" style="width:90px" data-f="queue_timeout_seconds" data-b="${esc(b.name)}" ${num(b.queue_timeout_seconds, "300")}></td>
       <td class="nw"><input type="number" min="0" max="3600" style="width:90px" data-f="session_hold_seconds" data-b="${esc(b.name)}" ${num(b.session_hold_seconds, "60")}></td>
-      <td class="hint" style="white-space:normal">${s ? `${(s.active || []).length}${s.streams_allowed != null ? "/" + s.streams_allowed : ""} ${esc(active)}` : "—"}</td>
-      <td class="nw"><label title="A lane is a small local backend for short jobs. Its models are left out of automatic routing: a persona reaches it by naming its model, or through divert when busy. A request must fit the limits to the right."><input type="checkbox" data-f="lane" data-b="${esc(b.name)}" ${b.lane ? "checked" : ""}> lane</label>
-        <input type="number" min="0" style="width:84px" title="Largest prompt (tokens, estimated) the lane takes. 0 = no limit." data-f="lane_max_prompt_tokens" data-b="${esc(b.name)}" ${num(b.lane_max_prompt_tokens, "3000")}>
-        <input type="number" min="0" style="width:74px" title="Output cap (tokens) for a call the lane serves. 0 = the persona's own cap." data-f="lane_max_output_tokens" data-b="${esc(b.name)}" ${num(b.lane_max_output_tokens, "400")}>
-        <label title="Let requests that carry tools use the lane."><input type="checkbox" data-f="lane_allow_tools" data-b="${esc(b.name)}" ${b.lane_allow_tools ? "checked" : ""}> tools</label>
-        <label title="Let the lane's model think. Off = short jobs answer without reasoning."><input type="checkbox" data-f="lane_thinking" data-b="${esc(b.name)}" ${b.lane_thinking ? "checked" : ""}> thinking</label></td>
+      <td style="min-width:150px">${s ? `<span class="nw" title="${n} session${n === 1 ? "" : "s"}${s.streams_allowed != null ? " of " + s.streams_allowed + " allowed" : ", no limit"}">${dots(n, s.streams_allowed)}<b>${n}</b>${s.streams_allowed != null ? ` <span class="hint" style="margin:0">of ${s.streams_allowed}</span>` : ""}</span>${names ? `<div class="hint clamp2" style="margin:2px 0 0" title="${esc(names)}">${esc(names)}</div>` : ""}` : '<span class="hint" style="margin:0">—</span>'}</td>
       <td class="nw"><button class="act primary" data-save="${esc(b.name)}">Save</button></td></tr>`;
   }).join("");
+  const laneRows = bes.map(b => {
+    const l = laneOf[b.name];
+    return `<tr class="${b.enabled === false ? "is-off" : ""}">${who(b)}
+      <td class="nw"><label title="A lane is a small local backend for short jobs. Its models are left out of automatic routing: a persona reaches it by naming its model, or through divert when busy. A request must fit the limits to the right."><input type="checkbox" data-f="lane" data-b="${esc(b.name)}" ${b.lane ? "checked" : ""}> lane</label></td>
+      <td class="nw"><input type="number" min="0" style="width:96px" data-f="lane_max_prompt_tokens" data-b="${esc(b.name)}" ${num(b.lane_max_prompt_tokens, "3000")}></td>
+      <td class="nw"><input type="number" min="0" style="width:86px" data-f="lane_max_output_tokens" data-b="${esc(b.name)}" ${num(b.lane_max_output_tokens, "400")}></td>
+      <td class="nw"><label title="Let requests that carry tools use the lane."><input type="checkbox" data-f="lane_allow_tools" data-b="${esc(b.name)}" ${b.lane_allow_tools ? "checked" : ""}> tools</label>
+        <label title="Let the lane's model think. Off = short jobs answer without reasoning."><input type="checkbox" data-f="lane_thinking" data-b="${esc(b.name)}" ${b.lane_thinking ? "checked" : ""}> thinking</label></td>
+      <td>${l ? `<span class="pill ${!l.healthy ? "bad" : l.free ? "ok" : "warn"}">${!l.healthy ? "down" : l.free ? "free" : "busy"}</span> <span class="hint mono" style="margin:0">${esc((l.models || []).join(", ") || "—")}</span>` : '<span class="hint" style="margin:0">not a lane</span>'}</td>
+      <td class="nw"><button class="act primary" data-save="${esc(b.name)}">Save</button></td></tr>`;
+  }).join("");
+  const on = bes.filter(b => b.enabled !== false);
+  const sessions = Object.values(d.streams || {}).reduce((a, s) => a + (s.active || []).length, 0);
+  const nWait = queueWaiting(q).length, lanes = q.lanes || [];
+  const qs = q.settings || {};
+  const kpi = (l, v, sub) => `<div class="kpi"><span class="kpi-l">${l}</span><span class="kpi-v">${v}</span><span class="kpi-s">${sub || ""}</span></div>`;
   $("#main").innerHTML = `
     <h2>Helpers &amp; limits</h2>
-    <p class="hint">Per backend. <b>Helpers allowed</b>: how many helper streams (sub-agents, e.g. Kilo's task tool or
+    <div class="ov-kpis">
+      ${kpi("backends in use", on.length, bes.length - on.length ? `${bes.length - on.length} disabled` : "all enabled")}
+      ${kpi("sessions now", sessions ? `<span style="color:var(--ok)">${sessions}</span>` : "0", "holding a place on a backend")}
+      ${kpi("waiting now", nWait ? `<span style="color:var(--warn)">${nWait}</span>` : "0", nWait ? "held for a free place" : "nothing is waiting")}
+      ${kpi("lanes", lanes.length, lanes.length ? lanes.map(l => `${esc(l.backend)} ${!l.healthy ? "down" : l.free ? "free" : "busy"}`).join(" · ") : "no lane for short jobs")}
+      ${kpi("queue classes", qs.enabled ? "on" : `<span style="color:var(--dim)">off</span>`, qs.default_class ? `default class ${esc(qs.default_class)}` : "")}
+    </div>
+    <div class="card"><div class="card-h">Backend limits <span class="hint">— how many sessions each backend serves at once</span></div>
+      ${rows ? `<div class="tscroll"><table class="no-tools"><tr><th>backend</th>
+        <th title="Helper streams (sub-agents) served next to the main one. 0 = main stream only, 1 = main + one helper, empty = no limit.">helpers allowed</th>
+        <th title="Calls running at once (for llama.cpp, its -np slots). More wait in a fair queue.">max concurrent</th>
+        <th title="How long a session over the limit waits for a place before it is refused.">queue timeout s</th>
+        <th title="After a call that ended in a tool call, the session keeps its place this long. A final answer frees it at once.">session hold s</th>
+        <th>sessions now</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}
+      <details class="how" style="margin:0"><summary>How these limits work</summary><p class="hint"><b>Helpers allowed</b>: how many helper streams (sub-agents, e.g. Kilo's task tool or
       parallel coordinator sessions) the backend serves next to your main one: <code>0</code> = main stream only,
       <code>1</code> = main + one helper, empty = no limit. A session over the limit waits up to the queue timeout for a slot,
       then is refused. <b>Session hold s</b>: after a call that ended in a tool call (the session is coming back with
       the tool result, or waiting on its own sub-agent) the session keeps its slot this long; a call that ended in a
       final answer frees the slot at once, so a new task never waits for a finished one.
       <b>Max concurrent</b>: calls running at once (e.g. llama.cpp <code>-np</code> slots); more wait in a fair queue.
-      Call/token caps per account, client or task are budget rules (Logs → Usage Log).</p>
-    <div class="card">${rows ? `<div class="tscroll"><table><tr><th>backend</th><th>helpers allowed</th><th>max concurrent</th><th>queue timeout s</th><th>session hold s</th><th>sessions now</th><th title="lane · max prompt tokens · max output tokens · tools · thinking">lane for short jobs</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>
-    ${queueCard(q)}`;
+      Call/token caps per account, client or task are budget rules (Logs → Usage Log).</p></details></div>
+    <div class="card"><div class="card-h">Lanes for short jobs <span class="hint">— a small local backend that takes short requests</span></div>
+      ${laneRows ? `<div class="tscroll"><table class="no-tools"><tr><th>backend</th><th>use as a lane</th>
+        <th title="Largest prompt (tokens, estimated) the lane takes. 0 = no limit.">largest prompt (tokens)</th>
+        <th title="Output cap (tokens) for a call the lane serves. 0 = the persona's own cap.">reply cap (tokens)</th>
+        <th>may use</th><th>now · models</th><th></th></tr>${laneRows}</table></div>` : '<p class="hint">No backends configured (Backends → Pool).</p>'}</div>
+    ${queueCard(q)}
+    ${waitingCard(q)}`;
   queueCardWire();
+  // a backend has fields in two tables (limits, lane); either Save sends all of them
   document.querySelectorAll("[data-save]").forEach(b => b.onclick = () => {
     const name = b.dataset.save, body = {name};
     document.querySelectorAll(`input[data-b="${CSS.escape(name)}"]`).forEach(i => { body[i.dataset.f] = i.type === "checkbox" ? i.checked : i.value; });
@@ -4357,26 +4451,61 @@ async function tabActiveUse() {
   const o = window._auOpts;
   const [d, lv] = await Promise.all([api(`clients/activity?hours=${o.hours}`), api("live")]);
   const when = ts => ts ? esc(_tsText(ts)) : "—";
-  const live = (lv.calls || []).map(c => `<tr><td class="nw">${esc(c.client_label)}</td><td class="nw">${esc(c.persona || "")}</td><td class="mono nw">${esc(c.model)}</td><td class="nw">${esc(c.backend || "")}</td><td class="nw">${esc(c.phase || "")}</td><td class="nw">${fmtDur((c.seconds || 0) * 1000)}</td></tr>`)
+  const cl = d.clients || [];
+  const WIN = [[1, "1 h"], [6, "6 h"], [24, "1 day"], [168, "7 days"]];
+  const winLabel = (WIN.find(w => w[0] == o.hours) || [0, o.hours + " h"])[1];
+  const total = d.total_requests || 0;
+  const sumOf = k => cl.reduce((a, c) => a + (c[k] || 0), 0);
+  const errs = sumOf("errors"), tin = sumOf("input_tokens"), tout = sumOf("output_tokens");
+  const nLive = (lv.calls || []).length + (lv.brain || []).length;
+  const live = (lv.calls || []).map(c => `<tr><td class="nw">${esc(c.client_label)}</td><td class="nw">${esc(c.persona || "")}</td><td class="mono nw">${esc(c.model)}</td><td class="nw">${esc(c.backend || "")}</td><td class="nw"><span class="lv-ph ${/generat|decod|stream/i.test(c.phase || "") ? "gen" : ""}">${esc(c.phase || "")}</span></td><td class="nw">${fmtDur((c.seconds || 0) * 1000)}</td></tr>`)
     .concat((lv.brain || []).map(b => `<tr><td class="nw">${esc(b.client_label)}</td><td class="nw">${esc(b.persona || "")}</td><td class="mono nw">🧠 ${esc(b.model || "")}</td><td class="nw">brain</td><td class="nw">${esc(b.purpose || "")}</td><td class="nw">${fmtDur((b.seconds || 0) * 1000)}</td></tr>`)).join("");
-  const rows = d.clients.map(c => `<tr>
-      <td class="nw"><b>${esc(c.client)}</b> ${c.tracked ? (c.configured ? '<span class="pill ok">key</span>' : "") : '<span class="pill warn">untracked</span>'}${c.live ? ` <span class="pill ok">${c.live} running</span>` : ""}${c.configured && c.enabled === false ? ' <span class="pill">off</span>' : ""}</td>
-      <td class="nw">${c.requests}</td><td class="nw">${c.errors ? `<span class="pill bad">${c.errors}</span>` : 0}</td>
-      <td class="nw">${c.input_tokens.toLocaleString()} / ${c.output_tokens.toLocaleString()}</td>
-      <td class="nw">${c.p50_s ? c.p50_s + " s" : "—"}</td>
+  const kpi = (l, v, sub) => `<div class="kpi"><span class="kpi-l">${l}</span><span class="kpi-v">${v}</span><span class="kpi-s">${sub || ""}</span></div>`;
+  const tone = (n, c) => n ? `<span style="color:var(--${c})">${n.toLocaleString()}</span>` : "0";
+  // who sent the traffic: the eight busiest, the rest as one line
+  const byReq = [...cl].sort((a, b) => b.requests - a.requests);
+  const top = byReq.slice(0, 8), rest = byReq.slice(8).reduce((a, c) => a + c.requests, 0);
+  const share = n => total ? 100 * n / total : 0;
+  const pctTxt = n => { const p = share(n); return (p >= 10 || p === 0 ? p.toFixed(0) : p.toFixed(1)) + "%"; };
+  const bar = (name, n, warn) => `<div class="cbar" title="${esc(name)}: ${n.toLocaleString()} requests"><span>${esc(name)}</span><span class="ov-bt"><i style="width:${Math.max(n ? 1 : 0, share(n)).toFixed(1)}%${warn ? ";background:var(--warn)" : ""}"></i></span><b>${pctTxt(n)}</b></div>`;
+  const rows = cl.map(c => {
+    const addr = (c.addrs || []).join(", "), agent = (c.agents || [])[0] || "";
+    const personas = (c.personas || []).join(", "), models = (c.models || []).join(", ");
+    return `<tr>
+      <td><b>${esc(c.client)}</b> ${c.tracked ? (c.configured ? '<span class="pill ok">key</span>' : "") : '<span class="pill warn">untracked</span>'}${c.live ? ` <span class="pill ok">${c.live} running</span>` : ""}${c.configured && c.enabled === false ? ' <span class="pill">off</span>' : ""}
+        <div class="hint" style="margin:2px 0 0" title="${esc(addr + (agent ? "\n" + agent : ""))}">${esc(addr || "—")}${agent ? " · " + esc(agent.slice(0, 42)) + (agent.length > 42 ? "…" : "") : ""}</div></td>
+      <td class="nw"><b>${c.requests.toLocaleString()}</b> <span class="hint" style="margin:0">${pctTxt(c.requests)}</span></td>
       <td>${sparkline(c.series, c.tracked ? _css("--accent", "#e8833a") : _css("--warn", "#d9a400"), "req")}</td>
+      <td class="nw">${c.errors ? `<span class="pill bad">${c.errors}</span>` : '<span class="hint" style="margin:0">0</span>'}</td>
+      <td class="nw" title="${c.input_tokens.toLocaleString()} in / ${c.output_tokens.toLocaleString()} out">${_fmtK(c.input_tokens)} / ${_fmtK(c.output_tokens)}</td>
+      <td class="nw">${c.p50_s ? c.p50_s + " s" : "—"}</td>
       <td class="hint nw">${when(c.last_seen)}</td>
-      <td class="hint" style="white-space:normal">${esc((c.addrs || []).join(", ") || "—")}<div>${esc(((c.agents || [])[0] || "").slice(0, 70))}</div></td>
-      <td class="hint" style="white-space:normal">${esc((c.personas || []).join(", "))}<div class="mono">${esc((c.models || []).slice(0, 3).join(", "))}</div></td>
-      <td class="nw">${c.tracked ? "" : `<button class="act" data-mk="${esc((c.addrs || [""])[0])}" title="Make a client key for this program so it shows by name (Access → Clients & Keys)">Make a key</button>`}</td></tr>`).join("");
+      <td style="min-width:200px"><div class="clamp2" title="${esc(personas)}">${esc(personas || "—")}</div>${models ? `<div class="hint mono clamp2" style="margin:2px 0 0" title="${esc(models)}">${esc(models)}</div>` : ""}</td>
+      <td class="nw">${c.tracked ? "" : `<button class="act" data-mk="${esc((c.addrs || [""])[0])}" title="Make a client key for this program so it shows by name (Access → Clients & Keys)">Make a key</button>`}</td></tr>`;
+  }).join("");
   $("#main").innerHTML = `
     <h2>Active use</h2>
-    <p class="hint">Every program that called the router in the window. A program with a client key shows by its name; one without a key shows as <b>untracked · its IP</b> — give it a key (Access → Clients &amp; Keys) and put that key in its API-key field (AnythingLLM, Open WebUI…) to track it by name. The route map with the brain and live paths is Routing → Routes (tick <i>active only</i>).</p>
-    <div class="row"><label>window</label><select id="au-hours">${[[1, "1 h"], [6, "6 h"], [24, "1 d"], [168, "7 d"]].map(([h, l]) => `<option value="${h}" ${h == o.hours ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <span class="stat">${d.total_requests} requests · ${d.clients.length} clients · ${d.untracked} untracked</span></div>
-    <div class="card"><h3>Running right now</h3>${live ? `<table><tr><th>client</th><th>persona</th><th>model</th><th>backend</th><th>phase</th><th>for</th></tr>${live}</table>` : '<p class="hint">Nothing in flight.</p>'}</div>
-    <div class="card"><h3>Clients</h3>${rows ? `<div class="tscroll"><table><tr><th>client</th><th>requests</th><th>errors</th><th>tokens in / out</th><th>median time</th><th>requests over the window</th><th>last seen</th><th>IP · app</th><th>personas · models</th><th></th></tr>${rows}</table></div>` : '<p class="hint">No traffic in this window.</p>'}</div>`;
-  $("#au-hours").onchange = e => { o.hours = +e.target.value; render(); };
+    <div class="pickbar"><div class="seg" id="au-hours" role="tablist" aria-label="window">${WIN.map(([h, l]) => `<button role="tab" aria-selected="${h == o.hours}" class="${h == o.hours ? "on" : ""}" data-h="${h}">${l}</button>`).join("")}</div>
+      <span class="hint">Every program that called the router in the last ${esc(winLabel)}.</span></div>
+    <div class="ov-kpis">
+      ${kpi("requests", total.toLocaleString(), "in the last " + esc(winLabel))}
+      ${kpi("clients", cl.length, `${cl.filter(c => c.tracked).length} known by name`)}
+      ${kpi("untracked", tone(d.untracked || 0, "warn"), d.untracked ? "no client key: shown by IP" : "every program has a key")}
+      ${kpi("errors", tone(errs, "bad"), !errs ? "none in the window" : (100 * errs / total).toFixed(errs / total < 0.01 ? 2 : 1) + "% of requests")}
+      ${kpi("tokens in / out", `${_fmtK(tin)}<small>/ ${_fmtK(tout)}</small>`, "read / written")}
+      ${kpi("running now", nLive ? `<span style="color:var(--ok)">${nLive}</span>` : "0", nLive ? "see below" : "nothing in flight")}
+    </div>
+    <div class="lv-grid">
+      <div class="card"><div class="card-h">Running right now</div>${live ? `<table class="no-tools"><tr><th>client</th><th>persona</th><th>model</th><th>backend</th><th>phase</th><th>for</th></tr>${live}</table>` : '<p class="hint" style="margin:0">Nothing in flight.</p>'}</div>
+      <div class="card"><div class="card-h">Share of requests <span class="hint">— who sent the traffic</span></div>${top.length ? top.map(c => bar(c.client, c.requests, !c.tracked)).join("") + (rest ? bar(`${byReq.length - 8} more`, rest) : "") : '<p class="hint" style="margin:0">No traffic in this window.</p>'}</div>
+    </div>
+    <div class="card"><div class="card-h">Clients <span class="hint">— ${cl.length} in the window</span></div>${rows ? `<div class="tscroll"><table><tr><th>client</th><th>requests</th><th>over the window</th><th>errors</th><th title="Tokens read / written">tokens in / out</th><th>median time</th><th>last seen</th><th title="Personas, then the models that served them">personas · models</th><th></th></tr>${rows}</table></div>` : '<p class="hint" style="margin:0">No traffic in this window.</p>'}</div>
+    <details class="how"><summary>What "untracked" means and how to name a program</summary><p class="hint">A program with a client key shows by its name; one without a key shows as <b>untracked · its IP</b>. Give it a key (Access → Clients &amp; Keys) and put that key in its API-key field (AnythingLLM, Open WebUI…) to track it by name. The route map with the brain and live paths is Routing → Routes (tick <i>active only</i>).</p></details>`;
+  $("#au-hours").onclick = e => {
+    const b = e.target.closest("button[data-h]");
+    if (!b || +b.dataset.h === o.hours) return;
+    o.hours = +b.dataset.h; render();
+  };
   document.querySelectorAll("[data-mk]").forEach(b => b.onclick = () => {
     window._clientOpts = window._clientOpts || {}; window._clientOpts.preset = "openwebui";
     current = "Clients & Keys"; render();
@@ -6925,31 +7054,38 @@ async function tabHostAdmin() {
   const be = window._hostBackend;
   const cur = bes.find(b => b.name === be) || bes[0];
 
-  // Shared backend selector row (both panels render it, so the dropdown is
-  // always present for the onchange handler bound at the end).
+  // v0.181.135: every backend is a button that carries its own state (was a dropdown
+  // that hid the others). Both panels render it, so the click handler bound at the
+  // end always finds it.
   const selector = hint => {
-    const beOpts = bes.map(b =>
-      `<option ${b.name === be ? "selected" : ""}>${esc(b.name)}</option>`).join("");
     const flav = _FLAVOR_LABEL[cur.flavor] || cur.flavor;
-    return `<div class="row"><label>backend</label><select id="host-be">${beOpts}</select>
+    const btns = bes.map(b => `<button role="tab" aria-selected="${b.name === be}" class="${b.name === be ? "on" : ""}" data-be="${esc(b.name)}"
+        title="${esc((_FLAVOR_LABEL[b.flavor] || b.flavor) + " · " + b.url + (b.healthy ? "" : " · not answering"))}"><i class="ov-led ${b.healthy ? "is-ok" : "is-bad"}"></i>${esc(b.name)}</button>`).join("");
+    return `<div class="pickbar"><div class="seg" id="host-be" role="tablist" aria-label="backend">${btns}</div>
       <span class="pill" title="server software behind the wire protocol — drives the admin surface">${esc(flav)}</span>
       ${cur.flavor === "ollama"
           ? (cur.version ? `<span class="pill ok" title="Ollama server version (/api/version)">Ollama v${esc(cur.version)}</span>`
                          : '<span class="pill warn" title="/api/version unreachable">version ?</span>')
           : `<span class="pill ${cur.healthy ? "ok" : "warn"}">${cur.healthy ? "healthy" : "unverified"}</span>${cur.version ? ` <span class="pill ok" title="Server version / build">${esc(cur.version)}</span>` : ""}`}
-      <span class="hint">${hint}</span></div>`;
+      <span class="hint mono">${esc(cur.url)}</span></div>
+      ${hint ? `<p class="hint">${hint}</p>` : ""}`;
   };
 
   if (cur.flavor === "ollama") await hostRenderOllama(be, d, selector);
   else await hostRenderDiag(cur, selector);
 
-  $("#host-be").onchange = e => { window._hostBackend = e.target.value; render(); };
+  const pick = $("#host-be");
+  if (pick) pick.onclick = e => {
+    const b = e.target.closest("button[data-be]");
+    if (!b || b.dataset.be === window._hostBackend) return;
+    window._hostBackend = b.dataset.be; render();
+  };
 }
 
 // -- read-only diagnostics panel (llama.cpp / Unsloth / vLLM / OpenAI) --------
 async function hostRenderDiag(cur, selector) {
   const note = {
-    llamacpp: "Plain <span class='mono'>llama-server</span> is read-only over HTTP — one model per process. Model add/switch/delete needs the separate <b>llama-swap</b> proxy (auto-detected: its resident models are shown below and on the Live tab).",
+    llamacpp: "Plain <span class='mono'>llama-server</span> is read-only over HTTP — one model per process. Model add/switch/delete needs the separate <b>llama-swap</b> proxy (auto-detected: its resident models are shown here and on the Live tab).",
     unsloth: "Unsloth serves chat (OpenAI + Anthropic compatible). Loading a model is a host CLI, not a REST call, so there is nothing to add or delete over HTTP.",
     vllm: "vLLM is read-only over HTTP — it serves the model(s) it was launched with. Engine metrics (KV cache, queue, preemptions, TTFT/TPOT) also appear live on Dashboard → Live.",
     openai: "Generic OpenAI-compatible endpoint — read-only model listing.",
@@ -6957,53 +7093,140 @@ async function hostRenderDiag(cur, selector) {
     meridian: "Meridian (Claude via the Claude Code SDK) — read-only: its /health (sign-in, plan, version, tool mode) and /metrics (requests, queue, TTFT, upstream latency). Sign-in and re-auth are under Backends → Pool → Meridian.",
   }[cur.flavor] || "";
   $("#main").innerHTML = `
-    <h2 style="display:flex;align-items:center">Host Admin — diagnostics ${help(cur.flavor === "vllm" ? "host_vllm" : cur.flavor === "llamacpp" ? "host_llamacpp" : "")}</h2>
-    ${selector("Read-only — these servers expose no model CRUD over HTTP.")}
-    ${note ? `<p class="hint">${note}</p>` : ""}
+    <h2 style="display:flex;align-items:center">Host Admin ${help(cur.flavor === "vllm" ? "host_vllm" : cur.flavor === "llamacpp" ? "host_llamacpp" : "")}</h2>
+    ${selector("")}
+    <div id="host-diag"><p class="hint">Asking ${esc(cur.name)}…</p></div>
     ${cur.flavor === "unsloth" ? `<div class="card">
-      <h2 style="margin-top:0">Load a model (host CLI)</h2>
+      <div class="card-h">Load a model (host CLI)</div>
       <p class="hint">There is no REST load endpoint — run this on the Unsloth host:</p>
-      <pre class="mono" style="white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px">unsloth run --model &lt;model-name&gt;:&lt;variant&gt;</pre></div>` : ""}
-    <div id="host-diag"><p class="hint">probing…</p></div>`;
+      <pre class="raw mono">unsloth run --model &lt;model-name&gt;:&lt;variant&gt;</pre></div>` : ""}
+    ${note ? `<details class="how"><summary>What this kind of server offers over HTTP</summary><p class="hint">Read-only: these servers have no way to add, switch or delete a model over HTTP. ${note}</p></details>` : ""}`;
+  const paint = html => {
+    // a slower answer for a backend that is no longer the one shown is dropped
+    if (window._hostBackend !== cur.name || !$("#host-diag")) return;
+    $("#host-diag").innerHTML = html;
+  };
   try {
     const r = await api("host/diag?backend=" + encodeURIComponent(cur.name));
-    $("#host-diag").innerHTML = r.ok ? renderDiagReport(r.report)
-      : `<p class="hint"><span class="pill bad">error</span> ${esc(r.error)}</p>`;
+    paint(r.ok ? renderDiagReport(r.report, cur)
+      : `<p class="hint"><span class="pill bad">error</span> ${esc(r.error)}</p>`);
   } catch (e) {
-    $("#host-diag").innerHTML = `<p class="hint"><span class="pill bad">error</span> ${esc(e.message)}</p>`;
+    paint(`<p class="hint"><span class="pill bad">error</span> ${esc(e.message)}</p>`);
   }
 }
 
-function renderDiagReport(rep) {
-  const card = (title, inner, tip) => `<div class="card"><h2 style="margin-top:0"${tip ? ` title="${esc(tip)}"` : ""}>${title}</h2>${inner}</div>`;
-  const errLine = e => `<p class="hint"><span class="pill bad">unreachable</span> ${esc(e || "no response")}</p>`;
+// v0.181.135. Why a probe did not succeed: the server does not offer that endpoint
+// (absent), it refused the key (denied), or it gave no usable answer (error). The
+// status in the error text is read too, for a report without the `state` field.
+function probeState(p) {
+  if (!p || p.ok) return "ok";
+  if (p.state) return p.state;
+  const code = p.status_code || +((/\bHTTP (\d{3})\b/.exec(p.error || "") || [])[1] || 0);
+  return [404, 405, 501].includes(code) ? "absent" : [401, 403].includes(code) ? "denied" : "error";
+}
+const _PROBE_INFO = {
+  health: ["/health", "whether the server is up and its model is loaded"],
+  version: ["/version", "the server's version"],
+  props: ["/props", "the loaded model file, context size, slots and default sampling (llama-server)"],
+  slots: ["/slots", "what each parallel slot is doing (llama-server; off when it was started with --no-slots)"],
+  models: ["/v1/models", "the models it serves"],
+  metrics: ["/metrics", "engine counters: KV cache, queue, tokens per second (llama-server needs --metrics)"],
+};
+// Pairs in a /health reply that read better as a share: [part, whole, what it is].
+const _HEALTH_RATIOS = [["vram_hits", "lookups", "expert lookups answered from VRAM"],
+                        ["vram_held", "vram_slots", "VRAM expert slots filled"],
+                        ["vram_held", "experts", "experts held in VRAM"]];
+
+function renderDiagReport(rep, cur) {
+  cur = cur || {};
+  const card = (title, inner, tip) => `<div class="card"><div class="card-h"${tip ? ` title="${esc(tip)}"` : ""}>${title}</div>${inner}</div>`;
   const gb = b => b ? (b / 1073741824).toFixed(1) + " GB" : "—";
   const bn = n => n ? (n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : (n / 1e6).toFixed(0) + "M") : "—";
   const yes = v => v ? '<span class="pill ok">yes</span>' : '<span class="hint">no</span>';
-  let html = "";
-  if (rep.health) {
-    const h = rep.health;
-    html += card("Health", h.ok
-      ? `<span class="pill ok">ok</span> <span class="mono">${esc(typeof h.body === "string" ? h.body : JSON.stringify(h.body))}</span>`
-      : errLine(h.error || ("HTTP " + h.status_code)), "GET /health — the server is up and the model is loaded");
+  const isObj = v => !!v && typeof v === "object" && !Array.isArray(v);
+  const label = k => String(k).replace(/_/g, " ");
+  const val = v => v === true ? "yes" : v === false ? "no" : v == null ? "—"
+    : typeof v === "number" ? (Number.isInteger(v) ? v.toLocaleString() : String(Math.round(v * 100) / 100))
+    : Array.isArray(v) ? v.join(", ") : isObj(v) ? JSON.stringify(v) : String(v);
+  const tile = (k, v) => { const t = val(v); return `<div class="tile" title="${esc(k)}"><div class="t-lbl">${esc(label(k))}</div><div class="t-val${t.length > 10 ? " sm" : ""}">${esc(t)}</div></div>`; };
+
+  // what did not succeed, split by why
+  const failed = [], absent = [];
+  for (const k of ["health", "version", "props", "slots", "models", "metrics"]) {
+    const p = rep[k];
+    if (!p || p.ok) continue;
+    // the model list is not optional: a server without it is a wrong address
+    (probeState(p) === "absent" && k !== "models" ? absent : failed).push([k, p]);
   }
-  if (rep.version) {
-    const v = rep.version;
-    html += card("Version", v.ok ? `<span class="pill ok">vLLM ${esc(v.version || "?")}</span>` : errLine(v.error), "GET /version");
+  const good = k => rep[k] && rep[k].ok ? rep[k] : null;
+  const h = rep.health, p = good("props"), sl = good("slots"), m = good("models"), mt = good("metrics");
+  const body = h && h.ok && isObj(h.body) ? h.body : {};
+  const sum = (mt && mt.summary) || {};
+
+  // the numbers of this backend at a glance
+  const kpis = [];
+  const kpi = (l, v, sub, small) => kpis.push(`<div class="kpi"><span class="kpi-l">${l}</span><span class="kpi-v${small ? " sm" : ""}">${v}</span><span class="kpi-s">${sub || ""}</span></div>`);
+  const hAsked = h && probeState(h) !== "absent";
+  const up = hAsked ? !!h.ok : m ? true : !!cur.healthy;
+  const stTxt = sum.status || (typeof body.status === "string" && body.status) || (up ? "answering" : "not answering");
+  kpi("status", `<span style="color:var(--${up ? "ok" : "bad"})">${esc(stTxt)}</span>`,
+      hAsked ? `GET /health · ${h.status_code ? "HTTP " + esc(h.status_code) : "no answer"}` : m ? "answers /v1/models" : "");
+  const file = p && p.model_path ? String(p.model_path).split(/[\\/]/).pop() : "";
+  const ids = m ? m.models || [] : [];
+  const modelName = (typeof body.model === "string" && body.model) || (ids.length === 1 ? ids[0] : "") || file;
+  if (modelName) kpi("model", esc(modelName), file && file !== modelName ? `<span title="${esc(p.model_path)}">${esc(file)}</span>` : ids.length > 1 ? `${ids.length} models listed` : "", true);
+  else if (ids.length) kpi("models", ids.length, "served by this backend");
+  const ctx = (p && p.n_ctx) || body.max_context || (isObj(body.tiers) && body.tiers.max_context)
+    || (m && (m.details || []).map(x => x.max_model_len || x.n_ctx_train).find(Boolean));
+  if (ctx) kpi("context", `${esc(formatCtx(+ctx))}<small>tokens</small>`, "the most one request can use");
+  if (sl && sl.count) kpi("slots", `${esc(sl.busy)}<small>of ${esc(sl.count)} busy</small>`, sl.busy ? "working now" : "idle");
+  else if (p && p.total_slots != null) kpi("slots", esc(p.total_slots), "parallel requests");
+  if (sum.logged_in != null) kpi("sign-in", sum.logged_in ? "signed in" : `<span style="color:var(--bad)">signed out</span>`, sum.subscription ? esc(sum.subscription) + " plan" : "", true);
+  const ver = cur.version || (p && p.build_info) || sum.version || (good("version") || {}).version || "";
+  if (ver) kpi("server", esc(ver), esc(_FLAVOR_LABEL[rep.flavor] || rep.flavor || ""), true);
+  let html = `<div class="ov-kpis">${kpis.join("")}</div>`;
+
+  if (failed.length) {
+    html += card(`Did not answer <span class="hint">— these should work on this server</span>`, `<ul class="plain">${failed.map(([k, f]) => {
+      const st = probeState(f);
+      return `<li><span class="mono">${esc(_PROBE_INFO[k][0])}</span> <span class="pill ${st === "denied" ? "warn" : "bad"}">${st === "denied" ? "key refused" : st === "absent" ? "not found" : "no answer"}</span>
+        <span class="hint">${esc(f.error || ("HTTP " + f.status_code))}${st === "denied" ? " — check this backend's API key under Backends → Pool." : st === "absent" ? " — check this backend's address under Backends → Pool." : ""}</span></li>`;
+    }).join("")}</ul>`);
   }
+
+  if (h && h.ok) {
+    const facts = [], groups = [];
+    if (isObj(h.body)) for (const [k, v] of Object.entries(h.body)) {
+      if (k === "status" && typeof v === "string") continue;        // shown above, as the status
+      (isObj(v) ? groups : facts).push([k, v]);
+    }
+    let inner = facts.length ? `<div class="tiles">${facts.map(([k, v]) => tile(k, v)).join("")}</div>` : "";
+    for (const [g, o] of groups) {
+      const ratios = _HEALTH_RATIOS.filter(([a, b]) => typeof o[a] === "number" && typeof o[b] === "number" && o[b] > 0);
+      inner += `<div class="tgroup">${esc(label(g))}</div>`
+        + ratios.map(([a, b, what]) => {
+            const pct = Math.min(100, 100 * o[a] / o[b]);
+            return `<div class="ratio" title="${esc(a)} ÷ ${esc(b)}"><span>${esc(what)}</span><span class="meter"><span style="width:${pct.toFixed(1)}%"></span></span><b>${pct.toFixed(1)}%<small>${esc(val(o[a]))} of ${esc(val(o[b]))}</small></b></div>`;
+          }).join("")
+        + `<div class="tiles" style="margin-top:8px">${Object.entries(o).map(([k, v]) => tile(k, v)).join("")}</div>`;
+    }
+    if (!inner) inner = `<span class="pill ok">ok</span> <span class="mono">${esc(typeof h.body === "string" ? h.body : "")}</span>`;
+    if (isObj(h.body)) inner += `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(h.body, null, 1))}</pre></details>`;
+    html += card(`Health <span class="hint">— what GET /health answered</span>`, inner);
+  }
+
+  let grid = "";
   if (rep.swap && rep.swap.is_swap) {
-    html += card("llama-swap — resident models (/running)", rep.swap.running.length
-      ? `<table><tr><th>model</th><th title="llama-swap process state">state</th></tr>${rep.swap.running.map(r =>
+    grid += card(`llama-swap <span class="hint">— resident models (/running)</span>`, rep.swap.running.length
+      ? `<table class="no-tools"><tr><th>model</th><th title="llama-swap process state">state</th></tr>${rep.swap.running.map(r =>
           `<tr><td class="mono">${esc(r.model)}</td><td>${esc(r.state || "")}</td></tr>`).join("")}</table>`
       : '<p class="hint">nothing loaded — the next request for a configured model will start it</p>',
       "llama-swap starts/stops llama-server processes per model on demand");
   }
-  if (rep.props) {
-    const p = rep.props;
+  if (p) {
     const mods = p.modalities || {}, caps = p.chat_template_caps || {};
     const samp = p.sampling_defaults || {};
-    html += card("Loaded model — /props", p.ok
-      ? `<table>
+    grid += card(`Loaded model <span class="hint">— /props</span>`, `<table class="no-tools">
           <tr><th>model</th><td class="mono">${esc(p.model_path || "?")}</td></tr>
           <tr><th title="Context per slot — the most one request can use">context (n_ctx / slot)</th><td class="mono">${esc(p.n_ctx ?? "?")}</td></tr>
           <tr><th title="Parallel request slots (-np)">slots</th><td class="mono">${esc(p.total_slots ?? "?")}</td></tr>
@@ -7012,39 +7235,44 @@ function renderDiagReport(rep) {
           <tr><th title="The chat template declares tool support — needs --jinja">tool calling</th><td>${Object.keys(caps).length ? yes(caps.supports_tools || caps.supports_tool_calls) : '<span class="hint">unknown (older build)</span>'}</td></tr>
           <tr><th>chat template</th><td>${p.chat_template_present ? "present" : "—"}</td></tr>
           ${Object.keys(samp).length ? `<tr><th title="Server-side defaults; per-request values from personas / clients override them">default sampling</th><td class="mono">${Object.entries(samp).map(([k, v]) => `${esc(k)}=${esc(Array.isArray(v) ? v.join(";") : v)}`).join(" · ")}</td></tr>` : ""}
-         </table>`
-      : errLine(p.error));
+         </table>`);
   }
-  if (rep.slots) {
-    const s = rep.slots;
-    html += card(`KV slots — /slots${s.ok && s.count ? ` (${s.busy}/${s.count} busy)` : ""}`, s.ok
-      ? (s.count ? `<table><tr><th>id</th><th>state</th><th title="Context size of this slot">n_ctx</th><th title="Tokens decoded so far for the current request">decoded</th><th title="Speculative decoding active on this slot">spec</th></tr>${s.slots.map(x =>
+  if (sl) {
+    grid += card(`Slots <span class="hint">— /slots${sl.count ? ` · ${esc(sl.busy)} of ${esc(sl.count)} busy` : ""}</span>`,
+      sl.count ? `<table class="no-tools"><tr><th>id</th><th>state</th><th title="Context size of this slot">n_ctx</th><th title="Tokens decoded so far for the current request">decoded</th><th title="Speculative decoding active on this slot">spec</th></tr>${sl.slots.map(x =>
           `<tr><td class="mono">${esc(x.id)}</td><td>${x.busy ? '<span class="pill warn">busy</span>' : '<span class="pill ok">idle</span>'}</td>
             <td class="mono">${esc(x.n_ctx || "")}</td><td class="mono">${esc(x.n_decoded || 0)}</td><td>${x.speculative ? "yes" : ""}</td></tr>`).join("")}</table>`
-          : `<p class="hint">no slots reported</p>`)
-      : errLine((s.error || "") + " — /slots may be disabled (--no-slots)"));
+        : `<p class="hint">no slots reported</p>`);
   }
-  if (rep.models) {
-    const m = rep.models, det = m.details || (m.models || []).map(id => ({id}));
-    const hasCtx = det.some(d => d.max_model_len || d.n_ctx_train), hasSize = det.some(d => d.size || d.n_params),
-          hasStatus = det.some(d => d.status);
-    html += card(`Models — /v1/models${m.ok ? " (" + m.models.length + ")" : ""}`, m.ok
-      ? (det.length ? `<table><tr><th>id</th>${hasCtx ? '<th title="vLLM max_model_len, or llama.cpp trained context (n_ctx_train)">context</th>' : ""}${hasSize ? '<th>params</th><th title="Weights file size">size</th>' : ""}${hasStatus ? "<th>status</th>" : ""}</tr>${det.map(x =>
+  if (m) {
+    const det = m.details || (m.models || []).map(id => ({id}));
+    const hasCtx = det.some(x => x.max_model_len || x.n_ctx_train), hasSize = det.some(x => x.size || x.n_params),
+          hasStatus = det.some(x => x.status);
+    grid += card(`Models <span class="hint">— /v1/models · ${det.length}</span>`,
+      !det.length ? `<p class="hint">no models reported</p>`
+      : !(hasCtx || hasSize || hasStatus)
+        // names only: chips, not a one-column table as wide as the page
+        ? `<div class="chips">${det.map(x => `<span class="pill mono">${esc(x.id)}</span>`).join("")}</div>`
+        : `<table><tr><th>id</th>${hasCtx ? '<th title="vLLM max_model_len, or llama.cpp trained context (n_ctx_train)">context</th>' : ""}${hasSize ? '<th>params</th><th title="Weights file size">size</th>' : ""}${hasStatus ? "<th>status</th>" : ""}</tr>${det.map(x =>
           `<tr><td class="mono">${esc(x.id)}${x.parent ? ` <span class="hint">(LoRA of ${esc(x.parent)})</span>` : ""}</td>
             ${hasCtx ? `<td class="mono">${esc(x.max_model_len || x.n_ctx_train || "—")}</td>` : ""}
             ${hasSize ? `<td class="mono">${bn(x.n_params)}</td><td class="mono">${gb(x.size)}</td>` : ""}
-            ${hasStatus ? `<td>${esc(x.status || "")}</td>` : ""}</tr>`).join("")}</table>`
-          : `<p class="hint">no models reported</p>`)
-      : errLine(m.error));
+            ${hasStatus ? `<td>${x.status ? `<span class="pill ${x.status === "loaded" ? "ok" : ""}">${esc(x.status)}</span>` : ""}</td>` : ""}</tr>`).join("")}</table>`);
   }
-  if (rep.metrics) {
-    const mt = rep.metrics;
-    html += card("Metrics — /metrics", mt.ok
-      ? `${renderServers([{...(mt.summary || {}), backend: rep.backend, flavor: rep.flavor, metrics_ok: true}])}
-         <details><summary>raw engine series (${Object.keys(mt.metrics || {}).length})</summary>
-         ${Object.keys(mt.metrics || {}).length ? `<table>${Object.entries(mt.metrics).map(([k, v]) =>
-          `<tr><th class="mono">${esc(k)}</th><td class="mono">${esc(v)}</td></tr>`).join("")}</table>` : '<p class="hint">none</p>'}</details>`
-      : errLine(mt.error));
+  if (grid) html += `<div class="ov-grid">${grid}</div>`;
+
+  if (mt) {
+    const series = Object.keys(mt.metrics || {}).length;
+    const shown = renderServers([{...sum, backend: rep.backend, flavor: rep.flavor, metrics_ok: true}]);
+    html += card(`Metrics <span class="hint">— /metrics</span>`, Object.keys(sum).length || series
+      ? `${shown}${series ? `<details><summary>raw engine series (${series})</summary>
+         <table>${Object.entries(mt.metrics).map(([k, v]) => `<tr><th class="mono">${esc(k)}</th><td class="mono">${esc(v)}</td></tr>`).join("")}</table></details>` : ""}`
+      : '<p class="hint" style="margin:0">The endpoint answered, with no counters this page knows.</p>');
+  }
+
+  if (absent.length) {
+    html += card(`Not offered by this server <span class="hint">— it answered "not found"; these are optional and nothing is wrong</span>`,
+      `<ul class="plain">${absent.map(([k]) => `<li><span class="mono">${esc(_PROBE_INFO[k][0])}</span> <span class="hint">${esc(_PROBE_INFO[k][1])}</span></li>`).join("")}</ul>`);
   }
   return html || `<p class="hint">no diagnostics available for this flavor</p>`;
 }

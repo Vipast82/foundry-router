@@ -181,7 +181,7 @@ class Services:
         from .automation_store import AutomationStore
         self.automation = AutomationStore(db)
         # the central secret store: its own file beside the DB, locked until the
-        # passphrase is entered on Setup → Secrets (secret_store.py)
+        # passphrase is entered on Access → Secrets (secret_store.py)
         from .secret_store import SecretStore
         self.secret_store = SecretStore(
             Path(getattr(db, "path", data_dir() / "foundry.sqlite")).parent / "secrets.sqlite")

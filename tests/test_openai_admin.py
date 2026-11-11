@@ -144,6 +144,54 @@ async def test_vllm_diagnostics_includes_metrics(tmp_path):
     assert "other_metric" not in m                     # only the wanted gauges kept
 
 
+async def test_a_probe_says_why_it_did_not_succeed(tmp_path):
+    """v0.181.135: a healthy backend showed three red "unreachable" cards for endpoints
+    it simply does not offer. Each probe now carries a state the page reads."""
+    from foundry_router.pool.openai_admin import probe_failure
+    admin = _admin(tmp_path, LLAMA)
+    rep = await admin.diagnostics("llamacpp-1")
+    assert rep["slots"]["state"] == "absent" and rep["slots"]["status_code"] == 501     # --no-slots
+    assert rep["slots"]["error"] == "HTTP 501: slots disabled"
+    assert rep["metrics"]["state"] == "absent" and rep["metrics"]["status_code"] == 404
+    assert "--metrics" in rep["metrics"]["error"]
+    # a refused key is not "the endpoint is not there"
+    nokey = BackendConfig(name="unsloth-2", type="openai-compatible",
+                          url="http://unsloth:8000/v1", flavor="unsloth")
+    rep = await _admin(tmp_path, nokey).diagnostics("unsloth-2")
+    assert rep["models"]["state"] == "denied" and rep["models"]["status_code"] == 401
+    # no answer at all, and a server error, are errors
+    assert probe_failure(ConnectionError("refused"))["state"] == "error"
+    assert "status_code" not in probe_failure(ConnectionError("refused"))
+    assert probe_failure(status=503)["state"] == "error"
+    assert probe_failure(status=405)["state"] == "absent" and probe_failure(status=403)["state"] == "denied"
+
+
+async def test_a_failing_health_keeps_its_body_and_the_probes_run_together(tmp_path):
+    import asyncio
+
+    seen, gate = [], asyncio.Event()
+
+    async def handler(request):
+        seen.append(request.url.path)
+        if len(seen) >= 4:                    # all four are in flight before any is answered
+            gate.set()
+        await asyncio.wait_for(gate.wait(), 5)
+        if request.url.path == "/health":
+            return httpx.Response(503, json={"error": "loading model"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(404, text="")
+
+    admin = OpenAIAdmin(httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                        _Pool([_State(VLLM)]), Database(tmp_path / "g.sqlite"))
+    rep = await admin.diagnostics("vllm-1")
+    assert list(rep)[4:] == ["health", "version", "models", "metrics"]       # the page's order
+    assert rep["health"]["ok"] is False and rep["health"]["state"] == "error"
+    assert rep["health"]["body"] == {"error": "loading model"} and rep["health"]["status_code"] == 503
+    assert rep["version"] == {"ok": False, "error": "HTTP 404", "state": "absent", "status_code": 404}
+    assert rep["models"]["ok"]
+
+
 def test_unknown_backend_raises(tmp_path):
     admin = _admin(tmp_path, LLAMA)
     with pytest.raises(ValueError):

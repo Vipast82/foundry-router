@@ -2,6 +2,31 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.135 — Host Admin, Active Use, Helpers & Limits, MCP Metrics and Cost redesigned; the refused-key message says what was sent
+
+**Host Admin.** A backend that is healthy showed three red "unreachable" cards (`/props`, `/slots`, `/metrics` answering 404) and its `/health` reply as one line of JSON running off the page.
+
+- Each probe that does not succeed now says why: `absent` (the server answered 404, 405 or 501: it does not offer that endpoint), `denied` (401 or 403: the key was refused) or `error` (no usable answer). Endpoints a server does not offer are listed once, quietly, under "Not offered by this server". Only a real failure is red, and a refused key points to the backend's key in Backends → Pool. A missing `/v1/models` still counts as a failure.
+- The `/health` reply is shown as tiles, one per field; a nested group gets its own heading, and pairs that are a share of each other (lookups answered from VRAM, VRAM slots filled) are drawn as bars. The reply as sent is one click away.
+- The top of the page is the backend's numbers: status, model, context, slots, server version, sign-in.
+- Backends are buttons with their state on them (was a dropdown). Model lists that are only names are chips, not a one-column table.
+- The probes are asked together, not one after another.
+
+**Active Use.** Six numbers on top (requests, clients, untracked, errors, tokens, running now), a bar per client for its share of the traffic, and a clients table whose rows are 88 px tall (the address, program, persona and model columns each wrapped into a narrow tall cell before). The window is a row of buttons.
+
+**Helpers & Limits.** Five numbers on top, then four sections: backend limits, lanes for short jobs, queue classes, waiting now. The lane settings left the limits table for a table of their own, which also shows whether each lane is free. Sessions on a backend are drawn as filled places out of the allowed number. Disabled backends stand last. The long explanations are folded under "How these limits work".
+
+**MCP Metrics.** Five sections (over time, tools, servers and callers, context cost, recent calls) under the totals. The per-server table shows the connection the router keeps open to each server and how long it has sat idle.
+
+**Cost.** Four sections (comparison, head to head, tokens by model, prices) under the totals and the verdict. The totals are tiles and include the cheapest paid service; the bar chart comes before the table.
+
+**The refused-key message.** Cline answered "unknown Foundry client key — make one in Foundry's web UI (Setup → Clients & keys)". The page has been under Access for a long time, and the message gave no way to tell a changed key from a program that was not sending its saved key. That day the program was sending the 7-character placeholder `foundry`.
+
+- The refusal now reads: "unknown Foundry client key: this program sent a short placeholder (7 characters), which matches no client. In Foundry's web UI open Access → Clients & Keys, make or renew the key for this program, and paste it into this program's API key field". What was sent is described (a placeholder, an OpenAI-style key, a Foundry key that was deleted, rotated or mistyped), never shown.
+- Every other message that said "Setup → Clients & keys" or "Setup → Secrets" names Access.
+
+Tests: `tests/test_openai_admin.py`, `tests/test_ui_kit.py`, `tests/test_client_auth.py`.
+
 ## v0.181.134 — one page that would not open ended the whole answer
 
 **What happened.** Foundry-Chat in AnythingLLM searched twice, then opened a page that answered 404 (in a second try, 403). The thoughts showed "foundry-finder call failed (McpError: Website Error (404): Page not found) — handing this request to the brain", the brain replied in prose, was told to delegate, said nothing more, and the chat got "The routing agent produced no answer — please retry." Both searches that had worked were thrown away.

@@ -612,7 +612,7 @@ def doctor(c: Coordinator, project: str = "") -> int:
                             # coordinator client's allowlist is what's missing
                             legacy = sorted(x for x in ids if x in _LEGACY_ALIASES)
                             hint = (f"; Kilo's key can use it, so add {persona} to the coordinator "
-                                    f"client's allowed personas (Foundry → Setup → Clients & keys)"
+                                    f"client's allowed personas (Foundry → Access → Clients & Keys)"
                                     + (f" — {', '.join(legacy)} {'is' if len(legacy) == 1 else 'are'} "
                                        f"allowed but legacy aliases don't authorize {persona}"
                                        if legacy else ""))

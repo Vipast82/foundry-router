@@ -1323,7 +1323,7 @@ function slotsHtml(f) {
   }).join("");
   return `<div class="sf sf-slots${mod ? " mod" : ""}" data-sf="slots">
     <label class="k">Studio slots <code class="hint" style="margin:0;font-weight:400">slots</code>${mod ? ` <span class="pill info">changed</span>` : ""}</label>
-    <div class="d">${esc(f.description || "")} A slot's secrets come from Setup → Secrets with its own slot key.</div>
+    <div class="d">${esc(f.description || "")} A slot's secrets come from Access → Secrets with its own slot key.</div>
     ${rows || `<p class="hint">No slots in the router's settings yet (the coordinator may still have some in its project.toml: Import brings them in).</p>`}
     <div class="row"><input type="text" id="slot-new" placeholder="new slot id, e.g. slot-2" aria-label="New slot id">
       <button class="act" type="button" data-act="slot-add">Add slot</button></div>

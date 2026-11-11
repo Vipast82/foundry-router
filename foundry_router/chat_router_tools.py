@@ -50,9 +50,9 @@ GET_DENY = [
 # writes that create, show or set secrets, or that a typed tool does better
 WRITE_DENY = [
     (re.compile(r"^/admin/api/setup/clients/?$"), "creating a client key shows the key; make it "
-     "in Setup -> Clients & keys"),
+     "in Access -> Clients & Keys"),
     (re.compile(r"^/admin/api/setup/clients/[^/]+/rotate"), "rotating a key shows the new key; do "
-     "it in Setup -> Clients & keys"),
+     "it in Access -> Clients & Keys"),
     (re.compile(r"^/admin/api/meridian/(reauth|auth_config|refresh)"), "Meridian sign-in is done "
      "in the dashboard (Pool -> Meridian)"),
     (re.compile(r"^/admin/api/mcp_servers/token"), "MCP tokens are secrets; set them in MCP Servers"),
@@ -217,7 +217,7 @@ def plan_config(svc, changes: dict) -> tuple[dict, list, list]:
             raise ChatError(f"{path}: the value contains a redacted placeholder")
         if parts[0] == "clients" and len(parts) > 2 and parts[2] in ("key_hash", "key_hint",
                                                                       "created"):
-            raise ChatError(f"{path} is managed by Setup -> Clients & keys")
+            raise ChatError(f"{path} is managed by Access -> Clients & Keys")
         try:
             parent, key = _walk(new, parts, create=True)
         except KeyError as e:

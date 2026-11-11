@@ -1,5 +1,5 @@
 """Central secret store: per-game (project) and shared secrets for Studio slots and
-other Foundry machines (Setup → Secrets, secrets_api.py).
+other Foundry machines (Access → Secrets, secrets_api.py).
 
 Values are write-only. They can be set, rotated, cleared and pulled by a client key
 with the `secrets` scope, but never shown back in the UI or the admin API.
@@ -298,8 +298,8 @@ class SecretStore:
         if self._key is None:
             st = self.state()
             raise SecretStoreError(
-                "the secret store is locked: unlock it on Setup → Secrets" if st == "locked"
-                else "the secret store has no passphrase yet: set one on Setup → Secrets",
+                "the secret store is locked: unlock it on Access → Secrets" if st == "locked"
+                else "the secret store has no passphrase yet: set one on Access → Secrets",
                 st, 503)
         return self._key
 

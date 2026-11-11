@@ -2,7 +2,7 @@
 
 Made once, under <data>/tls/ (key file 0600), and kept across restarts. Clients
 do not check a CA. They pin the certificate's SHA-256 fingerprint, which
-Setup → Secrets shows (slot-secrets: FOUNDRY_TLS_FINGERPRINT).
+Access → Secrets shows (slot-secrets: FOUNDRY_TLS_FINGERPRINT).
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """Setup API: client keys and backend limits, managed from the web UI
-(Setup → Clients & keys, Setup → Helpers & limits) instead of config.yaml.
+(Access → Clients & Keys, Access → Helpers & Limits) instead of config.yaml.
 
 Every change goes through config_store.save, so it lands in config.yaml,
 is validated before it is written, and shows up in config history (with
@@ -43,7 +43,7 @@ PRESETS = {
     "operator": {"scopes": ["operator"], "note": "a person using the coordinator control center"},
     "bridge": {"scopes": ["telemetry"], "note": "workstation telemetry bridge "
                                                 "(python -m foundry_coordinator bridge)"},
-    # one key per Studio slot / machine: it pulls only its own bundle (Setup → Secrets)
+    # one key per Studio slot / machine: it pulls only its own bundle (Access → Secrets)
     "slot": {"scopes": ["secrets"], "note": "Studio slot container (slot-secrets pulls its "
                                             "bundle at start and before each gate run)"},
 }

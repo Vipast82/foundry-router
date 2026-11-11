@@ -42,7 +42,10 @@ In `optional` mode a program that sends **no** key still works (as
 any client exists. Cline's OpenAI-compatible provider always sends whatever
 is in its API Key field, so after you add your first client (e.g. for Kilo),
 Cline's placeholder key starts being refused. Fix it by making a client for
-Cline and pasting its key into Cline. While you roll keys out, you can
+Cline and pasting its key into Cline. The refusal says what kind of key arrived
+("this program sent a short placeholder (7 characters)", "a Foundry key
+(deleted, rotated or mistyped)"), and **Access → Clients & Keys** lists each
+refused key by fingerprint with the sending address and program. While you roll keys out, you can
 instead set "keys that match no client" to *let through as anonymous*.
 
 Keys written in config.yaml by hand (below) keep working alongside managed

@@ -9,7 +9,7 @@
          and `slots` on the key narrow it further. Every pull is audited, refusals
          too. Values are never logged.
 
-  admin  /admin/api/secrets...                            (the web UI, Setup → Secrets)
+  admin  /admin/api/secrets...                            (the web UI, Access → Secrets)
          Metadata, set / rotate / clear / delete, passphrase (set, unlock, lock,
          change), settings, pull log. No route returns a value.
 
@@ -176,7 +176,7 @@ async def pull_bundle(request: Request, project: str = "", slot: str = ""):
                        "Secret store is locked: slots can't pull their keys",
                        f"{who} tried to pull its secrets ({project or 'shared'}"
                        f"{'/' + slot if slot else ''}) at {addr or 'an unknown address'}, but "
-                       "the store is locked (the router restarted). Unlock it on Setup → "
+                       "the store is locked (the router restarted). Unlock it on Access → "
                        "Secrets. Slots keep the files they pulled last until then.", project)
             store.record_pull(who, addr, agent, tr, project, slot, [], "locked", e.code)
             return _err(e)
@@ -397,7 +397,7 @@ async def settings(request: Request):
 
 
 def new_access_alert(svc, client_name: str, how: str) -> None:
-    """Called by Setup → Clients & keys when a key gets the secrets scope."""
+    """Called by Access → Clients & Keys when a key gets the secrets scope."""
     cfg = svc.config_store.config
     if not cfg.secrets.alert_on_new_access:
         return

@@ -26,6 +26,7 @@ string, never an exception that sinks the whole diagnostics call.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -47,6 +48,42 @@ _PROBES: dict[str, list[str]] = {
     "vllm":     ["health", "version", "models", "metrics"],
     "openai":   ["models"],
 }
+
+
+# A server that answers one of these for an endpoint does not offer that endpoint.
+ABSENT_STATUS = (404, 405, 501)
+DENIED_STATUS = (401, 403)
+
+
+class _HttpStatus(RuntimeError):
+    """An HTTP answer of 400 or above from a probe."""
+
+    def __init__(self, status: int, text: str = ""):
+        text = (text or "").strip()[:200]
+        super().__init__(f"HTTP {status}: {text}" if text else f"HTTP {status}")
+        self.status = status
+
+
+def probe_failure(e: Optional[BaseException] = None, *, status: Optional[int] = None,
+                  hint: str = "") -> dict:
+    """What a probe that did not succeed reports. `state` says why, so the page can
+    tell an endpoint the server simply does not offer (absent) from a refused key
+    (denied) and from a host that gave no usable answer (error). Before v0.181.135
+    all three were shown as a red "unreachable"."""
+    if status is None and isinstance(e, _HttpStatus):
+        status = e.status
+    state = ("absent" if status in ABSENT_STATUS
+             else "denied" if status in DENIED_STATUS else "error")
+    if isinstance(e, _HttpStatus):
+        msg = str(e)
+    elif e is not None:
+        msg = describe_exception(e)
+    else:
+        msg = f"HTTP {status}"
+    out: dict = {"ok": False, "error": msg + hint, "state": state}
+    if status is not None:
+        out["status_code"] = status
+    return out
 
 
 class OpenAIAdmin:
@@ -100,7 +137,7 @@ class OpenAIAdmin:
     async def _get_json(self, url: str, headers: dict) -> dict:
         r = await self.client.get(url, headers=headers, timeout=_QUICK_TIMEOUT)
         if r.status_code >= 400:
-            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+            raise _HttpStatus(r.status_code, r.text)
         return r.json()
 
     async def _probe_health(self, root: str, headers: dict) -> dict:
@@ -112,10 +149,11 @@ class OpenAIAdmin:
                 body = r.json()
             except Exception:
                 body = (r.text or "").strip()[:200]
-            return {"ok": r.status_code < 400, "status_code": r.status_code,
-                    "body": body}
+            if r.status_code >= 400:
+                return {**probe_failure(status=r.status_code), "body": body}
+            return {"ok": True, "status_code": r.status_code, "body": body}
         except Exception as e:
-            return {"ok": False, "error": describe_exception(e)}
+            return probe_failure(e)
 
     async def _probe_props(self, root: str, headers: dict) -> dict:
         """llama.cpp /props — loaded model path + generation defaults + n_ctx,
@@ -142,7 +180,7 @@ class OpenAIAdmin:
                     "sampling_defaults": sampling,
                     "generation_settings": gen}
         except Exception as e:
-            return {"ok": False, "error": describe_exception(e)}
+            return probe_failure(e)
 
     async def _probe_slots(self, root: str, headers: dict) -> dict:
         """llama.cpp /slots — per-slot busy state + context (may be disabled
@@ -156,7 +194,7 @@ class OpenAIAdmin:
                     "busy": summ.get("slots_busy", 0),
                     "slots": summ.get("slots", [])}
         except Exception as e:
-            return {"ok": False, "error": describe_exception(e)}
+            return probe_failure(e)
 
     async def _probe_swap(self, root: str, headers: dict) -> dict:
         """llama-swap GET /running — which configured models are resident.
@@ -179,7 +217,7 @@ class OpenAIAdmin:
             data = await self._get_json(f"{root}/version", headers)
             return {"ok": True, "version": str((data or {}).get("version") or "")}
         except Exception as e:
-            return {"ok": False, "error": describe_exception(e)}
+            return probe_failure(e)
 
     async def _probe_models(self, v1: str, headers: dict) -> dict:
         """/v1/models — ids plus whatever per-model metadata the server adds
@@ -205,7 +243,7 @@ class OpenAIAdmin:
             return {"ok": True, "models": [d["id"] for d in details],
                     "details": details}
         except Exception as e:
-            return {"ok": False, "error": describe_exception(e)}
+            return probe_failure(e)
 
     async def _probe_metrics(self, root: str, headers: dict, flavor: str) -> dict:
         """Prometheus /metrics (vLLM always; llama.cpp with --metrics) — parsed
@@ -217,7 +255,7 @@ class OpenAIAdmin:
             if r.status_code >= 400:
                 hint = (" — start llama-server with --metrics to enable"
                         if flavor == "llamacpp" else "")
-                return {"ok": False, "error": f"HTTP {r.status_code}{hint}"}
+                return probe_failure(status=r.status_code, hint=hint)
             parsed = prom.parse(r.text or "")
             prefix = "llamacpp:" if flavor == "llamacpp" else "vllm:"
             raw = {}
@@ -229,7 +267,7 @@ class OpenAIAdmin:
             return {"ok": True, "summary": prom.summarize(flavor, parsed),
                     "metrics": dict(sorted(raw.items()))}
         except Exception as e:
-            return {"ok": False, "error": describe_exception(e)}
+            return probe_failure(e)
 
     # -- unified diagnostics -------------------------------------------------------
 
@@ -244,19 +282,19 @@ class OpenAIAdmin:
         headers = self._headers(cfg.api_key)
         report: dict = {"backend": backend, "flavor": flavor, "url": cfg.url,
                         "root": root}
-        for probe in _PROBES.get(flavor, ["models"]):
-            if probe == "health":
-                report["health"] = await self._probe_health(root, headers)
-            elif probe == "props":
-                report["props"] = await self._probe_props(root, headers)
-            elif probe == "slots":
-                report["slots"] = await self._probe_slots(root, headers)
-            elif probe == "models":
-                report["models"] = await self._probe_models(v1, headers)
-            elif probe == "metrics":
-                report["metrics"] = await self._probe_metrics(root, headers, flavor)
-            elif probe == "swap":
-                report["swap"] = await self._probe_swap(root, headers)
-            elif probe == "version":
-                report["version"] = await self._probe_version(root, headers)
+        calls = {
+            "health": lambda: self._probe_health(root, headers),
+            "props": lambda: self._probe_props(root, headers),
+            "slots": lambda: self._probe_slots(root, headers),
+            "models": lambda: self._probe_models(v1, headers),
+            "metrics": lambda: self._probe_metrics(root, headers, flavor),
+            "swap": lambda: self._probe_swap(root, headers),
+            "version": lambda: self._probe_version(root, headers),
+        }
+        names = [p for p in _PROBES.get(flavor, ["models"]) if p in calls]
+        # v0.181.135: asked together. One after another, a host that was slow on
+        # each endpoint held the page for the sum of the waits.
+        results = await asyncio.gather(*(calls[n]() for n in names))
+        for name, res in zip(names, results):
+            report[name] = res
         return report

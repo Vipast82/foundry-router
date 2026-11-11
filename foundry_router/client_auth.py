@@ -26,7 +26,7 @@ in the logs and budgets) and its scopes decide what it may reach:
   required           — inference/media need a valid key.
 `client_auth.unknown_keys` — refuse (default) a key that matches no client, or
                        (optional mode only) let it through as anonymous.
-Keys can be managed in the web UI (Setup → Clients & keys); those are stored
+Keys can be managed in the web UI (Access → Clients & Keys); those are stored
 hashed (client_keys.py). Recent unknown keys are listed there by fingerprint.
 `client_auth.protect_admin` — also require an admin-scoped key for /admin and
                        /ui (off by default so nobody locks themselves out).
@@ -159,6 +159,15 @@ def identify(cfg, headers: dict, agent_tokens: Optional[dict] = None) -> tuple[O
     return None, bool(keys)
 
 
+def unknown_key_message(sent: str = "") -> str:
+    """What a program is told when its key matches no client. `sent` is what the key
+    looks like (client_keys._looks_like), never the key."""
+    return ("unknown Foundry client key"
+            + (f": this program sent {sent}, which matches no client" if sent else "")
+            + ". In Foundry's web UI open Access → Clients & Keys, make or renew the key "
+              "for this program, and paste it into this program's API key field")
+
+
 def _deny(status: int, message: str, code: str) -> tuple[int, bytes]:
     body = {"error": {"message": message, "type": "authentication_error"
                       if status == 401 else "permission_error", "code": code}}
@@ -194,18 +203,22 @@ class ClientAuthMiddleware:
             activity.client_seen(client["client_id"], addr, agent)
         lenient = (unknown == "anonymous" and mode == "optional"
                    and need in ("inference", "media"))
+        sent = ""
         if need and presented and client is None and getattr(cfg, "clients", None):
             for k in _keys_from(headers)[:1]:
                 activity.key_rejected(k, path, addr, agent,
                                       "allowed as anonymous" if lenient else "refused")
+                from .client_keys import _looks_like
+                sent = _looks_like(k)
         if need and presented and client is None and getattr(cfg, "clients", None) \
                 and not lenient:
             # A key that matches nothing is refused — a typo must not silently
             # become "anonymous" (unless the operator chose unknown_keys:
-            # anonymous for a rollout). Setup -> Clients & keys lists them.
-            problem = _deny(401, "unknown Foundry client key — make one in Foundry's web UI "
-                                 "(Setup → Clients & keys) and put it in this client's API "
-                                 "key field", "invalid_api_key")
+            # anonymous for a rollout). Access -> Clients & Keys lists them.
+            # v0.181.135: the message says what kind of key arrived (never the key), so
+            # "I did not change the key" can be checked from the error alone: a program
+            # that sends a placeholder is not sending the key that was saved in it.
+            problem = _deny(401, unknown_key_message(sent), "invalid_api_key")
         elif need == "telemetry":
             # the Foundry Client heart-beats with an operator key (control_api
             # refuses any other source kind from such a key)

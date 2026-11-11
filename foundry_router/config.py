@@ -749,7 +749,7 @@ class ClientConfig(BaseModel):
     See client_auth.py for what each scope reaches."""
     name: str
     key: Optional[str] = None          # use a ${VAR} reference in config.yaml
-    # Keys made in the web UI (Setup -> Clients & keys) are stored only as a
+    # Keys made in the web UI (Access -> Clients & Keys) are stored only as a
     # SHA-256 hash: config.yaml, its version history and export bundles never
     # hold the key itself. key_hint is the first/last characters, for display.
     key_hash: Optional[str] = None
@@ -785,13 +785,13 @@ class ClientConfig(BaseModel):
 
 
 class SecretsConfig(BaseModel):
-    """The central secret store (secret_store.py, Setup → Secrets). Values never
+    """The central secret store (secret_store.py, Access → Secrets). Values never
     live here: only how they may travel."""
     # Serve secret traffic (pulls, value writes, unlock) over plain HTTP too.
     # Off = HTTPS only (needs https_enabled).
     allow_http: bool = True
     # A second, HTTPS-only listener with a self-signed certificate the router
-    # makes (<data>/tls/); its SHA-256 fingerprint is shown on Setup → Secrets and
+    # makes (<data>/tls/); its SHA-256 fingerprint is shown on Access → Secrets and
     # pinned by slot-secrets. Restart the router after changing these.
     https_enabled: bool = False
     https_port: int = Field(default=11436, ge=1, le=65535)

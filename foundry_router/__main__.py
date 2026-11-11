@@ -21,7 +21,7 @@ def run() -> None:
     if not sec.https_enabled:
         uvicorn.run(app, host=host, port=port, log_level="info")
         return
-    # Setup → Secrets: a second, HTTPS-only listener (self-signed, pinned by
+    # Access → Secrets: a second, HTTPS-only listener (self-signed, pinned by
     # fingerprint) for secret traffic. Same app; only the plain server runs the
     # lifespan, so background work starts once.
     from .config import data_dir

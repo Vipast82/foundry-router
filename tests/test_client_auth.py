@@ -34,6 +34,31 @@ def test_optional_mode_keeps_keyless_clients_working(keyed, client):
     assert client.get("/admin/api/status").status_code != 401
 
 
+def test_the_refusal_says_what_was_sent_and_where_keys_are_made(keyed, client):
+    """v0.181.135: Cline showed "make one in ... (Setup → Clients & keys)". The page is
+    under Access, and nothing told a changed key from a program sending a placeholder
+    (that day it sent the word "foundry")."""
+    from foundry_router import client_auth
+    r = client.post("/v1/chat/completions", headers={"Authorization": "Bearer foundry"},
+                    json={"model": "Kilo-Local", "messages": []})
+    msg = r.json()["error"]["message"]
+    assert r.status_code == 401 and msg.startswith("unknown Foundry client key: this program sent ")
+    assert "a short placeholder (7 characters), which matches no client" in msg
+    assert "Access → Clients & Keys" in msg and "Setup" not in msg
+    assert "foundry," not in msg and "Bearer" not in msg                  # described, never shown
+    old = client.get("/v1/models", headers={"x-api-key": "fnd_" + "a" * 30}).json()["error"]["message"]
+    assert "a Foundry key (deleted, rotated or mistyped)" in old and "fnd_aaaa" not in old
+    assert client_auth.unknown_key_message().startswith("unknown Foundry client key. In Foundry's web UI")
+    # no message a person reads still sends them to a Setup page that is not there
+    import pathlib
+    root = pathlib.Path(client_auth.__file__).parent
+    for rel in ("client_auth.py", "chat_router_tools.py", "secret_store.py", "secrets_api.py",
+                "ui/static/control.html", "ui/static/automation.html"):
+        text = (root / rel).read_text(encoding="utf-8")
+        for stale in ("Setup → Clients", "Setup -> Clients", "Setup → Secrets", "Setup → \"\n"):
+            assert stale not in text, (rel, stale)
+
+
 def test_wrong_or_disabled_key_is_refused_never_anonymous(keyed, client):
     for k in ("typo-key", "off-key"):
         r = client.get("/v1/models", headers={"Authorization": f"Bearer {k}"})

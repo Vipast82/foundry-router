@@ -207,3 +207,54 @@ def test_performance_and_data_have_sections_and_late_blocks_join_theirs():
     assert "Tasks a development" in html
     assert not re.match(r"^Tasks(?! a development)", "Tasks a development coordinator reported")
     assert re.match(r"^Tasks(?! a development)", "Tasksshowing 50 of 110")
+
+
+def test_host_admin_tells_an_endpoint_that_is_not_offered_from_one_that_failed():
+    """v0.181.135: brain-lane, healthy, showed "unreachable" in red three times and its
+    /health reply as one line running off the page."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    fn = html[html.index("function probeState(p) {"):html.index("// -- full Ollama model-management panel")]
+    assert '[404, 405, 501].includes(code) ? "absent" : [401, 403].includes(code) ? "denied" : "error"' in fn
+    assert "if (p.state) return p.state;" in fn                       # the router's word first
+    assert '(probeState(p) === "absent" && k !== "models" ? absent : failed).push([k, p]);' in fn
+    assert "Not offered by this server" in fn and "Did not answer" in fn
+    assert '<span class="pill bad">unreachable</span>' not in fn      # the old card for every miss
+    assert "JSON.stringify(h.body, null, 1)" in fn and 'class="raw mono"' in fn      # wrapped, on request
+    assert "_HEALTH_RATIOS.filter(" in fn and 'class="ov-kpis"' in fn
+    assert '<div class="chips">' in fn                                # names only: no one-column table
+    tab = html[html.index("async function tabHostAdmin() {"):html.index("async function hostRenderDiag(")]
+    assert 'class="seg" id="host-be"' in tab and "<select" not in tab
+    assert 'if (window._hostBackend !== cur.name || !$("#host-diag")) return;' in html
+    css = html[:html.index("</style>")]
+    assert "pre.raw { white-space:pre-wrap; overflow-wrap:anywhere;" in css
+
+
+def test_the_last_five_tabs_have_numbers_on_top_and_sections():
+    """v0.181.135: Active Use, Helpers & Limits, MCP Metrics and Cost."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    sec = html[html.index("const TAB_SECTIONS = {"):html.index("function sectionTabs()")]
+    assert '"Helpers & Limits": [["Backend limits", /^Backend limits/], ["Lanes", /^Lanes for short jobs/],' in sec
+    assert '"MCP Metrics": [["Over time", /^Calls over time/], ["Tools", /^Per tool/]' in sec
+    assert 'Cost: [["Comparison", /^Visual comparison/], ["Head to head", /^Head to head/],' in sec
+    # every section's first block exists under the name its pattern looks for
+    lim = html[html.index("function queueCard(q) {"):html.index("// Alerts & digest (alerts.py)")]
+    for title in ('<div class="card-h">Backend limits ', '<div class="card-h">Lanes for short jobs ',
+                  '<div class="card-h">Queue classes ', '<div class="card-h">Waiting now '):
+        assert title in lim, title
+    assert lim.count('data-f="lane_max_prompt_tokens"') == 1 and lim.count('data-f="helpers_allowed"') == 1
+    assert 'document.querySelectorAll(`input[data-b="${CSS.escape(name)}"]`)' in lim     # one Save sends both tables
+    assert lim.count('class="ov-kpis"') == 1 and "slotdots" in lim
+    mcp = html[html.index("async function tabMcpMetrics() {"):html.index("async function tabAgents() {")]
+    order = [mcp.index(t) for t in ('ch("Calls over time"', 'ch("Per tool"', 'ch("Per server"',
+                                    'ch("Context budget', 'ch("Recent calls"')]
+    assert order == sorted(order)
+    assert 'class="seg" id="mcpm-win"' in mcp and "kept connection" in mcp
+    assert '$("#mcpm-win").value' not in mcp
+    cost = html[html.index("async function tabCost() {"):html.index("async function tabLive() {")]
+    assert cost.index('<div class="card-h">Visual comparison') < cost.index('<div class="card-h">Cost for this window')
+    assert 'class="seg" id="cost-win"' in cost and '$("#cost-win").value' not in cost
+    assert 'tile("cheapest paid"' in cost and 'class="cbar"' in cost
+    au = html[html.index("async function tabActiveUse() {"):html.index("window.showRouteEdge = async")]
+    assert 'class="seg" id="au-hours"' in au and 'class="ov-kpis"' in au
+    assert "Share of requests" in au and 'class="clamp2"' in au
+    assert "<th>IP · app</th>" not in au                               # folded under the client's name
