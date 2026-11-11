@@ -254,4 +254,36 @@ async def run(tools: list, tool: str, args: Optional[dict],
                + json.dumps([_entry(t) for t in close], ensure_ascii=False))
         return text(f"ERROR: {name or '(no name)'!r} is not a tool you can use. Use the exact "
                     f"name foundry_find_tools returns." + tip)
-    return await call(td, inner)
+    return await call(td, fit_types(inner, getattr(td, "parameters", None)))
+
+
+def fit_types(args: dict, schema) -> dict:
+    """Arguments in the types the tool's schema asks for, where the value plainly is
+    one: "15" for an integer, "true" for a boolean, '["a"]' for an array. Only text
+    is converted; a value that already has a JSON type is left alone. A model that writes its call as text gives every value as text
+    (toolcall_text.py), and a tool then refuses num_results="15". Anything that does
+    not convert cleanly is passed as it came, for the tool to judge."""
+    props = (schema or {}).get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict) or not isinstance(args, dict):
+        return args
+    out = dict(args)
+    for k, v in args.items():
+        spec = props.get(k)
+        kind = spec.get("type") if isinstance(spec, dict) else None
+        kinds = kind if isinstance(kind, list) else [kind]
+        if isinstance(v, str):
+            s = v.strip()
+            if "string" in kinds or kind is None:
+                continue
+            try:
+                if "integer" in kinds and re.fullmatch(r"[-+]?\d+", s):
+                    out[k] = int(s)
+                elif "number" in kinds and re.fullmatch(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?", s):
+                    out[k] = float(s)
+                elif "boolean" in kinds and s.lower() in ("true", "false"):
+                    out[k] = s.lower() == "true"
+                elif ("array" in kinds and s[:1] == "[") or ("object" in kinds and s[:1] == "{"):
+                    out[k] = json.loads(s)
+            except (ValueError, TypeError):
+                pass
+    return out

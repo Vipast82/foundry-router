@@ -72,10 +72,23 @@ def test_values_take_the_type_the_tool_asks_for():
                    tools)[0][0]["arguments"] == {"text": '{"a": 1}'}
 
 
+PLAIN = [{"type": "function", "function": {"name": "read_file", "parameters": {
+    "type": "object", "properties": {"path": {"type": "string"}}}}}]
+
+
+def test_a_tool_that_was_not_offered_is_not_called():
+    """Without find-on-demand (a client's own tools, a persona with its tools listed in
+    full) a name that is not on the list is not a call."""
+    for text in ("<tool_call>\n<function=delete_everything>\n<parameter=path>\n/\n</tool_call>",
+                 '<tool_call>{"name": "unknown_tool", "arguments": {}}</tool_call>',
+                 "<tool_call><function=searxng_web_search><parameter=query>x</tool_call>"):
+        assert extract(text, PLAIN) == ([], text), text
+    assert extract("<tool_call><function=read_file><parameter=path>a.txt</tool_call>", PLAIN)[0] == [
+        {"name": "read_file", "arguments": {"path": "a.txt"}}]
+
+
 def test_text_that_is_not_a_call_is_left_alone():
     for text in ("To call a tool write <tool_call> and the function name.",
-                 "<tool_call>\n<function=delete_everything>\n<parameter=path>\n/\n</tool_call>",   # not offered
-                 '<tool_call>{"name": "unknown_tool", "arguments": {}}</tool_call>',
                  "<tool_call>not json and not a function</tool_call>",
                  "<tool_call><function=find_tools>some prose<parameter=query>x</tool_call>",
                  SEEN_1 + " <tool_call>{broken</tool_call>",                                       # one bad block
@@ -83,7 +96,7 @@ def test_text_that_is_not_a_call_is_left_alone():
         assert extract(text, TOOLS) == ([], text), text
     assert extract(SEEN_1, None) == ([], SEEN_1) and extract(SEEN_1, []) == ([], SEEN_1)   # no tools offered
     # an ambiguous short name is not guessed
-    two = TOOLS + [{"type": "function", "function": {"name": "other_find_tools", "parameters": {}}}]
+    two = [TOOLS[0], {"type": "function", "function": {"name": "other_find_tools", "parameters": {}}}]
     assert extract(SEEN_1, two) == ([], SEEN_1)
     assert toolcall_text.has_marker(SEEN_1) and not toolcall_text.has_marker("plain") and not toolcall_text.has_marker("")
 
@@ -204,3 +217,53 @@ def test_past_replies_that_were_only_call_text_are_not_fed_back_as_examples():
     assert toolcall_text.only_calls(SEEN_1) and toolcall_text.only_calls(WELL_FORMED)
     assert not toolcall_text.only_calls("text <tool_call>x</tool_call>") and not toolcall_text.only_calls("")
     assert not toolcall_text.only_calls("<tool_call>just words</tool_call>")
+
+
+# what AnythingLLM showed after v0.181.129: the finder ran, then the model called the tool
+# it had found by its own name
+SEEN_3 = ("<tool_call> <function=searxng_web_search> <parameter=query> best uncensored AI image generation "
+          "models 2026 Civitai top rated photoreal <parameter=safesearch> 0 <parameter=num_results> 15 "
+          "</tool_call> <tool_call> <function=searxng_web_search> <parameter=query> best video generation "
+          "model local ComfyUI 2026 Wan 2.2 LTX HunyuanVideo <parameter=safesearch> 0 "
+          "<parameter=num_results> 15 </tool_call>")
+
+
+def test_a_found_tool_called_by_its_own_name_goes_through_the_finder():
+    calls, rest = extract(SEEN_3, TOOLS)
+    assert rest == "" and [c["name"] for c in calls] == ["foundry_call_tool", "foundry_call_tool"]
+    assert calls[0]["arguments"] == {"name": "searxng_web_search", "arguments": {
+        "query": "best uncensored AI image generation models 2026 Civitai top rated photoreal",
+        "safesearch": "0", "num_results": "15"}}
+    assert calls[1]["arguments"]["arguments"]["query"].startswith("best video generation model")
+    as_json = '<tool_call>{"name": "web_url_read", "arguments": {"url": "https://example.org"}}</tool_call>'
+    assert extract(as_json, TOOLS)[0] == [{"name": "foundry_call_tool", "arguments": {
+        "name": "web_url_read", "arguments": {"url": "https://example.org"}}}]
+    assert toolcall_text.VIA_FINDER == tool_finder.CALL_TOOL
+
+
+async def test_the_finder_gives_a_tool_its_arguments_in_the_types_it_asks_for():
+    """A call written as text carries every value as text; the tool wants num_results=15."""
+    from foundry_router.tools.sync import ToolDef
+    schema = {"type": "object", "properties": {
+        "query": {"type": "string"}, "num_results": {"type": "integer"}, "safesearch": {"type": "string"},
+        "score": {"type": "number"}, "fresh": {"type": "boolean"}, "sites": {"type": "array"},
+        "opts": {"type": "object"}, "page": {"type": ["integer", "null"]}}}
+    td = ToolDef(name="searxng_web_search", kind="mcp", description="search", parameters=schema,
+                 server="searxng", mcp_tool="searxng_web_search")
+    got = []
+
+    async def call(tool, args):
+        got.append((tool.name, args))
+        from foundry_router.tools.mcp_client import ToolResult
+        return ToolResult([{"type": "text", "text": "ok"}])
+    await tool_finder.run([td], tool_finder.CALL_TOOL, {"name": "searxng_web_search", "arguments": {
+        "query": "2026", "num_results": "15", "safesearch": "0", "score": "0.5", "fresh": "True",
+        "sites": '["a.org"]', "opts": '{"k": 1}', "page": "2", "extra": "7"}}, call)
+    assert got == [("searxng_web_search", {"query": "2026", "num_results": 15, "safesearch": "0",
+                                           "score": 0.5, "fresh": True, "sites": ["a.org"],
+                                           "opts": {"k": 1}, "page": 2, "extra": "7"})]
+    fit = tool_finder.fit_types
+    assert fit({"query": 2026, "num_results": "many", "fresh": "yes"}, schema) == {
+        "query": 2026, "num_results": "many", "fresh": "yes"}         # what does not convert is passed on
+    assert fit({"a": "1"}, None) == {"a": "1"} and fit({"a": "1"}, {"type": "object"}) == {"a": "1"}
+    assert fit({"fresh": True, "num_results": 3}, schema) == {"fresh": True, "num_results": 3}

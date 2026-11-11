@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.130 — a found tool called by its own name; argument types; markup is never the answer
+
+After v0.181.129 the AnythingLLM thread got one step further and stopped again: the two `foundry_find_tools` calls ran, then the reply was
+
+    <tool_call> <function=searxng_web_search> <parameter=query> ... <parameter=num_results> 15 </tool_call>
+
+With find-on-demand a model is offered only the two finder tools. It looked a tool up and then called what it found by its own name. The engine does not convert a call to a tool that was not declared, and the text reader added in v0.181.129 refused it for the same reason.
+
+- **A found tool called by name goes through the finder.** In a request that offers `foundry_call_tool`, a text call to any other name becomes `foundry_call_tool(name=..., arguments=...)`. The finder checks the grant and answers an unknown name with the closest tools, as it does for a structured call (the worker loop already did this for structured calls). Without find-on-demand nothing changes: a name that was not offered is not a call.
+- **Argument types.** A call written as text carries every value as text. `foundry_call_tool` now gives the tool its arguments in the types its schema asks for where the value plainly is one (`"15"` for an integer, `"true"` for a boolean, `'["a"]'` for an array). Only text is converted; what does not convert cleanly is passed as it came.
+- **Markup is never the answer.** If a worker's final reply is still nothing but tool-call markup, the request goes to the brain's own tool loop.
+
+Tests: `tests/test_toolcall_text.py`.
+
 ## v0.181.129 — a chat that answered with its tool calls as text and did nothing
 
 **What happened.** In AnythingLLM, persona Foundry-Chat, every turn on 2026-11-11 ended like this and nothing ran:

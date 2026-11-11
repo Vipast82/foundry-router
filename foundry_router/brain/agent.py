@@ -1857,6 +1857,15 @@ class AgentRunner:
             if not result.tool_calls:
                 # No tool call => the worker produced its final answer.
                 reasoning, clean = prompts.split_think(result.content)
+                from .. import toolcall_text
+                if toolcall_text.only_calls(clean.strip()):
+                    # v0.181.130: the "answer" is nothing but tool-call markup the router
+                    # could not read as calls. That is never shown to the user as an answer.
+                    self.model_registry.record_tool_call(worker, ok=False)
+                    async for ev in hand_to_brain(f"{worker} wrote tool calls that could not "
+                                                  f"be read"):
+                        yield ev
+                    return
                 if reasoning.strip():
                     emit_txt = reasoning[:2000] + ("…" if len(reasoning) > 2000 else "")
                     yield AgentEvent("think", f"[{worker} reasoning] {emit_txt}")

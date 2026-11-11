@@ -107,21 +107,35 @@ def _one(body: str, schemas: dict) -> Optional[dict]:
                 args = json.loads(args) if args.strip() else {}
             except (ValueError, TypeError):
                 return None
-        name = _resolve(name, schemas) if isinstance(name, str) else None
-        if name is None or not isinstance(args, dict):
+        if not isinstance(name, str) or not name.strip() or not isinstance(args, dict):
             return None
-        return {"name": name, "arguments": args}
+        return _named(name.strip(), args, schemas)
     m = _FUNC.match(body)
-    name = _resolve(m.group(1), schemas) if m else None
-    if name is None:
+    if not m:
         return None
     rest = body[m.end():]
-    types = schemas[name]
+    types = schemas.get(_resolve(m.group(1), schemas) or "", {})
     args = {k: _value(v, types.get(k)) for k, v in _PARAM.findall(rest)}
     # text between the tags that is not a parameter means this was not a call
     if _JUNK.sub("", _PARAM.sub("", rest)).strip():
         return None
-    return {"name": name, "arguments": args}
+    return _named(m.group(1), args, schemas)
+
+
+VIA_FINDER = "foundry_call_tool"         # tool_finder.CALL_TOOL
+
+
+def _named(written: str, args: dict, schemas: dict) -> Optional[dict]:
+    """The call under the name of an offered tool. With find-on-demand the model is
+    offered only the two finder tools, looks a tool up, and then calls what it found
+    by its own name ("searxng_web_search"): that call goes through foundry_call_tool,
+    which checks the grant and answers an unknown name with the closest tools."""
+    name = _resolve(written, schemas)
+    if name is not None:
+        return {"name": name, "arguments": args}
+    if VIA_FINDER in schemas:
+        return {"name": VIA_FINDER, "arguments": {"name": written, "arguments": args}}
+    return None
 
 
 UNRUN_NOTE = "(My reply here was a request to use a tool. It did not run, so it gave no result.)"
