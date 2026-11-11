@@ -95,7 +95,7 @@ def test_retention_prunes_go_through_the_stepped_delete(app):
     import inspect
     from foundry_router import control_center
     src = inspect.getsource(control_center.ControlCenter.prune)
-    assert src.count("execute_count") == 1 and "cc_snapshots" in src   # only the keep-the-newest one
+    assert "execute_count" not in src and "self._prune_snapshots(cut)" in src
 
 
 def test_a_call_that_holds_the_lock_for_long_is_recorded(tmp_path, monkeypatch):
@@ -274,3 +274,109 @@ def test_the_stall_event_lists_other_threads_and_slow_database_calls(app):
     assert "other threads: asyncio_0: prune (control_center.py:4215)" in e["detail"]
     assert "database lock: asyncio_0 held 12.5 s, waited 0.0 s: DELETE FROM cc_parts" in e["detail"]
     assert e["detail"].rstrip().endswith("STACK")
+
+
+# ---- v0.181.126: what v0.181.125's own records showed on the live router ----------------------
+
+def _snap(db, kind, session, received, confirmed, scope="session"):
+    return db.execute("INSERT INTO cc_snapshots (kind, project_id, session_id, scope, hash, data, "
+                      "source_ts, received_ts, confirmed_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                      (kind, "proj", session, scope, f"h{received}", "{}", confirmed, received,
+                       confirmed))
+
+
+def test_old_snapshots_are_pruned_without_reading_every_snapshot(app):
+    """One DELETE with a NOT IN subquery held the lock for 92.6 s (confirmed_ts is stored
+    after the snapshot body). Same rows go; the statements are small and by id."""
+    cc = app.state.services.control
+    db = cc.db
+    now = cc.clock()
+    cut = now - cc.settings()["retention_days"] * 86400
+    old, new = cut - 5000, now - 60
+    a1 = _snap(db, "todo", "ses_a", old, old)                 # old, superseded: goes
+    a2 = _snap(db, "todo", "ses_a", old + 10, old + 10)       # old, superseded: goes
+    b1 = _snap(db, "todo", "ses_b", old + 20, old + 20)       # old but the newest of its kind: stays
+    c1 = _snap(db, "diff", "ses_a", old + 30, new)            # received long ago, confirmed today: stays
+    w1 = _snap(db, "todo", "ses_a", old + 40, old + 40, scope="workspace")   # other scope, its newest
+    a3 = _snap(db, "todo", "ses_a", new, new)                 # recent
+    c2 = _snap(db, "diff", "ses_a", new + 1, new + 1)         # recent
+    statements = []
+    real = db.execute_count
+    db.execute_count = lambda sql, params=(): statements.append(sql) or real(sql, params)
+    try:
+        assert cc._prune_snapshots(cut) == 2
+    finally:
+        db.execute_count = real
+    left = {r["id"] for r in db.query("SELECT id FROM cc_snapshots")}
+    assert left == {b1, c1, a3, c2, w1} and a1 not in left and a2 not in left
+    assert len(statements) == 1 and "id IN (" in statements[0] and "NOT IN" not in statements[0]
+    assert cc._prune_snapshots(cut) == 0
+    db.execute("DELETE FROM cc_snapshots")
+    assert cc._prune_snapshots(cut) == 0                      # an empty table
+    assert cc.prune() >= 0
+
+
+def test_the_ends_of_a_table_are_asked_for_one_at_a_time(tmp_path):
+    """SELECT MIN(rowid), MAX(rowid) reads the whole table (1.1 s on cc_parts)."""
+    db = Database(tmp_path / "a.sqlite")
+    _log_table(db, 50, old=10)
+    asked = []
+    real = db.query_one
+    db.query_one = lambda sql, params=(): asked.append(sql) or real(sql, params)
+    assert db.delete_in_steps("t_log", "ts < ?", (500.0,), ordered=True) == 10
+    ends = [s for s in asked if "MIN(" in s or "MAX(" in s]
+    assert len(ends) == 2 and not any("MIN(" in s and "MAX(" in s for s in ends)
+
+
+def test_a_reader_reads_on_the_second_connection(tmp_path):
+    db = Database(tmp_path / "a.sqlite")
+    db.kv_set("k", "v")
+    r = db.reader()
+    assert r.query_one("SELECT value FROM kv WHERE key='k'") == {"value": "v"} and r.kv_get("k") == "v"
+    assert r.kv_get("missing") is None and r.query("SELECT 1 AS x WHERE 0") == []
+    assert db._ro is not None and r.path == db.path           # anything else is the database itself
+    with db._lock:                                            # the request path's lock is not needed
+        assert r.query_one("SELECT COUNT(*) AS n FROM kv")["n"] >= 1
+
+
+def test_the_charts_are_read_off_the_event_loop(app, client):
+    import inspect
+    from foundry_router.ui import routes
+    assert "asyncio.to_thread(server_history.query, svc.db.reader()" in inspect.getsource(routes.perf_servers)
+    assert "asyncio.to_thread(ph.query_history, svc.db.reader()" in inspect.getsource(routes.perf_history_api)
+    d = client.get("/admin/api/perf/servers?hours=1").json()
+    assert d["backends"] == {} and "interval_s" in d
+    h = client.get("/admin/api/perf-history?hours=1").json()
+    assert "backends" in h
+
+
+def test_backend_health_evidence_is_summed_by_the_database(app):
+    svc = app.state.services
+    now = time.time()
+
+    def ev(backend, status, ago, model="m", detail=""):
+        svc.db.execute("INSERT INTO usage_events (ts, backend, model, status, settled_ts, detail) "
+                       "VALUES (?,?,?,?,?,?)", (now - ago, backend, model, status, now - ago + 1, detail))
+    ev("strata", "settled", 7200, model="old-model")
+    ev("strata", "error", 1800, detail="timeout")
+    ev("strata", "settled", 600, model="new-model")
+    ev("strata", "reserved", 10)                              # in flight: not evidence
+    ev("meridian", "released", 300)
+    ev("meridian", "settled", 90000)                          # older than the day asked for
+    asked = []
+    real = svc.db.query
+    svc.db.query = lambda sql, params=(): asked.append(sql) or real(sql, params)
+    try:
+        out = svc.health._ledger_evidence(now - 86400)
+    finally:
+        svc.db.query = real
+    assert out["strata"]["calls_1h"] == 2 and out["strata"]["errors_1h"] == 1
+    assert out["strata"]["last_ok"] == {"at": out["strata"]["last_ok"]["at"], "model": "new-model",
+                                        "source": "real call"}
+    assert out["strata"]["last_error"]["detail"] == "timeout"
+    assert out["meridian"] == {"last_ok": None, "calls_1h": 1, "errors_1h": 1,
+                               "last_error": {"at": out["meridian"]["last_error"]["at"], "model": "m",
+                                              "detail": "released"}}
+    assert len(asked) == 2 and "GROUP BY backend" in asked[0]   # the day is never fetched row by row
+    svc.db.execute("DELETE FROM usage_events")
+    assert svc.health._ledger_evidence(now - 86400) == {}

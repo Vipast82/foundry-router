@@ -2,6 +2,19 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.126 — the last startup freeze and two slow reads, from v0.181.125's own records
+
+v0.181.125 went live and its record of slow database calls (`slow_db`) named what was left. Telemetry batches no longer freeze the router (none in the first minutes, where there was one every two).
+
+| What it recorded | Cause | Fix |
+|---|---|---|
+| 92.6 s at startup: `DELETE FROM cc_snapshots WHERE confirmed_ts < ? AND id NOT IN (...)` | The one cleanup statement v0.181.125 left whole. `confirmed_ts` is stored after the snapshot body, so testing it reads every body in the table | `ControlCenter._prune_snapshots`: a binary search on `received_ts` (about twenty single-row reads) finds the ids that can be old enough, the ids to keep come from columns stored before the body, and the rest go a hundred at a time. The reads are on the read-only connection. The same snapshots are removed as before |
+| 1.1 s: `SELECT MIN(rowid), MAX(rowid) FROM cc_parts` | SQLite answers MIN or MAX alone from the end of the table, but reads all of it when asked for both | `delete_in_steps` asks for them one at a time |
+| 5.5 s on the event loop: the engine-metrics chart (`/admin/api/perf/servers`) | A day of samples grouped on the loop | `/admin/api/perf/servers` and `/admin/api/perf-history` run on a worker thread and read on the second connection (`Database.reader()`) |
+| 1.5 s on the event loop: backend health evidence | Every usage event of the day fetched and walked in Python, for every health view and gate | The database sums it (two small queries) |
+
+Tests: `tests/test_stall_fixes.py`.
+
 ## v0.181.125 — the router freezes found and fixed; redesign, step 4: long tables and long tabs
 
 **The freezes.** The stall watchdog (v0.181.124) named them within ten minutes of going live. Everything shares one database connection behind one lock, and most callers are on the event loop, so any call that holds the lock for seconds freezes every stream.

@@ -4242,10 +4242,57 @@ class ControlCenter:
                 ("cc_batches", "ts < ?", cut, False),
                 ("cc_coord_events", "received_ts < ?", cut, True)):
             n += self.db.delete_in_steps(table, where, (arg,), ordered=ordered)
-        # the newest snapshot of each kind is kept whatever its age
-        n += self.db.execute_count(
-            "DELETE FROM cc_snapshots WHERE confirmed_ts < ? AND id NOT IN (SELECT "
-            "MAX(id) FROM cc_snapshots GROUP BY kind, project_id, session_id, scope)", (cut,))
+        return n + self._prune_snapshots(cut)
+
+    def _prune_snapshots(self, cut: float) -> int:
+        """Snapshots last confirmed before `cut` go, except the newest of each kind,
+        project, session and scope, which is kept whatever its age.
+
+        v0.181.125 still did this in one statement, and it held the database lock for
+        92.6 s on the live router: `confirmed_ts` is stored after the snapshot body, so
+        testing it reads every body in the table. Now nothing reads a body it will keep:
+
+        * `received_ts` grows with id, so a binary search (about twenty single-row
+          reads) finds the first snapshot received after the cut; only ids below it can
+          be old enough;
+        * the ids to keep come from the columns stored before the body;
+        * the rest are deleted a hundred at a time, each DELETE still checking
+          `confirmed_ts`, so a snapshot confirmed after the cut stays.
+
+        The reads are on the read-only connection: no lock is held for them."""
+        read = getattr(self.db, "ro_query", None) or self.db.query
+        lo = (read("SELECT MIN(id) AS a FROM cc_snapshots") or [{}])[0].get("a")
+        if lo is None:
+            return 0
+        a, b = int(lo), int(read("SELECT MAX(id) AS b FROM cc_snapshots")[0]["b"]) + 1
+        while a < b:
+            mid = (a + b) // 2
+            r = read("SELECT id, received_ts FROM cc_snapshots WHERE id >= ? ORDER BY id LIMIT 1",
+                     (mid,))
+            if not r or (r[0]["received_ts"] or 0) >= cut:
+                b = mid
+            else:
+                a = int(r[0]["id"]) + 1
+        bound = a
+        if bound <= lo:
+            return 0
+        keep = {r["id"] for r in read("SELECT MAX(id) AS id FROM cc_snapshots GROUP BY kind, "
+                                      "project_id, session_id, scope")}
+        off_loop = threading.current_thread() is not threading.main_thread()
+        n, start = 0, int(lo)
+        while start < bound:
+            ids = [r["id"] for r in read("SELECT id FROM cc_snapshots WHERE id >= ? AND id < ? "
+                                         "ORDER BY id LIMIT 100", (start, bound))]
+            if not ids:
+                break
+            start = ids[-1] + 1
+            dead = [i for i in ids if i not in keep]
+            if dead:
+                n += self.db.execute_count(
+                    f"DELETE FROM cc_snapshots WHERE id IN ({','.join('?' * len(dead))}) "
+                    "AND confirmed_ts < ?", (*dead, cut))
+                if off_loop:
+                    time.sleep(0.004)
         return n
 
     def capture_boundary(self) -> dict:

@@ -42,25 +42,37 @@ class HealthMonitor:
     # -- evidence ---------------------------------------------------------------
 
     def _ledger_evidence(self, since: float) -> dict:
+        """Per backend: the last success, the last failure and the last hour's counts.
+        v0.181.126: the database sums the day (it was every row of the day fetched and
+        walked in Python on the event loop: 1.5 s each time, and this runs for every
+        health view and gate)."""
         out: dict = {}
+        hour = time.time() - 3600
         try:
-            rows = self.svc.db.query(
-                "SELECT backend, model, status, ts, settled_ts, detail FROM usage_events "
-                "WHERE ts >= ? AND status IN ('settled','error','released') ORDER BY id", (since,))
+            groups = self.svc.db.query(
+                "SELECT backend, SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS calls_1h, "
+                "SUM(CASE WHEN ts >= ? AND status != 'settled' THEN 1 ELSE 0 END) AS errors_1h, "
+                "MAX(CASE WHEN status = 'settled' THEN id END) AS ok_id, "
+                "MAX(CASE WHEN status != 'settled' THEN id END) AS err_id "
+                "FROM usage_events WHERE ts >= ? AND status IN ('settled','error','released') "
+                "GROUP BY backend", (hour, hour, since))
+            ids = [i for g in groups for i in (g["ok_id"], g["err_id"]) if i is not None]
+            last = {r["id"]: r for r in self.svc.db.query(
+                "SELECT id, model, status, ts, settled_ts, detail FROM usage_events "
+                f"WHERE id IN ({','.join('?' * len(ids))})", ids)} if ids else {}
         except Exception:                                         # noqa: BLE001
             return out
-        hour = time.time() - 3600
-        for r in rows:
-            e = out.setdefault(r["backend"], {"last_ok": None, "last_error": None,
-                                              "calls_1h": 0, "errors_1h": 0})
-            t = r["settled_ts"] or r["ts"]
-            if r["status"] == "settled":
-                e["last_ok"] = {"at": t, "model": r["model"], "source": "real call"}
-            else:
-                e["last_error"] = {"at": t, "model": r["model"], "detail": r["detail"] or r["status"]}
-            if r["ts"] >= hour:
-                e["calls_1h"] += 1
-                e["errors_1h"] += r["status"] != "settled"
+        for g in groups:
+            e = out[g["backend"]] = {"last_ok": None, "last_error": None,
+                                     "calls_1h": int(g["calls_1h"] or 0),
+                                     "errors_1h": int(g["errors_1h"] or 0)}
+            ok, err = last.get(g["ok_id"]), last.get(g["err_id"])
+            if ok:
+                e["last_ok"] = {"at": ok["settled_ts"] or ok["ts"], "model": ok["model"],
+                                "source": "real call"}
+            if err:
+                e["last_error"] = {"at": err["settled_ts"] or err["ts"], "model": err["model"],
+                                   "detail": err["detail"] or err["status"]}
         return out
 
     def _paid(self, cfg) -> bool:

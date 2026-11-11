@@ -324,6 +324,28 @@ STARTER_CLIENT_COMPAT = {
 }
 
 
+class _Reader:
+    """Database.reader(): `query` / `query_one` / `kv_get` read on the read-only
+    connection; everything else is the database itself."""
+
+    def __init__(self, db: "Database"):
+        self._db = db
+
+    def query(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
+        return self._db.ro_query(sql, params)
+
+    def query_one(self, sql: str, params: Iterable[Any] = ()) -> Optional[dict]:
+        rows = self._db.ro_query(sql, params)
+        return rows[0] if rows else None
+
+    def kv_get(self, key: str) -> Optional[str]:
+        row = self.query_one("SELECT value FROM kv WHERE key=?", (key,))
+        return row["value"] if row else None
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+
 SLOW_CALL_SECONDS = 1.0      # a lock hold or wait this long is recorded (Database.slow_calls)
 DELETE_STEP = 4000           # rowids per slice in Database.delete_in_steps
 
@@ -919,6 +941,12 @@ class Database:
             rows = self._ro.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
 
+    def reader(self) -> "_Reader":
+        """This database with its reads on the second connection: hand it to a
+        read-only function that runs on a worker thread
+        (`await asyncio.to_thread(perf_history.query_history, db.reader(), ...)`)."""
+        return _Reader(self)
+
     def delete_in_steps(self, table: str, where: str, params: Iterable[Any] = (), *,
                         ordered: bool = False, step: int = DELETE_STEP) -> int:
         """DELETE FROM table WHERE <where>, one slice of `step` rowids at a time, letting
@@ -929,10 +957,13 @@ class Database:
         (logs): the walk stops at the first slice that has rows but nothing to delete,
         so an hourly prune reads the old end of the table, not all of it."""
         params = tuple(params)
-        r = self.query_one(f"SELECT MIN(rowid) AS a, MAX(rowid) AS b FROM {table}")
-        if not r or r["a"] is None:
+        # one aggregate per SELECT: SQLite answers MIN or MAX from the end of the b-tree,
+        # but reads the whole table when asked for both at once (1.1 s on cc_parts)
+        lo = (self.query_one(f"SELECT MIN(rowid) AS a FROM {table}") or {}).get("a")
+        if lo is None:
             return 0
-        a, last, n = int(r["a"]), int(r["b"]), 0
+        hi = (self.query_one(f"SELECT MAX(rowid) AS b FROM {table}") or {}).get("b")
+        a, last, n = int(lo), int(hi if hi is not None else lo), 0
         off_loop = threading.current_thread() is not threading.main_thread()
         while a <= last:
             b = a + step

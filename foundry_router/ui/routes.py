@@ -483,8 +483,8 @@ async def perf_history_api(request: Request):
     # run_label absent = every run; present (even "") = that run only ("" is
     # the unlabelled samples recorded before a label was set).
     run_label = q.get("run_label") if "run_label" in q else None
-    out = ph.query_history(svc.db, hours=hours, model=model, backend=backend,
-                           run_label=run_label)
+    out = await asyncio.to_thread(ph.query_history, svc.db.reader(), hours=hours, model=model,
+                                  backend=backend, run_label=run_label)
     # The backend filter lists every configured backend, not only those with
     # samples in the window, so one with no traffic yet shows as (0).
     seen = {b.get("backend") for b in out.get("backends") or []}
@@ -506,8 +506,9 @@ async def perf_servers(request: Request, hours: float = 24, backend: str = "",
     slots, tokens/s; Meridian counters and latencies)."""
     from .. import server_history
     svc = _svc(request)
-    out = server_history.query(svc.db, hours, backend,
-                               [m for m in metrics.split(",") if m] or None)
+    # a day of engine samples took 5.5 s on the event loop: a worker thread, second connection
+    out = await asyncio.to_thread(server_history.query, svc.db.reader(), hours, backend,
+                                  [m for m in metrics.split(",") if m] or None)
     out["interval_s"] = svc.config_store.config.perf.server_sample_seconds
     out["retention_days"] = svc.config_store.config.perf.retention_days
     return out
