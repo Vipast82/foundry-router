@@ -2,6 +2,17 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.133 — the performance advisor off the event loop
+
+One pause was left in the record after v0.181.130: 2.7 s in `GET /admin/api/perf/advisor`. The advisor read a day of performance samples on the event loop, and the Live tab and the overview ask for it again and again while they are open.
+
+- The history part of the advisor runs on a worker thread and reads on the second connection.
+- Its answer is kept for 45 s per window, so an open Live tab costs one read every 45 s, not one per refresh.
+
+Checked on the live router with v0.181.132: a clean start (no pauses, no slow database calls); two Foundry-Chat searches 30 s apart answered in 24 s each, the second on the reused connection after the new ping.
+
+Tests: `tests/test_stall_fixes.py`.
+
 ## v0.181.132 — a tool call that waited five minutes on a dead connection
 
 **What happened.** With v0.181.130 the AnythingLLM thread got further: the model's text calls were read, `foundry_find_tools` answered, `foundry_call_tool` started `searxng_web_search`, and then nothing moved. The router's log has it: `searxng/searxng_web_search timed out after 300s` (and the same on 2026-11-09). Called directly with the same arguments, the search server answers in 0.3 s.

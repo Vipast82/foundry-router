@@ -583,3 +583,28 @@ def test_the_work_view_reads_on_the_second_connection_and_cleanup_waits_after_a_
     assert router_main.FIRST_PRUNE_SECONDS == 300
     assert "await asyncio.sleep(FIRST_PRUNE_SECONDS)" in inspect.getsource(type(svc)._retention_loop)
     assert "n % 240 == FIRST_PRUNE_SECONDS // 15" in inspect.getsource(type(svc)._control_watchdog_loop)
+
+
+# ---- v0.181.133 ---------------------------------------------------------------------------------
+
+def test_the_advisor_reads_history_off_the_event_loop_and_is_kept_briefly(app, client, monkeypatch):
+    """A day of samples read on the event loop was a 2.7 s pause each time Live asked."""
+    from foundry_router import perf_advisor
+    ran_on = []
+    real = perf_advisor._gather
+
+    def spy(svc, hours):
+        ran_on.append(threading.current_thread() is threading.main_thread())
+        return real(svc, hours)
+    monkeypatch.setattr(perf_advisor, "_gather", spy)
+    a = client.get("/admin/api/perf/advisor?hours=24").json()
+    b = client.get("/admin/api/perf/advisor?hours=24").json()
+    assert a == b and "findings" in a and a["requests_analysed"] == 0
+    assert len(ran_on) == 1                                   # the second answer came from the 45 s keep
+    client.get("/admin/api/perf/advisor?hours=6")             # another window: its own read
+    assert len(ran_on) == 2
+    monkeypatch.setattr(perf_advisor, "ADVISOR_KEEP_SECONDS", 0.0)
+    client.get("/admin/api/perf/advisor?hours=24")
+    assert len(ran_on) == 3
+    import inspect
+    assert "svc.db.reader()" in inspect.getsource(real) and "asyncio.to_thread(_gather" in inspect.getsource(perf_advisor.advise)

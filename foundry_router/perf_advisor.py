@@ -749,8 +749,14 @@ def _mcp_rules(db, hours: float) -> list[dict]:
 
 # --------------------------------------------------------------------------- #
 
-async def advise(svc, hours: float = 24) -> dict:
-    db = svc.db
+ADVISOR_KEEP_SECONDS = 45.0
+
+
+def _gather(svc, hours: float) -> tuple[list, int]:
+    """The findings read from history, and how many requests were looked at. Runs on a
+    worker thread and reads on the second connection (v0.181.133: a day of samples on
+    the event loop was a 2.7 s pause each time Live or the overview asked)."""
+    db = svc.db.reader() if hasattr(svc.db, "reader") else svc.db
     findings: list[dict] = []
     rows = db.query(
         "SELECT model, backend, prompt_tokens, prefill_tokens, completion_tokens, "
@@ -776,11 +782,25 @@ async def advise(svc, hours: float = 24) -> dict:
             findings += fn()
         except Exception:
             log.exception("perf advisor rule group failed")
+    return findings, len(rows)
+
+
+async def advise(svc, hours: float = 24) -> dict:
+    """Kept for 45 s per window: Live asks every few seconds."""
+    import asyncio
+    import time
+    cache = svc.__dict__.setdefault("_advisor_cache", {})
+    hit = cache.get(hours)
+    if hit and time.monotonic() - hit[0] < ADVISOR_KEEP_SECONDS:
+        return hit[1]
+    findings, analysed = await asyncio.to_thread(_gather, svc, hours)
     try:
         findings += _server_rules(await svc.pool.server_metrics())
     except Exception:
         log.exception("perf advisor: server rules failed")
     findings.sort(key=lambda f: (_SEV_ORDER.get(f["severity"], 9), f["title"]))
-    return {"hours": hours, "requests_analysed": len(rows), "findings": findings,
-            "counts": {s: sum(1 for f in findings if f["severity"] == s)
-                       for s in ("critical", "warning", "info")}}
+    out = {"hours": hours, "requests_analysed": analysed, "findings": findings,
+           "counts": {s: sum(1 for f in findings if f["severity"] == s)
+                      for s in ("critical", "warning", "info")}}
+    cache[hours] = (time.monotonic(), out)
+    return out
