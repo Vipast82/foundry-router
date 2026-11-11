@@ -180,18 +180,56 @@ async def test_worker_answers_without_tools_when_not_needed(tmp_path):
     assert mcp.calls == []                                        # no tool call made
 
 
-async def test_tool_failure_hands_off_to_brain(tmp_path):
+async def test_a_failed_tool_call_is_a_result_the_worker_reads(tmp_path):
+    """v0.181.134: one page answering 404 ended the worker's loop and handed the whole
+    request to the brain, which then gave no answer ("The routing agent produced no
+    answer"). The worker now reads the error and goes on."""
     runner, ctx, pool, mcp = _make(
         tmp_path,
-        worker_script=[_tool("searxng_web_search", query="x")],
-        mcp_fail=True,
-        brain_script=[_tool("return_to_user", answer="brain completed it")])
+        worker_script=[_tool("searxng_web_search", query="x"),
+                       ChatResult(content="I could not open that page; here is what I know.")],
+        mcp_fail=True, brain_script=[])
     events = [ev async for ev in runner.run_worker_tools(ctx)]
     answers = [ev for ev in events if ev.kind == "answer"]
-    assert answers[0].text == "brain completed it"               # brain took over
-    assert ctx.logger.tool_calls[0]["ok"] is False               # failure still logged
+    assert answers[0].text == "I could not open that page; here is what I know."
+    assert ctx.logger.tool_calls[0]["ok"] is False               # the failure is logged
     thinks = " | ".join(ev.text for ev in events if ev.kind == "think")
-    assert "handing" in thinks.lower() and "brain" in thinks.lower()
+    assert "failed (" in thinks and "can try another source" in thinks and "brain" not in thinks.lower()
+    assert pool.tool_passes == [True, True]                      # it kept its tools after one failure
+
+
+async def test_after_three_failed_calls_the_worker_answers_without_tools(tmp_path):
+    calls = [_tool("searxng_web_search", query=f"q{i}") for i in range(3)]
+    runner, ctx, pool, mcp = _make(
+        tmp_path, worker_script=calls + [ChatResult(content="Nothing could be read; sorry.")],
+        mcp_fail=True, brain_script=[])
+    seen = []
+    real = pool.chat
+
+    async def chat(model, messages, **kw):
+        seen.append([m for m in messages if m.get("role") == "tool"])
+        return await real(model, messages, **kw)
+    pool.chat = chat
+    events = [ev async for ev in runner.run_worker_tools(ctx)]
+    assert [ev for ev in events if ev.kind == "answer"][0].text == "Nothing could be read; sorry."
+    assert len(mcp.calls) == 3 and pool.tool_passes == [True, True, True, False]   # tools withdrawn
+    results = [m["content"] for m in seen[-1]]
+    assert all(r.startswith("ERROR: this call failed: ") for r in results)
+    assert "Try a different page" in results[0] and "Do not call more tools" in results[2]
+    from foundry_router.brain import agent
+    assert agent.WORKER_TOOL_FAILURES == 3
+
+
+async def test_the_brain_first_reply_is_used_when_it_says_nothing_after_the_nudge(tmp_path):
+    """The fallback loop: prose, then silence. The prose is the answer, flagged."""
+    runner, ctx, pool, mcp = _make(
+        tmp_path, worker_script=[],
+        brain_script=[ChatResult(content="It is a LoRA; I could not find a download."),
+                      ChatResult(content="")])
+    events = [ev async for ev in runner.run(ctx)]
+    assert [ev for ev in events if ev.kind == "answer"][0].text == "It is a LoRA; I could not find a download."
+    thinks = " | ".join(ev.text for ev in events if ev.kind == "think")
+    assert "forwarding its first one" in thinks and "NOT produced or verified" in thinks
 
 
 async def test_unknown_tool_hands_off_to_brain(tmp_path):

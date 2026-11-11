@@ -328,6 +328,9 @@ def _mark_user_requested(ranked: list[dict], model_ids: list[str],
     return front + [r for r in ranked if r["id"] not in wanted_set]
 
 
+WORKER_TOOL_FAILURES = 3      # failed tool calls a worker may read before its tools are withdrawn
+
+
 class AgentRunner:
     def __init__(self, brain: BrainClient, pool, tool_registry, model_registry,
                  guardrails: GuardrailEngine, meridian_usage: MeridianUsage,
@@ -724,6 +727,7 @@ class AgentRunner:
             # question from stale training data).
             if not flags["nudged"]:
                 flags["nudged"] = True
+                flags["prose"] = (result.content or "").strip()
                 emit("think", f"Brain replied in prose instead of dispatching "
                               f"({took:.1f}s) — redirecting it to delegate to a "
                               f"worker model...")
@@ -796,7 +800,13 @@ class AgentRunner:
                 emit("think", "Brain insisted on answering directly — forwarding its "
                               "answer. Note: NOT produced or verified by a worker model.")
                 ctx.logger.record_guardrail("brain answered directly (prose, post-nudge)")
-            emit("answer", content or flags["last_tool_result"]
+            if not content and not flags["last_tool_result"] and flags.get("prose"):
+                # v0.181.134: asked to delegate, the brain then said nothing. Its first
+                # reply is better than "no answer"; it is flagged the same way.
+                emit("think", "The brain gave no second reply — forwarding its first one. "
+                              "Note: NOT produced or verified by a worker model.")
+                ctx.logger.record_guardrail("brain answered directly (prose, nothing after the nudge)")
+            emit("answer", content or flags["last_tool_result"] or flags.get("prose")
                  or "The routing agent produced no answer — please retry.")
             flags["finalized"] = True
             return "end"
@@ -1782,6 +1792,8 @@ class AgentRunner:
                          and wt_info and wt_info.get("type") == "ollama")
         from .. import tool_finder
         step, free_finds = 0, 0
+        offer: Optional[list] = specs      # the tools offered on the next turn
+        tool_failures = 0
         while step < cap:
             step += 1
             result = backend = None
@@ -1797,7 +1809,7 @@ class AgentRunner:
                     pacer = keepalive.Pacer(keepalive.visible_every(self.brain.cfg))
                     t_hb = time.monotonic()
                     src = self.pool.chat_stream(
-                        worker, messages, tools=specs, options=wt_options,
+                        worker, messages, tools=offer, options=wt_options,
                         think=self._think_for(worker))
                     async for kind, chunk in keepalive.stream_with_heartbeat(src, hb, t_hb):
                         if kind == "beat":     # silent prefill: keep the stream alive
@@ -1826,7 +1838,7 @@ class AgentRunner:
                     err = e
             else:
                 task = asyncio.create_task(self.pool.chat(
-                    worker, messages, tools=specs, options=wt_options,
+                    worker, messages, tools=offer, options=wt_options,
                     max_tokens=self.brain.cfg.worker_max_tokens,
                     think=self._think_for(worker)))
                 async for hb in self._heartbeat_events(task, f"{worker} (tool step {step}/{cap})"):
@@ -1955,16 +1967,31 @@ class AgentRunner:
                     out = rich.text
                 except Exception as e:
                     dur = int((time.monotonic() - t0) * 1000)
+                    why = describe_exception(e)
                     ctx.logger.record_tool_call(tc["name"], tool.server, dur,
-                                                ok=False, error=describe_exception(e),
+                                                ok=False, error=why,
                                                 caller=worker, arguments=tc["arguments"],
                                                 executes_code=ex_code)
-                    self.model_registry.record_tool_call(worker, ok=False)
-                    async for ev in hand_to_brain(
-                            f"{worker}'s {tool.server} call failed "
-                            f"({describe_exception(e)})"):
-                        yield ev
-                    return
+                    # v0.181.134: a failed call is a RESULT. The worker reads the error and
+                    # goes on (another page, another query, or an answer from what it has).
+                    # One page answering 404 used to end the worker's loop and hand the
+                    # whole request to the brain, which then gave no answer at all.
+                    tool_failures += 1
+                    last = tool_failures >= WORKER_TOOL_FAILURES
+                    yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} failed ({why[:200]}) — "
+                                     + (f"{worker} is told to answer from what it has."
+                                        if last else f"telling {worker}, which can try another source."))
+                    messages.append({
+                        "role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                        "content": f"ERROR: this call failed: {why[:600]}\n" + (
+                            "Do not call more tools. Answer now from what you already have, and "
+                            "say plainly what you could not read." if last else
+                            "Do not repeat the same call. Try a different page, query or tool, "
+                            "or answer from what you already have and say what you could not read.")})
+                    trail.append((tool.mcp_tool, f"ERROR: {why[:300]}"))
+                    if last:
+                        offer = None            # no more tools: the next turn is the answer
+                    continue
                 dur = int((time.monotonic() - t0) * 1000)
                 ctx.logger.record_tool_call(tc["name"], tool.server, dur, ok=True,
                                             caller=worker, arguments=tc["arguments"],

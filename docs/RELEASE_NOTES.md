@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.134 — one page that would not open ended the whole answer
+
+**What happened.** Foundry-Chat in AnythingLLM searched twice, then opened a page that answered 404 (in a second try, 403). The thoughts showed "foundry-finder call failed (McpError: Website Error (404): Page not found) — handing this request to the brain", the brain replied in prose, was told to delegate, said nothing more, and the chat got "The routing agent produced no answer — please retry." Both searches that had worked were thrown away.
+
+- **A failed tool call is a result the worker reads.** The error goes back to the model as the tool's result, with "try a different page, query or tool, or answer from what you already have". The worker keeps its loop, its search results and its tools. After three failed calls in one request its tools are withdrawn and it is told to answer from what it has. The failure is still logged on the request and in the tool trail.
+- **The brain's first reply is not thrown away.** When the brain-run loop answers in prose, is told to delegate and then says nothing, its first reply is sent, flagged as not produced by a worker model, instead of "produced no answer".
+
+Tests: `tests/test_worker_tools.py`.
+
 ## v0.181.133 — the performance advisor off the event loop
 
 One pause was left in the record after v0.181.130: 2.7 s in `GET /admin/api/perf/advisor`. The advisor read a day of performance samples on the event loop, and the Live tab and the overview ask for it again and again while they are open.
