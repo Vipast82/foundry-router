@@ -59,6 +59,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import sqlite3
 import threading
@@ -210,9 +211,15 @@ class CaptureStore:
         self._lock = threading.Lock()
         self._ro: Optional[sqlite3.Connection] = None
         self._ro_lock = threading.Lock()
+        self._q: queue.Queue = queue.Queue()             # rows waiting for the writer thread
+        self._writer: Optional[threading.Thread] = None
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # the WAL is synced at checkpoints, not at every record: a record is megabytes
+        # and a sync per record was part of a 2.2 s pause (a power cut can lose the last
+        # records; the store stays intact)
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(capture_records)")}
         if "purpose" not in cols:          # a store written before v0.153.0
@@ -233,7 +240,46 @@ class CaptureStore:
                 f"({', '.join('?' * len(cols))})", [row[c] for c in cols])
             return cur.lastrowid
 
+    def insert_later(self, row: dict, on_error=None) -> None:
+        """Hand a record to the writer thread and return at once. v0.181.131: the
+        request path wrote each record itself, on the event loop, and one INSERT of a
+        large request waited 2.2 s on the disk with every stream frozen. `flush()`
+        (called by every read) waits for the records still queued."""
+        self._q.put((row, on_error))
+        if self._writer is None or not self._writer.is_alive():
+            with self._ro_lock:
+                if self._writer is None or not self._writer.is_alive():
+                    self._writer = threading.Thread(target=self._drain, name="foundry-capture-writer",
+                                                    daemon=True)
+                    self._writer.start()
+
+    def _drain(self) -> None:
+        while True:
+            row, on_error = self._q.get()
+            try:
+                self.insert(row)
+            except Exception as e:                                # noqa: BLE001
+                if on_error is not None:
+                    try:
+                        on_error(e)
+                    except Exception:                             # noqa: BLE001
+                        pass
+            finally:
+                self._q.task_done()
+
+    def flush(self, timeout: float = 10.0) -> bool:
+        """Wait until the queued records are written (True) or `timeout` passes."""
+        end = time.monotonic() + timeout
+        with self._q.all_tasks_done:
+            while self._q.unfinished_tasks:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                self._q.all_tasks_done.wait(left)
+        return True
+
     def query(self, sql: str, args=()) -> list[dict]:
+        self.flush()
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
@@ -242,6 +288,7 @@ class CaptureStore:
         read-only connection: `insert`, which every captured request calls from the
         event loop, never waits for it. v0.181.125: the counts query held the one
         lock for 49 s and the router froze for as long."""
+        self.flush()
         with self._ro_lock:
             if self._ro is None:
                 self._ro = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
@@ -392,12 +439,14 @@ class Capture:
                 "truncated": truncated, "purpose": current_purpose(), **extra}
 
     def _write(self, row: dict) -> None:
-        try:
-            self.store.insert(row)
-        except Exception as e:                                    # noqa: BLE001
+        def failed(e: Exception) -> None:
             self.errors += 1
             self.last_error = f"{type(e).__name__}: {e}"[:300]
             log.warning("training capture write failed: %s", e)
+        try:
+            self.store.insert_later(row, failed)
+        except Exception as e:                                    # noqa: BLE001
+            failed(e)
 
     # -- hooks -----------------------------------------------------------------------
 

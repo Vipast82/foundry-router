@@ -521,7 +521,9 @@ class Services:
                     await asyncio.to_thread(self.alerts.tick)
                 except Exception:
                     log.exception("alerts tick failed")
-                if n % 240 == 0:
+                # hourly; the first one five minutes after a start (v0.181.131: at the
+                # start it read old rows off the disk while clients were reconnecting)
+                if n % 240 == FIRST_PRUNE_SECONDS // 15:
                     await asyncio.to_thread(self.control.prune)
             except Exception:
                 log.exception("control-center watchdog failed")
@@ -546,6 +548,7 @@ class Services:
     async def _retention_loop(self) -> None:
         """Keep log tables inside data_retention.days (Logs -> Data)."""
         from .datatools import prune
+        await asyncio.sleep(FIRST_PRUNE_SECONDS)
         while True:
             cfg = self.config_store.config.data_retention
             try:
@@ -734,6 +737,9 @@ class Services:
         await self.pool.stop()
         await self.http.aclose()
         self.db.close()
+
+
+FIRST_PRUNE_SECONDS = 300      # retention's first run after a start
 
 
 def create_app(config_path: Optional[Path] = None,

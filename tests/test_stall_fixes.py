@@ -537,3 +537,49 @@ def test_the_scorecard_is_built_once_a_minute_however_often_it_is_asked_for(app,
     monkeypatch.setattr(routes, "SCORECARD_KEEP_SECONDS", 0.0)
     client.get("/admin/api/work/scorecard")
     assert len(built) == 3
+
+
+# ---- v0.181.131 ---------------------------------------------------------------------------------
+
+def test_capture_records_are_written_by_a_writer_thread_and_reads_wait_for_them(app):
+    """One INSERT of a large request waited 2.2 s on the disk, on the event loop."""
+    svc = app.state.services
+    svc.config_store.config.training_capture = TrainingCaptureConfig(enabled=True)
+    cap, store = svc.capture, svc.capture.store
+    wrote_on = []
+    real = store.insert
+
+    def slow_insert(row):
+        wrote_on.append(threading.current_thread().name)
+        time.sleep(0.3)                                       # a slow disk
+        return real(row)
+    store.insert = slow_insert
+    t0 = time.monotonic()
+    cap._write({"record_uid": "w1", "ts": time.time(), "kind": "backend_call", "body": "{}"})
+    cap._write({"record_uid": "w2", "ts": time.time(), "kind": "backend_call", "body": "{}"})
+    assert time.monotonic() - t0 < 0.15                       # the caller did not wait for the disk
+    # a read sees every record handed over before it
+    assert [r["record_uid"] for r in store.query("SELECT record_uid FROM capture_records ORDER BY id")] == ["w1", "w2"]
+    assert wrote_on == ["foundry-capture-writer"] * 2 and store.flush() is True
+    # a failed write is counted, as before
+    store.insert = lambda row: (_ for _ in ()).throw(RuntimeError("disk full"))
+    cap._write({"record_uid": "w3", "ts": time.time(), "kind": "backend_call", "body": "{}"})
+    store.flush()
+    assert cap.errors == 1 and "disk full" in cap.last_error
+    store.insert = real
+    assert store.conn.execute("PRAGMA synchronous").fetchone()[0] == 1      # NORMAL
+
+
+def test_the_work_view_reads_on_the_second_connection_and_cleanup_waits_after_a_start(app):
+    import inspect
+    from foundry_router import main as router_main
+    from foundry_router.orchestration import WorkRegistry
+    src = inspect.getsource(WorkRegistry.view)
+    assert "db = self.db.reader()" in src and "self.db.query(" not in src
+    svc = app.state.services
+    with svc.db._lock:                                        # the request path's lock is not needed
+        out = svc.work.view("", hours=1)
+    assert out["tasks"] == [] and out["sessions"] == []
+    assert router_main.FIRST_PRUNE_SECONDS == 300
+    assert "await asyncio.sleep(FIRST_PRUNE_SECONDS)" in inspect.getsource(type(svc)._retention_loop)
+    assert "n % 240 == FIRST_PRUNE_SECONDS // 15" in inspect.getsource(type(svc)._control_watchdog_loop)

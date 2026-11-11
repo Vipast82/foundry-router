@@ -262,10 +262,13 @@ class WorkRegistry:
         return out
 
     def view(self, project_id: str = "", hours: float = 72) -> dict:
+        # v0.181.131: on the second connection (it runs on a worker thread; its 300-row
+        # read held the request path's lock for 1.2 s)
+        db = self.db.reader() if hasattr(self.db, "reader") else self.db
         since = time.time() - hours * 3600
         pw, pa = ("AND project_id=?", (project_id,)) if project_id else ("", ())
         tasks = []
-        for r in self.db.query(f"SELECT * FROM work_tasks WHERE updated_ts >= ? {pw} "
+        for r in db.query(f"SELECT * FROM work_tasks WHERE updated_ts >= ? {pw} "
                                "ORDER BY updated_ts DESC LIMIT 200", (since, *pa)):
             d = dict(r)
             try:
@@ -273,11 +276,11 @@ class WorkRegistry:
             except ValueError:
                 d["data"] = {}
             tasks.append(d)
-        sessions = [dict(r) for r in self.db.query(
+        sessions = [dict(r) for r in db.query(
             f"SELECT * FROM work_sessions WHERE updated_ts >= ? {pw} "
             "ORDER BY updated_ts DESC LIMIT 300", (since, *pa))]
         stats = {}
-        for r in self.db.query(
+        for r in db.query(
                 "SELECT session_id, COUNT(*) AS calls, SUM(CASE WHEN status='denied' THEN 1 "
                 "ELSE 0 END) AS denied, SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)) "
                 "AS tokens, SUM(CASE WHEN status='reserved' THEN 1 ELSE 0 END) AS inflight, "
@@ -292,7 +295,7 @@ class WorkRegistry:
             except ValueError:
                 s["meta"] = {}
         events = []
-        for r in self.db.query(f"SELECT * FROM work_events WHERE ts >= ? {pw} "
+        for r in db.query(f"SELECT * FROM work_events WHERE ts >= ? {pw} "
                                "ORDER BY ts DESC, id DESC LIMIT 300", (since, *pa)):
             d = dict(r)
             try:

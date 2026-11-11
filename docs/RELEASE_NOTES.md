@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.131 — two short pauses at a restart
+
+The v0.181.130 start recorded two pauses of 2.2 s and 2.9 s. Both happened while the disk was busy with the cleanup that runs at every start.
+
+- **Training capture writes** are handed to a writer thread. The request path wrote each record itself, on the event loop, and one INSERT of a large request waited 2.2 s on the disk. Reads of the store wait for the records still queued, so nothing is missed. The store's WAL is synced at checkpoints, not at every record (`synchronous=NORMAL`): a power cut can lose the last records, the store stays intact.
+- **The Work view** reads on the second connection. Its 300-row read held the request path's lock for 1.2 s.
+- **The first cleanup waits five minutes** after a start (retention and the control center's), so it no longer reads old rows off the disk while clients are reconnecting. Afterwards it runs hourly as before.
+
+Checked on the live router with v0.181.130: Foundry-Chat found its tools, ran two searches at once and answered in 28 s with no markup.
+
+Tests: `tests/test_stall_fixes.py`.
+
 ## v0.181.130 — a found tool called by its own name; argument types; markup is never the answer
 
 After v0.181.129 the AnythingLLM thread got one step further and stopped again: the two `foundry_find_tools` calls ran, then the reply was
