@@ -12,6 +12,25 @@ set -euo pipefail
 ref="${1:?usage: slot-checkout <ref>}"
 CO="${AU_CHECKOUT:-$HOME/work/AnimalUprising}"
 export PATH="$HOME/.rokit/bin:$PATH"
+# 2026-11-11: a plain clone from the mounted mirror copies the whole history (12 GB for AU);
+# slot-3's three copies filled its disk and it went read-only mid gate. The copy borrows the
+# mirror's objects (alternates); an older copy is relinked here once. Same function as
+# foundry_coordinator/slot_blender.py SHARE_FN.
+au_share() {
+    co="$1"; src="$2"
+    alt="$co/.git/objects/info/alternates"
+    [ -s "$alt" ] && return 0
+    objs="$(git -C "$src" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/objects"
+    [ -d "$objs" ] || return 0
+    head=$(git -C "$co" rev-parse -q --verify HEAD 2>/dev/null || true)
+    if [ -n "$head" ] && ! git -C "$src" cat-file -e "$head^{commit}" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "$co/.git/objects/info"
+    echo "$objs" > "$alt"
+    git -C "$co" repack -a -d -l -q && git -C "$co" prune-packed -q
+    echo "slot: $co now shares $objs"
+}
 # a rotated key reaches the slot before the gate (unchanged = one cheap 304); never fails the move
 slot-secrets >&2 || true
 # a new slot host: its game mirror was empty when the container started, so the first gate
@@ -19,9 +38,13 @@ slot-secrets >&2 || true
 first=0
 if [ ! -d "$CO/.git" ]; then
     mkdir -p "$(dirname "$CO")"
-    git clone -q --no-checkout "${AU_SOURCE:-/work/AnimalUprising}" "$CO"
+    git clone -q --no-checkout --shared "${AU_SOURCE:-/work/AnimalUprising}" "$CO"
     first=1
 fi
+# a checkout cut off earlier (disk full or read-only) leaves index.lock: one older than
+# 10 min has no git behind it (gates run one at a time on a slot)
+find "$CO/.git/index.lock" -mmin +10 -delete 2>/dev/null || true
+au_share "$CO" "${AU_SOURCE:-/work/AnimalUprising}" || true
 cd "$CO"
 git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
 target=$(git rev-parse --verify -q "origin/$ref^{commit}" || git rev-parse --verify "$ref^{commit}")

@@ -79,6 +79,27 @@ def local_changes(repo: str) -> tuple[list, list]:
 
 # ----------------------------------------------------------------------------- B2b: library
 
+# 2026-11-11: a slot copy cloned plainly from the mounted mirror holds the whole history (12 GB
+# for AnimalUprising, three copies a slot): slot-3 filled to 81 %, its disk went read-only mid
+# gate and a sprint was parked. Copies borrow the mirror's objects instead (alternates), and an
+# old copy is relinked the first time a run touches it. Bash, shared with contrib/studio-slot
+# (slot-checkout.sh, entrypoint.sh carry the same function).
+SHARE_FN = r"""au_share() {
+    co="$1"; src="$2"
+    alt="$co/.git/objects/info/alternates"
+    [ -s "$alt" ] && return 0
+    objs="$(git -C "$src" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/objects"
+    [ -d "$objs" ] || return 0
+    head=$(git -C "$co" rev-parse -q --verify HEAD 2>/dev/null || true)
+    if [ -n "$head" ] && ! git -C "$src" cat-file -e "$head^{commit}" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "$co/.git/objects/info"
+    echo "$objs" > "$alt"
+    git -C "$co" repack -a -d -l -q && git -C "$co" prune-packed -q
+    echo "foundry-blender: $co now shares $objs" >&2
+}
+"""
 LIB_DIR = "$HOME/assetlib"                 # in the slot container's persistent home volume
 _LIB_MANIFEST, _LIB_HASH, _LIB_DELETE = ".foundry-manifest.json", ".foundry-manifest.sha", \
     ".foundry-delete"
@@ -225,7 +246,11 @@ if ! flock -s -w {int(wait)} 8; then
 fi
 SFX=""; [ "$J" = 1 ] || SFX="-$J"
 W="$HOME/work/blender$SFX"
-if [ ! -d "$W/.git" ]; then git clone -q /work/AnimalUprising "$W" >&2 || exit 70; fi
+{SHARE_FN}if [ ! -d "$W/.git" ]; then git clone -q --shared /work/AnimalUprising "$W" >&2 || exit 70; fi
+# a run cut off mid checkout (slot-3, 2026-11-11: the disk went read-only) left its lock; this
+# job holds the copy's flock, so no other git runs in it
+rm -f "$W/.git/index.lock"
+au_share "$W" /work/AnimalUprising || true
 git -C "$W" fetch -q origin "refs/heads/blender/{run_id}" >&2 || exit 70
 git -C "$W" -c advice.detachedHead=false checkout -q --force --detach FETCH_HEAD >&2 || exit 70
 git -C "$W" clean -q -fd >&2

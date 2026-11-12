@@ -74,8 +74,28 @@ done
 if [ ! -d "$AU_CHECKOUT/.git" ] && git -C "$AU_SOURCE" rev-parse --git-dir >/dev/null 2>&1 \
         && git -C "$AU_SOURCE" rev-parse -q --verify HEAD >/dev/null 2>&1; then
     mkdir -p "$(dirname "$AU_CHECKOUT")"
-    git clone -q "$AU_SOURCE" "$AU_CHECKOUT" >"$HOME/checkout.log" 2>&1
+    git clone -q --shared "$AU_SOURCE" "$AU_CHECKOUT" >"$HOME/checkout.log" 2>&1
 fi
+# 2026-11-11: a plain clone from the mounted mirror copies the whole history (12 GB for AU);
+# slot-3's three copies filled its disk and it went read-only mid gate. The copy borrows the
+# mirror's objects (alternates); an older copy is relinked here once. Same function as
+# foundry_coordinator/slot_blender.py SHARE_FN.
+au_share() {
+    co="$1"; src="$2"
+    alt="$co/.git/objects/info/alternates"
+    [ -s "$alt" ] && return 0
+    objs="$(git -C "$src" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/objects"
+    [ -d "$objs" ] || return 0
+    head=$(git -C "$co" rev-parse -q --verify HEAD 2>/dev/null || true)
+    if [ -n "$head" ] && ! git -C "$src" cat-file -e "$head^{commit}" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "$co/.git/objects/info"
+    echo "$objs" > "$alt"
+    git -C "$co" repack -a -d -l -q && git -C "$co" prune-packed -q
+    echo "slot: $co now shares $objs" >>"$HOME/checkout.log"
+}
+[ -d "$AU_CHECKOUT/.git" ] && { au_share "$AU_CHECKOUT" "$AU_SOURCE" >>"$HOME/checkout.log" 2>&1 || true; }
 [ -d "$AU_CHECKOUT/.git" ] && git -C "$AU_CHECKOUT" fetch -q origin >>"$HOME/checkout.log" 2>&1
 
 # AU's toolchain (lune, selene, stylua, wally) from its rokit.toml, then its wally

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -252,3 +253,97 @@ def test_prepare_records_the_library(tmp_path, monkeypatch):
     raw["blender"]["library"] = ""
     b = SB.prepare(_Prof(ws, raw), str(tmp_path))
     assert json.loads(open(b["config"], encoding="utf-8").read())["library"] == ""
+
+
+def test_remote_script_clones_shared_and_relinks_an_old_copy():
+    """2026-11-11 slot-3: three plain clones of the mirror (12 GB of history each) filled the disk,
+    it went read-only mid gate. A new copy borrows the mirror's objects; an old one is relinked;
+    a lock left by a cut-off checkout is cleared under the job's flock."""
+    s = SB.remote_script("wt-1", 600, 0, ["-b"])
+    assert 'git clone -q --shared /work/AnimalUprising "$W"' in s
+    assert "au_share() {" in s and 'au_share "$W" /work/AnimalUprising' in s
+    assert 'rm -f "$W/.git/index.lock"' in s
+    # the lock is cleared only after this job holds its copy's flock
+    assert s.index("flock -w 600 9") < s.index('rm -f "$W/.git/index.lock"')
+    assert s.index('rm -f "$W/.git/index.lock"') < s.index('git -C "$W" fetch')
+
+
+def _share_fn(text: str) -> str:
+    """The au_share function body as written in a script (from its line to the closing brace)."""
+    start = text.index("au_share() {")
+    end = text.index("\n}\n", start) + 3
+    body = text[start:end].replace("\r\n", "\n")
+    # each script reports in its own way; the logic must match
+    return "\n".join(l for l in body.splitlines() if "now shares" not in l)
+
+
+def test_the_slot_scripts_carry_the_same_share_function():
+    root = Path(__file__).resolve().parents[1] / "contrib" / "studio-slot"
+    want = _share_fn(SB.SHARE_FN)
+    for name in ("slot-checkout.sh", "entrypoint.sh"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert _share_fn(text) == want, name
+    co = (root / "slot-checkout.sh").read_text(encoding="utf-8")
+    assert "git clone -q --no-checkout --shared" in co and 'au_share "$CO"' in co
+    assert 'find "$CO/.git/index.lock" -mmin +10 -delete' in co
+    ep = (root / "entrypoint.sh").read_text(encoding="utf-8")
+    assert 'git clone -q --shared "$AU_SOURCE" "$AU_CHECKOUT"' in ep and 'au_share "$AU_CHECKOUT"' in ep
+
+
+def _bash():
+    import shutil
+    b = shutil.which("bash")
+    if not b:
+        pytest.skip("no bash")
+    return b
+
+
+def _git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_au_share_relinks_a_full_clone_and_keeps_head_and_work(tmp_path):
+    bash = _bash()
+    src = tmp_path / "mirror.git"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(seed, "init", "-q", "-b", "master")
+    for i in range(3):
+        (seed / f"f{i}.txt").write_text("x" * 5000 + str(i))
+        _git(seed, "add", "-A")
+        _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", f"c{i}")
+    subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(src)], check=True)
+    co = tmp_path / "copy"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(src), str(co)], check=True)
+    (co / "f0.txt").write_text("dirty")                     # uncommitted work survives
+    (co / ".git" / "objects" / "info").mkdir(exist_ok=True)
+    head0 = _git(co, "rev-parse", "HEAD")
+    script = SB.SHARE_FN + f'au_share "{co.as_posix()}" "{src.as_posix()}"\n'
+    r = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    alt = (co / ".git" / "objects" / "info" / "alternates").read_text().strip()
+    assert alt.endswith("mirror.git/objects")
+    assert _git(co, "rev-parse", "HEAD") == head0
+    assert _git(co, "status", "--porcelain") == "M f0.txt"
+    assert _git(co, "fsck", "--connectivity-only", "--no-dangling") == ""
+    # every object now comes from the mirror: the copy keeps no pack of its own
+    assert not list((co / ".git" / "objects" / "pack").glob("*.pack"))
+    # a second run leaves a linked copy alone
+    r = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0 and "now shares" not in r.stderr
+
+
+def test_au_share_leaves_a_copy_whose_head_the_mirror_lacks(tmp_path):
+    bash = _bash()
+    src = tmp_path / "mirror.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(src)], check=True)
+    co = tmp_path / "copy"
+    co.mkdir()
+    _git(co, "init", "-q")
+    (co / "a.txt").write_text("a")
+    _git(co, "add", "-A")
+    _git(co, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "local only")
+    script = SB.SHARE_FN + f'au_share "{co.as_posix()}" "{src.as_posix()}"\n'
+    r = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert not (co / ".git" / "objects" / "info" / "alternates").exists()
