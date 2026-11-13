@@ -384,7 +384,12 @@ READY`, or a `GATE <ID> STARTED|RUNNING|NONE|ERROR|BUSY ...` line.
   exclusive locks (Studio, Rojo). Every runner, manual or not, also takes
   `runner.lock`, so two runners never drive Studio at once; that lock does
   not stop a session or helper calling Studio tools directly, so do not run
-  a gate while one does.
+  a gate while one does. The coordinator releases a `studio.lock` its task no
+  longer needs, but not while the workstation Studio is in Play (a bot match
+  outlives its session): it asks `get_studio_state` first (read-only, 5 s),
+  keeps the lock (event `studio_lock_kept`) for at most `[automation]
+  studio_lock_playtest_keep_minutes` (default 120, 0 = off), then releases it
+  (event `studio_lock_keep_cap`).
 - **`doctor` does not check** the Scene Analysis beta, display scaling or the
   viewport size.
 - The Roblox Assistant `playtest` subagent is advisory and never part of the

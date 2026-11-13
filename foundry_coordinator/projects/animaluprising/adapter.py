@@ -1054,6 +1054,17 @@ Change no code or test file in this session; if one needs changing, stop and rep
         except OSError:
             return False
 
+    def studio_in_play(self) -> bool | None:
+        """2026-11-13: is the workstation Studio in Play? True / False / None (cannot
+        tell). Asked before a studio.lock is released (studio_calls.playtest_keeps_lock):
+        a bot match plays on after its session ended. Read-only, 5 s at most, never
+        raises (studio_gate.studio_in_play: one get_studio_state per open place)."""
+        try:
+            from . import studio_gate
+            return studio_gate.studio_in_play()
+        except Exception:                                         # noqa: BLE001
+            return None
+
     def studio_busy(self, task_id: str) -> str:
         """'' when AU's shared studio.lock (tools/coord/lock.py) is free or held for
         `task_id` itself, else who holds it: a Studio auto-reopen (0.145.0) never

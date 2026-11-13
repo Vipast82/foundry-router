@@ -314,6 +314,9 @@ AUTOMATION_DEFAULTS: dict = {
     "max_agents": 1,
     "studio_idle_minutes": 10,
     "studio_track_max_minutes": 45,
+    # 2026-11-13 BOT-1 / TT-1: a studio.lock whose task no longer needs it is kept while the
+    # workstation Studio is in Play (a bot match outlives its session), this long at most
+    "studio_lock_playtest_keep_minutes": 120,
     # 2026-10-28: a track's merge runs the scripted Studio gate ([studio_calls]) for each of
     # its covered sprints, back to back under one Studio lease (0 = studio_track_max_minutes
     # per run in the batch)
@@ -984,6 +987,11 @@ _AUTO_DESC = {
                            "has not used it for this long.",
     "studio_track_max_minutes": "Longest Studio lease of a track's merge gate (one run; never "
                                 "interrupted mid-run).",
+    "studio_lock_playtest_keep_minutes": "A studio.lock the coordinator would release (its "
+                                         "task has no session that holds Studio) is kept "
+                                         "while the workstation Studio is in Play, for this "
+                                         "long at most; then it is released as before "
+                                         "(0 = never kept).",
     "merge_studio_batch": "When a track merges, run the scripted Studio gate ([studio_calls]) "
                           "in the main checkout for each of its sprints that [studio_calls] "
                           "covers that has suites of its own, in order, then ONE full "

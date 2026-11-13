@@ -212,6 +212,59 @@ def _sg():
     return studio_gate
 
 
+# 2026-11-13 BOT-1 / TT-1: a bot match plays on in Studio after the session that started it
+# ended its turn (or its task went to VERIFYING). studio.lock was released by task state,
+# the next gate started a playtest on top of the match ("Playtest already running") and
+# both runs were lost. Before a lock is released the adapter is asked whether Studio is in
+# Play (studio_in_play: read-only, 5 s at most). In Play: the lock stays, for at most
+# [automation] studio_lock_playtest_keep_minutes after the first keep (a stuck Play session
+# with a dead owner must not hold the workstation forever). Not in Play, no answer, or an
+# adapter without the probe: as before. A kept lock is asked about once a minute and
+# noted once, then every 10 minutes. The times live in memory: a restart starts them again.
+PLAYTEST_PROBE_EVERY_S = 60.0
+PLAYTEST_KEEP_NOTE_S = 600.0
+
+
+def playtest_keeps_lock(c, P, tid: str, line: str) -> bool:
+    """True: Studio is in Play, this studio.lock line stays (see above). c: the coordinator."""
+    probe = getattr(P.adapter, "studio_in_play", None)
+    if not callable(probe):
+        return False
+    from .automation import get as auto_get
+    cap_s = float(auto_get(P, "studio_lock_playtest_keep_minutes") or 0) * 60
+    if cap_s <= 0:
+        return False
+    seen = c.__dict__.setdefault("_lock_playtest_seen", {})
+    key, now = (P.id, line[:300]), c.clock()
+    st = seen.get(key)
+    if st and st.get("capped"):
+        return False
+    if not st or now - st["probed"] >= PLAYTEST_PROBE_EVERY_S:
+        try:
+            playing = probe() is True
+        except Exception:                                         # noqa: BLE001
+            playing = False
+        if not playing:
+            seen.pop(key, None)
+            return False
+        st = seen.setdefault(key, {"first": now, "noted": -1e18})
+        st["probed"] = now
+    kept_min = int((now - st["first"]) / 60)
+    if now - st["first"] >= cap_s:
+        st["capped"] = True
+        c.store.event(P.id, tid, "studio_lock_keep_cap",
+                      detail={"line": line[:300], "kept_minutes": kept_min,
+                              "why": "Studio is still in Play after "
+                                     "studio_lock_playtest_keep_minutes: released as before"})
+        return False
+    if now - st["noted"] >= PLAYTEST_KEEP_NOTE_S:
+        st["noted"] = now
+        c.store.event(P.id, tid, "studio_lock_kept",
+                      detail={"line": line[:300], "kept_minutes": kept_min,
+                              "why": "playtest in flight"})
+    return True
+
+
 # ============================================================================ the pipeline
 # Runs detached (its own process group): host half -> calls -> -Finish. It writes
 # .plan/tmp/gate/<ID>/calls_pipeline.json (phase per step; `done` with the result).
@@ -587,6 +640,12 @@ class StudioCalls:
                     return True
                 self.c._note(P, t, f"scripted Studio gate waits for a running studio_gate "
                                    f"({line[:120]})")
+                return False
+            # 2026-11-13 BOT-1: the idle session's bot match was still playing; the gate
+            # deleted the lock and its playtest failed "Playtest already running"
+            if playtest_keeps_lock(self.c, P, tid, line):
+                self.c._note(P, t, f"scripted Studio gate waits for studio.lock: a playtest "
+                                   f"is in flight in Studio ({line[:120]})")
                 return False
             try:
                 os.remove(SG.studio_lock_path())

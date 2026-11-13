@@ -1224,7 +1224,17 @@ class RepoBridge:
 
                 def log_message(self, *a):
                     pass
-            self.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+            # A fixed port first (FOUNDRY_GATE_BRIDGE_PORT, default 34873): Studio's Assistant
+            # HTTP allow list matches host:port, so a random port is always denied
+            # (TT-1, 2026-11-12). A busy port falls back to a free one.
+            self.httpd = None
+            for port in (int(os.environ.get("FOUNDRY_GATE_BRIDGE_PORT", "34873") or 0), 0):
+                try:
+                    self.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
+                    break
+                except OSError:
+                    if port == 0:
+                        raise
             self.httpd.daemon_threads = True
             threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         return self.httpd.server_address[1]
@@ -3136,6 +3146,15 @@ def plan_checks(plan: dict, files: list, explicit_selection: Optional[str], affe
 
 def studio_mode(text: str) -> str:
     """get_studio_state text -> edit | play | unknown."""
+    # 2026-11-13: the official server answers "- Current Studio Mode: Play" (or Edit). The
+    # patterns below have no "mode: play" form, so a playtest read as unknown: the calls
+    # mode never stopped a leftover playtest and failed "Playtest already running" instead.
+    m = re.search(r"studio mode\s*[:=]\s*\W*([a-z]+)", (text or "").lower())
+    if m:
+        if m.group(1) in ("play", "playing", "run", "running", "playtest", "test"):
+            return "play"
+        if m.group(1) == "edit":
+            return "edit"
     data = extract_json(text)
     blob = json.dumps(data).lower() if data is not None else (text or "").lower()
     if re.search(r'"(is_?playing|is_?running|playtest(ing)?)"\s*:\s*true', blob) or re.search(
@@ -3779,6 +3798,50 @@ def studio_lock_release(sprint: str, owner: str = STUDIO_LOCK_OWNER) -> bool:
             os.remove(studio_lock_path())
             return True
     return False
+
+
+def _state_mode(text: str) -> str:
+    """get_studio_state text -> edit | play | unknown (studio_in_play). Since 2026-11-13
+    studio_mode() reads the "Current Studio Mode" line itself; kept as a name."""
+    return studio_mode(text)
+
+
+def studio_in_play(timeout: float = 5.0) -> Optional[bool]:
+    """Is a Studio on this workstation in Play? True, False (every open place answered
+    Edit) or None (no Studio, no answer in `timeout` seconds, an unreadable state).
+    2026-11-13 BOT-1 / TT-1: a bot match plays on after the session that started it ended;
+    the coordinator asks this before it releases a studio.lock. Read-only: its own official
+    server, `list_roblox_studios` once and `get_studio_state` per open place; nothing is
+    started, stopped or run, and the console is not written. No retry; never raises; the
+    caller waits `timeout` at most (a slow server shutdown finishes on the probe's thread)."""
+    box: list = []
+
+    def probe():
+        c = None
+        end = time.monotonic() + timeout
+        try:
+            c = M.connect("official", init_timeout=timeout)
+            modes = []
+            for s in M.OfficialStudio(c).list_studios(max(0.1, end - time.monotonic())):
+                if not str(s.get("name") or "").strip():
+                    continue                     # on its start page: no place, no playtest
+                st = c.call_tool("get_studio_state", {"studio_id": str(s.get("id"))},
+                                 timeout=max(0.1, end - time.monotonic()))
+                modes.append("unknown" if st.get("is_error")
+                             else _state_mode(st.get("text") or ""))
+            box.append(True if "play" in modes
+                       else False if modes and all(m == "edit" for m in modes) else None)
+        except Exception:                                         # noqa: BLE001
+            box.append(None)
+        finally:
+            if c is not None:
+                with contextlib.suppress(Exception):
+                    c.close()
+
+    th = threading.Thread(target=probe, name="studio-in-play", daemon=True)
+    th.start()
+    th.join(timeout)
+    return box[0] if box else None
 
 
 # Paths the host half never reads: plans, summaries, evidence logs and captures. A commit

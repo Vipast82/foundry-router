@@ -4479,6 +4479,11 @@ class Coordinator:
                 return                           # E: a write-access Lead session may hold it
         except Exception:                                         # noqa: BLE001
             return
+        # 2026-11-13 BOT-1 / TT-1: the task's bot match may still be playing in Studio
+        # (it outlives the session's turn); in Play the lock stays, up to a cap
+        from .studio_calls import playtest_keeps_lock
+        if playtest_keeps_lock(self, P, t["task_id"], h["line"]):
+            return
         if P.adapter.release_studio_lock(h):
             self.store.event(P.id, t["task_id"], "studio_lock_released",
                              detail={"line": h["line"], "state": t["state"],

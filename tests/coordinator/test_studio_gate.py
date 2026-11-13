@@ -1201,6 +1201,31 @@ def test_doctor_ready_and_not_ready(fakes, repo, monkeypatch):
     assert any(o.startswith("FIX doctor.community_studio") for o in out)    # --place binds both
 
 
+def test_studio_in_play_only_reads_the_state_and_never_waits_long(fakes, monkeypatch):
+    """2026-11-13: the coordinator asks this before it releases a studio.lock (a bot match
+    plays on after its session ended). Two read calls, nothing else; no answer = None."""
+    set_rules, calls = fakes
+    set_rules([{"tool": "get_studio_state", "text": "Studio is playing"}])
+    assert G.studio_in_play(timeout=30) is True
+    set_rules([{"tool": "get_studio_state", "text": '{"mode": "Edit"}'}])
+    assert G.studio_in_play(timeout=30) is False
+    # the text the official server really answers (workstation, 2026-11-13)
+    set_rules([{"tool": "get_studio_state", "text": "- Current Studio Mode: Play\n- Available "
+               "DataModels: Client, Server\n- Focused DataModel in the viewport: Client"}])
+    assert G.studio_in_play(timeout=30) is True
+    set_rules([{"tool": "get_studio_state", "text": "- Current Studio Mode: Edit\n- Available "
+               "DataModels: Edit"}])
+    assert G.studio_in_play(timeout=30) is False
+    set_rules()                                                # an empty state: cannot tell
+    assert G.studio_in_play(timeout=30) is None
+    assert [c["tool"] for c in calls()] == ["list_roblox_studios", "get_studio_state"] * 5
+    set_rules([{"tool": "get_studio_state", "text": "Studio is playing", "sleep": 20}])
+    t0 = time.monotonic()
+    assert G.studio_in_play(timeout=1.0) is None and time.monotonic() - t0 < 4
+    monkeypatch.setenv("FOUNDRY_MCP_OFFICIAL", json.dumps([sys.executable, "-c", "pass"]))
+    assert G.studio_in_play(timeout=30) is None                # a server that is not there
+
+
 def test_stop_playtest_command(fakes, repo):
     set_rules, calls = fakes
     set_rules([], [{"tool": "solo_playtest", "text": '{"success": true, "action": "stop"}'}])

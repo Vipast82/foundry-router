@@ -465,6 +465,50 @@ def test_session_lock_left_behind_is_released_another_sprints_waits(env):
     assert json.loads(events(e, "studio_calls_lock_released")[0]["detail"])["line"].startswith("ses_x")
 
 
+def test_session_lock_left_behind_is_kept_while_its_match_plays(env):
+    """2026-11-13 BOT-1: the session ended its turn with its bot match still playing; the
+    gate deleted the session's studio.lock and its playtest failed "Playtest already
+    running". While Studio is in Play the lock stays and the run waits."""
+    e = env([{"result": "PASS"}])
+    playing = [True]
+    e.c.projects["game"].adapter.studio_in_play = lambda: playing[0]
+    lock = e.tmp / "locks" / "studio.lock"
+    lock.write_text("ses_x 2026-11-13T10:00:00Z T1 bot match\n")
+    drive(e, lambda t: "playtest is in flight" in (t["next_action"] or ""), limit=100)
+    for _ in range(30):                                         # 2.5 more minutes of ticks
+        e.c.tick()
+        e.now[0] += 5
+    assert lock.exists() and sc(e).get("pending") and not sc(e).get("run")
+    [ev] = events(e, "studio_lock_kept")                        # once, not every tick
+    assert json.loads(ev["detail"])["why"] == "playtest in flight"
+    assert not events(e, "studio_calls_lock_released")
+    playing[0] = False                                          # the match is over
+    drive(e, lambda t: bool(sc(e).get("run")) or bool(sc(e).get("last")), limit=100)
+    assert events(e, "studio_calls_lock_released") and not events(e, "studio_lock_keep_cap")
+
+
+def _no_answer():
+    raise RuntimeError("mcp: no answer")
+
+
+@pytest.mark.parametrize("case", ["edit", "unknown", "raises", "no_probe", "setting_0", "cap"])
+def test_session_lock_left_behind_is_released_without_a_playtest_or_at_the_cap(env, case):
+    e = env([{"result": "PASS"}])
+    P = e.c.projects["game"]
+    asked = []
+    if case != "no_probe":                                      # the generic adapter has none
+        answer = {"edit": lambda: False, "unknown": lambda: None, "raises": _no_answer}
+        P.adapter.studio_in_play = lambda: asked.append(1) or answer.get(case, lambda: True)()
+    if case in ("setting_0", "cap"):
+        P.profile.automation["studio_lock_playtest_keep_minutes"] = 0 if case == "setting_0" else 1
+    (e.tmp / "locks" / "studio.lock").write_text("ses_x 2026-11-13T10:00:00Z T1 bot match\n")
+    drive(e, lambda t: bool(sc(e).get("run")) or bool(sc(e).get("last")), limit=100)
+    assert events(e, "studio_calls_lock_released")
+    assert len(events(e, "studio_lock_keep_cap")) == (1 if case == "cap" else 0)
+    assert len(events(e, "studio_lock_kept")) == (1 if case == "cap" else 0)
+    assert bool(asked) == (case not in ("no_probe", "setting_0"))
+
+
 # ---------------------------------------------------------------- evidence
 def test_records_are_verified_with_runtime_identity_and_provenance(env, tmp_path):
     from foundry_coordinator.projects.animaluprising.adapter import AnimalUprisingAdapter
