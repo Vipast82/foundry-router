@@ -17,6 +17,10 @@ Usage (any cwd; --repo is the AU checkout):
              [--rerun failed|affected|all] [--budget-min N] [--group-min 10] [--background]
              [--dry-run]   the session gate's Studio half (needs gate.ps1's host half PASS at
              HEAD): writes docs/progress/<ID>_studio_lines.txt for gate.ps1 -Finish
+    bots     --sprint ID --runs-file runs.json [--run-min 75] [--block-min N] [--poll-s 45]
+             a block of bot matches (BotRunner.RunMatch), each in a fresh play session:
+             reports to docs/progress/PT_REPORTS/, one line per run in
+             docs/progress/<ID>_bot_matches.txt (docs/STUDIO_GATE.md "Bot matches")
     status   --sprint ID [--wait MINUTES]    read status.json / latest.json (--wait blocks <= 9 min)
 Exit codes: 0 PASS, 1 FAIL, 2 not ready / tooling error / still running. The last
 printed line is `GATE <ID> PASS|FAIL` (status while running: `GATE <ID> RUNNING ...`).
@@ -52,6 +56,7 @@ Fail closed everywhere: UNKNOWN (tool error, timeout, unparsable output) never c
 from __future__ import annotations
 
 import argparse
+import base64
 import collections
 import contextlib
 import hashlib
@@ -4523,6 +4528,295 @@ def calls_dry_run(a, out=print, run_cmd=default_run_cmd) -> int:
     return 0 if ok else 2
 
 
+# ---- bots mode (2026-11-13, BOT_MATCH_REVIEW proposal 1) ------------------------------
+# A block of bot matches as a script. BOT-1 / TT-1 / ECO-1: a session sat through every
+# 37-49 minute match, and a match whose session ended lost Studio to the next gate. For each
+# run: a fresh play session, the game's run recipe in the server VM (AU docs/progress/
+# BOT-1_PLAN.md "Run recipe": PlaytestBots on, AFK off, MatchService:Init(), RunMatch),
+# Status() every BOT_POLL_S (each poll rewrites status.json, so the coordinator's
+# stale-status watchdog sees progress for the whole match), Report() saved to
+# docs/progress/PT_REPORTS/<stamp>_<label>.md, AFK and the flag restored, the session
+# stopped. The runner lock and studio.lock (owner studio_gate) are held for the whole
+# block. A failed or timed-out run does not end the block; MCP servers that are gone do.
+BOTS_FILE = "bots_result.json"
+BOTS_LINES_REL = "docs/progress/{sprint}_bot_matches.txt"
+BOTS_REPORT_DIR = "docs/progress/PT_REPORTS"
+BOT_HARNESS = "src/server/Dev/Playtest/BotRunner.lua"      # always in the source check
+BOT_RUN_MIN = 75.0               # one run's wall budget (a Full match is 37-49 min)
+BOT_POLL_S = 45.0                # a Studio call over ~120 s is dropped: never wait inside one
+BOT_POLL_FAILS = 3               # Status() polls in a row without an answer: the session is gone
+BOT_MAX_RUNS = 24
+BOT_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,48}")
+BOT_BAD = ("FAILED", "TIMEOUT", "NOT_RUN")
+# what a run may name: BotRunner.RunMatch's options (difficulty / hardcore / noClient are
+# BOT-3's and pass through untouched), plus the runner's own label and init
+BOT_RUN_KEYS = {"label": str, "persona": str, "squad": list, "players": int, "length": str,
+                "seed": int, "speedup": (int, float), "stopAtWave": int,
+                "maxSimSeconds": (int, float), "scalingPlayers": int, "difficulty": str,
+                "hardcore": bool, "noClient": bool, "init": bool}
+BOT_LOW = {"players": 1, "stopAtWave": 1, "speedup": 1, "scalingPlayers": 1, "seed": 0}
+BOT_LUAU = ('local SSS = game:GetService("ServerScriptService")\n'
+            'local Dev = require(game:GetService("ReplicatedStorage").Shared.Config.Dev)\n'
+            'local Afk = require(SSS.Server.Services.AfkService)\n'
+            'local BR = require(SSS.Server.Dev.Playtest.BotRunner)\n')
+BOT_INIT = 'require(SSS.Server.Services.MatchService):Init()\n'
+BOT_START = (BOT_LUAU + 'Dev.PlaytestBots = true\nAfk:SetEnabledForTest(false)\n__INIT__'
+             'local r = BR.RunMatch(__OPTS__)\n'
+             'return ("BOTRUN ok=%s runId=%s stamp=%s players=%s reason=%s"):format('
+             'tostring(r.ok), tostring(r.runId), tostring(r.stamp), tostring(r.players), '
+             'tostring(r.reason))')
+BOT_STATUS = (BOT_LUAU + 'local st = BR.Status()\n'
+              'return ("BOTSTAT finished=%s wave=%s sim=%s :: %s"):format(tostring(st.finished), '
+              'tostring(st.wave), tostring(st.simTime), tostring(st.line))')
+BOT_STOP = BOT_LUAU + 'return "BOTSTOP " .. tostring(BR.Stop("runner budget"))'
+BOT_REPORT = BOT_LUAU + 'return BR.Report() or "BOTREPORT none"'
+BOT_RESTORE = (BOT_LUAU + 'pcall(function() Afk:SetEnabledForTest(nil) end)\n'
+               'Dev.PlaytestBots = false\nreturn "BOTRESTORE ok"')
+BOTRUN_RE = re.compile(r"BOTRUN ok=(\w+) runId=(\S+) stamp=(\S+) players=(\S+) reason=(.*)")
+BOTSTAT_RE = re.compile(r"BOTSTAT finished=(\w+) wave=(\S+) sim=(\S+) :: (.*)")
+
+
+def bot_runs(raw) -> tuple:
+    """A BOT_MATCHES `runs` list -> (normalized runs, None) or ([], why). An unknown key or
+    a wrong type is refused, never dropped: a typo would play a different match."""
+    if not isinstance(raw, list) or not raw:
+        return [], "runs must be a non-empty list of objects"
+    if len(raw) > BOT_MAX_RUNS:
+        return [], f"at most {BOT_MAX_RUNS} runs in one block ({len(raw)} given)"
+    out, seen = [], set()
+    for i, r in enumerate(raw, 1):
+        if not isinstance(r, dict):
+            return [], f"run {i} is not an object"
+        unknown = sorted(set(r) - set(BOT_RUN_KEYS))
+        if unknown:
+            return [], f"run {i}: unknown keys {unknown} (known: {', '.join(BOT_RUN_KEYS)})"
+        for k, v in r.items():
+            want = BOT_RUN_KEYS[k]
+            if (isinstance(v, bool) and want is not bool) or not isinstance(v, want) \
+                    or (isinstance(v, float) and not -1e12 < v < 1e12):
+                return [], f"run {i}: {k} has the wrong type or value ({v!r})"
+        names = [r[k] for k in ("persona", "length", "difficulty") if k in r] \
+            + list(r.get("squad") or [])
+        if any(not isinstance(x, str) or not BOT_NAME_RE.fullmatch(x) for x in names):
+            return [], f"run {i}: persona, squad, length and difficulty are plain names"
+        if not r.get("persona") and not r.get("squad"):
+            return [], f"run {i}: give a persona or a squad"
+        if not r.get("length"):
+            return [], (f"run {i}: give length (\"Skirmish\" or \"Full\"): a fresh profile's "
+                        f"first match is a Skirmish otherwise")
+        if any(k in r and r[k] < low for k, low in BOT_LOW.items()) \
+                or r.get("players", 1) > 16 or r.get("maxSimSeconds", 1) <= 0:
+            return [], (f"run {i}: a number is out of range (players 1-16; stopAtWave, speedup, "
+                        f"scalingPlayers from 1; seed from 0; maxSimSeconds above 0)")
+        label = r.get("label") or (f"{r.get('persona') or 'Squad'}x"
+                                   f"{r.get('players') or len(r.get('squad') or []) or 1}"
+                                   + (f"_s{r['seed']}" if "seed" in r else ""))
+        if not BOT_NAME_RE.fullmatch(label) or label in seen:
+            return [], f"run {i}: label {label!r} must be a plain name, one per run"
+        seen.add(label)
+        out.append({"label": label, **{k: v for k, v in r.items() if k != "label"}})
+    return out, None
+
+
+def _bot_line(r: dict) -> str:
+    """One run's result line (the lines file, the log, the coordinator's prompt)."""
+    def num(k):
+        return "-" if r.get(k) is None else f"{r[k]:g}"
+    tail = [f"report={r['report']}"] if r.get("report") else []
+    if r.get("reason"):
+        tail.append("reason=" + ascii_fold(one_line(r["reason"], 240)))
+    return (f"BOTRUN {r['label']} {r['result']} waves={num('waves')} match_s={num('match_s')} "
+            f"wall_min={num('wall_min')} " + " ".join(tail)).rstrip()
+
+
+def _bot_match(g: "Gate", spec: dict, tag: str, run_s: float, poll_s: float, res: dict) -> None:
+    """Recipe steps 2-5 inside a running play session; fills `res`."""
+    label = spec["label"]
+    opts = {k: v for k, v in spec.items() if k not in ("label", "init")}
+    code = fill(BOT_START, init=BOT_INIT if spec.get("init", True) else "", opts=luau_value(opts))
+    text, err = g.vm("server", code, f"bots {label} RunMatch")
+    m = None if err else BOTRUN_RE.search(text or "")
+    if m is None or m.group(1) != "true":
+        res["reason"] = "RunMatch did not start: " + one_line(m.group(5) if m else text, 200)
+        return
+    res["run_id"], stamp = m.group(2), re.sub(r"[^0-9A-Za-z\-]", "", m.group(3))
+    end, bad, timed_out = time.monotonic() + run_s, 0, False
+    while True:
+        time.sleep(poll_s)
+        text, err = g.vm("server", BOT_STATUS, f"bots {label} Status", 60)
+        m = None if err else BOTSTAT_RE.search(text or "")
+        if m is None:
+            bad += 1
+            g.status("match", f"{tag}: no Status() answer ({bad} of {BOT_POLL_FAILS})")
+            if bad >= BOT_POLL_FAILS:
+                res["reason"] = "the play session stopped answering: " + one_line(text, 160)
+                return
+            continue
+        bad, line = 0, one_line(m.group(4), 200)
+        g.status("match", f"{tag}: {line}")             # the watchdog's sign of life
+        if m.group(1) == "true":
+            break
+        if time.monotonic() >= end:
+            timed_out = True
+            res["reason"] = f"not finished after {run_s / 60:g} min, stopped ({line})"
+            g.vm("server", BOT_STOP, f"bots {label} Stop", 60)
+            break
+    text, err = g.vm("server", BOT_REPORT, f"bots {label} Report")
+    text = (text or "")[max(0, (text or "").find("# PT report")):]
+    if err or not text.strip() or "BOTREPORT none" in text:
+        res["reason"] = (res["reason"] + "; " if res["reason"] else "") + \
+            "no Report(): " + one_line(text, 160)
+        res["result"] = "TIMEOUT" if timed_out else "FAILED"
+        return
+    name = f"{stamp or time.strftime('%Y%m%d-%H%M%S')}_{label}.md"
+    res["report"] = f"{BOTS_REPORT_DIR}/{name}"
+    # the second copy is for a slot: only the gate folder and <ID>_* files are copied back
+    for p in (os.path.join(g.repo, *res["report"].split("/")),
+              os.path.join(g.gate_dir, "bot_reports", name)):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text.rstrip("\n") + "\n")
+    won = re.search(r"Result:\W*(\w+)", text)
+    res["result"] = "TIMEOUT" if timed_out else (won.group(1) if won else "DONE")
+    for key, pat, conv in (("waves", r"Waves reached:\W*(\d+)", int),
+                           ("match_s", r"Match length:\W*([\d.]+) s", float)):
+        got = re.search(pat, text)
+        res[key] = conv(got.group(1)) if got else None
+
+
+def _bot_run(g: "Gate", spec: dict, tag: str, run_s: float, poll_s: float) -> dict:
+    """One run in its own play session. A failed run is a result, never an exception (the
+    block goes on); GateTooling (the MCP servers are gone) is the caller's."""
+    t0 = time.monotonic()
+    res = {"label": spec["label"], "result": "FAILED", "reason": "", "report": "", "waves": None,
+           "match_s": None, "run_id": ""}
+    sink: list = []
+    g.status("playtest", f"{tag}: starting a play session")
+    if not g.start_playtest(sink=sink):
+        res["reason"] = "no play session: " + one_line((sink or [{}])[-1].get("detail"), 200)
+    else:
+        try:
+            _bot_match(g, spec, tag, run_s, poll_s, res)
+        finally:
+            with contextlib.suppress(GateTooling):      # recipe step 6, then the session
+                g.vm("server", BOT_RESTORE, f"bots {spec['label']} restore", 30)
+            g.stop_playtest()
+    res["wall_min"] = round((time.monotonic() - t0) / 60, 1)
+    return res
+
+
+def run_bots(a, out=print, official=None, community=None, run_cmd=default_run_cmd) -> int:
+    """`bots`: read the runs, take the runner lock and AU's studio.lock once for the whole
+    block, run it, release both."""
+    sprint = a.sprint
+    run_id = getattr(a, "run_id", None) or os.environ.get("FOUNDRY_GATE_RUN_ID") or ""
+    try:
+        if a.runs:
+            raw = json.loads(base64.urlsafe_b64decode(a.runs.encode("ascii")))
+        else:
+            with open(a.runs_file, encoding="utf-8-sig") as f:
+                raw = json.load(f)
+    except (OSError, ValueError, TypeError) as e:
+        out(f"BOTS {sprint} NOT READY: the runs cannot be read ({e})")
+        return 2
+    runs, why = bot_runs(raw.get("runs") if isinstance(raw, dict) else raw)
+    if why:
+        out(f"BOTS {sprint} NOT READY: {why}")
+        return 2
+    busy = acquire_lock(a.repo, sprint, "bots")
+    if busy:
+        out(f"BOTS {sprint} BUSY: another studio_gate runner is driving Studio ({busy})")
+        return 2
+    try:
+        held = studio_lock_acquire(sprint, f"studio_gate bots run {run_id or '-'}")
+        if held:
+            out(f"BOTS {sprint} BUSY: studio.lock is held: {held}")
+            return 2
+        try:
+            return _run_bots(a, sprint, run_id, runs, out, official, community, run_cmd)
+        finally:
+            studio_lock_release(sprint)
+    finally:
+        release_lock(a.repo)
+
+
+def _run_bots(a, sprint, run_id, runs, out, official, community, run_cmd) -> int:
+    g = Gate(a.repo, sprint, "bots", place=a.place, official=official, community=community,
+             run_cmd=run_cmd, call_timeout=a.timeout, out=out, run_id=run_id)
+    g.status("starting", "")
+    g.mcp_fail_limit = 2
+    run_s = max(0.001, float(a.run_min or BOT_RUN_MIN)) * 60
+    block_s = float(a.block_min or 0) * 60 or len(runs) * (run_s + 600)
+    lines_path = os.path.join(g.repo, *BOTS_LINES_REL.format(sprint=sprint).split("/"))
+    done, error = [], None
+
+    def emit(text: str) -> None:
+        out(text)
+        os.makedirs(os.path.dirname(lines_path), exist_ok=True)
+        with open(lines_path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(text + "\n")
+
+    try:
+        rc, head = run_cmd(["git", "rev-parse", "HEAD"], g.repo, 30)
+        g.head = (head or "").strip()
+        if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", g.head):
+            g.head = None
+            raise GateTooling("git rev-parse HEAD failed: " + (head or "")[:200])
+        g.status("preflight", "")
+        g.preflight()
+        st = g.official.call("get_studio_state", {}, timeout=min(g.call_timeout, 60))
+        if not st.get("is_error") and _state_mode(st.get("text") or "") == "play":
+            # never stopped here: with studio.lock held by this runner it is no match the
+            # coordinator knows of, but it may be the operator's
+            raise GateTooling("Studio is in Play (a match in flight or a play session left "
+                              "running): the block did not start and nothing was stopped")
+        # recipe step 1: the live sources are HEAD's (a stale Rojo sync plays old code)
+        g.status("verify", "pre-play")
+        g.live_verify(g._hash_maps(list(dict.fromkeys([BOT_HARNESS] + split_ids(a.files)))),
+                      cid="bots.verify_pre")
+        pre = g.checks[-1]
+        if pre["result"] != "PASS":
+            raise GateTooling(f"Studio's sources are not verified at HEAD {g.head[:12]} "
+                              f"({pre['result']}: {one_line(pre.get('detail'), 300)})")
+        emit(f"BOT MATCHES {sprint} at HEAD {g.head} (studio_gate bots, run_id {run_id or '-'}; "
+             f"{len(runs)} run(s), {run_s / 60:g} min each at most; source check "
+             f"{one_line(pre.get('detail'), 120)})")
+        start = time.monotonic()                 # the block budget is the runs' own time
+        for k, spec in enumerate(runs, 1):
+            left = block_s - (time.monotonic() - start)
+            if left <= 0:
+                r = {"label": spec["label"], "result": "NOT_RUN",
+                     "reason": f"the block budget ({block_s / 60:g} min) was spent"}
+            else:
+                r = _bot_run(g, spec, f"{k}/{len(runs)} {spec['label']}", min(run_s, left),
+                             float(a.poll_s))
+            done.append(r)
+            emit(_bot_line(r))
+    except GateTooling as e:
+        error = f"tooling: {e}"
+    except M.McpError as e:
+        error = f"tooling: McpError: {e}"
+    except Exception as e:                                        # noqa: BLE001
+        error = f"{type(e).__name__}: {e}"
+    ok = [r for r in done if r["result"] not in BOT_BAD]
+    result = "ERROR" if error else ("PASS" if len(ok) == len(runs) else "FAIL")
+    with contextlib.suppress(OSError):
+        emit(f"BOT MATCHES {sprint} {result}: {len(ok)} of {len(runs)} run(s) finished"
+             + (f" - {ascii_fold(one_line(error, 400))}" if error else ""))
+    write_json(os.path.join(g.gate_dir, BOTS_FILE), {
+        "schema": 1, "sprint": sprint, "head": g.head or "", "mode": "bots", "run_id": run_id,
+        "started": g.started, "finished": time.time(), "result": result, "error": error,
+        "runs": done, "requested": [s["label"] for s in runs],
+        "lines_file": BOTS_LINES_REL.format(sprint=sprint)})
+    with open(os.path.join(g.gate_dir, f"{(g.head or '0' * 12)[:12]}.bots.raw.log"), "a",
+              encoding="utf-8") as f:
+        f.write("".join(g._raw))
+    g.status("done", "")
+    g.close()
+    out(f"BOTS {sprint} {result}")
+    return {"PASS": 0, "FAIL": 1}.get(result, 2)
+
+
 # ---- background + status ---------------------------------------------------------
 def _pid_alive(pid: int) -> bool:
     if not pid:
@@ -4760,6 +5054,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="list rows, CALLs, DYNARG, bridges, manual rows and the carry plan; "
                         "no Studio, no locks, nothing written")
+    s = sub.add_parser("bots", help="a block of bot matches (BotRunner.RunMatch) as a script: "
+                                    "a report and one result line per run")
+    s.add_argument("--sprint", required=True)
+    s.add_argument("--runs", default="", help="the runs as base64url JSON (the coordinator's form)")
+    s.add_argument("--runs-file", dest="runs_file", default=None,
+                   help="the runs as a JSON file: a list, or a BOT_MATCHES object with `runs`")
+    s.add_argument("--files", default="", help="more files for the pre-play source check")
+    s.add_argument("--run-min", dest="run_min", type=float, default=BOT_RUN_MIN,
+                   help="wall budget of one run; past it the run is stopped and the block goes on")
+    s.add_argument("--block-min", dest="block_min", type=float, default=0.0,
+                   help="wall budget of the block (default: runs x (run budget + 10))")
+    s.add_argument("--poll-s", dest="poll_s", type=float, default=BOT_POLL_S)
     s = sub.add_parser("status")
     s.add_argument("--sprint", required=True)
     s.add_argument("--wait", type=float, nargs="?", const=WAIT_DEFAULT_MINUTES, default=None,
@@ -4806,6 +5112,8 @@ def main(argv=None, out=print, **inject) -> int:
         if a.background:
             return start_background(argv, a.repo, a.sprint, out=out)
         return run_calls(a, out=out, **inject)
+    if a.cmd == "bots":
+        return run_bots(a, out=out, **inject)
     if getattr(a, "background", False):
         sprint = a.sprint or f"regression-{re.sub(r'[^A-Za-z0-9]+', '_', a.selection or 'x')}"[:64]
         if not a.sprint:

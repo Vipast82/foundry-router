@@ -988,3 +988,190 @@ def test_a_row_that_plays_still_boots_once_per_playtest_only(fakes, repo, lock_d
     assert rc == 0, out
     ls = lines_of(repo, "C8").splitlines()
     assert not any("boot-only playtest" in x for x in ls)
+
+
+# ---- bots mode (2026-11-13): a block of bot matches as a script ------------------------
+BOT_SRC = "src/server/Dev/Playtest/BotRunner.lua"
+BOT_VERIFY = {"tool": "execute_luau", "match": "verifyLive",
+              "text": f"MATCH {BOT_SRC}\nVERIFY matched=1/1 mismatched=0 unresolved=0 skipped=0"}
+BOT_REPORT = ("# PT report 20261113-101010 — Builder x1 seed 7\n\n- **Result:** Defeat · "
+              "**Match length:** 419.69 s (6.995 min) · **Waves reached:** 2\n")
+BOT_RUNS = [{"label": "C1", "persona": "Builder", "players": 1, "length": "Full", "seed": 7,
+             "speedup": 4, "stopAtWave": 3},
+            {"label": "C2", "persona": "Builder", "players": 4, "length": "Skirmish",
+             "difficulty": "Hard", "noClient": True, "init": False}]
+STAT = {"tool": "eval_server_runtime", "match": "BR\\.Status"}
+STAT_DONE = {**STAT, "text": "BOTSTAT finished=true wave=2 sim=420 :: PT1 STATUS x Results wave=2 DONE"}
+STAT_BUSY = {**STAT, "text": "BOTSTAT finished=false wave=1 sim=60 :: PT1 STATUS x Combat wave=1"}
+
+
+def bot_rules(status, official=(), report=BOT_REPORT):
+    return [*official, BOT_VERIFY], [
+        PLAYER,
+        {"tool": "eval_server_runtime", "match": "RunMatch",
+         "text": "BOTRUN ok=true runId=20261113-101010_Builder stamp=20261113-101010 players=1 reason=nil"},
+        *status,
+        {"tool": "eval_server_runtime", "match": "BR\\.Report", "text": report},
+        {"tool": "eval_server_runtime", "match": "BOTRESTORE", "text": "BOTRESTORE ok"}]
+
+
+def run_bots(repo, sprint, runs, *extra):
+    from tests.coordinator.test_studio_gate import fake_host
+    if not (repo / BOT_SRC).exists():
+        (repo / BOT_SRC).parent.mkdir(parents=True)
+        (repo / BOT_SRC).write_text("return {}", encoding="utf-8")
+        commit(repo, "the bot harness")
+    rf = repo.parent / f"{sprint}_runs.json"
+    rf.write_text(json.dumps({"runs": runs}), encoding="utf-8")
+    out = []
+    rc = G.main(["--repo", str(repo), "--timeout", "20", "--run-id", f"rid-{sprint}", "bots",
+                 "--sprint", sprint, "--runs-file", str(rf), "--poll-s", "0.02", *extra],
+                out=out.append, run_cmd=fake_host(repo, files_map={BOT_SRC: "abc"}))
+    return rc, out
+
+
+def bot_lines(repo, sprint):
+    return (repo / "docs" / "progress" / f"{sprint}_bot_matches.txt").read_text(
+        encoding="utf-8").splitlines()
+
+
+def test_bot_runs_refuse_unknown_keys_and_wrong_types():
+    runs, why = G.bot_runs([{"persona": "Builder", "length": "Full", "seed": 7}])
+    assert why is None and runs == [{"label": "Builderx1_s7", "persona": "Builder",
+                                     "length": "Full", "seed": 7}]
+    assert G.bot_runs(BOT_RUNS)[0][1]["noClient"] is True          # BOT-3's options pass through
+    for bad, word in (([], "non-empty"), ([{"persona": "Builder", "lenght": "Full"}], "unknown keys"),
+                      ([{"persona": "Builder", "length": "Full", "players": "4"}], "players"),
+                      ([{"persona": "Builder", "length": "Full", "hardcore": 1}], "hardcore"),
+                      ([{"persona": "Builder", "length": "Full", "players": True}], "players"),
+                      ([{"persona": "Builder"}], "give length"), ([{"length": "Full"}], "persona"),
+                      ([{"persona": "x]] os.exit()", "length": "Full"}], "plain names"),
+                      ([{"persona": "Builder", "length": "Full", "speedup": 0}], "out of range"),
+                      ([{"persona": "Builder", "length": "Full"}] * 2, "one per run"),
+                      ([{"persona": "B", "length": "Full", "label": "a/b"}], "plain name")):
+        assert word in G.bot_runs(bad)[1], (bad, G.bot_runs(bad)[1])
+
+
+def test_a_bots_block_plays_each_run_in_a_fresh_session_and_saves_its_report(
+        fakes, repo, lock_dir, monkeypatch):
+    set_rules, calls = fakes
+    set_rules(*bot_rules([{**STAT_BUSY, "times": 2}, STAT_DONE]))
+    locks, statuses = [], []
+    real_acq, real_rel, real_status = G.studio_lock_acquire, G.studio_lock_release, G.Gate.status
+    monkeypatch.setattr(G, "studio_lock_acquire", lambda *a: locks.append("take") or real_acq(*a))
+    monkeypatch.setattr(G, "studio_lock_release",
+                        lambda *a: locks.append(G.studio_lock_read()) or real_rel(*a))
+    monkeypatch.setattr(G.Gate, "status", lambda self, phase, progress="": (
+        statuses.append((phase, progress)), real_status(self, phase, progress))[1])
+    rc, out = run_bots(repo, "B1", BOT_RUNS)
+    assert rc == 0 and out[-1] == "BOTS B1 PASS", out
+    # the lock: taken once, held as studio_gate for the whole block, released once
+    assert locks[0] == "take" and len(locks) == 2
+    assert locks[1].startswith("studio_gate ") and " B1 studio_gate bots run rid-B1" in locks[1]
+    assert not (lock_dir / "studio.lock").exists()
+    assert not (repo / ".plan" / "tmp" / "gate" / G.LOCK_NAME).exists()
+    # each run: its own play session, the recipe, the polls, the report, the restore
+    tools = [(c["tool"], c["args"].get("action") or c["args"].get("code", "")) for c in calls()
+             if c["kind"] == "community" and "GetPlayers" not in c["args"].get("code", "")]
+    kinds = ["start" if a == "start" else "stop" if a == "stop" else "run" if "RunMatch" in a
+             else "status" if "BR.Status" in a else "report" if "BR.Report" in a
+             else "restore" if "BOTRESTORE" in a else t for t, a in tools]
+    kinds = [k for k in kinds if k != "get_connected_instances"]
+    assert kinds == ["start", "run", "status", "status", "status", "report", "restore", "stop",
+                     "start", "run", "status", "report", "restore", "stop"]
+    c1, c2 = [a for _, a in tools if "RunMatch" in a]
+    assert c1.index("Dev.PlaytestBots = true") < c1.index("SetEnabledForTest(false)") \
+        < c1.index("MatchService):Init()") < c1.index("BR.RunMatch(")
+    assert "stopAtWave" in c1 and "noClient" not in c1 and "label" not in c1
+    assert "noClient" in c2 and "difficulty" in c2 and "MatchService):Init()" not in c2   # init: false
+    restore = next(a for _, a in tools if "BOTRESTORE" in a)
+    assert "SetEnabledForTest(nil)" in restore and "Dev.PlaytestBots = false" in restore
+    # every poll is a sign of life for the coordinator's stale-status watchdog
+    assert sum(1 for ph, _ in statuses if ph == "match") == 4
+    st = json.load(open(gate_file(repo, "B1", "status.json")))
+    assert st["mode"] == "bots" and st["phase"] == "done" and st["playing"] is False
+    # the reports, where the plan expects them (and the copy a slot run brings home)
+    for label in ("C1", "C2"):
+        rep = repo / "docs" / "progress" / "PT_REPORTS" / f"20261113-101010_{label}.md"
+        assert rep.read_text(encoding="utf-8") == BOT_REPORT
+        assert gate_file(repo, "B1", f"bot_reports/{rep.name}").exists()
+    ls = bot_lines(repo, "B1")
+    assert ls[0].startswith("BOT MATCHES B1 at HEAD ") and "2 run(s)" in ls[0]
+    assert re.fullmatch(r"BOTRUN C1 Defeat waves=2 match_s=419\.69 wall_min=[\d.]+ "
+                        r"report=docs/progress/PT_REPORTS/20261113-101010_C1\.md", ls[1]), ls[1]
+    assert ls[2].startswith("BOTRUN C2 Defeat ") and ls[3] == "BOT MATCHES B1 PASS: 2 of 2 run(s) finished"
+    v = json.load(open(gate_file(repo, "B1", G.BOTS_FILE)))
+    assert v["result"] == "PASS" and v["run_id"] == "rid-B1" and v["mode"] == "bots"
+    assert [r["label"] for r in v["runs"]] == ["C1", "C2"] and v["runs"][0]["waves"] == 2
+
+
+def test_a_run_over_its_budget_is_stopped_recorded_and_the_block_goes_on(fakes, repo):
+    set_rules, calls = fakes
+    set_rules(*bot_rules([{**STAT_BUSY, "times": 3}, {**STAT_DONE, "times": 1}, STAT_BUSY]))
+    rc, out = run_bots(repo, "B2", BOT_RUNS[:1] + [{**BOT_RUNS[1], "label": "C3"}, BOT_RUNS[1]],
+                       "--run-min", "0.03")
+    assert rc == 1 and out[-1] == "BOTS B2 FAIL", out
+    ls = bot_lines(repo, "B2")
+    assert ls[1].startswith("BOTRUN C1 Defeat ")
+    assert ls[2].startswith("BOTRUN C3 TIMEOUT ") and "reason=not finished after 0.03 min" in ls[2]
+    assert "report=docs/progress/PT_REPORTS/20261113-101010_C3.md" in ls[2]   # Stop() renders it
+    assert ls[3].startswith("BOTRUN C2 TIMEOUT ")                    # the block went on
+    assert ls[4] == "BOT MATCHES B2 FAIL: 1 of 3 run(s) finished"
+    code = [c["args"].get("code", "") for c in calls() if c["kind"] == "community"]
+    assert sum(1 for c in code if 'BR.Stop("runner budget")' in c) == 2
+    assert len(tool_calls(calls, "solo_playtest")) == 6              # 3 starts, 3 stops
+    # a block budget that is spent: the rest is NOT_RUN, never started
+    set_rules(*bot_rules([STAT_BUSY]))
+    rc, out = run_bots(repo, "B3", BOT_RUNS, "--run-min", "0.03", "--block-min", "0.01")
+    ls = bot_lines(repo, "B3")
+    assert rc == 1 and ls[1].startswith("BOTRUN C1 TIMEOUT ")
+    assert ls[2].startswith("BOTRUN C2 NOT_RUN ") and "the block budget" in ls[2]
+
+
+def test_a_dropped_play_session_fails_its_run_and_a_gone_studio_ends_the_block(
+        fakes, repo, lock_dir):
+    set_rules, calls = fakes
+    gone = {**STAT, "is_error": True, "text": "target_role_not_present_on_instance", "times": 3}
+    set_rules(*bot_rules([gone, STAT_DONE]))
+    rc, out = run_bots(repo, "B4", BOT_RUNS)
+    ls = bot_lines(repo, "B4")
+    assert rc == 1, out
+    assert ls[1].startswith("BOTRUN C1 FAILED ") and "the play session stopped answering" in ls[1]
+    assert ls[2].startswith("BOTRUN C2 Defeat ")                     # the next run still played
+    assert len(tool_calls(calls, "solo_playtest")) == 4
+    # the MCP servers are gone: a tooling ERROR, the block ends, the locks are released
+    set_rules(*bot_rules([{**STAT, "exit": True}]))
+    rc, out = run_bots(repo, "B5", BOT_RUNS)
+    v = json.load(open(gate_file(repo, "B5", G.BOTS_FILE)))
+    assert rc == 2 and v["result"] == "ERROR" and v["runs"] == [], out
+    assert "MCP connect/transport failures in a row" in v["error"]
+    assert bot_lines(repo, "B5")[-1].startswith("BOT MATCHES B5 ERROR: 0 of 2 run(s) finished - tooling")
+    assert not (lock_dir / "studio.lock").exists()
+    assert G.acquire_lock(str(repo), "x", "bots") is None
+    G.release_lock(str(repo))
+
+
+def test_a_bots_block_never_starts_on_a_busy_or_stale_studio(fakes, repo, lock_dir):
+    set_rules, calls = fakes
+    set_rules(*bot_rules([STAT_DONE]))
+    (lock_dir / "studio.lock").write_text("ses_x 2026-11-13T10:00:00Z ECO-1 bot match M1\n")
+    rc, out = run_bots(repo, "B6", BOT_RUNS)
+    assert rc == 2 and "studio.lock is held: ses_x" in out[-1] and calls() == []
+    (lock_dir / "studio.lock").unlink()
+    # Studio is in Play (the official server's own wording): nothing is started or stopped
+    set_rules(*bot_rules([STAT_DONE], official=[
+        {"tool": "get_studio_state", "text": "- Current Studio Mode: Play"}]))
+    rc, out = run_bots(repo, "B6", BOT_RUNS)
+    v = json.load(open(gate_file(repo, "B6", G.BOTS_FILE)))
+    assert rc == 2 and "Studio is in Play" in v["error"] and "nothing was stopped" in v["error"]
+    assert tool_calls(calls, "solo_playtest") == []
+    # recipe step 1: the live sources are not HEAD's -> no run
+    off, comm = bot_rules([STAT_DONE])
+    off[-1] = {**BOT_VERIFY, "text": f"MISMATCH {BOT_SRC}\nVERIFY matched=0/1 mismatched=1 unresolved=0 skipped=0"}
+    set_rules(off, comm)
+    rc, out = run_bots(repo, "B7", BOT_RUNS)
+    v = json.load(open(gate_file(repo, "B7", G.BOTS_FILE)))
+    assert rc == 2 and "sources are not verified at HEAD" in v["error"]
+    assert tool_calls(calls, "solo_playtest") == []
+    rc, out = run_bots(repo, "B8", [{"persona": "Builder", "length": "Full", "wave": 3}])
+    assert rc == 2 and "NOT READY" in out[-1] and "unknown keys ['wave']" in out[-1]

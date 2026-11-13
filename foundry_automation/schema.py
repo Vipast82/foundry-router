@@ -183,6 +183,10 @@ STUDIO_CALLS_DEFAULTS = {
     "host_timeout_minutes": 30,               # gate.ps1's host half (Lune included)
     "stale_status_minutes": 6,                # no CALL progress this long -> killed (tooling)
     "failure_lines": 5,                       # raw failure lines per failing row in the prompt
+    # 2026-11-13: BOT_MATCHES blocks (studio_gate bots). One run's wall budget (a Full match
+    # is 37-49 min) and the most one block may take, whatever the request asks for
+    "bot_run_budget_minutes": 75,
+    "bot_block_budget_minutes": 600,
     # the runner's files the coordinator commits after a run ({task} = the task id; all
     # closeout-exempt docs/progress/{task}_*, so the gate binding stays PASS)
     "outputs": ["docs/progress/{task}_studio_lines.txt", "docs/progress/{task}_EVIDENCE_RAW.log",
@@ -874,6 +878,9 @@ _SC_DESC = {
     "host_timeout_minutes": "gate.ps1's host half (Lune included).",
     "stale_status_minutes": "No CALL progress this long: the run is stopped (tooling).",
     "failure_lines": "Raw failure lines per failing row in the prompt.",
+    "bot_run_budget_minutes": "BOT_MATCHES: wall budget of one bot match; past it the run is "
+                              "stopped, recorded as timed out, and the block goes on.",
+    "bot_block_budget_minutes": "BOT_MATCHES: the most one block of bot matches may take.",
     "outputs": "Runner files the coordinator commits after a run ({task} = task id).",
 }
 

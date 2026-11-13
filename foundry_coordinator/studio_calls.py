@@ -38,6 +38,7 @@ task's findings, so the next BUILD session gets only those.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -164,6 +165,57 @@ def parse_request(text: str) -> Optional[dict]:
         return {"error": "nothing to run: give suites and/or a regression selection"}
     return {"suites": suites, "regression": regression, "tier": tier, "rerun": rerun,
             "files": files}
+
+
+# 2026-11-13 (BOT_MATCH_REVIEW proposal 1): a block of bot matches is asked for like a gate,
+# with a ```BOT_MATCHES``` block; the coordinator runs it detached (`studio_gate bots`), so no
+# session sits through a 37-49 minute match and the block holds studio.lock as studio_gate.
+BOT_BLOCK_RE = re.compile(r"```BOT_MATCHES[ \t]*\r?\n?(.*?)```", re.S)
+BOTS_FILE = "bots_result.json"
+BOT_EXAMPLE = ('```BOT_MATCHES\n{"runs": [{"label": "C1", "persona": "Builder", "players": 1, '
+               '"length": "Full", "seed": 20261016, "speedup": 4, "stopAtWave": 3}]}\n```')
+
+
+def parse_bot_request(text: str) -> Optional[dict]:
+    """The LAST ```BOT_MATCHES``` block of a session's final message -> {"kind": "bots",
+    "runs", "run_minutes", "block_minutes", "files"}, {"kind": "bots", "error": why} for a
+    malformed one, None when there is none. Unknown keys are refused, never ignored."""
+    blocks = BOT_BLOCK_RE.findall(text or "")
+    if not blocks:
+        return None
+
+    def bad(why: str) -> dict:
+        return {"kind": "bots", "error": why}
+    try:
+        d = json.loads(blocks[-1].strip())
+    except ValueError as e:
+        return bad(f"the BOT_MATCHES block is not JSON ({e})")
+    if not isinstance(d, dict):
+        return bad("the BOT_MATCHES block must be a JSON object")
+    unknown = sorted(set(d) - {"runs", "runMinutes", "blockMinutes", "files"})
+    if unknown:
+        return bad(f"unknown BOT_MATCHES keys {unknown} (runs, runMinutes, blockMinutes, files)")
+    runs, why = _sg().bot_runs(d.get("runs"))
+    if why:
+        return bad(why)
+    for k in ("runMinutes", "blockMinutes"):
+        v = d.get(k, 0)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1440:
+            return bad(f"bad {k} {v!r} (minutes, at most 1440)")
+    files = split_ids(d.get("files"))
+    badf = [f for f in files if not PATH_RE.fullmatch(f) or ".." in f.split("/")]
+    if badf:
+        return bad(f"unsafe file paths {badf}")
+    return {"kind": "bots", "runs": runs, "run_minutes": d.get("runMinutes", 0),
+            "block_minutes": d.get("blockMinutes", 0), "files": files}
+
+
+def _brief(req: dict) -> dict:
+    """A request for an event's detail (a block of 24 runs would not fit one)."""
+    if req.get("kind") != "bots":
+        return req
+    return {"kind": "bots", "runs": [r.get("label") for r in req.get("runs") or []],
+            "run_minutes": req.get("run_minutes"), "block_minutes": req.get("block_minutes")}
 
 
 def _read_json(path: str) -> Optional[dict]:
@@ -432,6 +484,44 @@ def run_pipeline(a, run: Callable = run_step, log: Callable = print) -> dict:
     return st
 
 
+def run_bot_block(a, run: Callable = run_step, log: Callable = print) -> dict:
+    """A bot-match block as ONE detached step under the pipeline record the coordinator
+    polls (calls_pipeline.json: phase bots, then done with the runner's result). The same
+    argv runs inside a Studio slot (slots.run), where --repo is the slot's checkout."""
+    repo, sprint = os.path.abspath(a.repo), a.sprint
+    gd = os.path.join(repo, *GATE_DIR.split("/"), sprint)
+    st = {"run_id": a.run_id, "sprint": sprint, "pid": os.getpid(), "phase": "bots",
+          "kind": "bots", "started": time.time(), "updated": time.time()}
+
+    def save(**kw):
+        st.update(kw, updated=time.time())
+        _write_json(os.path.join(gd, PIPELINE_FILE), st)
+
+    save()
+    cmd = _module_cmd(a.runner) + ["--repo", repo, "--run-id", a.run_id, "--timeout",
+                                   str(a.call_timeout)]
+    place = gate_place()
+    if place:
+        cmd += ["--place", place]                 # the TEST Studio by name, as the gate does
+    cmd += ["bots", "--sprint", sprint, "--runs", a.runs, "--files", a.files or "",
+            "--run-min", str(a.run_min), "--block-min", str(a.block_min)]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = ROUTER_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["FOUNDRY_GATE_RUN_ID"] = a.run_id
+    env["PYTHONIOENCODING"] = "utf-8"
+    log("$ " + " ".join(cmd)[:2000])
+    rc, out = run(cmd, ROUTER_ROOT, float(a.block_min) * 60 + 600, env)
+    log(out[-20000:])
+    v = _read_json(os.path.join(gd, BOTS_FILE))
+    if v is None or v.get("run_id") != a.run_id or rc not in (0, 1, 2):
+        why = next((ln for ln in reversed(out.splitlines()) if ln.strip()), f"bots exited {rc}")
+        save(phase="done", result="ERROR", stage="bots", bots_rc=rc, error=str(why)[:800])
+        return st
+    save(phase="done", result=str(v.get("result") or "ERROR"), stage="bots", bots_rc=rc,
+         head=v.get("head") or "", error=str(v.get("error") or "")[:800])
+    return st
+
+
 def _pipeline_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m foundry_coordinator.studio_calls")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -451,6 +541,16 @@ def _pipeline_parser() -> argparse.ArgumentParser:
     p.add_argument("--host-timeout-min", dest="host_timeout_min", type=float, default=30.0)
     # 2026-11-04 POL-3: a just-reopened place needs time for Rojo's first sync
     p.add_argument("--sync-wait-s", dest="sync_wait_s", type=float, default=90.0)
+    p = sub.add_parser("bots", help="a block of bot matches (the coordinator runs it)")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--sprint", required=True)
+    p.add_argument("--run-id", dest="run_id", required=True)
+    p.add_argument("--runs", required=True, help="the runs, base64url JSON")
+    p.add_argument("--files", default="")
+    p.add_argument("--runner", default="foundry_coordinator.projects.animaluprising.studio_gate")
+    p.add_argument("--call-timeout", dest="call_timeout", type=float, default=120.0)
+    p.add_argument("--run-min", dest="run_min", type=float, default=75.0)
+    p.add_argument("--block-min", dest="block_min", type=float, default=600.0)
     return ap
 
 
@@ -459,6 +559,11 @@ def main(argv=None) -> int:
     if not ID_RE.fullmatch(a.sprint):
         print(f"bad sprint id {a.sprint!r}")
         return 2
+    if a.cmd == "bots":
+        st = run_bot_block(a, log=lambda s: print(s, flush=True))
+        print(f"PIPELINE {a.sprint} {st.get('result')} stage=bots {st.get('error') or ''}".rstrip(),
+              flush=True)
+        return {"PASS": 0, "FAIL": 1}.get(str(st.get("result")), 2)
     st = run_pipeline(a, log=lambda s: print(s, flush=True))
     print(f"PIPELINE {a.sprint} {st.get('result')} stage={st.get('stage')} "
           f"{st.get('finish_line') or st.get('error') or ''}".rstrip(), flush=True)
@@ -514,9 +619,10 @@ class StudioCalls:
             return False
 
     def wants(self, P, tid: str, s) -> Optional[dict]:
-        """The STUDIO_GATE request in an idle session's final message (enabled tasks only)."""
+        """The STUDIO_GATE (or BOT_MATCHES) request in an idle session's final message
+        (enabled tasks only)."""
         text = getattr(s, "final_text", "") or ""
-        if "STUDIO_GATE" not in text:
+        if "STUDIO_GATE" not in text and "BOT_MATCHES" not in text:
             return None
         rep = getattr(s, "report", None) or {}
         if str(rep.get("status") or "").upper() in ("BLOCKED", "NEEDS_HUMAN"):
@@ -528,7 +634,12 @@ class StudioCalls:
             # this exact turn was already served (its result prompt could not be sent):
             # never a second run for the same request; the idle path takes over
             return None
-        req = parse_request(text)
+        req = parse_bot_request(text)
+        if req is None:
+            req = parse_request(text)
+        elif BLOCK_RE.search(text):
+            req = {"kind": "bots", "error": "one request per turn: a STUDIO_GATE block or a "
+                                            "BOT_MATCHES block, not both"}
         if req is not None:
             req["_key"] = key
         return req
@@ -562,6 +673,10 @@ class StudioCalls:
                     f"{req['error']}\nEnd your turn with one corrected block, e.g.\n"
                     f"```STUDIO_GATE\n{{\"suites\": \"S51\", \"regression\": \"none\", "
                     f"\"tier\": \"A\", \"rerun\": \"failed\"}}\n```\n")
+            if req.get("kind") == "bots":
+                text = (f"## Scripted bot matches: your BOT_MATCHES block was refused\n"
+                        f"{req['error']}\nEnd your turn with one corrected block, e.g.\n"
+                        f"{BOT_EXAMPLE}\n")
             key = "studio-calls:bad:" + hashlib.sha1(req["error"].encode()).hexdigest()[:10]
             if sid and self.store.op(f"deliver:{P.id}:{tid}:{sid}:{key}"):
                 return False                          # same malformed block again: normal path
@@ -576,7 +691,7 @@ class StudioCalls:
         d["pending"] = {"req": req, "session_id": sid, "head": head, "ts": time.time()}
         self._save(P, tid, d)
         self.store.event(P.id, tid, "studio_calls_requested", session_id=sid,
-                         detail={"request": req, "head": head})
+                         detail={"request": _brief(req), "head": head})
         self.tick(P, self.store.task(P.id, tid), s)
         return True
 
@@ -658,7 +773,27 @@ class StudioCalls:
         self.c._note(P, t, f"scripted Studio gate waits for studio.lock ({line[:120]})")
         return False
 
+    def _bot_budgets(self, P, req: dict) -> tuple:
+        """(minutes per run, minutes for the block): the request's, else [studio_calls]
+        bot_run_budget_minutes and runs x (run + 10); bot_block_budget_minutes caps a block."""
+        s = settings(P)
+        run_min = float(req.get("run_minutes") or s.get("bot_run_budget_minutes") or 75)
+        want = float(req.get("block_minutes") or 0) or len(req.get("runs") or []) * (run_min + 10)
+        return run_min, min(want, float(s.get("bot_block_budget_minutes") or 600))
+
+    def _bots_args(self, P, tid: str, req: dict, run_id: str) -> list:
+        s = settings(P)
+        run_min, block_min = self._bot_budgets(P, req)
+        runs = base64.urlsafe_b64encode(json.dumps(
+            req.get("runs") or [], separators=(",", ":")).encode("utf-8")).decode("ascii")
+        return ["bots", "--repo", P.profile.workspace, "--sprint", tid, "--run-id", run_id,
+                "--runs", runs, "--files", ",".join(req.get("files") or []),
+                "--runner", s["runner_module"], "--call-timeout", str(s["call_timeout_seconds"]),
+                "--run-min", f"{run_min:g}", "--block-min", f"{block_min:g}"]
+
     def _limit_s(self, P, req: dict) -> int:
+        if req.get("kind") == "bots":
+            return int((self._bot_budgets(P, req)[1] + 15) * 60)
         s = settings(P)
         budget = int(s["full_run_budget_minutes"] if req.get("regression") == "full"
                       else s["run_budget_minutes"])
@@ -666,7 +801,8 @@ class StudioCalls:
 
     def _command(self, P, tid: str, req: dict, files: list, run_id: str, tier: str,
                  head: str = "") -> list:
-        args = self._pipeline_args(P, tid, req, files, run_id, tier)
+        args = (self._bots_args(P, tid, req, run_id) if req.get("kind") == "bots"
+                else self._pipeline_args(P, tid, req, files, run_id, tier))
         slot = self._slot(P)
         if slot is not None:
             # 2026-10-31: a slot-bound track's gate runs inside the slot (checkout -> pipeline
@@ -739,8 +875,9 @@ class StudioCalls:
         head = P.ws.head()
         req = dict(pend.get("req") or {})
         tier = req.get("tier") or self._tier(P, tid)
-        files = list(req.get("files") or []) or self._files(P, t, head)
-        run_id = f"{tid}-calls-{head[:12]}-{secrets.token_hex(6)}"
+        bots = req.get("kind") == "bots"
+        files = list(req.get("files") or []) or ([] if bots else self._files(P, t, head))
+        run_id = f"{tid}-{'bots' if bots else 'calls'}-{head[:12]}-{secrets.token_hex(6)}"
         log = os.path.join(evidence_dir(self.c.state_dir, P.id, tid, head), "studio_calls.log")
         cmd = self._command(P, tid, req, files, run_id, tier, head)
         with_pipeline = os.path.join(self._gate_dir(P, tid), PIPELINE_FILE)
@@ -775,9 +912,11 @@ class StudioCalls:
         self._save(P, tid, d)
         self.store.event(P.id, tid, "studio_calls_started", session_id=pend.get("session_id") or "",
                          detail={"head": head, "pid": proc.pid, "run_id": run_id, "log": log,
-                                 "request": req, "files": files[:40]})
-        self.c._note(P, t, f"scripted Studio gate started at {head[:12]} "
-                           f"({req.get('regression')}; suites {','.join(req.get('suites') or []) or '-'})")
+                                 "request": _brief(req), "files": files[:40]})
+        self.c._note(P, t, f"scripted bot matches started at {head[:12]} "
+                           f"({len(req.get('runs') or [])} run(s))" if bots else
+                     f"scripted Studio gate started at {head[:12]} "
+                     f"({req.get('regression')}; suites {','.join(req.get('suites') or []) or '-'})")
         return True
 
     # ---------------------------------------------------------------- poll / kill
@@ -831,20 +970,23 @@ class StudioCalls:
                          f"minutes (phase {(pj or {}).get('phase')}, {st.get('phase')} "
                          f"{st.get('progress') or ''}); it was stopped"})
         stale = float(settings(P)["stale_status_minutes"]) * 60
-        if (pj or {}).get("phase") == "calls" and st.get("mode") == "calls" \
+        # 2026-11-13: a bots block too. Its runner rewrites status.json at every Status()
+        # poll (45 s), so a 45-minute match never looks stale; a runner that hangs does.
+        live = (pj or {}).get("phase")
+        if live in ("calls", "bots") and st.get("mode") == live \
                 and st.get("phase") != "done" and stale > 0:
             upd = float(st.get("updated") or 0)
             if upd and time.time() - upd > stale and pid_alive(st.get("pid")):
                 self._kill(P, tid, run, "stale")
                 return self._consume(P, t, s, run, {
-                    "result": "ERROR", "stage": "calls",
+                    "result": "ERROR", "stage": live,
                     "error": f"no CALL progress for {int(stale // 60)} min (status.json phase "
                              f"{st.get('phase')} {st.get('progress') or ''}: a modal dialog, a "
                              f"hung plugin?); the runner was stopped"})
         self.c._note(P, t, f"scripted Studio gate at {run['head'][:12]}: "
                            f"{(pj or {}).get('phase') or 'starting'}"
                            + (f" / {st.get('phase')} {st.get('progress') or ''}"
-                              if (pj or {}).get("phase") == "calls" else "")
+                              if live in ("calls", "bots") else "")
                            + f", {int(elapsed // 60)}:{int(elapsed % 60):02d} of "
                              f"{int(limit // 60)} min")
         return None
@@ -1077,7 +1219,80 @@ class StudioCalls:
                          f"scripted Studio gate {result} at {run['head'][:12]}: lines, evidence "
                          f"and gate files (coordinator)", "studio_calls_outputs")
 
+    def _consume_bots(self, P, t: dict, s, run: dict, pj: dict) -> dict:
+        """A bot-match block ended: its reports and result lines are committed and the
+        session gets ONE prompt, a line per run. Kept apart from the gate's outcome
+        (`last_bots`, never `last`: nothing that reads a gate result may see a block)."""
+        tid, ws = t["task_id"], P.profile.workspace
+        self._procs.pop((P.id, tid), None)
+        gd = self._gate_dir(P, tid)
+        v = _read_json(os.path.join(gd, BOTS_FILE)) or {}
+        if v.get("run_id") != run.get("run_id"):
+            v = {}
+        result = str(pj.get("result") or "ERROR").upper()
+        runs = [r for r in v.get("runs") or [] if isinstance(r, dict)]
+        paths = [f"docs/progress/{tid}_bot_matches.txt"]
+        for r in runs:
+            rel = str(r.get("report") or "").replace("\\", "/")
+            if not rel.startswith("docs/progress/PT_REPORTS/") or ".." in rel.split("/"):
+                continue
+            # a slot copies back its gate folder and docs/progress/<ID>_* only: the runner's
+            # second copy of the report goes where the plan expects it
+            src = os.path.join(gd, "bot_reports", os.path.basename(rel))
+            dst = os.path.join(ws, *rel.split("/"))
+            if not os.path.exists(dst) and os.path.isfile(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(src, dst)
+            paths.append(rel)
+        outcome = {"kind": "bots", "run_id": run["run_id"], "head": run["head"], "result": result,
+                   "stage": pj.get("stage"), "error": pj.get("error") or v.get("error") or "",
+                   "runs": [{k: r.get(k) for k in ("label", "result", "waves", "match_s",
+                                                   "wall_min", "report", "reason")}
+                            for r in runs][:40],
+                   "duration_s": round(max(0.0, time.time() - float(run.get("wall") or time.time())), 1),
+                   "cli": bool(run.get("cli"))}
+        if s is not None:
+            self.c._memory_notes(P, t, s)            # deferred while the block ran
+        from . import bookkeeping as BK
+        paths = [p for p in paths if os.path.isfile(os.path.join(ws, *p.split("/")))
+                 and P.profile.in_workspace(p)]
+        try:
+            sha, cerr = BK.commit(self.c, P, t, paths, f"bot matches {result} at "
+                                  f"{run['head'][:12]}: reports and result lines (coordinator)",
+                                  "studio_calls_outputs")
+        except Exception as e:                                    # noqa: BLE001
+            sha, cerr = "", str(e)[:300]
+        outcome["commit"], outcome["commit_error"] = sha, cerr
+        d = self._d(P, tid)
+        d.pop("run", None)
+        d["last_bots"] = outcome
+        self._save(P, tid, d)
+        self.store.event(P.id, tid, "bot_matches_error" if result == "ERROR" else "bot_matches_done",
+                         detail={**outcome, "runs": [f"{r.get('label')} {r.get('result')}"
+                                                     for r in outcome["runs"]]})
+        if run.get("cli"):
+            self.c.store.release(P.id, tid, self._run_locks(P))
+            return outcome
+        if result == "ERROR":
+            # Studio gone, stale sources, a hung runner: BLOCKED with the reason (auto-heal /
+            # the lead), as a gate's tooling error; finished runs keep their reports
+            return self._tooling(P, t, outcome, run, f"scripted bot matches: "
+                                 f"{outcome['error'] or 'ERROR'}") or outcome
+        cur = self.store.task(P.id, tid) or t
+        if cur.get("session_id"):
+            head_txt = ""
+            try:
+                head_txt = P.adapter.continue_prompt(
+                    P.adapter.describe(tid), f"the scripted bot matches {result}") + "\n\n"
+            except Exception:                                     # noqa: BLE001
+                pass
+            outcome["sent"] = self._prompt(P, cur, head_txt + bots_prompt_text(tid, outcome),
+                                           f"studio-calls:{run['run_id']}")
+        return outcome
+
     def _consume(self, P, t: dict, s, run: dict, pj: dict) -> dict:
+        if (run.get("req") or {}).get("kind") == "bots":
+            return self._consume_bots(P, t, s, run, pj)
         tid = t["task_id"]
         self._procs.pop((P.id, tid), None)
         v = self._calls_verdict(P, tid, run)
@@ -1408,6 +1623,26 @@ def findings_lines(outcome: dict, v: dict) -> list:
     for m in (v or {}).get("manual") or []:
         out.append(f"row {m.get('row')} MANUAL: {m.get('why')}")
     return out
+
+
+def bots_prompt_text(tid: str, o: dict) -> str:
+    """The ONE prompt after a bot-match block: a line per run, never a report's text."""
+    out = [f"## Scripted bot matches: BOT MATCHES {tid} {o.get('result')} at "
+           f"{str(o.get('head'))[:12]} (coordinator run {o.get('run_id')})"]
+    for r in o.get("runs") or []:
+        w, m = ("-" if r.get(k) is None else r[k] for k in ("waves", "match_s"))
+        out.append(f"- {r.get('label')} {r.get('result')}: waves {w}, match {m} s, "
+                   f"{r.get('wall_min') or 0} min wall"
+                   + (f", report {r['report']}" if r.get("report") else "")
+                   + (f" ({r['reason']})" if r.get("reason") else ""))
+    out.append(f"The result lines are in docs/progress/{tid}_bot_matches.txt. "
+               + (f"The coordinator committed them and the reports ({o['commit'][:12]})."
+                  if o.get("commit") else "The reports are in the working tree, not committed"
+                  + (f" ({o['commit_error']})" if o.get("commit_error") else "") + ": commit them."))
+    out.append("Read each report before you use its numbers (meta.totalWaves and meta.seedBuilt, "
+               "as the run recipe says). A FAILED, TIMEOUT or NOT_RUN run has its reason above; "
+               "to run it again, or more runs, end your turn with a new BOT_MATCHES block.")
+    return "\n".join(out) + "\n"
 
 
 def prompt_text(tid: str, pj: dict, v: Optional[dict], run: dict, sha: str, s: dict) -> str:

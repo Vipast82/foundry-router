@@ -1201,6 +1201,16 @@ def test_doctor_ready_and_not_ready(fakes, repo, monkeypatch):
     assert any(o.startswith("FIX doctor.community_studio") for o in out)    # --place binds both
 
 
+def test_studio_mode_reads_the_official_mode_line():
+    """2026-11-13: "- Current Studio Mode: Play" read as unknown, so the calls mode never
+    stopped a leftover playtest (it failed "Playtest already running" instead)."""
+    assert G.studio_mode("- Current Studio Mode: Play\n- Available DataModels: Client, Server") == "play"
+    assert G.studio_mode("- Current Studio Mode: Edit\n- Available DataModels: Edit") == "edit"
+    assert G.studio_mode("Studio is playing") == "play"            # the older forms still work
+    assert G.studio_mode('{"mode": "Edit"}') == "edit"
+    assert G.studio_mode("") == "unknown"
+
+
 def test_studio_in_play_only_reads_the_state_and_never_waits_long(fakes, monkeypatch):
     """2026-11-13: the coordinator asks this before it releases a studio.lock (a bot match
     plays on after its session ended). Two read calls, nothing else; no answer = None."""

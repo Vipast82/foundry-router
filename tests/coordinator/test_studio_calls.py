@@ -813,3 +813,208 @@ def test_an_automatic_request_never_copies_tier_c(tmp_path):
         "GATE RUN sprint=AS-V08 tier=b regression=none suites=[AS_V00]\n", encoding="utf-8")
     assert sc.default_request(P, "AS-V08", object())["tier"] == "B"       # others kept
     assert SC.code_tier("") == "A" and SC.code_tier("c") == "A"
+
+
+# ---------------------------------------------------------------- BOT_MATCHES (2026-11-13)
+BOTS = ('```BOT_MATCHES\n{"runs": [{"label": "C1", "persona": "Builder", "players": 1, '
+        '"length": "Full", "seed": 7, "speedup": 4, "stopAtWave": 3}, {"label": "C2", '
+        '"persona": "Builder", "players": 4, "length": "Skirmish", "noClient": true}]}\n```\n')
+
+FAKE_BOTS = textwrap.dedent('''\
+    """Fake studio_calls bots step: `bots --repo R --sprint ID --run-id X --runs B64 ...`.
+    The first report is written where the workstation runner writes it, the others only
+    into the gate folder (what a slot's copy-back brings home)."""
+    import base64, json, os, sys, time
+    a = sys.argv[1:]
+    assert a[0] == "bots", a
+    arg = lambda k: a[a.index(k) + 1]
+    repo, sprint, rid = arg("--repo"), arg("--sprint"), arg("--run-id")
+    runs = json.loads(base64.urlsafe_b64decode(arg("--runs")))
+    step = json.load(open(os.environ["FAKE_CALLS_PLAN"]))[0]
+    open(os.environ["FAKE_CALLS_PLAN"] + ".args.0", "w").write(json.dumps(a))
+    gd = os.path.join(repo, ".plan", "tmp", "gate", sprint)
+    prog = os.path.join(repo, "docs", "progress")
+    for d in (os.path.join(gd, "bot_reports"), os.path.join(prog, "PT_REPORTS")):
+        os.makedirs(d, exist_ok=True)
+    def put(name, d):
+        with open(os.path.join(gd, name + ".tmp"), "w") as f:
+            json.dump(d, f)
+        for _ in range(100):        # the coordinator may be reading it (Windows)
+            try:
+                os.replace(os.path.join(gd, name + ".tmp"), os.path.join(gd, name))
+                break
+            except PermissionError:
+                time.sleep(0.05)
+    pipe = {"run_id": rid, "sprint": sprint, "pid": os.getpid(), "kind": "bots"}
+    put("calls_pipeline.json", {**pipe, "phase": "bots", "updated": time.time()})
+    put("status.json", {"sprint": sprint, "pid": os.getpid(), "phase": "match", "mode": "bots",
+                        "progress": "1/2 C1: PT1 STATUS x Combat wave=1", "playing": True,
+                        "updated": time.time() - step.get("status_age", 0)})
+    time.sleep(step.get("sleep", 0))
+    res = step["result"]
+    if res == "ERROR":
+        put("calls_pipeline.json", {**pipe, "phase": "done", "result": "ERROR", "stage": "bots",
+                                    "error": step.get("error", "boom")})
+        sys.exit(2)
+    done = []
+    for i, r in enumerate(runs):
+        name = "20261113-101010_" + r["label"] + ".md"
+        late = res == "FAIL" and i == len(runs) - 1
+        if not late:
+            where = os.path.join(prog, "PT_REPORTS") if i == 0 else os.path.join(gd, "bot_reports")
+            open(os.path.join(where, name), "w").write("# PT report " + r["label"] + "\\n")
+        done.append({"label": r["label"], "result": "TIMEOUT" if late else "Defeat",
+                     "waves": None if late else 2, "match_s": None if late else 419.69,
+                     "wall_min": 1.5, "report": "" if late else "docs/progress/PT_REPORTS/" + name,
+                     "reason": "not finished after 75 min, stopped" if late else ""})
+    with open(os.path.join(prog, sprint + "_bot_matches.txt"), "a", newline="\\n") as f:
+        f.write("BOT MATCHES " + sprint + " " + res + "\\n")
+    put("bots_result.json", {"schema": 1, "sprint": sprint, "mode": "bots", "run_id": rid,
+                             "result": res, "error": None, "runs": done})
+    put("calls_pipeline.json", {**pipe, "phase": "done", "result": res, "stage": "bots"})
+    ''')
+
+
+def bots_agent(ctx):
+    if "Scripted bot matches: BOT MATCHES T1" in ctx["prompt"]:
+        return {"final": "read the reports\n" + DONE}
+    return {"writes": {"src/a.txt": f"OK {time.time_ns()}"}, "commit": "T1: work",
+            "final": "asking for the matches\n" + BOTS + NOT_DONE}
+
+
+def bots_env(env, plan, script=bots_agent):
+    e = env(plan, script=script)
+    (e.tmp / "fake_pipeline.py").write_text(FAKE_BOTS)
+    return e
+
+
+def test_parse_bot_request_normalizes_and_refuses_bad_blocks():
+    r = SC.parse_bot_request("text\n" + BOTS + NOT_DONE)
+    assert r["kind"] == "bots" and [x["label"] for x in r["runs"]] == ["C1", "C2"]
+    assert r["runs"][1] == {"label": "C2", "persona": "Builder", "players": 4,
+                            "length": "Skirmish", "noClient": True}
+    assert r["run_minutes"] == 0 and r["block_minutes"] == 0 and r["files"] == []
+    assert SC.parse_bot_request("no block here, only the word BOT_MATCHES") is None
+    ok = '"runs": [{"persona": "Builder", "length": "Full"}]'
+    for body, word in (('{"runs": []}', "non-empty"), ("[1]", "JSON object"), ("{nope", "not JSON"),
+                       ("{" + ok + ', "budget": 5}', "unknown BOT_MATCHES keys ['budget']"),
+                       ('{"runs": [{"persona": "Builder", "length": "Full", "wave": 3}]}',
+                        "unknown keys ['wave']"),
+                       ('{"runs": [{"persona": "Builder"}]}', "give length"),
+                       ("{" + ok + ', "runMinutes": "75"}', "bad runMinutes"),
+                       ("{" + ok + ', "blockMinutes": 99999}', "bad blockMinutes"),
+                       ("{" + ok + ', "files": "../x.lua"}', "unsafe file paths")):
+        got = SC.parse_bot_request(f"```BOT_MATCHES\n{body}\n```")
+        assert got["kind"] == "bots" and word in got["error"], (body, got)
+    r = SC.parse_bot_request("```BOT_MATCHES\n{" + ok + ', "runMinutes": 30, "files": "src/a.lua"}\n```')
+    assert r["run_minutes"] == 30 and r["files"] == ["src/a.lua"]
+    assert r["runs"][0]["label"] == "Builderx1"
+
+
+def test_a_bot_matches_request_runs_detached_and_comes_back_as_one_prompt(env):
+    e = bots_env(env, [{"result": "FAIL", "sleep": 0.6}])
+    t = drive(e, lambda t: bool(sc(e).get("run")))
+    assert t["state"] == S.IMPLEMENTING and "bot matches" in (t["next_action"] or "")
+    run = sc(e)["run"]
+    assert "-bots-" in run["run_id"] and run["limit_s"] == (2 * 85 + 15) * 60
+    n_prompts = len(e.client.log)
+    drive(e, lambda t: len(e.client.log) > n_prompts)                # no prompt before the end
+    text = e.client.log[-1][1]
+    assert "## Scripted bot matches: BOT MATCHES T1 FAIL at" in text
+    assert "- C1 Defeat: waves 2, match 419.69 s, 1.5 min wall, report " \
+           "docs/progress/PT_REPORTS/20261113-101010_C1.md" in text
+    assert "- C2 TIMEOUT: waves -, match - s, 1.5 min wall (not finished after 75 min, stopped)" in text
+    assert "docs/progress/T1_bot_matches.txt" in text and "# PT report" not in text
+    # what the runner was asked for: the normalized runs, the budgets from [studio_calls]
+    args = json.loads(open(str(e.plan) + ".args.0").read())
+    import base64
+    assert json.loads(base64.urlsafe_b64decode(args[args.index("--runs") + 1])) == \
+        SC.parse_bot_request(BOTS)["runs"]
+    assert args[args.index("--run-min") + 1] == "75" and args[args.index("--block-min") + 1] == "170"
+    started = json.loads(events(e, "studio_calls_started")[0]["detail"])
+    assert started["request"]["runs"] == ["C1", "C2"]
+    done = json.loads(events(e, "bot_matches_done")[0]["detail"])
+    assert done["result"] == "FAIL" and done["runs"] == ["C1 Defeat", "C2 TIMEOUT"] and done["commit"]
+    files = git(e.repo, "show", "--name-only", "--format=", done["commit"]).split()
+    assert sorted(files) == ["docs/progress/PT_REPORTS/20261113-101010_C1.md",
+                             "docs/progress/T1_bot_matches.txt"]
+    # a gate outcome is never touched by a block, and nothing is left running
+    assert sc(e)["last_bots"]["result"] == "FAIL" and "last" not in sc(e) and not sc(e).get("run")
+    assert not events(e, "studio_calls_done")
+
+
+def test_a_slot_runs_report_copy_is_put_where_the_plan_expects_it(env):
+    e = bots_env(env, [{"result": "PASS"}])
+    drive(e, lambda t: bool(events(e, "bot_matches_done")))
+    done = json.loads(events(e, "bot_matches_done")[0]["detail"])
+    files = git(e.repo, "show", "--name-only", "--format=", done["commit"]).split()
+    assert "docs/progress/PT_REPORTS/20261113-101010_C2.md" in files   # only the gate folder had it
+    assert (e.repo / "docs" / "progress" / "PT_REPORTS" / "20261113-101010_C2.md").read_text() \
+        == "# PT report C2\n"
+    assert "committed them and the reports" in e.client.log[-1][1]
+    # the same argv is wrapped for a Studio slot exactly as a gate's is
+    from foundry_coordinator import slots as SL
+    P = e.c.projects["game"]
+    slot = {**SL.DEFAULTS, "container": "studio-slot-1"}
+    e.c.studio_calls._slot = lambda P_: slot
+    req = SC.parse_bot_request(BOTS)
+    cmd = e.c.studio_calls._command(P, "T1", req, [], "rid-1", "A", "abc123")
+    assert cmd[1:4] == ["-m", "foundry_coordinator.slots", "run"]
+    inner = cmd[cmd.index("--") + 1:]
+    assert inner[0] == "bots" and inner[inner.index("--repo") + 1] == P.profile.workspace
+    assert SL.slot_pipeline_args(inner, slot["repo"])[inner.index("--repo") + 1] == slot["repo"]
+
+
+def test_a_refused_bot_block_and_a_tooling_error(env):
+    def confused(ctx):
+        if "BOT_MATCHES block was refused" in ctx["prompt"]:
+            return {"final": "fixed\n" + BOTS + NOT_DONE}
+        return {"final": "```BOT_MATCHES\n{\"runs\": [{\"persona\": \"Builder\", \"wave\": 3}]}\n```\n"
+                         + NOT_DONE}
+    e = bots_env(env, [{"result": "ERROR", "error": "tooling: Studio is in Play"}], script=confused)
+    drive(e, lambda t: any("BOT_MATCHES block was refused" in x for _, x in e.client.log))
+    refusal = next(x for _, x in e.client.log if "BOT_MATCHES block was refused" in x)
+    assert "unknown keys ['wave']" in refusal and '"length": "Full"' in refusal   # the example
+    assert not events(e, "studio_calls_started")
+    t = drive(e, lambda t: t["state"] == S.BLOCKED)
+    assert "scripted bot matches: tooling: Studio is in Play" in (t["blocker"] or "")
+    assert json.loads(events(e, "bot_matches_error")[0]["detail"])["result"] == "ERROR"
+    assert not e.c.store.holds("game", "T1")
+
+
+def test_a_block_that_polls_is_never_stale_and_one_that_hangs_is_stopped(env):
+    """2026-11-13: `regression=full` died at the 6-minute stale-status watchdog because the
+    runner planned for longer than that without a status update. A bots runner rewrites
+    status.json at every Status() poll: a 45-minute match is quiet, a hung runner is not."""
+    e = bots_env(env, [{"result": "PASS", "sleep": 60}])
+    drive(e, lambda t: bool(sc(e).get("run")))
+    status = e.repo / ".plan" / "tmp" / "gate" / "T1" / "status.json"
+    for _ in range(100):
+        if status.exists():
+            break
+        time.sleep(0.1)
+    for _ in range(9):                                          # 45 simulated minutes
+        st = json.loads(status.read_text())
+        status.write_text(json.dumps({**st, "updated": time.time()}))     # the runner's poll
+        e.now[0] += 300
+        e.c.tick()
+    assert sc(e).get("run") and not events(e, "studio_calls_stopped")
+    assert "bots / match 1/2 C1" in task(e)["next_action"]
+    st = json.loads(status.read_text())
+    status.write_text(json.dumps({**st, "updated": time.time() - 7 * 60}))  # no poll for 7 min
+    t = drive(e, lambda t: t["state"] == S.BLOCKED, step=0)
+    assert "no CALL progress for 6 min" in (t["blocker"] or "") and "bot matches" in t["blocker"]
+    assert json.loads(events(e, "studio_calls_stopped")[0]["detail"])["reason"] == "stale"
+
+
+def test_bot_budgets_come_from_the_request_and_the_setting_caps_a_block(env):
+    e = env([{"result": "PASS"}])
+    P, scx = e.c.projects["game"], e.c.studio_calls
+    req = SC.parse_bot_request(BOTS)
+    assert scx._bot_budgets(P, req) == (75.0, 170.0)
+    assert scx._bot_budgets(P, {**req, "run_minutes": 30}) == (30.0, 80.0)
+    assert scx._bot_budgets(P, {**req, "block_minutes": 900}) == (75.0, 600.0)
+    P.profile.studio_calls["bot_run_budget_minutes"] = 20
+    P.profile.studio_calls["bot_block_budget_minutes"] = 50
+    assert scx._bot_budgets(P, req) == (20.0, 50.0)
+    assert scx._limit_s(P, req) == (50 + 15) * 60

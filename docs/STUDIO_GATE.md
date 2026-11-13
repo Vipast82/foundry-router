@@ -218,6 +218,100 @@ These map to the `ui` subset instead of every suite that reads them:
 `src/shared/Net/Remotes.lua` edit, and any unmapped `src/client/UI/` file.
 No hit means no regression (`regression.selection` SKIP, not required).
 
+## Bot matches: the `BOT_MATCHES` request and the `bots` mode
+
+Added 2026-11-13. A bot match (`BotRunner.RunMatch`, 37-49 minutes for a Full
+match) used to need a session that polled it to the end, and a match whose
+session ended early lost Studio to the next gate. A sprint under
+`[studio_calls]` now asks for a block of matches the way it asks for a gate.
+Its session ends a turn with one block:
+
+    ```BOT_MATCHES
+    {"runs": [
+      {"label": "C1", "persona": "Builder", "players": 1, "length": "Full",
+       "seed": 20261016, "speedup": 4, "stopAtWave": 3},
+      {"label": "C2", "persona": "Builder", "players": 4, "length": "Skirmish",
+       "seed": 20261016, "speedup": 4, "stopAtWave": 3}
+    ]}
+    ```
+
+- **Per run:** `persona` or `squad` (a list of personas), `length` (always
+  required: a fresh profile's first match is a Skirmish otherwise), and
+  optionally `players`, `seed`, `speedup`, `stopAtWave`, `maxSimSeconds`,
+  `scalingPlayers`, `difficulty`, `hardcore`, `noClient`. They go to
+  `RunMatch` as given; the last three are passed through for a harness that
+  knows them. `label` names the run and its report file (default
+  `<persona>x<players>_s<seed>`; one per run). `init: false` skips
+  `MatchService:Init()`.
+- **Per block:** `runMinutes` (one run's wall budget; default `[studio_calls]
+  bot_run_budget_minutes`, 75), `blockMinutes` (default runs x (run budget +
+  10); never above `bot_block_budget_minutes`, 600), `files` (more files for
+  the source check). At most 24 runs.
+- An unknown key, a wrong type or a `STUDIO_GATE` block in the same turn is
+  refused with one prompt that says why; nothing is ignored.
+
+**What the coordinator does.** One detached process holds `runner.lock` and
+`studio.lock` (owner `studio_gate`) for the whole block. Before the first
+run it checks that Studio is in Edit (a Studio in Play is never stopped: the
+block ends as a tooling error) and that the live sources equal HEAD
+(`GateRunner.verifyLive` on `src/server/Dev/Playtest/BotRunner.lua` plus
+`files`). Then, for each run:
+
+1. a fresh play session (`solo_playtest`);
+2. in the server VM: `Dev.PlaytestBots = true`,
+   `AfkService:SetEnabledForTest(false)`, `MatchService:Init()`,
+   `BotRunner.RunMatch{...}`;
+3. `BotRunner.Status()` every 45 s. Each poll rewrites `status.json`, which
+   is what `[studio_calls] stale_status_minutes` watches: a match of any
+   length is quiet, a runner that hangs is stopped;
+4. `BotRunner.Report()` saved as
+   `docs/progress/PT_REPORTS/<stamp>_<label>.md`;
+5. `AfkService:SetEnabledForTest(nil)`, `Dev.PlaytestBots = false`, the play
+   session stopped.
+
+A run over its budget gets `BotRunner.Stop`, its partial report is saved and
+it is recorded `TIMEOUT`; a run whose play session stops answering is
+`FAILED`; the block goes on with the next run either way. Only MCP servers
+that are gone (Studio closed) end the block.
+
+**What comes back.** One line per run in
+`docs/progress/<ID>_bot_matches.txt`:
+
+    BOTRUN C1 Defeat waves=2 match_s=419.69 wall_min=9.3 report=docs/progress/PT_REPORTS/20261113-211409_C1.md
+    BOTRUN C2 TIMEOUT waves=- match_s=- wall_min=75 reason=not finished after 75 min, stopped (...)
+
+The coordinator commits that file and the reports, writes the event
+`bot_matches_done` (or `bot_matches_error`) and sends the session one prompt
+with the same lines. A tooling error stops the task BLOCKED with the reason,
+as a gate's does.
+
+**Left to the plan:** which runs, and reading each report (`meta.totalWaves`,
+`meta.seedBuilt`, the anomalies) before its numbers are used. The runner
+takes no checkpoint captures (`PopCaptures()` is not polled) and plays one
+match per play session.
+
+**Text for a game plan:**
+
+> Bot matches run as a block the coordinator plays: end your turn with one
+> `BOT_MATCHES` block (docs/STUDIO_GATE.md "Bot matches" in the Foundry repo),
+> one entry per run with `label`, `persona`, `players`, `length`, `seed`,
+> `speedup` and the cut (`stopAtWave`). Do not start a playtest or take
+> `studio.lock` for these runs yourself. You get one line per run and the
+> report paths under `docs/progress/PT_REPORTS/`; read each report, check
+> `meta.totalWaves` and `meta.seedBuilt`, then go on. List
+> `docs/progress/PT_REPORTS/**` in "Files this sprint may change".
+
+**A Studio slot.** A slot-bound track's block runs inside the slot through
+the same wrapper as its gate (`slots.run`); the reports come back with the
+gate folder and are put under `docs/progress/PT_REPORTS/` on the host.
+
+**By hand** (no coordinator; the same runner):
+
+    py -m foundry_coordinator.projects.animaluprising.studio_gate --repo C:/Roblox/AnimalUprising bots --sprint <ID> --runs-file runs.json
+
+`runs.json` is the list of runs or the whole `BOT_MATCHES` object. The last
+line is `BOTS <ID> PASS|FAIL|ERROR` (exit 0 / 1 / 2).
+
 ## Gate file: `docs/progress/<ID>_gate.json`
 
 Written with the sprint's one-page plan. **Read from HEAD** (`git show
