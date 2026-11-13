@@ -220,7 +220,9 @@ No hit means no regression (`regression.selection` SKIP, not required).
 
 ## Bot matches: the `BOT_MATCHES` request and the `bots` mode
 
-Added 2026-11-13. A bot match (`BotRunner.RunMatch`, 37-49 minutes for a Full
+Added 2026-11-13; run once against the workstation Studio the same day (one wave-1
+Skirmish run, 3.2 minutes, `BOTS BOTCHECK PASS`) and deployed. Not yet run on a slot.
+A bot match (`BotRunner.RunMatch`, 37-49 minutes for a Full
 match) used to need a session that polled it to the end, and a match whose
 session ended early lost Studio to the next gate. A sprint under
 `[studio_calls]` now asks for a block of matches the way it asks for a gate.
