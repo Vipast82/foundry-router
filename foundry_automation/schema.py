@@ -174,6 +174,10 @@ STUDIO_CALLS_DEFAULTS = {
     "tasks": [],                              # explicit task ids; empty = every task of `tiers`
     "tiers": ["A", "B"],
     "auto_verify": False,                     # VERIFYING runs it when the gate is missing/stale
+    # 2026-11-14 time-save item 0: while a sprint is mid-build the repair assignment leaves
+    # merely-stale GUARD suites (not its own, not red) to the final gate; off = every stale
+    # required suite is listed, as before. The closing requirement never changes.
+    "defer_guard_suites": False,
     "runner_module": "foundry_coordinator.projects.animaluprising.studio_gate",
     "pipeline_module": "foundry_coordinator.studio_calls",
     "call_timeout_seconds": 120,              # one MCP CALL
@@ -869,6 +873,9 @@ _SC_DESC = {
     "tiers": "Sprint tiers covered when `tasks` is empty.",
     "auto_verify": "VERIFYING runs the scripted gate for a tier A/B sprint whose gate is "
                    "missing or stale at HEAD (once per HEAD).",
+    "defer_guard_suites": "Mid-build, the repair assignment asks only for the sprint's own and "
+                          "red suites; stale regression guards wait for the final gate (and run "
+                          "once at half-way). Closing still needs every suite fresh.",
     "runner_module": "The studio_gate runner (its `calls` mode).",
     "pipeline_module": "The pipeline (host half -> calls -> -Finish).",
     "call_timeout_seconds": "One MCP CALL.",

@@ -1602,6 +1602,67 @@ def _known_suites(suites: list, known: Optional[set]) -> list:
     return [s for s in suites if s in known]
 
 
+def deferred_guards(P, t: dict, spec, head: str, candidates: list, ledger=None) -> dict:
+    """2026-11-14 time-save item 0: which of the stale required suites a MID-BUILD repair
+    assignment leaves to the final gate. `candidates` = check ids ("suite:UX_1"). In four days
+    the assignments' "Checks to rerun" made sessions gate ten older UI suites after every
+    small fix (~45 gate-minutes a day); a note in the plan cannot help, the assignment text
+    wins. Returns {"deferred": [check ids], "halfway": bool}. deferred is empty (everything
+    asked, as before) unless [studio_calls] defer_guard_suites is on and the plan is mid-build
+    (open BUILD checklist rows at head: the same test that keeps a sprint out of VERIFYING);
+    any doubt (no index row, no record, an unreadable input) asks for the suite.
+
+    OWN, always asked: the sprint's own suite (id = task id, "-" -> "_", any case); a suite
+    whose check file this sprint added or changed (task base..head, the RegressionIndex row's
+    file); a suite whose newest verdict is not PASS (red or never run: it stays in until it
+    passed once at a later head). Every other candidate is a GUARD. When half of the plan's
+    BUILD checklist rows are ticked the guards are due once (data.guards_halfway is set by the
+    caller), then deferred again. Only the REPAIR ASSIGNMENT calls this: a session's own
+    STUDIO_GATE block, default_request (VERIFYING: the plan is complete) and gate_submission
+    (obligations build.suite.* / build.gate) never go through it."""
+    none = {"deferred": [], "halfway": False}
+    try:
+        if not settings(P).get("defer_guard_suites") or not candidates or not head:
+            return none
+        pending = P.adapter.pending_build_steps(spec, head, P.ws)
+        if not pending:                       # None = no checklist, [] = BUILD complete
+            return none
+        data = t.get("data") or {}
+        base = str(data.get("task_base") or t.get("base_sha") or "")
+        if not base:
+            return none
+        from .projects.animaluprising.studio_gate import parse_regression_index
+        with open(os.path.join(P.profile.workspace, "tests", "RegressionIndex.lua"),
+                  encoding="utf-8", errors="replace") as f:
+            rows = {str(e.get("id")): str(e.get("file") or "")
+                    for e in parse_regression_index(f.read())["entries"]
+                    if isinstance(e, dict) and e.get("id")}
+        changed = {c.replace("\\", "/") for c in P.ws.changed_files(base, head)}
+        tid = str(t.get("task_id") or getattr(spec, "task_id", ""))
+        own_id = re.sub(r"[-.]", "_", tid).upper()
+        guards = []
+        for cid in candidates:
+            sid = str(cid).split(":", 1)[1] if str(cid).startswith("suite:") else ""
+            f = rows.get(sid)
+            if not sid or sid.upper() == own_id or f is None:
+                continue
+            if any(f"tests/{f}{ext}" in changed for ext in (".lua", ".luau")):
+                continue
+            recs = ledger._cands(P, tid, cid) if ledger is not None else []
+            if not recs or recs[0].get("result") != "PASS" or recs[0].get("truncated"):
+                continue
+            guards.append(cid)
+        if not guards:
+            return none
+        build = (P.adapter.plan_progress(spec, head, P.ws) or [])[:-1]     # CLOSE row out
+        if build and 2 * sum(1 for m in build if m[0] == "done") >= len(build) \
+                and not data.get("guards_halfway"):
+            return {"deferred": [], "halfway": True}
+        return {"deferred": guards, "halfway": False}
+    except Exception:                                             # noqa: BLE001 - fail open
+        return none
+
+
 # ============================================================================ texts
 
 def findings_lines(outcome: dict, v: dict) -> list:
