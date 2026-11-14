@@ -148,6 +148,12 @@ direct path (the client brings its own tools):
   called; nothing is submitted twice. Raise `job_wait_seconds` for a chat program that
   waits longer (Open WebUI: about 300 s; AnythingLLM cuts off near 120 s). Empty
   `job_check_tool` or 0 seconds = no waiting.
+- **Private files (v0.181.137).** A file its server sends with `Cache-Control: no-store` is
+  one the server says must not be kept elsewhere; Media_Gen sends every file of a private
+  library that way. Such a file is never copied to Foundry and gets no signed link: its body
+  is not read, the model is told it was not shown, and the chat gets the tool server's own
+  link, which opens on the same network. `tool_fetch_no_store` ("also copy files marked
+  private") turns this off.
 - All of these are on Logs → Usage Log → Images, under "Files tools make in a chat".
 
 ### Long-running generation tools

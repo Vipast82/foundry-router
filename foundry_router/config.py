@@ -878,6 +878,12 @@ class MediaConfig(BaseModel):
     # these extra hosts — never an arbitrary host a model or page wrote.
     tool_fetch_urls: bool = True
     tool_fetch_hosts: list[str] = Field(default_factory=list)
+    # A file its server sends with "Cache-Control: no-store" is one the server says
+    # must not be kept anywhere else (Media_Gen: every file of a private library).
+    # Off (the default, Victor 2026-11-14): such a file is never copied here and gets
+    # no signed link; the chat gets the tool server's own link. On: it is treated
+    # like any other file.
+    tool_fetch_no_store: bool = False
     public_link_ttl_hours: int = 168       # signed link lifetime (7 days)
     # Base URL the chat user's browser reaches Foundry on (e.g. behind a
     # reverse proxy). "" = from the request's Host / X-Forwarded-* headers.

@@ -34,6 +34,10 @@ person chatting. Now, on the brain, worker and direct paths:
    several formats (Media_Gen: ogg, mp3 and flac of one sound) is shown once,
    in the format a browser handles best; side files a tool labels as such
    ("uncaptioned_mp4:", "narration_flac:") are left as links for the model.
+8. **Private files stay where they are (v0.181.137).** A file its server sends
+   with ``Cache-Control: no-store`` (Media_Gen: a private library) is not copied
+   and gets no signed link, unless ``media.tool_fetch_no_store`` is on. The model
+   is told to give the user the server's own link.
 7. **Queued jobs (v0.181.136).** A server that answers at once with a job id
    and makes the file later (Media_Gen) is waited for here: Foundry reads the
    job with ``media.job_check_tool`` until it is done or
@@ -73,6 +77,7 @@ _FORMAT_ORDER = ("png", "jpg", "jpeg", "webp", "gif", "mp4", "m4v", "mov", "webm
 # "mp4: http://..." — the word a tool put in front of a link
 _LABELLED_URL = re.compile(r"([A-Za-z0-9_]+):\s*(https?://[^\s<>\"'`\])}]+)")
 _JOB_FINAL = ("done", "failed", "cancelled", "canceled", "error")
+_NO_STORE = "no-store"                # _fetch's reason for a file its server marks private
 _MAX_JOBS = 4                         # jobs of one reply that are waited for together
 _MAX_URLS = 8                         # media URLs fetched per tool result
 _FETCH_TIMEOUT = 120.0
@@ -333,6 +338,10 @@ async def _fetch(svc, url: str, cap: int) -> tuple[Optional[bytes], str]:
                                    follow_redirects=False) as r:
             if r.status_code != 200:
                 return None, f"HTTP {r.status_code}"
+            # the body is not read: nothing of a private file passes through here
+            if _NO_STORE in (r.headers.get("cache-control") or "").lower() \
+                    and not getattr(svc.config_store.config.media, "tool_fetch_no_store", False):
+                return None, _NO_STORE
             clen = int(r.headers.get("content-length") or 0)
             if clen and clen > cap:
                 return None, f"larger than {_size(cap)} (media.tool_output_max_mb)"
@@ -399,6 +408,12 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
                   if b.get("type") == "resource_link"]
         for u in pick_urls(texts, hosts)[:_MAX_URLS]:
             raw, why = await _fetch(svc, u, cap)
+            if raw is None and why == _NO_STORE:
+                notes.append(f"[Foundry: {u} is a private file ({server} marks it as not to be "
+                             f"kept elsewhere), so it was not copied and is NOT shown under your "
+                             f"reply. Give the user that link as it is; it opens on their own "
+                             f"network.]")
+                continue
             if raw is None:
                 notes.append(f"[Foundry: couldn't fetch {u} to show the user ({why}); give the "
                              f"user that link instead.]")

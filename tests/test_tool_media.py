@@ -375,6 +375,51 @@ def test_one_copy_per_result_and_side_files_stay_links(svc, client):
     assert fetched == [f"{MG}/game/sfx/poison_9b.mp3"] and len(cap.items) == 1
 
 
+def test_a_file_its_server_marks_private_is_never_copied(svc, client):
+    """Victor 2026-11-14: pictures of a Media_Gen private library stay out of Foundry.
+    Media_Gen sends every file of a private library with Cache-Control: private, no-store."""
+    read = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            read.append(1)                       # the body of a private file is never pulled
+            yield png(tag=b"secret")
+
+    async def handler(req):
+        if "/nsfw/" in str(req.url):
+            return httpx.Response(200, stream=Body(), headers={"cache-control": "private, no-store"})
+        return httpx.Response(200, content=png(tag=b"open"))
+    old = svc.http
+    svc.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    text = f"Files:\n  png: {MG}/nsfw/image/a_1234.png"
+    try:
+        cap = _store(client, svc, ToolResult([{"type": "text", "text": text}]), tool="media_check_job")
+        assert cap.items == [] and read == []
+        assert len(cap.notes) == 1 and f"{MG}/nsfw/image/a_1234.png is a private file" in cap.notes[0]
+        assert "NOT shown under your reply" in cap.notes[0] and "couldn't fetch" not in cap.notes[0]
+        note = tool_media.model_note(cap.items, cap.notes)
+        assert "shown to the user automatically" not in note            # nothing was shown
+        # a file without the mark, in the same result, is shown as before
+        both = _store(client, svc, ToolResult([{"type": "text", "text":
+                      text + f"\n  png: {MG}/personal/image/b_5678.png"}]), tool="media_check_job")
+        assert len(both.items) == 1 and len(both.notes) == 1 and read == []
+        # the switch on the admin page turns the rule off
+        r = client.post("/admin/api/config/media", json={"tool_fetch_no_store": True})
+        assert r.json()["media"]["tool_fetch_no_store"] is True
+        try:
+            on = _store(client, svc, ToolResult([{"type": "text", "text": text}]),
+                        tool="media_check_job")
+            assert len(on.items) == 1 and on.notes == [] and read == [1]
+        finally:
+            client.post("/admin/api/config/media", json={"tool_fetch_no_store": False})
+    finally:
+        svc.http = old
+    assert svc.config_store.config.media.tool_fetch_no_store is False     # off unless switched on
+    from pathlib import Path
+    html = (Path(tool_media.__file__).parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="md-nostore"' in html and 'tool_fetch_no_store: $("#md-nostore").checked' in html
+
+
 class _QueueServer:
     """Media_Gen's shape: a generate tool answers at once with a job id; the check
     tool reports queued, running, then done with a file link."""

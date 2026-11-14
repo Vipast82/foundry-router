@@ -1601,7 +1601,7 @@ async def set_media(request: Request):
             except (TypeError, ValueError):
                 return JSONResponse({"error": f"{k} must be an integer"}, status_code=400)
     for k in ("enabled", "allow_paid_api", "mcp_tools", "tool_outputs", "audio_html",
-              "video_html"):
+              "video_html", "tool_fetch_no_store"):
         if k in body:
             updates[k] = bool(body[k])
     for k in ("backend", "default_model", "draft_model", "attachments_upload_url",

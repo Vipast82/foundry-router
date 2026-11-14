@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.137 — files a tool server marks private are never copied to Foundry
+
+**Decision (Victor, 2026-11-14).** Pictures and videos of a Media_Gen private library stay out of Foundry.
+
+Since v0.143 a picture a persona's tool made was copied into Foundry's store and shown through a signed link that needs no key for 7 days, whatever library it came from. Media_Gen sends every file of a private library with `Cache-Control: private, no-store`.
+
+- A file its server sends with `no-store` is not copied and gets no signed link. Its body is not read at all.
+- The model is told the file is private, was not shown, and to give the user the tool server's own link, which opens on the same network (and only while chat access to the private library is on in Media_Gen).
+- Files without the mark in the same result are shown as before.
+- "also copy files marked private" on Logs → Usage Log → Images turns the rule off (`media.tool_fetch_no_store`, off by default).
+
+By the call history nothing private was copied before this: until 14 Nov the router last read a Media_Gen job on 8 Nov, three days before the first private library was made.
+
+Tests: `tests/test_tool_media.py`.
+
 ## v0.181.136 — videos come back to the chat; a queued Media_Gen job is waited for in the same reply
 
 **What was there.** A picture or sound a persona's tool made already came back under the chat reply (stored copy, signed link, pictures shown inline). Checked live with Foundry-Creative and Media_Gen 5.20: a finished sound job came back as working links. Three things were missing.

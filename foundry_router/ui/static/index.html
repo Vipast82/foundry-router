@@ -7766,6 +7766,7 @@ function mediaCard(md) {
       <label title="How long a link keeps working.">links last (hours)</label><input id="md-ttl" type="number" min="1" max="8760" style="width:80px" value="${c.public_link_ttl_hours}">
       <input type="checkbox" id="md-vid" ${c.video_html ? "checked" : ""}><label for="md-vid" title="Also put a video player under the link. Only for chat programs that show HTML in a reply; the link and the download link are always there.">video player in the reply</label>
       <input type="checkbox" id="md-aud" ${c.audio_html ? "checked" : ""}><label for="md-aud" title="Also put an audio player under the link. Only for chat programs that show HTML in a reply.">audio player in the reply</label>
+      <input type="checkbox" id="md-nostore" ${c.tool_fetch_no_store ? "checked" : ""}><label for="md-nostore" title="A tool server can mark a file as not to be kept anywhere else (Media_Gen does this for every file of a private library). Off: such a file is never copied to Foundry and gets no link from it; the chat gets the tool server's own link, which opens on your network. On: it is copied and shown like any other file, behind a link that needs no key.">also copy files marked private</label>
       <span class="hint">saved with the Save button above</span></div>
     <p class="hint">A timeout is never resubmitted, the same request within ${c.dedupe_minutes} min returns the existing job, and a refused or unavailable model fails without falling back to another model or provider. Kilo/Cline save results into the project via the local media adapter (contrib/media-adapter).</p>
     ${jobs ? `<table><tr><th>time (UTC)</th><th>client</th><th>model</th><th>status</th><th>prompt</th><th>time</th><th>result</th></tr>${jobs}</table>` : '<p class="hint">No image jobs yet.</p>'}
@@ -7788,7 +7789,8 @@ function bindMediaCard() {
         tool_outputs: $("#md-out").checked, job_check_tool: $("#md-check").value.trim(),
         job_wait_seconds: +$("#md-wait").value, tool_output_max_mb: +$("#md-maxmb").value,
         public_base_url: $("#md-base").value.trim(), public_link_ttl_hours: +$("#md-ttl").value,
-        video_html: $("#md-vid").checked, audio_html: $("#md-aud").checked}});
+        video_html: $("#md-vid").checked, audio_html: $("#md-aud").checked,
+        tool_fetch_no_store: $("#md-nostore").checked}});
       toast("Image settings saved"); render();
     } catch (e) { toast(e.message, true); }
   };
