@@ -654,7 +654,12 @@ async def monitor(svc) -> dict:
     ledger: Ledger = svc.ledger
     cfg = ledger.cfg
     now = time.time()
-    rows_7d = ledger.db.query("SELECT * FROM usage_events WHERE ts >= ?", (now - 7 * 86400,))
+    # v0.181.138: a week of the ledger, read on a worker thread and the second
+    # connection (it held the one lock 2.6 s on the event loop each time the page asked)
+    import asyncio
+    read = getattr(ledger.db, "ro_query", None) or ledger.db.query
+    rows_7d = await asyncio.to_thread(read, "SELECT * FROM usage_events WHERE ts >= ?",
+                                      (now - 7 * 86400,))
     calls = [r for r in rows_7d if r["status"] in COUNTED]
     in5 = [r for r in calls if r["ts"] >= now - 5 * 3600]
     in24 = [r for r in calls if r["ts"] >= now - 86400]

@@ -608,3 +608,61 @@ def test_the_advisor_reads_history_off_the_event_loop_and_is_kept_briefly(app, c
     assert len(ran_on) == 3
     import inspect
     assert "svc.db.reader()" in inspect.getsource(real) and "asyncio.to_thread(_gather" in inspect.getsource(perf_advisor.advise)
+
+
+def test_the_last_large_reads_use_the_second_connection():
+    """v0.181.138: in two days on v0.181.135 seven freezes of 2-5 s were recorded, all
+    one cause: a large read holding the one lock. The control center's overview (every
+    task of the window, 3.1 s) and graph ran on the event loop; the budget page read a
+    week of the ledger there (2.6 s); the alert clean-up and the route graph read on a
+    thread but on the main connection."""
+    import inspect
+
+    from foundry_router import budget, control_api, control_center, routes_view
+
+    api = inspect.getsource(control_api)
+    assert "asyncio.to_thread(_cc(request).reading().overview," in api
+    assert "asyncio.to_thread(_cc(request).reading().route_graph," in api
+    mon = inspect.getsource(budget.monitor)
+    assert 'await asyncio.to_thread(read, "SELECT * FROM usage_events WHERE ts >= ?"' in mon
+    assert 'ledger.db.query("SELECT * FROM usage_events' not in mon
+    alerts = inspect.getsource(control_center)
+    assert 'for r in read("SELECT project_id, task_id, state FROM cc_tasks")' in alerts
+    graph = inspect.getsource(routes_view.graph)
+    assert graph.count("svc.db.query(") == graph.count("svc.db.query(") and "reqs = read(" in graph
+    assert "denials = read(" in graph
+
+
+def test_a_reading_control_center_reads_elsewhere_and_writes_in_place(tmp_path):
+    from foundry_router.control_center import ControlCenter
+    from foundry_router.db import Database
+
+    db = Database(tmp_path / "cc.sqlite")
+    cc = ControlCenter(db)
+    twin = cc.reading()
+    assert twin is not cc and twin.clock is cc.clock
+    seen = []
+    real = db.ro_query
+
+    def spy(sql, params=()):
+        seen.append(sql)
+        return real(sql, params)
+    db.ro_query = spy
+    try:
+        out = twin.overview([], hours=24)
+        graph = twin.route_graph([], "", "", 30)
+    finally:
+        db.ro_query = real
+    assert isinstance(out, dict) and isinstance(graph, dict)
+    assert any("FROM cc_tasks WHERE received_ts >= ?" in q for q in seen)      # read on the second connection
+    assert cc.db is db                                                           # the original is untouched
+    # the same answers as the control center itself
+    assert cc.overview([], hours=24).keys() == out.keys()
+
+    class Plain:                          # a database without a second connection: no twin
+        def query(self, *a):
+            return []
+    plain = ControlCenter.__new__(ControlCenter)
+    plain.db = Plain()
+    assert plain.reading() is plain
+

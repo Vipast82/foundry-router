@@ -143,7 +143,9 @@ async def logout(request: Request):
 @_guard
 async def overview(request: Request, hours: float = 168):
     s = _op(request)
-    return _cc(request).overview(s["projects"], hours=max(1.0, min(24 * 90.0, hours)))
+    # v0.181.138: off the event loop, on the read-only connection (ControlCenter.reading)
+    return await asyncio.to_thread(_cc(request).reading().overview, s["projects"],
+                                   hours=max(1.0, min(24 * 90.0, hours)))
 
 
 @router.get("/control/api/sessions/{session_id}")
@@ -259,7 +261,8 @@ async def memory_search(request: Request, project: str, q: str = "", file: str =
 @_guard
 async def graph(request: Request, project: str = "", task: str = "", minutes: float = 30):
     s = _op(request)
-    return _cc(request).route_graph(s["projects"], project, task, max(1.0, min(1440.0, minutes)))
+    return await asyncio.to_thread(_cc(request).reading().route_graph, s["projects"], project,
+                                   task, max(1.0, min(1440.0, minutes)))
 
 
 @router.get("/control/api/tracks")

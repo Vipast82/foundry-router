@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.138 — the short freezes left on v0.181.135 (control center overview and graph, budget page)
+
+**What was recorded.** In two days on v0.181.135 the stall watchdog logged seven freezes of 0.3 to 4.9 s and 40 slow database calls. One cause throughout: a large read holding the one database lock, either on the event loop or on a thread while the loop waited for the lock.
+
+- **Control center overview** (`GET /control/api/overview`): every task of the window was read on the event loop (`SELECT * FROM cc_tasks WHERE received_ts >= ?`, 3.1 s held, a 4.9 s freeze). **Control center graph** (`GET /control/api/graph`): the same with the request log (1.1 s, several times an hour). Both now run on a worker thread and read on the database's second, read-only connection (`ControlCenter.reading()`).
+- **Budget page** (`GET /admin/api/budgets`): a week of the ledger was read on the event loop (2.6 s held, a 4.2 s freeze). It is read on a worker thread and the second connection.
+- **Alert clean-up** read every task's state on a thread but on the main connection (1.0 to 1.7 s held, about hourly); **the route map** did the same with its two window reads (1.3 s). Both read on the second connection.
+
+Tests: `tests/test_stall_fixes.py`.
+
 ## v0.181.137 — files a tool server marks private are never copied to Foundry
 
 **Decision (Victor, 2026-11-14).** Pictures and videos of a Media_Gen private library stay out of Foundry.

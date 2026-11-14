@@ -53,11 +53,13 @@ def graph(svc, hours: float = 24, show_all: bool = False, active: bool = False) 
     from .observability import client_label, live as live_now
     cfg = svc.config_store.config
     since_iso, since_ts = _since_iso(hours), time.time() - hours * 3600
-    reqs = svc.db.query(
+    # v0.181.138: the two window reads go to the second connection (1.3 s on the main one)
+    read = getattr(svc.db, "ro_query", None) or svc.db.query
+    reqs = read(
         "SELECT client_id, client_addr, user_agent, persona, client_model, mode, served_model, "
         "served_backend, outcome, status, duration_ms, request_id, routing FROM request_log "
         "WHERE ts >= ?", (since_iso,))
-    denials = svc.db.query(
+    denials = read(
         "SELECT client_id, persona, model, backend, rule, detail FROM usage_events "
         "WHERE ts >= ? AND status='denied'", (since_ts,))
     try:

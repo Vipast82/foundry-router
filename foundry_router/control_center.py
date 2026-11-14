@@ -33,6 +33,7 @@ when its own stream fails.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import logging
@@ -622,6 +623,20 @@ class ControlCenter:
         note = getattr(self.db, "note_slow", None)
         if note is not None:
             note("control center transaction", t0, t1)
+
+    def reading(self) -> "ControlCenter":
+        """This control center with its reads on the database's second, read-only
+        connection (v0.181.138), for a page that only reads and runs on a worker
+        thread. Everything in Foundry shares one connection behind one lock: the
+        overview read every task of the window on the event loop (3.1 s held, a
+        4.9 s freeze of every stream) and the graph did the same with the request
+        log. Writes, if a read path makes any, still go to the main connection."""
+        reader = getattr(self.db, "reader", None)
+        if reader is None:
+            return self
+        twin = copy.copy(self)
+        twin.db = reader()
+        return twin
 
     @staticmethod
     def _rows(conn, sql, args=()) -> list[dict]:
@@ -1774,8 +1789,10 @@ class ControlCenter:
         rows = self.db.query("SELECT * FROM cc_alerts WHERE status IN ('new','acknowledged')")
         if not rows:
             return []
+        # every task's state: read on the second connection (it held the lock 1.0-1.7 s)
+        read = getattr(self.db, "ro_query", None) or self.db.query
         states = {(r["project_id"], r["task_id"]): r["state"]
-                  for r in self.db.query("SELECT project_id, task_id, state FROM cc_tasks")}
+                  for r in read("SELECT project_id, task_id, state FROM cc_tasks")}
         info_s = float(st["alert_info_hours"]) * 3600
         quiet_s = float(st["alert_error_quiet_hours"]) * 3600
         last_err: dict = {}
