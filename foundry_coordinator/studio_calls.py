@@ -69,6 +69,13 @@ DEFAULT_FILES = ["tests/RegressionIndex.lua", "tests/GateRunner.lua"]
 MAX_GATE_FILES = 200
 # gate ERRORs that are the sprint's own file to fix (studio_gate PROJECT_UNMAPPED /
 # PROJECT_UNSERVABLE): the session gets them back instead of a tooling stop
+# 2026-11-14 item 24: a workstation gate that starts with no TEST Studio connected or a playtest
+# still running ends within seconds ("No Studio Peer connected", "Playtest already running":
+# 20 runs). [studio_calls] gate_preflight checks both first and retries every
+# PREFLIGHT_EVERY_S without using an attempt; after PREFLIGHT_MAX_WAIT_S of refusals it starts
+# the gate anyway (a probe that is wrong must never hold the gate for good).
+PREFLIGHT_EVERY_S = 30.0
+PREFLIGHT_MAX_WAIT_S = 600.0
 PROJECT_MARKERS = ("PROJECT: not mapped in default.project.json", "PROJECT: Rojo cannot serve")
 
 
@@ -119,6 +126,25 @@ def settings(P) -> dict:
     if isinstance(sc, dict):
         out.update(sc)
     return out
+
+
+def shared_lune_env(profile, state_dir: str) -> dict:
+    """{AU_LUNE_CACHE_DIR: <dir>} when [studio_calls] shared_lune_cache is on, else {}.
+    2026-11-14 time-saving item 24: every lane worktree had its own Lune spec cache, so each
+    new lane's first gate ran all ~2,800 specs cold (20-27 min; 13 cold runs = 324 min in
+    four days). run.luau's entries are content-keyed (one file per spec, written by
+    write-then-rename), so the main checkout and every lane share ONE directory per project,
+    outside any worktree. Failing to create it leaves the variable unset (the old cache)."""
+    sc = getattr(profile, "studio_calls", None)
+    if not state_dir or not (isinstance(sc, dict) and sc.get("shared_lune_cache") is True):
+        return {}
+    pid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(getattr(profile, "id", "") or "project"))
+    d = os.path.join(os.path.abspath(state_dir), "lune_spec_cache", pid)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return {}
+    return {"AU_LUNE_CACHE_DIR": d}
 
 
 def split_ids(v) -> list:
@@ -578,6 +604,7 @@ class StudioCalls:
         self.store = coordinator.store
         self.clock = clock
         self._procs: dict = {}                       # (project, task) -> Popen
+        self._pf: dict = {}                          # (project, task) -> pre-flight wait state
 
     # ---------------------------------------------------------------- queries
     def _d(self, P, tid: str) -> dict:
@@ -808,7 +835,10 @@ class StudioCalls:
             # 2026-10-31: a slot-bound track's gate runs inside the slot (checkout -> pipeline
             # -> outputs copied back into the worktree)
             from . import slots
-            return slots.wrap_pipeline(slot, args, P.profile.workspace, tid, head or P.ws.head())
+            # 2026-11-14 item 24: the slot's own shared Lune cache (home volume, not the checkout)
+            kw = {"lune_cache": True} if settings(P).get("shared_lune_cache") is True else {}
+            return slots.wrap_pipeline(slot, args, P.profile.workspace, tid, head or P.ws.head(),
+                                       **kw)
         return _module_cmd(settings(P)["pipeline_module"]) + args
 
     def _pipeline_args(self, P, tid: str, req: dict, files: list, run_id: str, tier: str) -> list:
@@ -824,8 +854,9 @@ class StudioCalls:
                    "--budget-min", str(budget),
                    "--host-timeout-min", str(s["host_timeout_minutes"])])
 
-    def _spawn(self, cmd: list, log: str, run_id: str):
+    def _spawn(self, cmd: list, log: str, run_id: str, extra_env: Optional[dict] = None):
         env = dict(os.environ)
+        env.update(extra_env or {})      # reaches gate.ps1 and the `lune` it starts (item 24)
         env["PYTHONPATH"] = ROUTER_ROOT + (os.pathsep + env["PYTHONPATH"]
                                            if env.get("PYTHONPATH") else "")
         env["FOUNDRY_GATE_RUN_ID"] = run_id
@@ -852,6 +883,42 @@ class StudioCalls:
             locks = [x for x in locks if not str(x).startswith("studio:")] + [slots.lock_name(slot)]
         return locks
 
+    def _preflight(self, P, t: dict) -> bool:
+        """[studio_calls] gate_preflight (workstation only; a slot has no such check): a Studio
+        with the TEST place is connected and no playtest runs. False = do not spawn; the
+        pending request stays, no attempt is used and no verdict is written, the next tick
+        asks again (at most every PREFLIGHT_EVERY_S). A leftover playtest is stopped the way
+        a killed run's is (_stop_playtest). An unknown answer or a probe error starts the gate
+        as before. 2026-11-14 item 24 (see PREFLIGHT_EVERY_S)."""
+        if not settings(P).get("gate_preflight"):
+            return True
+        tid, key, now = t["task_id"], (P.id, t["task_id"]), self.clock()
+        st = self._pf.get(key)
+        if st and now < st["next"]:
+            return False
+        try:
+            verdict, why = _sg().studio_preflight(gate_place())
+        except Exception:                                         # noqa: BLE001
+            verdict, why = "unknown", ""
+        if verdict not in ("no_studio", "play"):
+            self._pf.pop(key, None)
+            return True
+        st = self._pf.setdefault(key, {"since": now, "why": "", "next": 0.0})
+        if now - st["since"] >= PREFLIGHT_MAX_WAIT_S:
+            self._pf.pop(key, None)
+            self.store.event(P.id, tid, "studio_calls_preflight_gave_up",
+                             detail={"why": why[:300], "waited_s": int(now - st["since"])})
+            return True
+        st["next"] = now + PREFLIGHT_EVERY_S
+        if verdict == "play":
+            self._stop_playtest(P, tid)
+        if st["why"] != why:
+            st["why"] = why
+            self.store.event(P.id, tid, "studio_calls_preflight_wait",
+                             detail={"why": why[:300], "verdict": verdict})
+        self.c._note(P, t, f"scripted Studio gate waits (pre-flight): {why[:200]}")
+        return False
+
     def _start(self, P, t: dict, pend: dict) -> bool:
         tid = t["task_id"]
         if self.c._held(P, t, "scripted Studio gate start"):
@@ -872,6 +939,8 @@ class StudioCalls:
                 return False
         if self._slot(P) is None and not self._studio_lock_free(P, t):
             return False
+        if self._slot(P) is None and not self._preflight(P, t):
+            return False
         head = P.ws.head()
         req = dict(pend.get("req") or {})
         tier = req.get("tier") or self._tier(P, tid)
@@ -886,7 +955,9 @@ class StudioCalls:
         except OSError:
             pass
         try:
-            proc = self._spawn(cmd, log, run_id)
+            proc = self._spawn(cmd, log, run_id,
+                               None if self._slot(P) is not None
+                               else shared_lune_env(P.profile, self.c.state_dir))
         except OSError as e:
             d = self._d(P, tid)
             d.pop("pending", None)

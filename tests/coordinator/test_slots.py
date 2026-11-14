@@ -357,3 +357,44 @@ def test_main_kilo_studio_mcp_points_at_the_slot_and_comes_back(tmp_path):
     assert out["action"] == "restore"
     assert json.loads(kc.read_text(encoding="utf-8"))["mcp"] == orig
     assert SL.sync_main_kilo(prof, str(tmp_path / "state"), path=str(kc))["action"] == "none"
+
+
+# ----------------------------------------------------------------------------- item 24: shared Lune cache
+def test_the_slot_pipeline_gets_one_shared_lune_cache_only_when_asked(monkeypatch):
+    slot = {**SL.DEFAULTS, **SLOT_CFG, "id": "slot-1"}
+    assert "--lune-cache-dir" not in SL.wrap_pipeline(slot, ["pipeline"], "C:/t", "T", "h")
+    on = SL.wrap_pipeline(slot, ["pipeline"], "C:/t", "T", "h", lune_cache=True)
+    assert on[on.index("--lune-cache-dir") + 1] == SL.SLOT_LUNE_CACHE
+    assert SL.SLOT_LUNE_CACHE.startswith("~/") and "AnimalUprising" not in SL.SLOT_LUNE_CACHE
+    spawned = []
+
+    class P:
+        def __init__(self, cmd, **kw):
+            spawned.append(" ".join(cmd))
+
+        def wait(self):
+            return 0
+    monkeypatch.setattr(SL.subprocess, "run", lambda cmd, **kw: SimpleNamespace(
+        returncode=0, stdout=b"SLOT-CHECKOUT abc OK\n", stderr=b""))
+    monkeypatch.setattr(SL.subprocess, "Popen", P)
+    monkeypatch.setattr(SL, "copy_back", lambda *a, **k: [])
+    local = {**slot, "host": ""}
+    for cache in (True, False):
+        spawned.clear()
+        argv = SL.wrap_pipeline(local, ["pipeline", "--repo", "C:/t"], "C:/t", "T", "abc123",
+                                lune_cache=cache)
+        assert SL.main(argv[argv.index("run"):]) == 0
+        assert ("AU_LUNE_CACHE_DIR" in spawned[-1]) is cache
+        if cache:
+            assert "mkdir -p" in spawned[-1] and ".cache/au-lune-spec-cache" in spawned[-1]
+            assert "$HOME" in spawned[-1]
+
+
+def test_a_slot_gate_asks_for_the_slot_cache_only_with_the_switch():
+    sc, P, c = _main_calls()
+    P.ws = SimpleNamespace(head=lambda: "abc123")
+    sc._tier = lambda *a, **k: "A"
+    P.profile.studio_calls = {}
+    assert "--lune-cache-dir" not in sc._command(P, "T1", {}, [], "rid", "A", head="abc123")
+    P.profile.studio_calls = {"shared_lune_cache": True}
+    assert "--lune-cache-dir" in sc._command(P, "T1", {}, [], "rid", "A", head="abc123")

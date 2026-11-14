@@ -71,6 +71,10 @@ DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundr
             "community_mcp": "/usr/local/bin/robloxstudio-mcp", "enabled": True,
             "checkout_timeout_s": 600, "host": "", "ssh": SSH_DEFAULT,
             "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": ""}
+# 2026-11-14 item 24: the slot's ONE shared Lune spec cache ([studio_calls] shared_lune_cache): in
+# /home/studio (the persistent studio-home volume), outside the checkout, so every lane's gate on
+# the slot reuses it and `git clean` / a lane's removal never empties it. "~/" = the slot's $HOME.
+SLOT_LUNE_CACHE = "~/.cache/au-lune-spec-cache"
 FOUNDRY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -178,7 +182,8 @@ def exec_argv(slot: dict, args: list, interactive: bool = False) -> list:
                      + [slot["container"]] + [str(a) for a in args])
 
 
-def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, head: str) -> list:
+def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, head: str,
+                  lune_cache: bool = False) -> list:
     """The host command that runs `pipeline_args` (the `studio_calls pipeline ...` argv after the
     module, with --repo set to the HOST worktree) inside the slot and copies the outputs back."""
     remote = []
@@ -192,7 +197,17 @@ def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, hea
             "--foundry", slot["foundry"], "--path-prefix", slot.get("path_prefix") or "",
             "--worktree", worktree, "--task", task, "--head", head,
             "--checkout-timeout", str(int(slot.get("checkout_timeout_s") or 600))] \
-        + remote + ["--"] + list(pipeline_args)
+        + remote + (["--lune-cache-dir", SLOT_LUNE_CACHE] if lune_cache else []) \
+        + ["--"] + list(pipeline_args)
+
+
+def lune_cache_export(path: str) -> str:
+    """Shell text that creates `path` on the slot and exports AU_LUNE_CACHE_DIR to it ("" for no
+    path; a failed mkdir leaves the variable unset, i.e. the checkout's own cache as before)."""
+    if not path:
+        return ""
+    q = '"$HOME"/' + shlex.quote(path[2:]) if path.startswith("~/") else shlex.quote(path)
+    return f"mkdir -p {q} 2>/dev/null && export AU_LUNE_CACHE_DIR={q}; "
 
 
 def slot_pipeline_args(args: list, slot_repo: str) -> list:
@@ -455,6 +470,7 @@ def run(a) -> int:
            f"FOUNDRY_GATE_RUN_ID={shlex.quote(os.environ.get('FOUNDRY_GATE_RUN_ID', ''))}; ")
     if a.path_prefix:
         env += f"export PATH={shlex.quote(a.path_prefix)}:$PATH; "
+    env += lune_cache_export(getattr(a, "lune_cache_dir", "") or "")
     script = (env + f"cd {shlex.quote(repo)} && python3 -m foundry_coordinator.studio_calls "
               + " ".join(shlex.quote(x) for x in args))
     print("SLOT run: " + script[:400], flush=True)
@@ -581,6 +597,7 @@ def main(argv=None) -> int:
     r.add_argument("--au-push-url", default="")
     r.add_argument("--foundry-push-url", default="")
     r.add_argument("--foundry-host-dir", default="")
+    r.add_argument("--lune-cache-dir", default="")
     r.add_argument("pipeline", nargs=argparse.REMAINDER)
     fe = sub.add_parser("fetch", help="copy files Studio wrote on a slot into this worktree")
     fe.add_argument("--config", required=True)

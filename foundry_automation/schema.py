@@ -191,6 +191,13 @@ STUDIO_CALLS_DEFAULTS = {
     # is 37-49 min) and the most one block may take, whatever the request asks for
     "bot_run_budget_minutes": 75,
     "bot_block_budget_minutes": 600,
+    # 2026-11-14 time-saving item 24: every lane worktree / slot lane ran all ~2,800 Lune specs
+    # cold on its first gate (13 cold runs = 324 min in four days). true = one shared Lune
+    # spec cache per machine (AU_LUNE_CACHE_DIR) for the main checkout and every lane
+    "shared_lune_cache": False,
+    # 2026-11-14 item 24: before a WORKSTATION gate spawns, check a Studio with the TEST place is
+    # connected and no playtest runs; if not, wait and retry (no attempt, no verdict)
+    "gate_preflight": False,
     # the runner's files the coordinator commits after a run ({task} = the task id; all
     # closeout-exempt docs/progress/{task}_*, so the gate binding stays PASS)
     "outputs": ["docs/progress/{task}_studio_lines.txt", "docs/progress/{task}_EVIDENCE_RAW.log",
@@ -888,6 +895,12 @@ _SC_DESC = {
     "bot_run_budget_minutes": "BOT_MATCHES: wall budget of one bot match; past it the run is "
                               "stopped, recorded as timed out, and the block goes on.",
     "bot_block_budget_minutes": "BOT_MATCHES: the most one block of bot matches may take.",
+    "shared_lune_cache": "One shared Lune spec cache per machine (AU_LUNE_CACHE_DIR): the "
+                         "workstation's under the coordinator state folder, a slot's under "
+                         "its home; a new lane's first gate no longer runs every spec cold.",
+    "gate_preflight": "Before a workstation gate starts, check a Studio with the TEST place is "
+                      "connected and no playtest runs; otherwise wait and retry (no attempt "
+                      "used, no verdict). Off = start at once.",
     "outputs": "Runner files the coordinator commits after a run ({task} = task id).",
 }
 

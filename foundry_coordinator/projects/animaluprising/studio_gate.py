@@ -3849,6 +3849,53 @@ def studio_in_play(timeout: float = 5.0) -> Optional[bool]:
     return box[0] if box else None
 
 
+def studio_preflight(place: str = "", timeout: float = 8.0) -> tuple:
+    """("ok" | "no_studio" | "play" | "unknown", why): is a Studio with the TEST place (`place`:
+    a substring of its name, "" = any open place) connected, and is it free of a running
+    playtest? 2026-11-14 item 24: a gate that starts without one ended in seconds ("No Studio
+    Peer connected", "Playtest already running"). Read-only like studio_in_play (the official
+    server's list_roblox_studios and get_studio_state, nothing started or stopped); never
+    raises; no answer in `timeout` s or an unreadable state is "unknown" (the caller starts
+    the gate as before)."""
+    box: list = []
+
+    def probe():
+        c = None
+        end = time.monotonic() + timeout
+        try:
+            c = M.connect("official", init_timeout=timeout)
+            studios = M.OfficialStudio(c).list_studios(max(0.1, end - time.monotonic()))
+            named = [s for s in studios if str(s.get("name") or "").strip()]
+            pick = [s for s in named if not place or place.lower() in str(s.get("name")).lower()]
+            if not pick:
+                names = ", ".join(str(s.get("name")) for s in named) or "none"
+                box.append(("no_studio", f"no Studio with the TEST place"
+                                         f"{' ' + repr(place) if place else ''} is connected "
+                                         f"(open: {names})"))
+                return
+            modes = []
+            for s in pick:
+                st = c.call_tool("get_studio_state", {"studio_id": str(s.get("id"))},
+                                 timeout=max(0.1, end - time.monotonic()))
+                modes.append("unknown" if st.get("is_error") else studio_mode(st.get("text") or ""))
+            if "play" in modes:
+                box.append(("play", "a playtest is still running in Studio"))
+            else:
+                box.append(("ok", "") if all(m == "edit" for m in modes)
+                           else ("unknown", "Studio state unreadable"))
+        except Exception as e:                                    # noqa: BLE001
+            box.append(("unknown", f"pre-flight probe failed: {e}"[:200]))
+        finally:
+            if c is not None:
+                with contextlib.suppress(Exception):
+                    c.close()
+
+    th = threading.Thread(target=probe, name="studio-preflight", daemon=True)
+    th.start()
+    th.join(timeout)
+    return box[0] if box else ("unknown", "pre-flight probe timed out")
+
+
 # Paths the host half never reads: plans, summaries, evidence logs and captures. A commit
 # that changes only these between the host half's stamp and HEAD cannot change its result.
 # 2026-11-09: two operator plan commits (plans: ...) moved HEAD under VR-MAP2's gate twice;

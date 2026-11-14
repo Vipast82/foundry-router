@@ -9,6 +9,7 @@ with a fake step runner."""
 from __future__ import annotations
 
 import json
+import os
 import textwrap
 import time
 from types import SimpleNamespace
@@ -1018,3 +1019,111 @@ def test_bot_budgets_come_from_the_request_and_the_setting_caps_a_block(env):
     P.profile.studio_calls["bot_block_budget_minutes"] = 50
     assert scx._bot_budgets(P, req) == (20.0, 50.0)
     assert scx._limit_s(P, req) == (50 + 15) * 60
+
+
+# ---------------------------------------------------------------- item 24
+def test_shared_lune_cache_is_off_by_default_and_one_directory_per_project(tmp_path):
+    prof = SimpleNamespace(id="game", studio_calls={"shared_lune_cache": False})
+    assert SC.defaults()["shared_lune_cache"] is False and SC.defaults()["gate_preflight"] is False
+    assert SC.shared_lune_env(prof, str(tmp_path)) == {}
+    prof.studio_calls["shared_lune_cache"] = True
+    got = SC.shared_lune_env(prof, str(tmp_path))
+    d = got["AU_LUNE_CACHE_DIR"]
+    assert os.path.isabs(d) and os.path.isdir(d) and d.startswith(str(tmp_path))
+    assert SC.shared_lune_env(prof, str(tmp_path)) == got            # the same dir every time
+    assert SC.shared_lune_env(prof, "") == {}
+
+
+def test_the_switches_are_validated_booleans(tmp_path):
+    repo, _ = make_repo(tmp_path, "game", [T1])
+    p = load(str(write_profile(tmp_path, "game", repo,
+                               extra="[studio_calls]\nshared_lune_cache = true\ngate_preflight = true\n")))
+    assert p.studio_calls["shared_lune_cache"] is True and p.studio_calls["gate_preflight"] is True
+    with pytest.raises(ProfileError):
+        load(str(write_profile(tmp_path, "game", repo, extra="[studio_calls]\nshared_lune_cache = 1\n")))
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_the_gate_process_gets_the_shared_cache_variable_only_with_the_switch(env, on):
+    e = env([{"result": "PASS"}], extra="shared_lune_cache = true\n" if on else "")
+    seen = []
+    calls = e.c.studio_calls
+    orig = calls._spawn
+
+    def spy(cmd, log, run_id, extra_env=None):
+        seen.append(extra_env)
+        return orig(cmd, log, run_id, extra_env)
+    calls._spawn = spy
+    drive(e, lambda t: bool(sc(e).get("run")))
+    if on:
+        want = os.path.join(os.path.abspath(e.c.state_dir), "lune_spec_cache", "game")
+        assert seen[0] == {"AU_LUNE_CACHE_DIR": want} and os.path.isdir(want)
+    else:
+        assert not seen[0]
+
+
+def test_spawn_merges_the_cache_variable_over_the_inherited_environment(tmp_path, monkeypatch):
+    """run_step passes env=None down to gate.ps1, which starts lune with Start-Process (it
+    inherits), so what _spawn puts in the pipeline's environment reaches run.luau."""
+    got = {}
+
+    class Proc:
+        pid = 1
+    monkeypatch.setattr(SC.subprocess, "Popen", lambda cmd, **kw: got.update(kw) or Proc())
+    SC.StudioCalls.__new__(SC.StudioCalls)._spawn(["x"], str(tmp_path / "l.log"), "rid",
+                                                 {"AU_LUNE_CACHE_DIR": "D:/c"})
+    assert got["env"]["AU_LUNE_CACHE_DIR"] == "D:/c" and got["env"]["FOUNDRY_GATE_RUN_ID"] == "rid"
+
+
+def test_preflight_refuses_to_spawn_and_retries_without_a_verdict_or_an_attempt(env, monkeypatch):
+    e = env([{"result": "PASS"}], extra="gate_preflight = true\n")
+    answers = [("no_studio", "no Studio with the TEST place is connected (open: none)")]
+    asked = []
+    monkeypatch.setattr(SC._sg(), "studio_preflight",
+                        lambda place="", timeout=8.0: asked.append(1) or answers[0])
+    stops = []
+    monkeypatch.setattr(SC.StudioCalls, "_stop_playtest", lambda self, P, tid: stops.append(tid))
+    for _ in range(40):
+        e.c.tick()
+        e.now[0] += 1.0
+        if events(e, "studio_calls_preflight_wait"):
+            break
+    assert events(e, "studio_calls_preflight_wait")
+    d = sc(e)
+    assert not d.get("run") and not d.get("runs") and not d.get("last") and d.get("pending")
+    assert not events(e, "studio_calls_started") and not events(e, "studio_calls_error")
+    n = len(asked)
+    e.c.tick()                                  # inside the retry interval: not asked again
+    assert len(asked) == n
+    # a playtest left running is stopped, then the gate waits
+    answers[0] = ("play", "a playtest is still running in Studio")
+    e.now[0] += SC.PREFLIGHT_EVERY_S + 1
+    e.c.tick()
+    assert stops == ["T1"] and not sc(e).get("run")
+    # Studio is ready: the same pending request starts on a later tick
+    answers[0] = ("ok", "")
+    e.now[0] += SC.PREFLIGHT_EVERY_S + 1
+    drive(e, lambda t: bool(sc(e).get("run")))
+    assert len(events(e, "studio_calls_started")) == 1
+
+
+def test_preflight_gives_up_after_the_cap(env, monkeypatch):
+    e = env([{"result": "PASS"}], extra="gate_preflight = true\n")
+    monkeypatch.setattr(SC._sg(), "studio_preflight",
+                        lambda place="", timeout=8.0: ("no_studio", "none connected"))
+    for _ in range(40):
+        e.c.tick()
+        e.now[0] += 1.0
+        if events(e, "studio_calls_preflight_wait"):
+            break
+    assert events(e, "studio_calls_preflight_wait") and not sc(e).get("run")
+    e.now[0] += SC.PREFLIGHT_MAX_WAIT_S + 1
+    drive(e, lambda t: bool(sc(e).get("run")))
+    assert events(e, "studio_calls_preflight_gave_up")
+
+
+def test_preflight_is_never_asked_while_the_switch_is_off(env, monkeypatch):
+    e = env([{"result": "PASS"}])
+    monkeypatch.setattr(SC._sg(), "studio_preflight",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked while off")))
+    drive(e, lambda t: bool(sc(e).get("run")))
