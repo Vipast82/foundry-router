@@ -829,7 +829,8 @@ class Recovery:
             raise AssignmentInvariant("an assignment may only carry BUILD obligations")
         for o in build_open:
             for e in o["required_evidence"]:
-                if e["kind"] == "check" and e["ref"] not in a["affected_checks_to_rerun"] \n                        and e["ref"] not in a.get("deferred_guard_suites", ()):
+                if e["kind"] == "check" and e["ref"] not in a["affected_checks_to_rerun"] \
+                        and e["ref"] not in a.get("deferred_guard_suites", ()):
                     raise AssignmentInvariant(f"BUILD check {e['ref']} dropped from the assignment")
         if directive_violations(a["strategy"]):
             raise AssignmentInvariant("assignment strategy waives or moves BUILD work")
