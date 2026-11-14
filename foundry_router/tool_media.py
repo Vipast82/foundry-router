@@ -1,4 +1,4 @@
-"""Images and audio made by persona MCP tools reach the chat user.
+"""Images, audio and video made by persona MCP tools reach the chat user.
 
 Before this, an image or audio result from a persona tool became a text note
 ("[image: image/png, 512 KB]") that only the model saw; nothing reached the
@@ -26,6 +26,18 @@ person chatting. Now, on the brain, worker and direct paths:
    checks with the Foundry-owned ``tool_job_status`` tool. A client's own
    request timeout can't kill a 10-minute generation, and polling never
    resubmits anything.
+5. **Video (v0.181.136).** An .mp4 / .m4v / .mov a tool lists is fetched and
+   stored like the rest and handed back as a link that plays in the browser,
+   with a second link that downloads it. Before, the chat got the tool server's
+   own address, which only works on the same network.
+6. **One copy per result (v0.181.136).** A tool that lists the same result in
+   several formats (Media_Gen: ogg, mp3 and flac of one sound) is shown once,
+   in the format a browser handles best; side files a tool labels as such
+   ("uncaptioned_mp4:", "narration_flac:") are left as links for the model.
+7. **Queued jobs (v0.181.136).** A server that answers at once with a job id
+   and makes the file later (Media_Gen) is waited for here: Foundry reads the
+   job with ``media.job_check_tool`` until it is done or
+   ``media.job_wait_seconds`` passed, so the picture is in the same reply.
 """
 
 from __future__ import annotations
@@ -53,7 +65,15 @@ _MAX_WAIT = 60.0                      # tool_job_status long-poll cap
 _DEDUPE_S = 600.0                     # same long call from the same client -> same job
 _URL_RE = re.compile(r"https?://[^\s<>\"'`\])}]+", re.I)
 _MEDIA_EXT = {"png", "jpg", "jpeg", "webp", "gif", "wav", "mp3", "ogg", "oga", "flac",
-              "m4a", "webm", "opus"}
+              "m4a", "webm", "opus", "mp4", "m4v", "mov"}
+_VIDEO_EXT = {"mp4", "m4v", "mov"}
+# which copy to show when one result is listed in several formats: first wins
+_FORMAT_ORDER = ("png", "jpg", "jpeg", "webp", "gif", "mp4", "m4v", "mov", "webm",
+                 "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac")
+# "mp4: http://..." — the word a tool put in front of a link
+_LABELLED_URL = re.compile(r"([A-Za-z0-9_]+):\s*(https?://[^\s<>\"'`\])}]+)")
+_JOB_FINAL = ("done", "failed", "cancelled", "canceled", "error")
+_MAX_JOBS = 4                         # jobs of one reply that are waited for together
 _MAX_URLS = 8                         # media URLs fetched per tool result
 _FETCH_TIMEOUT = 120.0
 
@@ -88,7 +108,8 @@ class MediaItem:
 
     @property
     def kind(self) -> str:
-        return "audio" if self.mime.startswith("audio/") else "image"
+        return ("audio" if self.mime.startswith("audio/")
+                else "video" if self.mime.startswith("video/") else "image")
 
 
 @dataclass
@@ -181,6 +202,12 @@ def render(svc, sink: list) -> str:
             url = link(svc, it)
             if it.kind == "image":
                 lines.append(f"![{_md(it.label)}]({url})")
+            elif it.kind == "video":
+                ext = it.mime.split("/", 1)[1].replace("quicktime", "mov")
+                lines.append(f"🎬 [{_md(it.label)} ({ext}, {_size(it.bytes)})]({url}) · "
+                             f"[download]({url}?download=1)")
+                if getattr(cfg.media, "video_html", False):
+                    lines.append(f'<video controls preload="metadata" src="{url}"></video>')
             else:
                 ext = it.mime.split("/", 1)[1].replace("mpeg", "mp3")
                 lines.append(f"🔊 [{_md(it.label)} ({ext}, {_size(it.bytes)})]({url})")
@@ -204,8 +231,10 @@ def model_note(items: list, notes: list) -> str:
     out = []
     if items:
         n_img = sum(1 for i in items if i.kind == "image")
-        n_aud = len(items) - n_img
+        n_vid = sum(1 for i in items if i.kind == "video")
+        n_aud = len(items) - n_img - n_vid
         what = ", ".join(p for p in (f"{n_img} image(s)" if n_img else "",
+                                     f"{n_vid} video(s)" if n_vid else "",
                                      f"{n_aud} audio file(s)" if n_aud else "") if p)
         out.append(f"[Foundry: {what} from this tool are shown to the user automatically "
                    f"under your reply. Don't repeat or invent links to them; just say what "
@@ -227,16 +256,74 @@ def _allowed_hosts(svc, server: str) -> set[str]:
     return hosts
 
 
-def _media_url(url: str) -> bool:
+def _url_ext(url: str) -> str:
+    """The media extension a URL names ("" = none): its path, or a file name in
+    its query (ComfyUI style: /view?filename=x.png&type=output)."""
     parts = urlsplit(url)
     ext = parts.path.rsplit(".", 1)[-1].lower() if "." in parts.path.rsplit("/", 1)[-1] else ""
     if ext in _MEDIA_EXT:
-        return True
-    # ComfyUI style: /view?filename=x.png&type=output
+        return ext
     for k, v in parse_qsl(parts.query):
         if k.lower() in ("filename", "file", "name") and v.rsplit(".", 1)[-1].lower() in _MEDIA_EXT:
-            return True
-    return False
+            return v.rsplit(".", 1)[-1].lower()
+    return ""
+
+
+def _media_url(url: str) -> bool:
+    return bool(_url_ext(url))
+
+
+def _url_stem(url: str) -> str:
+    """A URL without its extension: two formats of one result share it."""
+    parts = urlsplit(url)
+    path = parts.path
+    if "." in path.rsplit("/", 1)[-1]:
+        path = path.rsplit(".", 1)[0]
+    names = [v.rsplit(".", 1)[0] for k, v in parse_qsl(parts.query)
+             if k.lower() in ("filename", "file", "name")]
+    return f"{(parts.hostname or '').lower()}{path}?{'&'.join(names)}"
+
+
+def pick_urls(texts: list, hosts: set) -> list[str]:
+    """The media links of one tool result that are fetched and shown, in the
+    order the tool listed them.
+
+    * only links to a media file on an allowed host;
+    * when the tool labels its links and some labels are the plain file type
+      ("mp4:", "png:") while others say more ("uncaptioned_mp4:",
+      "narration_flac:"), only the plain ones: the others are side files;
+    * one link per result: of "x.ogg", "x.mp3" and "x.flac" the first format in
+      _FORMAT_ORDER."""
+    cands: list[tuple[str, str, bool]] = []          # (url, ext, plain label)
+    for txt in texts:
+        labels = {m.group(2).rstrip(".,;:!?"): m.group(1).lower()
+                  for m in _LABELLED_URL.finditer(txt or "")}
+        for u in _URL_RE.findall(txt or ""):
+            u = u.rstrip(".,;:!?")
+            ext = _url_ext(u)
+            if not ext or any(c[0] == u for c in cands) \
+                    or (urlsplit(u).hostname or "").lower() not in hosts:
+                continue
+            cands.append((u, ext, labels.get(u) == ext))
+    if any(c[2] for c in cands):
+        cands = [c for c in cands if c[2]]
+    best: dict[str, tuple[str, str, bool]] = {}
+    rank = {e: i for i, e in enumerate(_FORMAT_ORDER)}
+    for c in cands:
+        stem = _url_stem(c[0])
+        if stem not in best or rank.get(c[1], 99) < rank.get(best[stem][1], 99):
+            best[stem] = c
+    return [c[0] for c in best.values()]
+
+
+def _video_mime(raw: bytes, ext: str) -> Optional[str]:
+    """video/mp4 or video/quicktime for a file a tool NAMED as video and whose
+    bytes are that container. An .m4a and an .mp4 are the same container, so the
+    name decides between sound and video; the bytes decide whether it is one at
+    all (a page of text called x.mp4 is nothing)."""
+    if ext not in _VIDEO_EXT or len(raw) < 12 or raw[4:8] != b"ftyp":
+        return None
+    return "video/quicktime" if raw[8:12] == b"qt  " else "video/mp4"
 
 
 async def _fetch(svc, url: str, cap: int) -> tuple[Optional[bytes], str]:
@@ -269,14 +356,14 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
     notes: list[str] = []
     seen: set[str] = set()
 
-    def add(raw: Optional[bytes], label: str) -> None:
+    def add(raw: Optional[bytes], label: str, video: Optional[str] = None) -> None:
         if not raw:
             return
         if len(raw) > cap:
             notes.append(f"[Foundry: a {label} of {_size(len(raw))} was not shown to the user "
                          f"— over media.tool_output_max_mb.]")
             return
-        mime, w, h = sniff_media(raw)
+        mime, w, h = (video, None, None) if video else sniff_media(raw)
         if not mime:
             return
         digest = hashlib.sha256(raw).hexdigest()
@@ -310,21 +397,16 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
                  if b.get("type") == "text"]
         texts += [b.get("uri") or "" for b in getattr(rich, "blocks", None) or []
                   if b.get("type") == "resource_link"]
-        urls: list[str] = []
-        for txt in texts:
-            for u in _URL_RE.findall(txt):
-                u = u.rstrip(".,;:!?")
-                if u not in urls and _media_url(u) \
-                        and (urlsplit(u).hostname or "").lower() in hosts:
-                    urls.append(u)
-        for u in urls[:_MAX_URLS]:
+        for u in pick_urls(texts, hosts)[:_MAX_URLS]:
             raw, why = await _fetch(svc, u, cap)
             if raw is None:
                 notes.append(f"[Foundry: couldn't fetch {u} to show the user ({why}); give the "
                              f"user that link instead.]")
                 continue
-            kind = "audio" if (sniff_media(raw)[0] or "").startswith("audio/") else "image"
-            add(raw, f"{tool} {kind}")
+            video = _video_mime(raw, _url_ext(u))
+            kind = "video" if video else (
+                "audio" if (sniff_media(raw)[0] or "").startswith("audio/") else "image")
+            add(raw, f"{tool} {kind}", video)
     return found, notes
 
 
@@ -341,11 +423,14 @@ async def store_result(svc, server: str, tool: str, args: Optional[dict], rich, 
         found, out.notes = await _collect(svc, server, tool, rich, fetch_urls)
         if not found:
             return out
-        n_img = n_aud = 0
+        n_img = n_aud = n_vid = 0
         for f in found:
             if f["mime"].startswith("audio/"):
                 n_aud += 1
                 f["label"] = f"{tool} audio" + (f" {n_aud}" if n_aud > 1 else "")
+            elif f["mime"].startswith("video/"):
+                n_vid += 1
+                f["label"] = f"{tool} video" + (f" {n_vid}" if n_vid > 1 else "")
             else:
                 n_img += 1
                 f["label"] = f"{tool} image" + (f" {n_img}" if n_img > 1 else "")
@@ -573,12 +658,116 @@ async def run_tool(svc, mcp, server: str, tool: str, args: Optional[dict], *,
         return res
     from .brain.agent import raw_call_tool_rich
     rich = await raw_call_tool_rich(mcp, server, tool, args or {})
+    rich = await wait_for_queued(svc, mcp, server, tool, rich, sink, progress)
     cap = await store_result(svc, server, tool, args, rich, persona=persona)
     if cap.items or cap.notes:
         sink.extend(cap.items)
         rich.text = "\n".join(p for p in ((rich.text or ""), model_note(cap.items, cap.notes)) if p)
     rich.media_items = cap.items
     return rich
+
+
+def _server_has_tool(svc, server: str, tool: str) -> bool:
+    try:
+        return any(t.server == server and (t.mcp_tool or t.name) == tool
+                   for t in svc.tool_registry.enabled())
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+async def wait_for_queued(svc, mcp, server: str, tool: str, rich, sink: list,
+                          progress: Optional[Callable] = None):
+    """v0.181.136. Media_Gen answers every generate tool at once with
+    "job_id: <id>" and makes the file later; the chat then showed a job id and
+    the picture only came when the user asked again. When a tool's reply names a
+    job that is not finished and its server has ``media.job_check_tool``, the job
+    is read here every few seconds until it is done, failed, or
+    ``media.job_wait_seconds`` passed.
+
+    Done or failed: the check's result is returned in place of the "queued"
+    reply, so its files are stored and shown like any other result. Still
+    running: the first reply is returned with a note for the model, and the
+    reply to the user says the job is still being made. Nothing is ever
+    submitted twice: only the check tool is called."""
+    from .media import _MG_JOB, _MG_STATUS
+    mcfg = svc.config_store.config.media
+    check = (getattr(mcfg, "job_check_tool", "") or "").strip()
+    wait = float(getattr(mcfg, "job_wait_seconds", 0) or 0)
+    text = getattr(rich, "text", "") or ""
+    if not check or wait <= 0 or tool == check or getattr(rich, "is_error", False):
+        return rich
+    m = _MG_JOB.search(text)
+    if not m or ((_MG_STATUS.search(text) or [None, ""])[1]).lower() in _JOB_FINAL:
+        return rich
+    if not _server_has_tool(svc, server, check):
+        return rich
+    from .brain.agent import raw_call_tool_rich
+    from .tools.mcp_client import ToolResult
+    # one reply can queue several jobs (Media_Gen: variations=3 lists three job ids)
+    ids = list(dict.fromkeys(_MG_JOB.findall(text)))[:_MAX_JOBS]
+
+    def say(line: str) -> None:
+        if progress is not None:
+            try:
+                progress(line)
+            except Exception:                                    # noqa: BLE001
+                pass
+
+    names = ", ".join(ids)
+    say(f"⏳ {server} queued job {names} for {tool} — waiting up to {int(wait)}s for it here\n")
+    poll = max(0.05, float(getattr(mcfg, "fallback_poll_seconds", 3.0) or 3.0))
+    t0 = said = time.monotonic()
+    reports: dict = {}                    # job id -> the check result that ended it
+    last: dict = {}
+    broken = False
+    while len(reports) < len(ids) and not broken:
+        left = wait - (time.monotonic() - t0)
+        if left <= 0:
+            break
+        await asyncio.sleep(min(poll, left))
+        for jid in ids:
+            if jid in reports:
+                continue
+            try:
+                chk = await raw_call_tool_rich(mcp, server, check, {"job_id": jid})
+            except Exception as e:                               # noqa: BLE001
+                from .errors import describe_exception
+                log.warning("%s/%s for job %s failed while waiting: %s", server, check, jid,
+                            describe_exception(e))
+                broken = True
+                break
+            ctext = getattr(chk, "text", "") or ""
+            st = ((_MG_STATUS.search(ctext) or [None, ""])[1]).lower()
+            if st in _JOB_FINAL:
+                reports[jid] = chk
+                say(f"{server} job {jid}: {st} after {int(time.monotonic() - t0)}s\n")
+                continue
+            pct = re.search(r"\b(\d{1,3}) ?%", ctext)
+            now = f"{st or 'working'}{' ' + pct.group(1) + '%' if pct else ''}"
+            # a line when the state changes, and one every 15 s so the stream is never silent
+            if now != last.get(jid) or time.monotonic() - said >= 15:
+                say(f"⏳ {server} job {jid}: {now} ({int(time.monotonic() - t0)}s)\n")
+                last[jid], said = now, time.monotonic()
+    secs = int(time.monotonic() - t0)
+    waiting = [j for j in ids if j not in reports]
+    for jid in waiting:
+        sink.append(PendingJob(jid, f"{server}/{tool}"))
+    still = ""
+    if waiting:
+        still = (f"[Foundry: job {', '.join(waiting)} was still "
+                 f"{last.get(waiting[0]) or 'running'} after {secs}s of waiting. Tell the user it is "
+                 f"being made and that they can ask you to check on it; then call {check} once with "
+                 f"job_id \"{waiting[0]}\". Do NOT call {tool} again — that would start a second job.]")
+    if not reports:
+        rich.text = f"{text}\n{still}"
+        return rich
+    # the finished jobs' reports stand in for the "queued" reply: their files are stored and shown
+    done = [reports[j] for j in ids if j in reports]
+    out = ToolResult([blk for r in done for blk in (getattr(r, "blocks", None) or [])])
+    out.text = "\n\n".join(p for p in (
+        text, f"[Foundry waited {secs}s for job {', '.join(j for j in ids if j in reports)}; "
+              f"{check} now reports:]", *[(getattr(r, "text", "") or "") for r in done], still) if p)
+    return out
 
 
 def status_tooldef():

@@ -53,7 +53,9 @@ _EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 # what persona MCP tools may hand back (tool_media.py): images and audio
 TOOL_EXT = {**_EXT, "image/gif": "gif", "audio/wav": "wav", "audio/mpeg": "mp3",
             "audio/ogg": "ogg", "audio/flac": "flac", "audio/mp4": "m4a",
-            "audio/webm": "webm"}
+            "audio/webm": "webm",
+            # v0.181.136: a video a tool made (tool_media.py decides it is one)
+            "video/mp4": "mp4", "video/quicktime": "mov"}
 # image-budget rows only: tool output (op tool / tool_job) never counts
 _IMAGE_OPS = "op IN ('generate','edit')"
 _IMAGE_MODEL_RE = re.compile(r"(^|[-_/])(gpt-image|dall-e|grok-imagine|imagen|flux|"

@@ -885,9 +885,20 @@ class MediaConfig(BaseModel):
     # Also add <audio controls> after the audio link (only for clients that
     # render that HTML; the markdown link is always there).
     audio_html: bool = False
+    # The same for a video: <video controls> after its link (v0.181.136).
+    video_html: bool = False
     # Long-running tools (mcp_servers[].long_running): how long a chat request
     # waits before handing the model a job id instead.
     tool_inline_wait_seconds: int = 90
+    # -- servers that queue their work (v0.181.136) ---------------------------
+    # Media_Gen answers every generate tool at once with "job_id: <id>" and makes
+    # the file later; the result is read with this tool. In a chat Foundry waits
+    # for the job itself, up to job_wait_seconds, so the picture or video is in
+    # the same reply. Past that the model is told the job is still running.
+    # "" or 0 = never wait (the model reports the job id, as before). 90 stays
+    # under AnythingLLM's ~120 s cut-off; Open WebUI allows about 300.
+    job_check_tool: str = "media_check_job"
+    job_wait_seconds: int = 90
     # -- chat attachments for media-gen (media_attachments.py, v0.181.117) ----
     # Where attachments are uploaded: "" = the Media_Gen MCP server's URL with /mcp -> /upload
     # (env MEDIA_GEN_UPLOAD_URL wins over both).

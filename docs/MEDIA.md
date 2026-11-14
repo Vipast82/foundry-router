@@ -126,6 +126,30 @@ direct path (the client brings its own tools):
    get the real image/audio content, plus a text block with the link for
    clients that drop MCP media.
 
+### Video, one copy per result, and queued jobs (v0.181.136)
+
+- **Video.** An `.mp4`, `.m4v` or `.mov` a tool lists is fetched and stored like a
+  picture and handed back as `🎬 [<tool> video (mp4, 5.2 MB)](link) · [download](link?download=1)`:
+  the first link plays in the browser, the second saves the file. `video_html` adds
+  a `<video controls>` player for chat programs that show HTML. A file counts as
+  video when the tool named it as one and its bytes are that container; the per-file
+  limit is `tool_output_max_mb` (100), and a larger file stays a link to the tool server.
+- **One copy per result.** A tool that lists one result in several formats (Media_Gen:
+  ogg, mp3 and flac of a sound) is shown once, in the first of png, jpg, webp, gif, mp4,
+  webm, mp3, m4a, ogg, wav, flac. When a tool labels its links and some labels are the
+  plain file type (`mp4:`) while others say more (`uncaptioned_mp4:`, `narration_flac:`),
+  only the plain ones are shown; the others stay links in the tool's text.
+- **Queued jobs.** Media_Gen answers every generate tool at once with `job_id: <id>` and
+  makes the file later. In a chat Foundry now reads the job itself with
+  `job_check_tool` (`media_check_job`) every `fallback_poll_seconds` until it is done,
+  failed, or `job_wait_seconds` (90) passed, with a progress line at least every 15 s.
+  Done in time: the picture or video is in the same reply. Still running: the reply
+  says so and the model is told to check once when asked. Only the check tool is ever
+  called; nothing is submitted twice. Raise `job_wait_seconds` for a chat program that
+  waits longer (Open WebUI: about 300 s; AnythingLLM cuts off near 120 s). Empty
+  `job_check_tool` or 0 seconds = no waiting.
+- All of these are on Logs → Usage Log → Images, under "Files tools make in a chat".
+
 ### Long-running generation tools
 
 Mark the server `long_running: true` when one call can take 10+ minutes (Media_Gen

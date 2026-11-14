@@ -7757,6 +7757,16 @@ function mediaCard(md) {
       <button id="md-save">Save</button></div>
     <div class="row"><label title="Chat attachments (pictures, audio, video) are uploaded here so Media_Gen tools get a reference (upload:...) instead of base64. Empty = the Media_Gen MCP server's URL with /mcp replaced by /upload. The MEDIA_GEN_UPLOAD_URL environment variable wins over this.">attachment upload URL</label><input id="md-att-url" size="40" value="${esc(c.attachments_upload_url || "")}" placeholder="auto (Media_Gen /mcp → /upload)">
       <label title="Attachment URLs on these hosts (e.g. a chat front end's file store) are fetched by Foundry and uploaded; other public URLs go to media-gen as they are. Foundry's own /media/a/ links are always fetched. Comma-separated.">fetch hosts</label><input id="md-att-hosts" size="30" value="${esc((c.attachments_fetch_hosts || []).join(", "))}" placeholder="none"></div>
+    <div class="card-h" style="margin-top:14px">Files tools make in a chat <span class="hint">— pictures, sound and video from Media_Gen and other tool servers, shown under the reply</span></div>
+    <div class="row"><input type="checkbox" id="md-out" ${c.tool_outputs ? "checked" : ""}><label for="md-out" title="Keep a copy of each picture, sound or video a tool makes and show it under the chat reply through a signed link that expires. Off: the chat gets only what the model writes.">show tool files in the chat</label>
+      <label title="The tool that reads a queued job on a server that answers at once with a job id (Media_Gen: media_check_job). Foundry calls it while it waits, so the picture or video is in the same reply. Empty = never wait: the model reports the job id.">job check tool</label><input id="md-check" size="18" value="${esc(c.job_check_tool || "")}">
+      <label title="How long a chat reply waits for a queued job before it says the job is still being made. 0 = never wait.">wait for a job (s)</label><input id="md-wait" type="number" min="0" max="1800" style="width:80px" value="${c.job_wait_seconds}">
+      <label title="A file larger than this is not copied; the chat gets the tool server's own link.">largest file (MB)</label><input id="md-maxmb" type="number" min="1" max="4096" style="width:80px" value="${c.tool_output_max_mb}"></div>
+    <div class="row"><label title="The address the links start with: what the browser of the person chatting can reach, e.g. https://foundry.example.com. Empty = the address the chat program used to reach Foundry, which only works on the same network.">address in the links</label><input id="md-base" size="34" value="${esc(c.public_base_url || "")}" placeholder="the address the request came in on">
+      <label title="How long a link keeps working.">links last (hours)</label><input id="md-ttl" type="number" min="1" max="8760" style="width:80px" value="${c.public_link_ttl_hours}">
+      <input type="checkbox" id="md-vid" ${c.video_html ? "checked" : ""}><label for="md-vid" title="Also put a video player under the link. Only for chat programs that show HTML in a reply; the link and the download link are always there.">video player in the reply</label>
+      <input type="checkbox" id="md-aud" ${c.audio_html ? "checked" : ""}><label for="md-aud" title="Also put an audio player under the link. Only for chat programs that show HTML in a reply.">audio player in the reply</label>
+      <span class="hint">saved with the Save button above</span></div>
     <p class="hint">A timeout is never resubmitted, the same request within ${c.dedupe_minutes} min returns the existing job, and a refused or unavailable model fails without falling back to another model or provider. Kilo/Cline save results into the project via the local media adapter (contrib/media-adapter).</p>
     ${jobs ? `<table><tr><th>time (UTC)</th><th>client</th><th>model</th><th>status</th><th>prompt</th><th>time</th><th>result</th></tr>${jobs}</table>` : '<p class="hint">No image jobs yet.</p>'}
   </div>`;
@@ -7774,7 +7784,11 @@ function bindMediaCard() {
         jobs_per_5h: +$("#md-5h").value, jobs_per_day: +$("#md-day").value,
         client_jobs_per_day: +$("#md-client").value, max_concurrent: +$("#md-conc").value,
         attachments_upload_url: $("#md-att-url").value.trim(),
-        attachments_fetch_hosts: $("#md-att-hosts").value}});
+        attachments_fetch_hosts: $("#md-att-hosts").value,
+        tool_outputs: $("#md-out").checked, job_check_tool: $("#md-check").value.trim(),
+        job_wait_seconds: +$("#md-wait").value, tool_output_max_mb: +$("#md-maxmb").value,
+        public_base_url: $("#md-base").value.trim(), public_link_ttl_hours: +$("#md-ttl").value,
+        video_html: $("#md-vid").checked, audio_html: $("#md-aud").checked}});
       toast("Image settings saved"); render();
     } catch (e) { toast(e.message, true); }
   };

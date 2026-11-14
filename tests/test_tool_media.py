@@ -272,6 +272,270 @@ def test_run_tool_model_sees_note_user_gets_sink(svc, client):
     assert res.images()                                # bytes still there for vision models
 
 
+# -- video, one copy per result, queued jobs (v0.181.136) ------------------------------
+
+def mp4(n=3000) -> bytes:
+    return b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41" + b"\x00" * n
+
+
+MG = "http://192.168.0.115:8934/files"
+
+
+def _fetching(svc, files):
+    """svc.http that serves `files` ({url: bytes}); returns (restore, fetched list)."""
+    fetched = []
+
+    async def handler(req):
+        fetched.append(str(req.url))
+        body = files.get(str(req.url))
+        return httpx.Response(200, content=body) if body is not None else httpx.Response(404)
+    old = svc.http
+    svc.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    def restore():
+        svc.http = old
+    return restore, fetched
+
+
+def test_a_video_comes_back_as_a_link_that_plays_and_one_that_downloads(svc, client):
+    """The chat got the tool server's own address for a video (mp4 was not a
+    file type Foundry brought back), which only opens on the same network."""
+    raw = mp4()
+    restore, fetched = _fetching(svc, {f"{MG}/personal/video/fox_e513.mp4": raw})
+    try:
+        text = ("job_id: e51378bdd98f\nSTATUS: done\nFiles (URLs on the remote server):\n"
+                f"  mp4: {MG}/personal/video/fox_e513.mp4\nvideo: 1280x704, 5.0 s, sound: yes")
+        cap = _store(client, svc, ToolResult([{"type": "text", "text": text}]),
+                     tool="media_check_job")
+    finally:
+        restore()
+    assert len(cap.items) == 1
+    it = cap.items[0]
+    assert it.kind == "video" and it.mime == "video/mp4" and it.label == "media_check_job video"
+    md = tool_media.render(svc, cap.items)
+    url = tool_media.link(svc, it)
+    assert f"🎬 [media_check_job video (mp4, 2 KB)]({url}) · [download]({url}?download=1)" in md
+    assert "<video" not in md and "192.168.0.115" not in md       # the stored copy, not the GPU host
+    svc.config_store.config.media.video_html = True
+    try:
+        assert f'<video controls preload="metadata" src="{url}"></video>' in tool_media.render(
+            svc, cap.items)
+    finally:
+        svc.config_store.config.media.video_html = False
+    path = url.replace("http://testserver", "")
+    r = client.get(path)
+    assert r.status_code == 200 and r.content == raw and r.headers["content-type"] == "video/mp4"
+    assert r.headers["content-disposition"].startswith("inline")
+    d = client.get(path + "?download=1")
+    assert d.status_code == 200 and d.headers["content-disposition"].startswith("attachment")
+    assert d.headers["content-disposition"].endswith('.mp4"')
+    part = client.get(path, headers={"Range": "bytes=0-9"})          # a player seeks
+    assert part.status_code == 206 and part.content == raw[:10]
+    note = tool_media.model_note(cap.items, [])
+    assert "1 video(s)" in note and "shown to the user automatically" in note
+
+
+def test_a_page_named_mp4_is_not_a_video_and_an_m4a_stays_sound(svc, client):
+    m4a = b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00" + b"\x00" * 500
+    restore, _ = _fetching(svc, {f"{MG}/a/x.mp4": b"<html>sign in</html>", f"{MG}/a/song.m4a": m4a})
+    try:
+        cap = _store(client, svc, ToolResult([{"type": "text", "text":
+                     f"video {MG}/a/x.mp4 and sound {MG}/a/song.m4a"}]))
+    finally:
+        restore()
+    assert [(i.kind, i.mime) for i in cap.items] == [("audio", "audio/mp4")]
+    assert tool_media._video_mime(b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 20, "mov") == "video/quicktime"
+    assert tool_media._video_mime(mp4(), "m4a") is None              # the name decides
+
+
+def test_one_copy_per_result_and_side_files_stay_links(svc, client):
+    """Media_Gen lists a sound as ogg, mp3 and flac: the chat showed three links to
+    the same second of sound. A finished presenter video lists five files."""
+    hosts = {"192.168.0.115"}
+    sfx = (f"Files:\n  ogg: {MG}/game/sfx/poison_9b.ogg\n  mp3: {MG}/game/sfx/poison_9b.mp3\n"
+           f"  flac: {MG}/game/sfx/poison_9b.flac\nUse the .ogg or .mp3 in Roblox.")
+    assert tool_media.pick_urls([sfx], hosts) == [f"{MG}/game/sfx/poison_9b.mp3"]
+    presenter = (f"  mp4: {MG}/personal/video/host_f34a.mp4\n  srt: {MG}/personal/video/host_f34a.srt\n"
+                 f"  vtt: {MG}/personal/video/host_f34a.vtt\n"
+                 f"  uncaptioned_mp4: {MG}/personal/music_video/host_ee7c.mp4\n"
+                 f"  narration_flac: {MG}/personal/video/host_f34a_parts/narration.flac")
+    assert tool_media.pick_urls([presenter], hosts) == [f"{MG}/personal/video/host_f34a.mp4"]
+    # links without such labels are all kept, in order; another host never is
+    plain = (f"two pictures {MG}/a.png and {MG}/b.png, also http://evil.example/c.png and "
+             f"http://192.168.0.115:8934/view?filename=d.png&type=output")
+    assert tool_media.pick_urls([plain], hosts) == [
+        f"{MG}/a.png", f"{MG}/b.png", "http://192.168.0.115:8934/view?filename=d.png&type=output"]
+    assert tool_media.pick_urls([f"Speech ready: {MG}/out.wav. Docs {MG}/readme"], hosts) == [
+        f"{MG}/out.wav"]
+    restore, fetched = _fetching(svc, {f"{MG}/game/sfx/poison_9b.mp3": b"ID3" + b"\x00" * 400})
+    try:
+        cap = _store(client, svc, ToolResult([{"type": "text", "text": sfx}]))
+    finally:
+        restore()
+    assert fetched == [f"{MG}/game/sfx/poison_9b.mp3"] and len(cap.items) == 1
+
+
+class _QueueServer:
+    """Media_Gen's shape: a generate tool answers at once with a job id; the check
+    tool reports queued, running, then done with a file link."""
+
+    def __init__(self, states, final):
+        self.states, self.final, self.calls = list(states), final, []
+
+    async def __call__(self, server, tool, args, **kw):
+        self.calls.append((tool, dict(args or {})))
+        if tool != "media_check_job":
+            return ToolResult([{"type": "text", "text":
+                                "job_id: 0123456789ab\nSTATUS: queued\nposition 1 in the queue"}])
+        if self.states:
+            return ToolResult([{"type": "text", "text":
+                                f"job_id: 0123456789ab\nSTATUS: {self.states.pop(0)}"}])
+        return ToolResult([{"type": "text", "text": self.final}])
+
+
+def _queued(svc, client, monkeypatch, fake, *, wait=5, tool="generate_image", has_tool=True):
+    monkeypatch.setattr(tool_media, "_server_has_tool", lambda s, server, t: has_tool)
+    m = svc.config_store.config.media
+    old = (m.job_wait_seconds, m.fallback_poll_seconds, svc.mcp.call_tool_rich)
+    m.job_wait_seconds, m.fallback_poll_seconds, svc.mcp.call_tool_rich = wait, 0.05, fake
+    said, sink = [], []
+    try:
+        res = run(client, tool_media.run_tool, svc, svc.mcp, "tts", tool, {"prompt": "a fox"},
+                  sink=sink, progress=said.append)
+    finally:
+        m.job_wait_seconds, m.fallback_poll_seconds, svc.mcp.call_tool_rich = old
+    return res, sink, said
+
+
+def test_a_queued_job_is_waited_for_and_its_picture_is_in_the_same_reply(svc, client, monkeypatch):
+    """Media_Gen queues every job: the chat showed a job id, and the picture came
+    only when the user asked again."""
+    raw = png(tag=b"fox")
+    fake = _QueueServer(["queued", "running\nprogress: 40%"],
+                        f"job_id: 0123456789ab\nSTATUS: done\nFiles:\n  png: {MG}/personal/image/fox_0123.png")
+    restore, fetched = _fetching(svc, {f"{MG}/personal/image/fox_0123.png": raw})
+    try:
+        res, sink, said = _queued(svc, client, monkeypatch, fake)
+    finally:
+        restore()
+    assert [c[0] for c in fake.calls] == ["generate_image"] + ["media_check_job"] * 3   # never resubmitted
+    assert all(c[1] == {"job_id": "0123456789ab"} for c in fake.calls[1:])
+    assert len(sink) == 1 and sink[0].kind == "image" and res.media_items == sink
+    assert "![generate_image image](http://testserver/media/a/" in tool_media.render(svc, sink)
+    assert "STATUS: queued" in res.text and "Foundry waited" in res.text and "STATUS: done" in res.text
+    assert "1 image(s) from this tool are shown to the user automatically" in res.text
+    told = "".join(said)
+    assert "queued job 0123456789ab for generate_image" in told and "running 40%" in told
+    assert "job 0123456789ab: done after" in told
+
+
+def test_a_reply_that_queues_several_jobs_is_waited_for_as_a_whole(svc, client, monkeypatch):
+    """Media_Gen's variations=2 answers with two job ids. Both pictures are shown; a
+    job that is not done in time is the only one reported as still running."""
+    a, b = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+    left = {a: ["running"], b: ["running"] * 3}
+    calls = []
+
+    async def fake(server, tool, args, **kw):
+        calls.append((tool, (args or {}).get("job_id")))
+        if tool != "media_check_job":
+            return ToolResult([{"type": "text", "text":
+                                f"job_id: {a}  (seed 5, queue position 1)\n"
+                                f"job_id: {b}  (seed 6, queue position 2)\nSTATUS: queued"}])
+        jid = args["job_id"]
+        if left[jid]:
+            return ToolResult([{"type": "text", "text": f"job_id: {jid}\nSTATUS: {left[jid].pop(0)}"}])
+        return ToolResult([{"type": "text", "text":
+                            f"job_id: {jid}\nSTATUS: done\nFiles:\n  png: {MG}/personal/image/v_{jid[:4]}.png"}])
+    files = {f"{MG}/personal/image/v_aaaa.png": png(tag=b"a"), f"{MG}/personal/image/v_bbbb.png": png(tag=b"b")}
+    restore, fetched = _fetching(svc, files)
+    try:
+        res, sink, said = _queued(svc, client, monkeypatch, fake)
+    finally:
+        restore()
+    assert [c for c in calls if c[0] != "media_check_job"] == [("generate_image", None)]
+    assert calls.count(("media_check_job", a)) == 2 and calls.count(("media_check_job", b)) == 4
+    assert [i.kind for i in sink] == ["image", "image"] and sorted(fetched) == sorted(files)
+    assert f"Foundry waited" in res.text and res.text.count("STATUS: done") == 2
+    # one of the two is too slow: its picture is shown, the other is named as still running
+    left = {a: [], b: ["running"] * 500}
+    calls.clear()
+    restore, fetched = _fetching(svc, files)
+    try:
+        res, sink, said = _queued(svc, client, monkeypatch, fake, wait=0.4)
+    finally:
+        restore()
+    assert [type(i).__name__ for i in sink] == ["PendingJob", "MediaItem"] and sink[0].job_id == b
+    assert f"job {b} was still running" in res.text and f'job_id "{b}"' in res.text
+    assert res.text.count("STATUS: done") == 1 and "1 image(s) from this tool are shown" in res.text
+
+
+def test_a_job_that_outlasts_the_wait_is_reported_as_still_running(svc, client, monkeypatch):
+    fake = _QueueServer(["running"] * 200, "")
+    res, sink, said = _queued(svc, client, monkeypatch, fake, wait=0.3, tool="generate_video")
+    assert [c[0] for c in fake.calls].count("generate_video") == 1
+    assert len(sink) == 1 and isinstance(sink[0], tool_media.PendingJob)
+    assert sink[0].job_id == "0123456789ab" and sink[0].label == "tts/generate_video"
+    assert "⏳ tts/generate_video is still running (job `0123456789ab`)" in tool_media.render(svc, sink)
+    assert "call media_check_job once with job_id \"0123456789ab\"" in res.text
+    assert "Do NOT call generate_video again" in res.text
+
+
+def test_a_failed_job_is_the_result_and_nothing_else_is_waited_for(svc, client, monkeypatch):
+    fake = _QueueServer([], "job_id: 0123456789ab\nSTATUS: failed\nreason: out of memory")
+    res, sink, _ = _queued(svc, client, monkeypatch, fake)
+    assert sink == [] and "STATUS: failed" in res.text and "out of memory" in res.text
+    # the check tool itself, a server without it, and the setting switched off: no waiting
+    for kw in ({"tool": "media_check_job"}, {"has_tool": False}, {"wait": 0}):
+        fake = _QueueServer(["running"] * 50, "")
+        res, sink, said = _queued(svc, client, monkeypatch, fake, **kw)
+        assert len(fake.calls) == 1 and sink == [] and said == [], kw
+    svc.config_store.config.media.job_check_tool = ""
+    try:
+        fake = _QueueServer(["running"] * 50, "")
+        _queued(svc, client, monkeypatch, fake)
+        assert len(fake.calls) == 1
+    finally:
+        svc.config_store.config.media.job_check_tool = "media_check_job"
+    # a reply that names a job already finished, or no job at all, is left as it is
+    async def done(server, tool, args, **kw):
+        return ToolResult([{"type": "text", "text": "job_id: 0123456789ab\nSTATUS: cancelled"}])
+    res, sink, said = _queued(svc, client, monkeypatch, done, tool="media_cancel_job")
+    assert said == [] and "Foundry" not in res.text
+
+
+def test_the_chat_file_settings_are_saved_from_the_admin_page(svc, client):
+    m = svc.config_store.config.media
+    assert (m.job_check_tool, m.job_wait_seconds, m.video_html) == ("media_check_job", 90, False)
+    r = client.post("/admin/api/config/media", json={
+        "job_wait_seconds": 240, "job_check_tool": " media_check_job ", "video_html": True,
+        "public_base_url": "https://foundry.example.com/", "tool_output_max_mb": 250,
+        "public_link_ttl_hours": 48})
+    got = r.json()["media"]
+    try:
+        assert r.status_code == 200 and got["job_wait_seconds"] == 240 and got["video_html"] is True
+        assert got["job_check_tool"] == "media_check_job" and got["tool_output_max_mb"] == 250.0
+        assert got["public_base_url"] == "https://foundry.example.com" and got["public_link_ttl_hours"] == 48
+        bad = client.post("/admin/api/config/media", json={"public_base_url": "foundry.example.com"})
+        assert bad.status_code == 400 and "http://" in bad.json()["error"]
+        assert client.post("/admin/api/config/media", json={"job_wait_seconds": 99999}).json()[
+            "media"]["job_wait_seconds"] == 1800
+    finally:
+        client.post("/admin/api/config/media", json={
+            "job_wait_seconds": 90, "video_html": False, "public_base_url": "",
+            "tool_output_max_mb": 100, "public_link_ttl_hours": 168})
+    from pathlib import Path
+    html = (Path(tool_media.__file__).parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    card = html[html.index("function mediaCard(md) {"):html.index("function bindMediaCard() {")]
+    for field in ('id="md-out"', 'id="md-check"', 'id="md-wait"', 'id="md-maxmb"', 'id="md-base"',
+                  'id="md-ttl"', 'id="md-vid"', 'id="md-aud"'):
+        assert field in card, field
+    save = html[html.index("function bindMediaCard() {"):html.index("async function cancelMediaJob(")]
+    for key in ("tool_outputs:", "job_check_tool:", "job_wait_seconds:", "tool_output_max_mb:",
+                "public_base_url:", "public_link_ttl_hours:", "video_html:", "audio_html:"):
+        assert key in save, key
+
+
 # -- long-running jobs -----------------------------------------------------------------
 
 def _slow_tool(delay, result):

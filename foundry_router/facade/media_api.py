@@ -235,7 +235,7 @@ _NOT_FOUND = JSONResponse({"error": {"message": "not found", "code": "not_found"
 @router.get("/media/a/{token}")
 async def public_artifact(request: Request, token: str):
     """THE ONE DELIBERATE UNAUTHENTICATED READ (client_auth.scope_for): one
-    stored image/audio file for whoever holds a valid, unexpired signed token
+    stored image, audio or video file for whoever holds a valid, unexpired signed token
     (tool_media.sign). Every failure — bad signature, expired, pruned — is the
     same bare 404, so the route reveals nothing. No listing exists."""
     from .. import tool_media
@@ -245,9 +245,11 @@ async def public_artifact(request: Request, token: str):
     if found is None:
         return _NOT_FOUND
     path, meta = found
+    # ?download=1: the browser saves the file (the "download" link under a video)
+    save = request.query_params.get("download", "").lower() in ("1", "true", "yes")
     return FileResponse(path, media_type=meta["mime"],
                         filename=f"{hit[0]}-{hit[1]}.{path.suffix.lstrip('.')}",
-                        content_disposition_type="inline",
+                        content_disposition_type="attachment" if save else "inline",
                         headers={"x-content-sha256": meta["sha256"],
                                  "x-content-type-options": "nosniff",
                                  "cache-control": "private, max-age=3600",

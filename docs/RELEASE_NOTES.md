@@ -2,6 +2,20 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.136 — videos come back to the chat; a queued Media_Gen job is waited for in the same reply
+
+**What was there.** A picture or sound a persona's tool made already came back under the chat reply (stored copy, signed link, pictures shown inline). Checked live with Foundry-Creative and Media_Gen 5.20: a finished sound job came back as working links. Three things were missing.
+
+- **Video.** `.mp4` was not a file type Foundry brought back, so the chat got Media_Gen's own address (`http://192.168.0.206:8190/files/...mp4`), which only opens on the same network. A video a tool lists is now fetched, stored and handed back as two links under the reply: one that plays in the browser and one that downloads the file (`?download=1`). An optional setting adds a video player for chat programs that show HTML. Files over the per-file limit (100 MB by default) stay a link to the tool server.
+- **Same reply.** Media_Gen answers every generate tool at once with a job id and makes the file later, so the chat showed a job id and the picture came only when the user asked again. Foundry now reads the job itself (with `media_check_job`) until it is done, failed, or the wait passed (90 s by default), with progress lines while it waits. Done in time: the picture or video is in the same reply, and a second tool can use it in the same turn (an edit, then a video from it). Not done: the reply says the job is still being made and the model checks once when asked. Only the check tool is called; nothing is submitted twice. A reply that queues several jobs (Media_Gen's variations) is waited for as a whole, up to four jobs.
+- **One copy.** Media_Gen lists a sound as ogg, mp3 and flac, and the chat showed three links to the same second of sound. One result is now shown once, in the format a browser handles best, and side files a tool labels as such (`uncaptioned_mp4:`, `narration_flac:`) are no longer fetched.
+
+**Settings**, all on Logs → Usage Log → Images under "Files tools make in a chat": show tool files in the chat, job check tool, wait for a job (seconds), largest file (MB), address in the links, links last (hours), video player, audio player. The address and the players existed before but only in the config file.
+
+**Not changed.** A chat program that holds the Media_Gen tools itself through the Foundry-MCP endpoint still gets Media_Gen's own links; only tools a persona runs get the hand-back. Media_Gen itself needs no update.
+
+Tests: `tests/test_tool_media.py`.
+
 ## v0.181.135 — Host Admin, Active Use, Helpers & Limits, MCP Metrics and Cost redesigned; the refused-key message says what was sent
 
 **Host Admin.** A backend that is healthy showed three red "unreachable" cards (`/props`, `/slots`, `/metrics` answering 404) and its `/health` reply as one line of JSON running off the page.

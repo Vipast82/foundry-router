@@ -1583,7 +1583,10 @@ async def media_cancel_admin(request: Request, job_id: str):
 _MEDIA_INTS = {"max_concurrent": (1, 8), "max_queued": (1, 100), "jobs_per_5h": (0, 10000),
                "jobs_per_day": (0, 100000), "client_jobs_per_day": (0, 100000),
                "max_images_per_job": (1, 10), "job_timeout_seconds": (30, 3600),
-               "max_attempts": (1, 5), "dedupe_minutes": (0, 1440), "retention_days": (0, 3650)}
+               "max_attempts": (1, 5), "dedupe_minutes": (0, 1440), "retention_days": (0, 3650),
+               # v0.181.136: files tools make in a chat
+               "job_wait_seconds": (0, 1800), "tool_inline_wait_seconds": (0, 1800),
+               "public_link_ttl_hours": (1, 8760)}
 
 
 @router.post("/admin/api/config/media")
@@ -1597,12 +1600,25 @@ async def set_media(request: Request):
                 updates[k] = max(lo, min(hi, int(body[k])))
             except (TypeError, ValueError):
                 return JSONResponse({"error": f"{k} must be an integer"}, status_code=400)
-    for k in ("enabled", "allow_paid_api", "mcp_tools"):
+    for k in ("enabled", "allow_paid_api", "mcp_tools", "tool_outputs", "audio_html",
+              "video_html"):
         if k in body:
             updates[k] = bool(body[k])
-    for k in ("backend", "default_model", "draft_model", "attachments_upload_url"):
+    for k in ("backend", "default_model", "draft_model", "attachments_upload_url",
+              "job_check_tool"):
         if k in body:
             updates[k] = str(body[k] or "").strip()
+    if "public_base_url" in body:
+        base = str(body["public_base_url"] or "").strip().rstrip("/")
+        if base and not base.startswith(("http://", "https://")):
+            return JSONResponse({"error": "public_base_url must start with http:// or https://"},
+                                status_code=400)
+        updates["public_base_url"] = base
+    if "tool_output_max_mb" in body:
+        try:
+            updates["tool_output_max_mb"] = max(1.0, min(4096.0, float(body["tool_output_max_mb"])))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "tool_output_max_mb must be a number"}, status_code=400)
     if "attachments_fetch_hosts" in body:
         hosts = body["attachments_fetch_hosts"]
         if isinstance(hosts, str):
