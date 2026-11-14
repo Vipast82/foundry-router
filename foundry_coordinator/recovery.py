@@ -597,6 +597,20 @@ class Recovery:
             for m in ledger.missing(P, spec, head) or []:
                 if m.get("check_id") and m["check_id"] not in affected:
                     affected.append(m["check_id"])
+        # 2026-11-14 time-save item 0 ([studio_calls] defer_guard_suites): mid-build, merely
+        # stale regression GUARD suites are left to the final gate and never listed here (the
+        # sessions gated ten older suites after every small fix). The obligations stay open and
+        # gate_submission / VERIFYING still need them fresh at the final head.
+        deferred, halfway = [], False
+        if affected and spec is not None:
+            from .studio_calls import deferred_guards
+            dg = deferred_guards(P, trow, spec, head,
+                                 [c for c in affected if c.startswith("suite:")], ledger)
+            deferred, halfway = dg["deferred"], dg["halfway"]
+            affected = [c for c in affected if c not in deferred]
+            if halfway:
+                # half the plan's rows are ticked: the guards run now, once
+                self.store.merge_data(P.id, task, guards_halfway=head)
 
         # strategy: refused if it waives/moves/substitutes; must differ on repeats
         rejected = []
@@ -742,6 +756,7 @@ class Recovery:
                "overlooked": overlooked[:12], "repeats": repeats,
                "strategy_required_different": bool(reps), "strategy": strategy[:2000],
                "strategy_fp": sfp, "budget": budget, "affected_checks_to_rerun": affected,
+               "deferred_guard_suites": deferred,
                "escalation_decision": esc_used,
                "rejected_guidance": rejected}
         if fresh_lead_strategy and reps and (same or max_count >= 3):
@@ -814,7 +829,8 @@ class Recovery:
             raise AssignmentInvariant("an assignment may only carry BUILD obligations")
         for o in build_open:
             for e in o["required_evidence"]:
-                if e["kind"] == "check" and e["ref"] not in a["affected_checks_to_rerun"]:
+                if e["kind"] == "check" and e["ref"] not in a["affected_checks_to_rerun"] \
+                        and e["ref"] not in a.get("deferred_guard_suites", ()):
                     raise AssignmentInvariant(f"BUILD check {e['ref']} dropped from the assignment")
         if directive_violations(a["strategy"]):
             raise AssignmentInvariant("assignment strategy waives or moves BUILD work")
@@ -855,6 +871,9 @@ class Recovery:
         L.append("### Strategy\n" + a["strategy"][:1200])
         if a["affected_checks_to_rerun"]:
             L.append("### Checks to rerun: " + ", ".join(a["affected_checks_to_rerun"]))
+        if a.get("deferred_guard_suites"):
+            L.append("### Deferred to the final gate (regression guards, do not request them "
+                     "now): " + ", ".join(c.split(":", 1)[-1] for c in a["deferred_guard_suites"]))
         b = a["budget"]
         L.append("### Budget: attempts {}/{}, sessions {}/{}, evidence continuations {}/{}".format(
             b["attempts"]["used"], b["attempts"]["max"], b["sessions"]["used"],
