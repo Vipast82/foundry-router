@@ -2,6 +2,11 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.154 — Host Admin tiles read better
+
+- A Unix time is shown as a date and time, a byte count as GB, and a list of
+  objects (Strata's two GPUs) as tiles per item instead of "[object Object]".
+
 ## v0.181.153 — Host Admin shows what Strata's own Monitor page shows
 
 - The Strata gateway answers `GET /metrics` with JSON (hardware, engine with the

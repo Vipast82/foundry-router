@@ -7954,7 +7954,12 @@ function renderDiagReport(rep, cur) {
   const val = v => v === true ? "yes" : v === false ? "no" : v == null ? "—"
     : typeof v === "number" ? (Number.isInteger(v) ? v.toLocaleString() : String(Math.round(v * 100) / 100))
     : Array.isArray(v) ? v.join(", ") : isObj(v) ? JSON.stringify(v) : String(v);
-  const tile = (k, v) => { const t = val(v); return `<div class="tile" title="${esc(k)}"><div class="t-lbl">${esc(label(k))}</div><div class="t-val${t.length > 10 ? " sm" : ""}">${esc(t)}</div></div>`; };
+  // by the field's name: a Unix time as a date, a byte count as GB
+  const nice = (k, v) => typeof v !== "number" ? val(v)
+    : v > 1e9 && v < 1e11 && /(^|[ _])(time|since|started|at)$/i.test(k) ? new Date(v * 1000).toLocaleString()
+    : v >= 1e8 && /(^|[ _])(bytes|mem[ _]used|mem[ _]total|ram[ _]used|ram[ _]total)$/i.test(k) ? (v / 1073741824).toFixed(1) + " GB"
+    : val(v);
+  const tile = (k, v) => { const t = nice(k, v); return `<div class="tile" title="${esc(k)}"><div class="t-lbl">${esc(label(k))}</div><div class="t-val${t.length > 10 ? " sm" : ""}">${esc(t)}</div></div>`; };
 
   // what did not succeed, split by why
   const failed = [], absent = [];
@@ -8017,7 +8022,10 @@ function renderDiagReport(rep, cur) {
             return `<div class="ratio" title="${esc(a)} ÷ ${esc(b)}"><span>${esc(what)}</span><span class="meter"><span style="width:${pct.toFixed(1)}%"></span></span><b>${pct.toFixed(1)}%<small>${esc(val(o[a]))} of ${esc(val(o[b]))}</small></b></div>`;
           }).join("")
         + `<div class="tiles" style="margin-top:8px">${Object.entries(o).flatMap(([k, v]) => isObj(v)
-            ? Object.entries(v).map(([k2, v2]) => [k + " " + k2, v2]) : [[k, v]]).map(([k, v]) => tile(k, v)).join("")}</div>`;
+            ? Object.entries(v).map(([k2, v2]) => [k + " " + k2, v2])
+            : Array.isArray(v) && v.length && v.every(isObj)
+            ? v.flatMap((it, i) => Object.entries(it).filter(([k2]) => k2 !== "index").map(([k2, v2]) => [`${k} ${i} ${k2}`, v2]))
+            : [[k, v]]).map(([k, v]) => tile(k, v)).join("")}</div>`;
     }
     if (!inner) inner = `<span class="pill ok">ok</span> <span class="mono">${esc(typeof bodyObj === "string" ? bodyObj : "")}</span>`;
     if (isObj(bodyObj)) inner += `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(bodyObj, null, 1))}</pre></details>`;
