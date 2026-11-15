@@ -199,6 +199,14 @@ class AgentBrainConfig(BaseModel):
     # persona's max_tool_steps overrides it. The poll guard, the paid-call cap, the context
     # guard and the wrap-up round at the cap still stop a runaway loop.
     worker_tool_max_steps: int = 25
+    # Main-model mode (main_route.py, v0.181.140). A conversation that overflowed to
+    # another model goes back to the persona's main model only when that model has
+    # been idle this long and the conversation is at most this many tokens (the
+    # main model has not seen it, so it reads all of it before the first word).
+    main_return_idle_seconds: float = Field(default=5.0, ge=0, le=3600)
+    main_return_max_tokens: int = Field(default=8000, ge=0, le=2_000_000)
+    # models tried for one request before it fails
+    main_max_tries: int = Field(default=3, ge=1, le=10)
     # Input-side twin of tool_result_limit_chars: caps what the brain sees of
     # a large pasted user message (file/code) before its FIRST routing
     # decision — otherwise a 23k-char paste blows the brain's context before

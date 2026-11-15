@@ -196,7 +196,8 @@ async def set_brain(request: Request):
                "direct_stream_stall_seconds", "heartbeat_visible_seconds",
                "context_guard", "context_guard_reserve_tokens", "context_guard_sticky",
                "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
-               "routing_mode", "worker_tool_result_chars", "worker_tool_max_steps"}
+               "routing_mode", "worker_tool_result_chars", "worker_tool_max_steps",
+               "main_return_idle_seconds", "main_return_max_tokens", "main_max_tries"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if _is_masked(updates.get("api_key")):
         updates.pop("api_key")                       # masked echo: keep the stored key
@@ -2246,8 +2247,42 @@ async def clone_persona(request: Request):
 async def delete_persona(request: Request):
     svc = _svc(request)
     body = await request.json()
-    svc.personas.delete(body.get("virtual_name") or "")
+    name = body.get("virtual_name") or ""
+    svc.personas.delete(name)
+    if name:
+        from .. import persona_setup
+        persona_setup.forget(svc.db, name)        # a starter persona stays deleted
     return {"ok": True}
+
+
+@router.get("/admin/api/personas/setup")
+async def persona_setup_plan(request: Request, days: int = 30):
+    """The one-chat-persona setup: what it would change and each persona's
+    traffic over `days` (persona_setup.py). Read-only."""
+    import asyncio
+
+    from .. import persona_setup
+    return await asyncio.to_thread(persona_setup.plan, _svc(request), max(1, min(365, days)))
+
+
+@router.post("/admin/api/personas/setup")
+async def persona_setup_apply(request: Request):
+    """{"retire": [names]} (default: all six) -> Foundry-Chat in main-model mode,
+    Foundry-Local and Foundry-Max created, the named personas switched off and
+    answered by Foundry-Chat. {"restore": name} undoes one. {"remove": true}
+    deletes the retired personas that are still switched off."""
+    from .. import persona_setup
+    svc = _svc(request)
+    body = await request.json()
+    if body.get("restore"):
+        ok = persona_setup.restore(svc, str(body["restore"]))
+        return {"ok": ok} if ok else JSONResponse({"error": "not a retired persona"}, status_code=404)
+    if body.get("remove"):
+        return {"ok": True, "removed": persona_setup.remove_retired(svc)}
+    retire = body.get("retire")
+    if retire is not None and not isinstance(retire, list):
+        return JSONResponse({"error": "retire must be a list of persona names"}, status_code=400)
+    return persona_setup.apply(svc, retire)
 
 
 # --------------------------------------------------------------------------- #

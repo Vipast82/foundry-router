@@ -184,8 +184,8 @@ class EvalHarness:
         from .facade.ollama_api import _run_events
         from .guardrails import RequestGuardState
         from .usage import RequestLogger
-        mode = "pipeline" if (persona.get("execution_mode") or "") == "pipeline" \
-            else "agent"
+        em = persona.get("execution_mode") or ""
+        mode = em if em in ("pipeline", "main") else "agent"
         ctx = RequestContext(
             persona=persona,
             messages=[{"role": "user", "content": prompt}],

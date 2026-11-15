@@ -199,6 +199,7 @@ def graph(svc, hours: float = 24, show_all: bool = False, active: bool = False) 
         kind = p.get("kind") or "chat"
         mode = ("image policy" if kind == "media" else
                 "direct" if strict or (p.get("execution_mode") or "agent") == "direct"
+                else "main model" if (p.get("execution_mode") or "") == "main"
                 else (p.get("execution_mode") or "agent") + " (brain)")
         pinned_cfg = (backends.get((p.get("backend") or "").strip()) or None)
         persona_paid = None

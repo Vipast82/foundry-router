@@ -28,7 +28,7 @@ ENUMS: dict[str, tuple] = {
     "local_bias_strength": (None, "strong", "moderate", "cost_aware_default", "prefer_paid"),
     "routing": (None, "strict"),
     "fallback_policy": (None, "refuse"),
-    "execution_mode": (None, "direct", "pipeline"),
+    "execution_mode": (None, "direct", "pipeline", "main"),
     "kind": (None, "chat", "media"),
     "output_style": (None, "plain_text"),
     "outcome_judge": (None, "paid", "local_large", "brain"),

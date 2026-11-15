@@ -47,6 +47,26 @@ class PersonaStore:
             "SELECT * FROM personas WHERE lower(virtual_name) IN (lower(?), lower(?))",
             (virtual_name, base))
 
+    def resolve(self, virtual_name: str) -> Optional[dict]:
+        """The persona that ANSWERS for a name a client asked for (v0.181.140).
+        A retired persona (persona_setup.py: missing or switched off, and recorded
+        with a stand-in) is answered by its stand-in, so a chat program still set
+        to the old name keeps working. Editing code uses get(), never this."""
+        row = self.get(virtual_name)
+        if row is not None and row.get("enabled", 1):
+            return row
+        from . import persona_setup
+        gone = persona_setup.retired(self.db)
+        if not gone:
+            return row
+        base = virtual_name.split(":")[0].lower()
+        target = next((t for n, t in gone.items() if n.lower() in (virtual_name.lower(), base)), "")
+        if target:
+            alt = self.get(target)
+            if alt is not None and alt.get("enabled", 1):
+                return alt
+        return row
+
     def upsert(self, virtual_name: str, **fields) -> None:
         now = utcnow()
         for k in ("escalation_triggers", "preferred_mcp_tools", "guardrail_overrides",
