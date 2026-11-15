@@ -388,12 +388,27 @@ class CaptureStore:
         about a quarter of the disk time. `compact_stop()` ends it after the batch
         in hand."""
         self._compact_stop = False
+        # v0.181.148: its OWN read connection. It read through the store's shared
+        # read-only connection, whose lock is held for the whole of each query; a
+        # request that read capture records on the event loop waited behind it
+        # (a 61 s freeze on the live router).
+        rd = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
+                             check_same_thread=False, timeout=30)
+        rd.row_factory = sqlite3.Row
+
+        class _Rd:                       # read-back checks on the same private connection
+            @staticmethod
+            def q(sql, args=()):
+                return [dict(r) for r in rd.execute(sql, tuple(args)).fetchall()]
+        from foundry_training.blobs import BlobStore
+        check = BlobStore(_Rd(), cache_bytes=32 * 1024 * 1024)
         st = self.compaction = {"state": "running", "phase": "packing", "started": time.time(),
                                 "bytes_before": self.size_bytes(), "records": 0, "packed": 0,
                                 "verified": 0, "text_bytes": 0, "error": ""}
         try:
-            last = int(self._meta("packed_through") or 0)
-            top = (self.ro_query("SELECT MAX(id) AS n FROM capture_records")[0]["n"]) or 0
+            r0 = rd.execute("SELECT v FROM capture_meta WHERE k='packed_through'").fetchone()
+            last = int((r0[0] if r0 else 0) or 0)
+            top = rd.execute("SELECT MAX(id) FROM capture_records").fetchone()[0] or 0
             st["from"], st["to"] = last, top
             while last < top:
                 if self._compact_stop:
@@ -401,8 +416,9 @@ class CaptureStore:
                     st["finished"], st["bytes_after"] = time.time(), self.size_bytes()
                     return st
                 t_batch = time.monotonic()
-                rows = self.ro_query("SELECT id, body FROM capture_records WHERE id > ? AND "
-                                     "id <= ? ORDER BY id LIMIT ?", (last, top, batch), flush=False)
+                rows = [dict(r) for r in rd.execute(
+                    "SELECT id, body FROM capture_records WHERE id > ? AND id <= ? ORDER BY id "
+                    "LIMIT ?", (last, top, batch)).fetchall()]
                 if not rows:
                     break
                 pending: dict = {}
@@ -422,7 +438,7 @@ class CaptureStore:
                 self.blobs.flush(pending)
                 for text, rid, v, packed in updates:
                     if v is not None:
-                        if self.blobs.unpack(packed) != v:
+                        if check.unpack(packed) != v:
                             raise RuntimeError(f"record {rid} does not read back the same; "
                                                f"stopped, the record was left as it was")
                         st["verified"] += 1
@@ -457,6 +473,10 @@ class CaptureStore:
             log.exception("capture store compaction failed")
         st["finished"] = time.time()
         st["bytes_after"] = self.size_bytes()
+        try:
+            rd.close()
+        except Exception:                                         # noqa: BLE001
+            pass
         return st
 
     def compact_stop(self) -> dict:

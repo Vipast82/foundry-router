@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.148 — the capture shrink reads on its own connection (a 61 s freeze)
+
+**What was recorded.** The v0.181.145 shrink on the live router: 14 freezes in half an hour, the longest 61.3 s at `ro_query (capture.py)`. The shrink read its batches through the store's shared read-only connection, whose lock is held for the whole of each query, so a request that read capture records on the event loop waited behind it. (The earlier 6 to 23 s freezes were the disk, addressed in v0.181.146.)
+
+- The shrink opens its own read-only connection for its batches, its start position and its read-back checks. It no longer takes the shared connection's lock at all.
+
+Tests: `tests/test_capture_store_once.py`.
+
 ## v0.181.147 — training archive: one more copy of the fine-tuning data in a folder of your choice
 
 - **Logs → Training → Capture → Archive** (`training_capture.archive_dir`, `training_archive.py`). A folder the router can write to: a second disk, or a network share (NFS, SMB) mounted on the host and passed into the container. To Foundry it is a path; it mounts nothing itself. Empty = off.

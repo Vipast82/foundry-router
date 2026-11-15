@@ -168,3 +168,31 @@ def test_the_shrink_yields_the_disk_and_can_be_stopped(tmp_path):
     html = (Path(routes.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="cap-compact-stop"' in html and "body: {stop: true}" in html
 
+
+def test_the_shrink_reads_on_its_own_connection(tmp_path):
+    """v0.181.148: it shared the store's read-only connection, whose lock is held for
+    the whole of each query; a request reading capture records on the event loop
+    waited 61 s behind it on the live router."""
+    import threading
+    path = _old_store(tmp_path, n=24)
+    st = CaptureStore(path)
+    st.ro_query("SELECT 1")                                    # the shared connection exists
+    waited = []
+
+    def reader():
+        t0 = time.monotonic()
+        st.ro_query("SELECT COUNT(*) AS n FROM capture_records", flush=False)
+        waited.append(time.monotonic() - t0)
+
+    with st._ro_lock:                                           # someone holds the shared one...
+        done = threading.Thread(target=st.compact, kwargs={"pause": 0, "yield_factor": 0})
+        done.start()
+        done.join(30)                                           # ...and the shrink still finishes
+        assert not done.is_alive() and st.compaction["state"] == "done"
+    reader()
+    assert waited[0] < 2
+    import inspect
+    src = inspect.getsource(CaptureStore.compact)
+    assert 'rd = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro"' in src
+    assert "self.ro_query(\"SELECT id, body" not in src
+
