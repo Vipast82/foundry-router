@@ -503,6 +503,21 @@
   .ratio { display:grid; grid-template-columns:minmax(110px, 260px) minmax(0, 1fr) auto; gap:10px; align-items:center; margin:6px 0; }
   .ratio .meter { width:100%; }
   .ratio b { font-family:var(--num-font); text-align:right; white-space:nowrap; }
+  .mon-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:10px; margin:0 0 10px; }
+  .mon-stat { position:relative; overflow:hidden; padding:12px 14px 30px; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+  .mon-l { color:var(--dim); font-size:12.5px; }
+  .mon-v { font:600 30px/1.15 var(--num-font); white-space:nowrap; }
+  .mon-v small { font:500 13px var(--num-font); color:var(--dim); margin-left:4px; }
+  .mon-v + .mon-v { font-size:20px; }
+  .mon-s { color:var(--dim); font-size:12px; }
+  .mon-stat svg { position:absolute; left:0; right:0; bottom:0; width:100%; height:26px; }
+  .mon-two { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 2fr); gap:0 12px; }
+  @media (max-width: 900px) { .mon-two { grid-template-columns:minmax(0, 1fr); } }
+  .mon-bar { margin:0 0 12px; }
+  .mon-bar-h { display:flex; justify-content:space-between; gap:10px; font-size:13px; margin-bottom:4px; }
+  .mon-bar-h b { font:500 12.5px var(--num-font); color:var(--dim); white-space:nowrap; }
+  .mon-bar .meter { display:block; width:100%; }
+  .mon-state { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 10px; font-size:13.5px; }
   .ratio b small { font-weight:400; color:var(--dim); margin-left:6px; }
   pre.raw { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
             border-radius:6px; padding:10px; margin:8px 0 0; max-height:320px; overflow:auto; font-size:12px; }
@@ -7943,6 +7958,83 @@ const _HEALTH_RATIOS = [["vram_hits", "lookups", "expert lookups answered from V
                         ["vram_held", "vram_slots", "VRAM expert slots filled"],
                         ["vram_held", "experts", "experts held in VRAM"]];
 
+// Strata's /metrics JSON (v0.181.155), drawn like its own Monitor page: figures with
+// their trend, bars for what fills up, the latest requests. Each thing once.
+function renderEngineMonitor(mon, tile) {
+  const O = v => v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  const eng = O(mon.engine), hw = O(mon.hardware), st = O(mon.hardware_static), live = O(mon.live),
+        cc = O(mon.conversation_cache), tot = O(mon.totals), hist = O(mon.history),
+        reqs = Array.isArray(mon.requests) ? mon.requests : [], gpus = Array.isArray(hw.gpus) ? hw.gpus.filter(g => g && typeof g === "object") : [];
+  const isN = v => typeof v === "number" && isFinite(v);
+  const num = (v, d) => isN(v) ? v.toLocaleString(undefined, {maximumFractionDigits: d || 0}) : "—";
+  const gib = b => isN(b) ? (b / 1073741824).toFixed(1) : "—";
+  const series = k => (Array.isArray(hist[k]) ? hist[k] : []).map(x => isN(x) ? x : Array.isArray(x) ? +x[x.length - 1] : x && isN(x.v) ? x.v : NaN).filter(isN);
+  const spark = (k, color) => {
+    const a = series(k);
+    if (a.length < 2) return "";
+    const hi = Math.max(...a, 1e-9), pts = a.map((v, i) => `${(100 * i / (a.length - 1)).toFixed(1)},${(23 - 20 * Math.max(0, v) / hi).toFixed(1)}`).join(" ");
+    return `<svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polygon points="0,24 ${pts} 100,24" fill="var(--${color})" opacity=".16"/><polyline points="${pts}" fill="none" stroke="var(--${color})" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>`;
+  };
+  const stat = (l, v, unit, sub, sp, second) => `<div class="mon-stat"><div class="mon-l">${esc(l)}</div><div class="mon-v">${esc(v)}<small>${esc(unit || "")}</small></div>${second || ""}<div class="mon-s">${esc(sub || "")}</div>${sp || ""}</div>`;
+  const bar = (l, part, whole, right) => {
+    if (!isN(part) || !isN(whole) || whole <= 0) return "";
+    const pct = Math.max(0, Math.min(100, 100 * part / whole));
+    return `<div class="mon-bar"><div class="mon-bar-h"><span>${esc(l)}</span><b>${esc(right)}</b></div><span class="meter"><span style="width:${pct.toFixed(1)}%"></span></span></div>`;
+  };
+  const per = (f, unit) => gpus.map((g, i) => `GPU ${i} ${f(g)}${unit}`).join(" · ");
+
+  // state
+  const state = String(live.state || "unknown"), working = state !== "idle" && state !== "unloaded";
+  let html = `<div class="mon-state"><span class="pill ${state === "error" ? "bad" : working ? "warn" : "ok"}">${esc(state)}</span>
+    <span>${working ? esc([live.phase, isN(live.prompt_total) ? `prompt ${num(live.prompt_read)} of ${num(live.prompt_total)}` : "",
+        isN(live.generated) ? `written ${num(live.generated)}${isN(live.max_tokens) ? " of " + num(live.max_tokens) : ""}` : "",
+        isN(live.tok_s) ? num(live.tok_s, 1) + " tok/s" : ""].filter(Boolean).join(" · "))
+      : state === "idle" ? "Waiting for a request" : ""}${live.queued ? ` · ${esc(live.queued)} queued` : ""}</span></div>`;
+
+  // figures
+  const dec = tot.decode_ms > 0 ? 1000 * tot.output_tokens / tot.decode_ms : null,
+        pre = tot.prompt_ms > 0 ? 1000 * (tot.prompt_tokens - (tot.reused || 0)) / tot.prompt_ms : null;
+  html += `<div class="mon-grid">`
+    + stat("Speed", num(dec, 1), "tok/s written", "averages since start", spark("tok_s", "ok"),
+           `<div class="mon-v">${esc(num(pre))}<small>tok/s read</small></div>`)
+    + stat("GPU load", num(hw.gpu_util), "%", per(g => num(g.util), "%"), spark("gpu_util", "ok"))
+    + stat("VRAM", gib(hw.gpu_mem_used), `of ${gib(hw.gpu_mem_total)} GB`, per(g => gib(g.mem_used), " GB"), spark("gpu_mem_used", "ok"))
+    + stat("GPU temperature", num(hw.gpu_temp), "°C", per(g => num(g.temp), "°"), spark("gpu_temp", "warn"))
+    + stat("Power", num(hw.gpu_power), "W", isN(hw.gpu_power_limit) ? `of ${num(hw.gpu_power_limit)} W limit` : "", spark("gpu_power", "ok"))
+    + stat("PCIe", isN(hw.gpu_pcie_gen_max) ? "Gen" + hw.gpu_pcie_gen_max : "—", isN(hw.gpu_pcie_width) ? "x" + hw.gpu_pcie_width : "",
+           `to GPU ${num(hw.gpu_pcie_rx_mb, 1)} MB/s${isN(hw.gpu_pcie_gen) ? " · link now Gen" + hw.gpu_pcie_gen : ""}`, spark("gpu_pcie_rx_mb", "info"))
+    + stat("CPU", num(hw.cpu), "%", st.cores ? `${st.cores} cores · ${st.threads} threads` : "", spark("cpu", "ok"))
+    + stat("Disk read", num(hw.disk_read_mb, 1), "MB/s", `write ${num(hw.disk_write_mb, 1)} MB/s`, spark("disk_read_mb", "info"))
+    + `</div>`;
+
+  // what fills up
+  const last = reqs[0] || {};
+  const bars = bar("Experts in VRAM", eng.expert_cache_mib, isN(hw.gpu_mem_total) ? hw.gpu_mem_total / 1048576 : null,
+                   `${num(eng.expert_slots)} experts · ${num(eng.expert_cache_mib / 1024, 1)} GB`)
+    + bar("System RAM", hw.ram_used, hw.ram_total, `${gib(hw.ram_used)} of ${gib(hw.ram_total)} GB`)
+    + bar("Context, last request", last.prompt_total, eng.context, `${num(last.prompt_total)} of ${num(eng.context)}`)
+    + bar("Parked conversations", cc.parked, cc.slots, `${num(cc.parked)} of ${num(cc.slots)}`)
+    + bar("Their memory (RAM)", cc.bytes, isN(cc.budget_mib) ? cc.budget_mib * 1048576 : null, `${gib(cc.bytes)} of ${num(cc.budget_mib / 1024, 1)} GB`)
+    + bar("Prompt tokens reused", tot.reused, tot.prompt_tokens, `${num(tot.reused)} of ${num(tot.prompt_tokens)}`)
+    + bar("Draft tokens accepted", tot.drafts_accepted, tot.drafts_offered, `${num(tot.drafts_accepted)} of ${num(tot.drafts_offered)}`)
+    + (isN(cc.parks) ? `<p class="hint" style="margin:0">Conversations parked ${num(cc.parks)} · restored ${num(cc.restores)} · evicted ${num(cc.evictions)}${isN(cc.last_at) ? ` · last ${esc(cc.last_event || "change")} ${esc(new Date(cc.last_at * 1000).toLocaleTimeString())}` : ""}</p>` : "");
+
+  // the latest requests
+  const pill = f => `<span class="pill ${f === "stop" || f === "tool_calls" ? "ok" : f === "length" ? "warn" : f ? "bad" : ""}">${esc(f || "—")}</span>`;
+  const rows = reqs.map(r => `<tr><td class="mono">${isN(r.time) ? esc(new Date(r.time * 1000).toLocaleTimeString()) : ""}</td><td>${pill(r.finish)}</td>
+      <td class="mono">${num(r.prompt_tokens)}</td><td class="mono">${num(r.reused)}</td><td class="mono">${num(r.output_tokens)}</td>
+      <td class="mono">${r.prompt_ms > 0 && isN(r.prompt_read) ? num(1000 * r.prompt_read / r.prompt_ms) : "—"}</td><td class="mono">${num(r.decode_tok_s, 1)}</td>
+      <td class="mono">${isN(r.hit_rate) ? (100 * r.hit_rate).toFixed(1) + "%" : "—"}</td><td class="mono">${isN(r.duration_s) ? num(r.duration_s, 1) + " s" : "—"}</td></tr>`).join("");
+  const table = rows ? `<div style="overflow-x:auto"><table class="no-tools"><tr><th>time</th><th>ended</th><th>prompt</th><th title="prompt tokens taken from the cache">reused</th><th>output</th>
+      <th title="prompt tokens read per second">read t/s</th><th title="tokens written per second">write t/s</th><th title="expert lookups answered from VRAM">VRAM hits</th><th>took</th></tr>${rows}</table></div>` : '<p class="hint">no requests yet</p>';
+  const since = isN(tot.since) ? `<p class="hint" style="margin:8px 0 0">Since ${esc(new Date(tot.since * 1000).toLocaleString())}: ${num(tot.requests)} requests · ${num(tot.prompt_tokens)} prompt tokens · ${num(tot.output_tokens)} written</p>` : "";
+  const cardOf = (t, inner) => `<div class="card"><div class="card-h">${t}</div>${inner}</div>`;
+  html += `<div class="mon-two">${cardOf("Memory and cache", bars || '<p class="hint">not reported</p>')}${cardOf(`Recent requests <span class="hint">— the latest ${reqs.length}</span>`, table + since)}</div>`;
+  if (Object.keys(eng).length) html += cardOf(`<details style="width:100%"><summary>Engine settings <span class="hint">— ${Object.keys(eng).length} values the engine started with</span></summary>
+      <div class="tiles" style="margin-top:10px">${Object.entries(eng).map(([k, v]) => tile(k, v)).join("")}</div></details>`, "");
+  return html;
+}
+
 function renderDiagReport(rep, cur) {
   cur = cur || {};
   const card = (title, inner, tip) => `<div class="card"><div class="card-h"${tip ? ` title="${esc(tip)}"` : ""}>${title}</div>${inner}</div>`;
@@ -8031,23 +8123,15 @@ function renderDiagReport(rep, cur) {
     if (isObj(bodyObj)) inner += `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(bodyObj, null, 1))}</pre></details>`;
     return inner;
   };
-  if (h && h.ok) html += card(`Health <span class="hint">— what GET /health answered</span>`, factsBlock(h.body, true));
+  // a server with a monitor reply (Strata) gets the graphical view; the health and
+  // status replies repeat it and go into one fold at the bottom
+  const monOn = !!(mt && isObj(mt.monitor));
   const es = good("status");
-  if (es) html += card(`Engine status <span class="hint">— what GET /v1/status answered</span>`, factsBlock(es.body, false));
-  // Strata answers /metrics with JSON: what its own Monitor page shows
-  if (mt && isObj(mt.monitor)) {
-    const mon = Object.assign({}, mt.monitor), reqs = Array.isArray(mon.requests) ? mon.requests : [];
-    delete mon.requests;
-    let inner = factsBlock(mon, false);
-    const cols = reqs.length ? Object.keys(reqs[0]).filter(k => reqs.some(r => r && !isObj(r[k]) && !Array.isArray(r[k]) && r[k] != null)) : [];
-    const cell = (k, v) => typeof v === "number" && v > 1e9 && /time|at$|^ts$|start|end/i.test(k)
-      ? new Date(v > 1e11 ? v : v * 1000).toLocaleTimeString() : val(v);
-    if (cols.length) inner += `<div class="tgroup">recent requests <span class="hint">— the latest ${reqs.length}</span></div>
-      <div style="overflow-x:auto"><table class="no-tools"><tr>${cols.map(k => `<th>${esc(label(k))}</th>`).join("")}</tr>${reqs.map(r =>
-        `<tr>${cols.map(k => `<td class="mono">${esc(cell(k, (r || {})[k]))}</td>`).join("")}</tr>`).join("")}</table></div>`;
-    html += card(`Engine monitor <span class="hint">— what GET /metrics answered: hardware, experts, conversation cache, recent requests</span>`, inner);
+  if (monOn) html += renderEngineMonitor(mt.monitor, tile);
+  else {
+    if (h && h.ok) html += card(`Health <span class="hint">— what GET /health answered</span>`, factsBlock(h.body, true));
+    if (es) html += card(`Engine status <span class="hint">— what GET /v1/status answered</span>`, factsBlock(es.body, false));
   }
-
   let grid = "";
   if (rep.swap && rep.swap.is_swap) {
     grid += card(`llama-swap <span class="hint">— resident models (/running)</span>`, rep.swap.running.length
@@ -8061,23 +8145,23 @@ function renderDiagReport(rep, cur) {
     const samp = p.sampling_defaults || {};
     grid += card(`Loaded model <span class="hint">— /props</span>`, `<table class="no-tools">
           <tr><th>model</th><td class="mono">${esc(p.model_path || "?")}</td></tr>
-          <tr><th title="Context per slot — the most one request can use">context (n_ctx / slot)</th><td class="mono">${esc(p.n_ctx ?? "?")}</td></tr>
+          ${monOn ? "" : `<tr><th title="Context per slot — the most one request can use">context (n_ctx / slot)</th><td class="mono">${esc(p.n_ctx ?? "?")}</td></tr>
           <tr><th title="Parallel request slots (-np)">slots</th><td class="mono">${esc(p.total_slots ?? "?")}</td></tr>
-          ${p.build_info ? `<tr><th>build</th><td class="mono">${esc(p.build_info)}</td></tr>` : ""}
+          ${p.build_info ? `<tr><th>build</th><td class="mono">${esc(p.build_info)}</td></tr>` : ""}`}
           <tr><th title="Multimodal projector loaded (--mmproj)">vision / audio</th><td>${yes(mods.vision)} / ${yes(mods.audio)}</td></tr>
           <tr><th title="The chat template declares tool support — needs --jinja">tool calling</th><td>${Object.keys(caps).length ? yes(caps.supports_tools || caps.supports_tool_calls) : '<span class="hint">unknown (older build)</span>'}</td></tr>
           <tr><th>chat template</th><td>${p.chat_template_present ? "present" : "—"}</td></tr>
           ${Object.keys(samp).length ? `<tr><th title="Server-side defaults; per-request values from personas / clients override them">default sampling</th><td class="mono">${Object.entries(samp).map(([k, v]) => `${esc(k)}=${esc(Array.isArray(v) ? v.join(";") : v)}`).join(" · ")}</td></tr>` : ""}
          </table>`);
   }
-  if (sl) {
+  if (sl && !(monOn && sl.count <= 1)) {                             // one slot is in the figures above
     grid += card(`Slots <span class="hint">— /slots${sl.count ? ` · ${esc(sl.busy)} of ${esc(sl.count)} busy` : ""}</span>`,
       sl.count ? `<table class="no-tools"><tr><th>id</th><th>state</th><th title="Context size of this slot">n_ctx</th><th title="Tokens decoded so far for the current request">decoded</th><th title="Speculative decoding active on this slot">spec</th></tr>${sl.slots.map(x =>
           `<tr><td class="mono">${esc(x.id)}</td><td>${x.busy ? '<span class="pill warn">busy</span>' : '<span class="pill ok">idle</span>'}</td>
             <td class="mono">${esc(x.n_ctx || "")}</td><td class="mono">${esc(x.n_decoded || 0)}</td><td>${x.speculative ? "yes" : ""}</td></tr>`).join("")}</table>`
         : `<p class="hint">no slots reported</p>`);
   }
-  if (m) {
+  if (m && !(monOn && ids.length <= 1)) {                            // one model is named above
     const det = m.details || (m.models || []).map(id => ({id}));
     const hasCtx = det.some(x => x.max_model_len || x.n_ctx_train), hasSize = det.some(x => x.size || x.n_params),
           hasStatus = det.some(x => x.status);
@@ -8094,7 +8178,12 @@ function renderDiagReport(rep, cur) {
   }
   if (grid) html += `<div class="ov-grid">${grid}</div>`;
 
-  if (mt) {
+  if (monOn) {
+    const raw = (t, o) => isObj(o) ? `<details style="margin-top:6px"><summary class="mono">${t}</summary><pre class="raw mono">${esc(JSON.stringify(o, null, 1))}</pre></details>` : "";
+    const noHist = Object.assign({}, mt.monitor); delete noHist.history;
+    html += card(`<details style="width:100%"><summary>Everything the server reported <span class="hint">— the replies as it sent them</span></summary>
+      ${raw("GET /health", h && h.body)}${raw("GET /v1/status", es && es.body)}${raw("GET /metrics", noHist)}</details>`, "");
+  } else if (mt) {
     const series = Object.keys(mt.metrics || {}).length;
     const shown = renderServers([{...sum, backend: rep.backend, flavor: rep.flavor, metrics_ok: true}]);
     html += card(`Metrics <span class="hint">— /metrics</span>`, Object.keys(sum).length || series

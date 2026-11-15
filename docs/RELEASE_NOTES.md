@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.155 — the Strata host page is drawn like Strata's Monitor
+
+- Host Admin for a server with a monitor reply (Strata): eight figures with trend
+  lines (speed, GPU load, VRAM, temperature, power, PCIe, CPU, disk), bars for what
+  fills up (experts in VRAM, RAM, context, parked conversations and their memory,
+  prompt reuse, drafts accepted) and a short table of the latest requests.
+- Said once: the Health, Engine status, Slots (one slot), Models (one model) and
+  Metrics cards are left out for such a server. The engine's settings and the
+  replies as sent are in two folds.
+
 ## v0.181.154 — Host Admin tiles read better
 
 - A Unix time is shown as a date and time, a byte count as GB, and a list of

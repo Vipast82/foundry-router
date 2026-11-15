@@ -234,7 +234,7 @@ async def test_a_json_metrics_reply_is_passed_on_as_the_monitor():
 
     from foundry_router.pool import openai_admin
     body = {"engine": {"experts_in_vram": 15778}, "hardware": {"gpu": {"temp_c": 34}},
-            "conversation_cache": {"parked": 4, "slots": 4}, "history": {"speed": [1, 2, 3]},
+            "conversation_cache": {"parked": 4, "slots": 4}, "history": {"cpu": list(range(500)), "round": 2},
             "requests": [{"time": 1794775566, "prompt": 19, "output": 2}] * 60}
 
     class Client:
@@ -247,10 +247,15 @@ async def test_a_json_metrics_reply_is_passed_on_as_the_monitor():
     out = await adm._probe_metrics("http://x", {}, "llamacpp")
     assert out["ok"] and out["summary"] == {} and out["metrics"] == {}
     mon = out["monitor"]
-    assert mon["engine"] == {"experts_in_vram": 15778} and "history" not in mon
+    assert mon["engine"] == {"experts_in_vram": 15778}
+    assert mon["history"] == {"cpu": list(range(380, 500)), "round": 2}     # the latest points, for trend lines
     assert len(mon["requests"]) == openai_admin._MONITOR_REQUESTS == 25
     html = (Path(openai_admin.__file__).parent.parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
-    assert "if (mt && isObj(mt.monitor)) {" in html and "what GET /metrics answered" in html
+    # v0.181.155: drawn like Strata's own Monitor, and the cards that repeat it are left out
+    assert "function renderEngineMonitor(mon, tile) {" in html
+    assert "if (monOn) html += renderEngineMonitor(mt.monitor, tile);" in html
+    assert "if (sl && !(monOn && sl.count <= 1)) {" in html and "if (m && !(monOn && ids.length <= 1)) {" in html
+    assert "Everything the server reported" in html and ".mon-stat svg {" in html
     # v0.181.154: times, byte counts and lists of objects are laid out readably
     assert "const nice = (k, v) =>" in html and "Array.isArray(v) && v.length && v.every(isObj)" in html
 
