@@ -261,6 +261,7 @@ class CaptureStore:
         self.conn.execute("CREATE TABLE IF NOT EXISTS capture_meta (k TEXT PRIMARY KEY, v TEXT)")
         self.blobs = _blobs.BlobStore(_BlobDB(self), cache_bytes=64 * 1024 * 1024)
         self.compaction: dict = {"state": "idle"}
+        self._compact_stop = False
         self._compactor: Optional[threading.Thread] = None
         if new:
             try:
@@ -370,15 +371,23 @@ class CaptureStore:
         r = self.ro_query("SELECT v FROM capture_meta WHERE k=?", (k,), flush=False)
         return r[0]["v"] if r else None
 
-    def compact(self, batch: int = 40, pause: float = 0.02, verify_every: int = 100,
-                reclaim: bool = True) -> dict:
+    def compact(self, batch: int = 8, pause: float = 0.05, verify_every: int = 100,
+                reclaim: bool = True, yield_factor: float = 3.0) -> dict:
         """Pack every record written before packing existed, a few at a time, then
         give the freed space back to the disk (VACUUM). Runs on its own thread
         (`compact_start`); captured calls keep being written meanwhile (they wait
         only during the final VACUUM, in the writer's queue). It continues after a
         restart from the last record it packed. Every `verify_every`-th record is
         read back and compared before it is replaced; a difference stops the run
-        with nothing changed in that batch."""
+        with nothing changed in that batch.
+
+        v0.181.146: the first live run (40 records a batch, 20 ms apart) took the
+        disk from the router: ordinary queries of the main database waited 6 to 23 s
+        three times in ten minutes. Batches are 8 records now, and after each one
+        the thread sleeps `yield_factor` times as long as the batch took, so it uses
+        about a quarter of the disk time. `compact_stop()` ends it after the batch
+        in hand."""
+        self._compact_stop = False
         st = self.compaction = {"state": "running", "phase": "packing", "started": time.time(),
                                 "bytes_before": self.size_bytes(), "records": 0, "packed": 0,
                                 "verified": 0, "text_bytes": 0, "error": ""}
@@ -387,6 +396,11 @@ class CaptureStore:
             top = (self.ro_query("SELECT MAX(id) AS n FROM capture_records")[0]["n"]) or 0
             st["from"], st["to"] = last, top
             while last < top:
+                if self._compact_stop:
+                    st["state"], st["phase"] = "stopped", ""
+                    st["finished"], st["bytes_after"] = time.time(), self.size_bytes()
+                    return st
+                t_batch = time.monotonic()
                 rows = self.ro_query("SELECT id, body FROM capture_records WHERE id > ? AND "
                                      "id <= ? ORDER BY id LIMIT ?", (last, top, batch), flush=False)
                 if not rows:
@@ -429,9 +443,9 @@ class CaptureStore:
                 st["records"] += len(rows)
                 st["packed"] += len(updates)
                 st["at"] = last
-                if pause:
-                    time.sleep(pause)
-            if reclaim:
+                if pause or yield_factor:
+                    time.sleep(max(pause, yield_factor * (time.monotonic() - t_batch)))
+            if reclaim and not self._compact_stop:
                 st["phase"] = "reclaiming disk space"
                 with self._lock:
                     self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -444,6 +458,12 @@ class CaptureStore:
         st["finished"] = time.time()
         st["bytes_after"] = self.size_bytes()
         return st
+
+    def compact_stop(self) -> dict:
+        """End a running shrink after the batch in hand. Starting it again continues
+        from the last record it packed."""
+        self._compact_stop = True
+        return self.compaction
 
     def compact_start(self) -> dict:
         if self._compactor is not None and self._compactor.is_alive():

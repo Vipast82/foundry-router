@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.146 — training: excluding is off by default; the keep-everything dataset drops nothing for its size; the capture shrink yields the disk
+
+**Excluding is opt-in** (`[training] exclude = true` in a project profile). Off, the default: no episode is excluded for how it was judged or who wrote it. What the policy's `require` list would have said is kept on the episode as `notes`, every model's turns may be targets, and the `calls` kind keeps calls of any quality. Only text that still looks like a secret keeps an episode out. A profile that wants the old selection sets `exclude = true`; then its `require` lists and `allow_frontier_targets` apply as before. Decided by Victor, 2026-11-15; the policy had selected 2 of 1,169 episodes. The providers' terms on hosted-model output are unchanged and still printed in every manifest.
+
+**The keep-everything dataset** (`foundry_training.sessions`). Its first run on the live store wrote 5,260 examples and left 5,540 conversations out as too long to cut. Measured: a coding session carries 60 to 180 tool definitions, a median of 38,922 tokens before the first word (implementers 56,915), so the system prompt and tools alone were over a 32,768-token example for 131 of 220 sampled conversations.
+- **`--tools used` (default): each example lists only the tools it calls.** `--tools all` keeps every definition.
+- **A turn larger than a whole example is shortened in the middle**, with a line saying how many characters were left out, instead of being dropped.
+
+**Capture shrink.** The first live run froze the router three times in ten minutes (ordinary queries of the main database waited 6 to 23 s for the disk). Batches are 8 records (were 40), and after each the thread sleeps three times as long as the batch took. **Stop** button and `{"stop": true}`: ends after the records in hand; starting again continues from there.
+
+Tests: `tests/test_training_sessions.py`, `tests/training/test_acceptance.py`, `tests/test_capture_store_once.py`.
+
 ## v0.181.145 — training data: each message stored once (router capture and the pipeline store); the keep-everything dataset
 
 **What was measured** (2026-11-15). The workstation store held raw.sqlite 103.8 GB and normalized.sqlite 103.0 GB. 99.6 % of the normalized bytes were Foundry `model_request` / `model_call` events of about 340 KB each: every captured call carries the whole conversation before it, so turn 50 repeats turns 1-49, and the text sat in four copies (router capture, raw, and two normalized events per call). From all of it the curated policy selected 2 of 1,169 episodes. The router container had 44 GB free on a thin pool with 36 GB left, with about 148,000 calls in the same form.

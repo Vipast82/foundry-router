@@ -61,7 +61,10 @@ def workspace(root: Path, name: str = "fixture-game") -> tuple[str, str, str]:
 
 
 def profile(root: Path, pid: str, ws: str, extra: str = "", eval_fraction: float = 0.0,
-            sources=("kilo", "foundry", "coordinator", "git"), enabled: bool = True) -> str:
+            sources=("kilo", "foundry", "coordinator", "git"), enabled: bool = True,
+            exclude: bool = True) -> str:
+    """`exclude=True`: these tests are about the selection policy, which is opt-in
+    since v0.181.146 (`[training] exclude = true`)."""
     d = root / "profiles" / pid
     d.mkdir(parents=True, exist_ok=True)
     p = d / "project.toml"
@@ -75,6 +78,7 @@ implementer = "Foundry-Kilo-Local"
 reviewer = "Foundry-Kilo-Sonnet"
 [training]
 enabled = {"true" if enabled else "false"}
+exclude = {"true" if exclude else "false"}
 sources = {json.dumps(list(sources))}
 local_models = ["{LOCAL}"]
 local_personas = ["Foundry-Kilo-Local"]

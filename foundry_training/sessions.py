@@ -21,6 +21,14 @@ whole body of work needs:
 * **A long conversation becomes several examples** of at most `max_tokens`, cut
   between turns, each starting with the system prompt; a later piece opens with a
   line saying earlier turns are omitted.
+* **Only the tools an example uses are listed in it** (`--tools used`, the
+  default). A coding session carries 60 to 180 tool definitions, about 40,000
+  tokens before the first word: measured on the live store, that alone was over a
+  32,768-token example for 131 of 220 conversations, and the first run left 5,540
+  conversations out. `--tools all` keeps every definition (use a larger
+  `--max-tokens` with it).
+* **A turn larger than a whole example is shortened in the middle**, with a line
+  saying how many characters were left out, instead of being dropped.
 * **Two files per split**, the same examples:
     chat   `{"messages": [...], "tools": [...], "meta": {...}}`  OpenAI-style
            messages with tool calls (TRL, Unsloth, Axolotl)
@@ -51,6 +59,7 @@ from .labels import NEGATIVE_LABELS, POSITIVE_LABELS
 from .messages import neutral, neutral_tools
 
 OMITTED = "(The conversation continues from earlier turns that are not shown here.)"
+ELIDED = "\n… [{n:,} characters left out of this message to fit the example] …\n"
 TIERS = ("verified", "ok", "unknown", "failed")
 _TAGS = (
     ("blender", re.compile(r"blender|\bbpy\b|\.blend\b|\.fbx\b|\.glb\b", re.I)),
@@ -188,10 +197,32 @@ def build_example(store, last: dict, inside: list, outcome_labels: dict) -> Opti
                      "tags": tags_of(msgs, tools, last["task_id"], f.get("role"))}}
 
 
+def used_tools(messages: list, tools: list) -> list:
+    """The definitions of the tools these messages call, in their original order."""
+    names = {tc["name"] for m in messages for tc in (m.get("tool_calls") or [])}
+    return [t for t in tools if t.get("name") in names]
+
+
+def _shorten(unit: list, over_tokens: int) -> list:
+    """The unit with its longest message cut in the middle by about `over_tokens`."""
+    i = max(range(len(unit)), key=lambda k: len(unit[k].get("content") or ""))
+    text = unit[i].get("content") or ""
+    cut = min(len(text) - 200, int(over_tokens * 3.2) + 400)
+    if cut <= 0:
+        return unit
+    keep = len(text) - cut
+    head, tail = text[:keep * 2 // 3], text[len(text) - keep // 3:]
+    out = list(unit)
+    out[i] = {**unit[i], "content": head + ELIDED.format(n=len(text) - len(head) - len(tail)) + tail}
+    return out
+
+
 def pieces(messages: list, tools: list, max_tokens: int, tok=None) -> list:
     """The conversation as it is when it fits; otherwise consecutive pieces of at
     most max_tokens, cut before a user turn or an assistant turn (never between a
-    tool call and its result). A turn too large for any piece is left out."""
+    tool call and its result). A turn too large for a piece of its own is
+    shortened in the middle (`_shorten`); nothing is left out for its size unless
+    the system prompt and tools alone fill the example."""
     def size(ms):
         return _tokens(_render_chatml(to_chatml(ms, tools)["messages"], tools), tok)[0]
 
@@ -220,7 +251,14 @@ def pieces(messages: list, tools: list, max_tokens: int, tok=None) -> list:
             continue
         if piece and any(m["role"] == "assistant" for m in piece):
             out.append(opener() + piece)
-        piece = u if size(opener() + u) <= max_tokens else []
+        piece = u
+        for _ in range(6):                     # too large even alone: shorten it
+            over = size(opener() + piece) - max_tokens
+            if over <= 0:
+                break
+            piece = _shorten(piece, over)
+        if size(opener() + piece) > max_tokens:
+            piece = []                         # the system prompt and tools fill the example
     if piece and any(m["role"] == "assistant" for m in piece):
         out.append(opener() + piece)
     return out
@@ -233,7 +271,7 @@ def _split(group: str, seed: str, fraction: float) -> str:
 
 def export(store, projects: list, name: str = "", max_tokens: int = 32768,
            validation_fraction: float = 0.05, seed: str = "sessions-v1",
-           include_reasoning: bool = True, tags: Optional[list] = None,
+           include_reasoning: bool = True, tools: str = "used", tags: Optional[list] = None,
            tiers: Optional[list] = None, tokenizer_path: Optional[str] = None,
            known_secrets=(), out_root: Optional[str] = None, log=print) -> dict:
     """Write the keep-everything dataset for `projects`. `tags` / `tiers` narrow
@@ -250,7 +288,7 @@ def export(store, projects: list, name: str = "", max_tokens: int = 32768,
              for sp in ("train", "validation") for kind in ("chat", "text")}
     stats = {"sessions": 0, "conversations": 0, "examples": Counter(), "tokens": Counter(),
              "tiers": Counter(), "tags": Counter(), "models": Counter(), "skipped": Counter(),
-             "pieces_of_long": 0, "redacted_again": 0}
+             "pieces_of_long": 0, "redacted_again": 0, "shortened": 0}
     seen: set = set()
     try:
         for pid in projects:
@@ -276,13 +314,21 @@ def export(store, projects: list, name: str = "", max_tokens: int = 32768,
                     stats["conversations"] += 1
                     group = f"{pid}:{meta['task_id'] or ('session:' + (sid or ''))}"
                     sp = _split(group, seed, validation_fraction)
-                    parts = pieces(ex["messages"], ex["tools"], max_tokens, tok)
+                    # cut with no tool list (each piece gets only the tools it uses),
+                    # or with all of them
+                    cut_tools = ex["tools"] if tools == "all" else []
+                    reserve = 0 if tools == "all" else min(max_tokens // 4, 6000)
+                    parts = pieces(ex["messages"], cut_tools, max_tokens - reserve, tok)
                     if not parts:
-                        stats["skipped"]["too_long_to_cut"] += 1
+                        stats["skipped"]["system_prompt_fills_the_example"] += 1
                         continue
                     if len(parts) > 1:
                         stats["pieces_of_long"] += len(parts)
+                    full_tools = ex["tools"]
                     for i, ms in enumerate(parts):
+                        ex["tools"] = full_tools if tools == "all" else used_tools(ms, full_tools)
+                        if any(ELIDED.split("{")[0].strip() in (x.get("content") or "") for x in ms):
+                            stats["shortened"] += 1
                         chat = to_chatml(ms, ex["tools"], None, reasoning=include_reasoning)
                         # anything that still looks like a secret is blanked in place;
                         # the example is kept
@@ -325,6 +371,7 @@ def export(store, projects: list, name: str = "", max_tokens: int = 32768,
         "models": dict(stats["models"].most_common()), "skipped": dict(stats["skipped"]),
         "examples_from_long_conversations": stats["pieces_of_long"],
         "examples_redacted_again": stats["redacted_again"],
+        "examples_with_a_shortened_turn": stats["shortened"], "tools": tools,
         "files": {f"{sp}{'.text' if kind == 'text' else ''}.jsonl":
                   os.path.getsize(out_dir / f"{sp}{'.text' if kind == 'text' else ''}.jsonl")
                   for sp in ("train", "validation") for kind in ("chat", "text")},
@@ -360,6 +407,8 @@ Examples: {m['examples'].get('train', 0):,} train, {m['examples'].get('validatio
 from {m['conversations']:,} conversations in {m['sessions']:,} sessions.
 Longest example: {m['max_tokens']:,} tokens ({m['token_count']}); a longer conversation was cut
 between turns into several examples ({m['examples_from_long_conversations']:,} examples came from such cuts).
+Tool definitions per example: {'only the tools that example calls' if m.get('tools') != 'all' else 'all of them'}.
+{m.get('examples_with_a_shortened_turn', 0):,} examples hold a turn that was shortened in the middle to fit.
 Validation is split by task, so a task is never on both sides.
 
 ## Labels (in `meta` of every line)
@@ -410,6 +459,8 @@ def main(argv=None) -> int:
     ap.add_argument("--tag", action="append")
     ap.add_argument("--tier", action="append", choices=TIERS)
     ap.add_argument("--no-reasoning", action="store_true")
+    ap.add_argument("--tools", choices=("used", "all"), default="used",
+                    help="tool definitions per example: the ones it calls (default), or all")
     ap.add_argument("--tokenizer")
     ap.add_argument("--out", help="write the dataset folder under this directory")
     a = ap.parse_args(argv)
@@ -417,7 +468,7 @@ def main(argv=None) -> int:
     projects = a.project or store.projects()
     m = export(store, projects, name=a.name, max_tokens=a.max_tokens,
                validation_fraction=a.validation, include_reasoning=not a.no_reasoning,
-               tags=a.tag, tiers=a.tier, tokenizer_path=a.tokenizer, out_root=a.out,
+               tools=a.tools, tags=a.tag, tiers=a.tier, tokenizer_path=a.tokenizer, out_root=a.out,
                log=lambda s: print(time.strftime("%H:%M:%S"), s, flush=True))
     print(json.dumps({k: m[k] for k in ("path", "sessions", "conversations", "examples", "tokens",
                                         "tiers", "tags", "skipped", "files")}, indent=1))

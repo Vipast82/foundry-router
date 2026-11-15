@@ -137,3 +137,34 @@ def test_the_admin_page_and_route():
     html = (Path(routes.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="cap-compact"' in html and 'api("training/capture/compact", {method: "POST", body: {}})' in html
     assert "c.store_bytes" in html
+
+
+def test_the_shrink_yields_the_disk_and_can_be_stopped(tmp_path):
+    """v0.181.146: the first live run froze the router three times in ten minutes
+    (ordinary queries waited 6-23 s for the disk)."""
+    import inspect
+    import threading
+    path = _old_store(tmp_path, n=40)
+    st = CaptureStore(path)
+    sig = inspect.signature(st.compact)
+    assert sig.parameters["batch"].default == 8 and sig.parameters["yield_factor"].default == 3.0
+    seen = []
+    real = time.sleep
+    try:
+        time.sleep = lambda s: (seen.append(s), st.compact_stop() if len(seen) == 2 else None)
+        out = st.compact()
+    finally:
+        time.sleep = real
+    assert out["state"] == "stopped" and out["records"] == 16 and len(seen) == 2    # two batches, then stopped
+    assert all(s >= 0.05 for s in seen)
+    assert st._meta("packed_through") == "16"
+    out = st.compact(pause=0, yield_factor=0)                            # started again: continues
+    assert out["state"] == "done" and out["from"] == 16 and out["records"] == 24
+    assert threading.active_count() >= 1
+    from pathlib import Path
+
+    from foundry_router.ui import routes
+    assert 'body.get("stop")' in inspect.getsource(routes.training_capture_compact)
+    html = (Path(routes.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="cap-compact-stop"' in html and "body: {stop: true}" in html
+

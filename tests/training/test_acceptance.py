@@ -592,3 +592,30 @@ def test_closeout_manifest_is_processed_and_completeness_recorded(world, tmp_pat
     training_hook.finalize(st2, P2, st2.task("elsewhere", "T"), "FAILED", str(tmp))
     res, = p.process_queue(str(tmp / "spool"))
     assert res["left"] and list((tmp / "spool").glob("elsewhere__*.json"))
+
+
+def test_nothing_is_excluded_by_default(tmp_path):
+    """v0.181.146: `[training] exclude` is off unless a profile switches it on. The
+    episode the policy excluded for missing context is selected, with the policy's
+    verdict kept as a note; frontier-written turns may be targets."""
+    ws, base, head = workspace(tmp_path)
+    prof = profile(tmp_path, PID, ws, exclude=False)
+    st = coordinator(tmp_path, PID, "FX-1", SESSION, base, head)
+    p = pipeline(tmp_path, [prof])
+    p.ingest_kilo(exports=[str(KILO_EXPORT)])
+    p.ingest_coordinator(st.path)
+    p.curate(PID)
+    ep, = _episodes(p, kind="trajectory")
+    assert ep["status"] == "selected" and ep["reasons"] == []
+    assert ep["data"]["notes"] == ["missing_context"]
+    from foundry_training.config import TrainingProject, load
+    cfg = load(prof)
+    assert cfg.exclude is False and cfg.frontier_targets() is True
+    strict = TrainingProject(id="x", workspace="", path="", exclude=True)
+    assert strict.frontier_targets() is False
+    strict.export = {"allow_frontier_targets": True}
+    assert strict.frontier_targets() is True
+    assert TrainingProject(id="x", workspace="", path="").policy_hash() != strict.policy_hash()
+    from foundry_training import curate
+    assert curate.ALWAYS_EXCLUDES == ("secret_exposure",)
+

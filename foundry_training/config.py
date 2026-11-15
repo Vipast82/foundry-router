@@ -82,13 +82,26 @@ class TrainingProject:
     tags: dict = field(default_factory=dict)
     unbound_project: str = ""
     unbound: bool = False               # the pseudo-project of unbound Foundry captures
+    # v0.181.146: `[training] exclude = true` turns the selection policy on: the
+    # `require` lists decide which episodes are selected, and frontier-written turns
+    # are targets only with `[training.export] allow_frontier_targets = true`.
+    # Off (the default): no episode is excluded for how it was judged or who wrote
+    # it; what the policy would have said is kept on the episode as `notes`, and
+    # every model's turns are targets. Only text that still looks like a secret
+    # keeps an episode out. On a live store the policy had selected 2 of 1,169.
+    exclude: bool = False
+
+    def frontier_targets(self) -> bool:
+        """May a turn written by a hosted model be a training target?"""
+        return (not self.exclude) or bool(self.export.get("allow_frontier_targets", False))
 
     def require(self, kind: str) -> list[str]:
         return list((self.policy.get(kind) or {}).get("require") or DEFAULT_REQUIRE.get(kind, []))
 
     def policy_hash(self) -> str:
         blob = json.dumps({"policy": self.policy, "split": self.split, "export": self.export,
-                           "local": [self.local_models, self.local_personas]}, sort_keys=True)
+                           "local": [self.local_models, self.local_personas],
+                           **({"exclude": True} if self.exclude else {})}, sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
     def artifact_dirs(self) -> list[str]:
@@ -119,7 +132,8 @@ def load(path: str) -> TrainingProject:
         fast_lane_tasks=[str(x) for x in (fl.get("tasks") or [])]
         if fl.get("enabled", True) else [],
         tags=dict(t.get("tags") or {}),
-        unbound_project=str(t.get("unbound_project") or ""))
+        unbound_project=str(t.get("unbound_project") or ""),
+        exclude=bool(t.get("exclude", False)))
 
 
 def unbound_of(p: TrainingProject) -> TrainingProject:

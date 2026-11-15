@@ -127,7 +127,7 @@ def requirements(ep: dict, cfg, known_secrets=()) -> list[str]:
     if "system_and_tools_known" in need and (not f.get("system_and_tools_known")
                                              or f.get("compaction")):
         reasons.append("missing_context")
-    if not cfg.export.get("allow_frontier_targets", False):
+    if not cfg.frontier_targets():
         # Enforced for every dataset kind, not only where a policy lists
         # local_author: frontier text is never a training target. A "helper"
         # step (a local turn that carried out a helper's prework patch or a
@@ -214,6 +214,21 @@ def eval_categories(ep: dict, task_events: list[dict]) -> list[str]:
     return cats
 
 
+# what keeps an episode out even with excluding off (v0.181.146)
+ALWAYS_EXCLUDES = ("secret_exposure",)
+
+
+def decide(ep: dict, cfg, known_secrets=()) -> tuple[list[str], list[str]]:
+    """(reasons that exclude the episode, notes). With `[training] exclude = true`
+    every reason excludes, as before. Off (the default) only ALWAYS_EXCLUDES do;
+    the rest is what the policy would have said, kept as notes on the episode."""
+    reasons = requirements(ep, cfg, known_secrets)
+    if getattr(cfg, "exclude", False):
+        return reasons, []
+    return ([r for r in reasons if r in ALWAYS_EXCLUDES],
+            [r for r in reasons if r not in ALWAYS_EXCLUDES])
+
+
 def run(store, project_id: str, episodes: list[dict], cfg, known_secrets=()) -> dict:
     ev = store.events(project_id)
     approvals_needed = {e["task_id"] for e in ev if e["event_type"] == "task_transition"
@@ -246,7 +261,8 @@ def run(store, project_id: str, episodes: list[dict], cfg, known_secrets=()) -> 
             # a duplicate joins its canonical's group, so both land in one split
             canon = store.cur.q("SELECT group_id FROM episodes WHERE episode_id=?", (dup_of,))
             group_merge[ep["group_id"]] = canon[0]["group_id"] if canon else ep["group_id"]
-        reasons = requirements(ep, cfg, known_secrets)
+        reasons, notes = decide(ep, cfg, known_secrets)
+        ep["notes"] = notes               # what the policy would have said (excluding off)
         group = group_merge.get(ep["group_id"], ep["group_id"])
         split = split_of(group, project_id, ep["first_ts"], cfg)
         if dup_of:
@@ -338,7 +354,7 @@ def preferences(store, project_id: str, episodes: list[dict], cfg=None) -> list[
     frontier targets. A later response with more information is never paired
     with an earlier one."""
     from .labels import quality_state
-    allow = bool(cfg is not None and cfg.export.get("allow_frontier_targets", False))
+    allow = bool(cfg is not None and cfg.frontier_targets())
     ev = store.events(project_id, "event_type='model_call'")
     outcome_by_session = {e["session_id"]: e["outcome"]["verification"]["status"]
                           for e in episodes if e["kind"] == "trajectory"}
