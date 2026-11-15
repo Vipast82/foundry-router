@@ -2,6 +2,12 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.149 — the router container has an /archive mount for the training archive
+
+- `docker-compose.yml`: `${FOUNDRY_ARCHIVE_DIR_HOST:-./archive}:/archive`. Set `FOUNDRY_ARCHIVE_DIR_HOST` in `.env` to a second disk or a mounted network share, then use `/archive` as the Archive folder (Logs -> Training -> Capture). Without the variable it is a folder next to the compose file.
+- A network share is mounted on the HOST, not by Foundry. On Proxmox with an unprivileged container: mount the NFS export on the Proxmox node (`/etc/fstab`), pass it into the container with `pct set <id> -mp0 /mnt/finetuning,mp=/mnt/finetuning`, restart the container, and set `FOUNDRY_ARCHIVE_DIR_HOST=/mnt/finetuning`.
+- First keep-everything dataset from the converted store (v0.181.146 code): 8,432 sessions, 9,048 conversations, 24,524 examples, 593 million tokens, nothing left out but 382 exact duplicates.
+
 ## v0.181.148 — the capture shrink reads on its own connection (a 61 s freeze)
 
 **What was recorded.** The v0.181.145 shrink on the live router: 14 freezes in half an hour, the longest 61.3 s at `ro_query (capture.py)`. The shrink read its batches through the store's shared read-only connection, whose lock is held for the whole of each query, so a request that read capture records on the event loop waited behind it. (The earlier 6 to 23 s freezes were the disk, addressed in v0.181.146.)

@@ -132,3 +132,10 @@ def test_settings_route_page_and_loop():
     for fid in ("arc-dir", "arc-cap", "arc-ds", "arc-hours", "arc-save", "arc-run"):
         assert f'id="{fid}"' in html, fid
     assert 'api("training/archive", {method: "POST", body: {}})' in html
+
+
+def test_the_container_has_an_archive_mount():
+    from pathlib import Path
+    compose = (Path(ta.__file__).parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "- ${FOUNDRY_ARCHIVE_DIR_HOST:-./archive}:/archive" in compose
+

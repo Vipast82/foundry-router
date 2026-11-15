@@ -25,6 +25,10 @@ services:
       # FOUNDRY_CONFIG_DIR / FOUNDRY_DATA_DIR_HOST in .env (default: next to this file).
       - ${FOUNDRY_CONFIG_DIR:-./config}:/config
       - ${FOUNDRY_DATA_DIR_HOST:-./data}:/data
+      # v0.181.149: the training archive (Logs -> Training -> Archive, folder /archive).
+      # Point FOUNDRY_ARCHIVE_DIR_HOST in .env at a second disk or a mounted network
+      # share (e.g. /mnt/finetuning); the default is a folder next to this file.
+      - ${FOUNDRY_ARCHIVE_DIR_HOST:-./archive}:/archive
     environment:
       - MERIDIAN_API_KEY=${MERIDIAN_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
