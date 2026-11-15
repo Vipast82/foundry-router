@@ -555,3 +555,26 @@ def test_a_silent_stretch_shows_what_the_model_is_doing(tmp_path):
     evs = _run(runner.run_main(ctx))
     assert not [e for e in evs if e.kind == "think" and "still working" in e.text]
     assert AgentBrainConfig().main_progress_seconds == 3.0
+
+
+def test_a_model_can_carry_the_routers_own_limit(tmp_path):
+    """v0.181.144: the small local model reads a deep prompt slowly (about 35 s for 20K
+    tokens on the brain host), so it can be kept to short chats whatever its window."""
+    reg = types.SimpleNamespace(get=lambda m: {
+        "strata": {"context_length": 262144},
+        "small": {"context_length": 65536, "route_max_tokens": 16000}}.get(m))
+    assert main_route.fit(reg, ["strata", "small"], 9_000) == (["strata", "small"], [])
+    keep, notes = main_route.fit(reg, ["strata", "small"], 20_000)
+    assert keep == ["strata"] and "it is given at most 16,000" in notes[0]
+    # stored by hand, kept through an automatic refresh, and on the admin page
+    db = Database(tmp_path / "r.sqlite")
+    registry = ModelRegistry(db)
+    registry.upsert_auto("small", source="discovery", context_length=65536)
+    registry.manual_update("small", route_max_tokens=16000)
+    registry.upsert_auto("small", source="discovery", context_length=65536)
+    assert registry.get("small")["route_max_tokens"] == 16000
+    from pathlib import Path
+    html = (Path(main_route.__file__).parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="me-rmax"' in html and 'route_max_tokens: parseInt($("#me-rmax").value, 10) || null' in html
+    assert 'id="me-ctx"' in html and 'context_length: parseInt($("#me-ctx").value, 10) || null' in html
+

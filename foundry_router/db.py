@@ -498,6 +498,9 @@ class Database:
             ("models", "adequacy_failed", "INTEGER DEFAULT 0"),
             ("models", "calls_ok", "INTEGER DEFAULT 0"),
             ("models", "calls_failed", "INTEGER DEFAULT 0"),
+            # v0.181.144: the largest conversation (tokens) the router gives this model in
+            # main-model mode, whatever its real window is (NULL / 0 = the window)
+            ("models", "route_max_tokens", "INTEGER"),
             ("personas", "selection_weights", "TEXT"),
             ("model_named_benchmarks", "source", "TEXT DEFAULT 'research'"),
             ("personas", "brain_handles_tools", "INTEGER DEFAULT 0"),

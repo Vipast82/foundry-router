@@ -5950,6 +5950,10 @@ async function tabModels() {
         <button class="act" id="me-close" title="Close without saving (Esc)">Close</button></div>
       <div class="dr-body">
       <h3 class="pe-sec">Description</h3>
+      <div class="row"><label title="The model's real context window in tokens, as its server runs it. Empty = what the router detected or was told by the provider.">context window (tokens)</label>
+        <input id="me-ctx" type="number" min="0" step="1024" style="width:110px" placeholder="detected">
+        <label title="The router's own limit for main-model personas: a conversation longer than this is not given to this model (the next model on the route takes it), whatever the real window is. Use it to keep a small local model to short chats, where it is fast. Empty = up to its window.">largest conversation sent to it (tokens)</label>
+        <input id="me-rmax" type="number" min="0" step="1024" style="width:110px" placeholder="its window"></div>
       <div class="row"><label>relative_cost_tier</label>
         <select id="me-tier"><option value="">-</option><option>free</option>
         <option>low</option><option>medium</option><option>high</option><option>very_high</option></select>
@@ -6014,6 +6018,8 @@ window.editModel = id => {
   panel.querySelector(".dr-body").scrollTop = 0;
   $("#me-id").textContent = id;
   $("#me-tier").value = m.relative_cost_tier || "";
+  $("#me-ctx").value = m.context_length || "";
+  $("#me-rmax").value = m.route_max_tokens || "";
   $("#me-policy").value = m.content_policy || "";
   $("#me-tags").value = parseTags(m.tags).join(", ");
   $("#me-good").value = m.good_for || "";
@@ -6103,6 +6109,8 @@ window.editModel = id => {
     const tags = $("#me-tags").value.split(",").map(s => s.trim()).filter(Boolean);
     run(api("models/update", {method: "POST", body: {
       id, relative_cost_tier: $("#me-tier").value || null,
+      context_length: parseInt($("#me-ctx").value, 10) || null,
+      route_max_tokens: parseInt($("#me-rmax").value, 10) || null,
       content_policy: $("#me-policy").value || null,
       tags: tags.length ? JSON.stringify(tags) : null,
       good_for: $("#me-good").value || null,

@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.144 — a model can carry the router's own conversation limit; a model's window can be set by hand
+
+- **Model Registry → edit a model → "largest conversation sent to it (tokens)"** (`models.route_max_tokens`). In main-model mode a conversation longer than that is not given to the model, whatever its real window is; the next model on the route takes it. For a small local model that fits a long chat but reads it slowly (the brain host's sweep: about 35 s for a 20K-token prompt, 4 minutes for 63K), so it can be kept to short chats where it is fast. Set by hand only; an automatic refresh never changes it.
+- **"context window (tokens)"** on the same form: the model's real window, for a server the router could not read it from (the brain host's model had none recorded).
+
+Tests: `tests/test_main_mode.py`.
+
 ## v0.181.143 — helpers: a main-model persona can ask other models for help
 
 Phase 3 of the one-chat-persona plan, first part (A2A agents as helpers come next). Nothing changes for a persona without helpers.

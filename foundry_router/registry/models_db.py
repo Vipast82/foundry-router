@@ -97,6 +97,7 @@ MODEL_FIELDS = [
     # picked as a worker because the flag only ever got set reactively, after a
     # "does not support chat" 400). upsert_auto still respects manual overrides.
     "embedding",
+    "route_max_tokens",          # v0.181.144: the router's own cap, set by hand only
     # Backend-declared capabilities from Ollama /api/show (JSON list: e.g.
     # vision, tools, thinking, insert). Auto-probed at discovery; advertised to
     # clients so they can enable image / reasoning features.
