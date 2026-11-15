@@ -43,6 +43,7 @@ _QUICK_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 # UI renders a card per present probe; a flavor asks only for endpoints its
 # server actually implements, so we don't spam 404s.
 _MONITOR_REQUESTS = 25
+_MONITOR_POINTS = 120
 
 _PROBES: dict[str, list[str]] = {
     # "status" (v0.181.152): Strata's /v1/status, the engine's own counters. Its
@@ -273,14 +274,19 @@ class OpenAIAdmin:
             if (r.text or "").lstrip().startswith("{"):
                 # v0.181.153: the Strata gateway answers /metrics with JSON (what its
                 # own Monitor page reads): hardware, engine, conversation cache,
-                # totals, recent requests. The time series ("history") is left out
-                # and the request list is cut to the latest _MONITOR_REQUESTS.
+                # totals, recent requests. The request list is cut to the latest
+                # _MONITOR_REQUESTS.
                 try:
                     j = r.json()
                 except Exception:                                   # noqa: BLE001
                     j = None
                 if isinstance(j, dict):
-                    mon = {k: v for k, v in j.items() if k != "history"}
+                    mon = dict(j)
+                    # v0.181.155: the time series stay, cut to the latest points:
+                    # the page draws them as trend lines
+                    if isinstance(mon.get("history"), dict):
+                        mon["history"] = {k: (v[-_MONITOR_POINTS:] if isinstance(v, list) else v)
+                                          for k, v in mon["history"].items()}
                     if isinstance(mon.get("requests"), list):
                         mon["requests"] = mon["requests"][:_MONITOR_REQUESTS]
                     return {"ok": True, "summary": {}, "metrics": {}, "monitor": mon}
