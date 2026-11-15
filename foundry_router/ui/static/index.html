@@ -4185,16 +4185,18 @@ async function tabTraining() {
       <p class="hint">projects: ${esc((c.projects || []).join(", ") || (c.enabled ? "all bound" : "—"))}${(c.exclude_projects || []).length ? " · excluded: " + esc(c.exclude_projects.join(", ")) : ""}${c.errors ? ` · <span class="pill bad">${c.errors} capture errors</span> ${esc(c.last_error || "")}` : ""}${c.store_error ? ` · <span class="pill bad">store: ${esc(c.store_error)}</span>` : ""}</p>
       ${(() => {
         const k = c.compaction || {}, gb = b => (b / 1e9).toFixed(b >= 1e10 ? 0 : 2) + " GB";
-        const done = c.packed_through && k.state !== "running";
+        const total = (c.counts || []).reduce((a, r) => a + (r.n || 0), 0);
+        const left = total && c.packed_through != null ? Math.max(0, total - c.packed_through) : null;
+        const done = k.state === "done" || (k.state !== "running" && left !== null && left < total * 0.01);
         const prog = k.state === "running"
           ? (k.phase === "packing" ? `packing record ${(k.at || k.from || 0).toLocaleString()} of ${(k.to || 0).toLocaleString()} (${k.verified} checked)` : esc(k.phase || "working"))
           : k.state === "done" ? `finished: ${gb(k.bytes_before)} → ${gb(k.bytes_after)}`
           : k.state === "error" ? `stopped: ${esc(k.error)}` : "";
         return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Capture store</b>
           <span class="stat" style="margin-left:0">size <b>${c.store_bytes != null ? gb(c.store_bytes) : "—"}</b></span>
-          <button class="act" id="cap-compact" ${k.state === "running" ? "disabled" : ""} title="Every captured call holds the whole conversation before it. This stores each message once: the records written before v0.181.145 are rewritten a few at a time (every 100th is read back and compared first), then the freed space is returned to the disk. Capture keeps running. It can be started again after a restart and continues where it stopped.">${k.state === "running" ? "Shrinking…" : done ? "Shrink again" : "Shrink the store"}</button>
+          <button class="act" id="cap-compact" ${k.state === "running" ? "disabled" : ""} title="Every captured call holds the whole conversation before it. This stores each message once: the records written before v0.181.145 are rewritten a few at a time (every 100th is read back and compared first), then the freed space is returned to the disk. Capture keeps running. It can be started again after a restart and continues where it stopped.">${k.state === "running" ? "Shrinking…" : done ? "Shrink again" : c.packed_through ? "Continue shrinking" : "Shrink the store"}</button>
           ${k.state === "running" ? '<button class="act" id="cap-compact-stop" title="Ends the shrink after the few records in hand. Start it again later and it continues from there.">Stop</button>' : ""}
-          <span class="hint">${prog || (k.state === "stopped" ? "stopped; start it again to continue" : done ? "records are stored with each message once" : "records written before v0.181.145 repeat the whole conversation in every call")}</span></div>`;
+          <span class="hint">${prog || (k.state === "stopped" ? "stopped; start it again to continue" : done ? "records are stored with each message once" : c.packed_through ? `not finished: about ${(left === null ? 0 : left).toLocaleString()} older records still repeat the whole conversation (it stops at every restart; press Continue)` : "records written before v0.181.145 repeat the whole conversation in every call")}</span></div>`;
       })()}
       ${(() => {
         const a = d.archive || {}, l = a.last || {}, r = a.run || {}, smb = a.smb || {};
@@ -7934,6 +7936,7 @@ const _PROBE_INFO = {
   slots: ["/slots", "what each parallel slot is doing (llama-server; off when it was started with --no-slots)"],
   models: ["/v1/models", "the models it serves"],
   metrics: ["/metrics", "engine counters: KV cache, queue, tokens per second (llama-server needs --metrics)"],
+  status: ["/v1/status", "the engine's own counters: experts in VRAM and RAM, cache use (Strata)"],
 };
 // Pairs in a /health reply that read better as a share: [part, whole, what it is].
 const _HEALTH_RATIOS = [["vram_hits", "lookups", "expert lookups answered from VRAM"],
@@ -7955,7 +7958,7 @@ function renderDiagReport(rep, cur) {
 
   // what did not succeed, split by why
   const failed = [], absent = [];
-  for (const k of ["health", "version", "props", "slots", "models", "metrics"]) {
+  for (const k of ["health", "version", "props", "slots", "models", "metrics", "status"]) {
     const p = rep[k];
     if (!p || p.ok) continue;
     // the model list is not optional: a server without it is a wrong address
@@ -7997,10 +8000,12 @@ function renderDiagReport(rep, cur) {
     }).join("")}</ul>`);
   }
 
-  if (h && h.ok) {
+  // any JSON object a server answers with, laid out: plain values as tiles, each
+  // nested object as a group with its shares and tiles, the reply itself in a fold
+  const factsBlock = (bodyObj, skipStatus) => {
     const facts = [], groups = [];
-    if (isObj(h.body)) for (const [k, v] of Object.entries(h.body)) {
-      if (k === "status" && typeof v === "string") continue;        // shown above, as the status
+    if (isObj(bodyObj)) for (const [k, v] of Object.entries(bodyObj)) {
+      if (skipStatus && k === "status" && typeof v === "string") continue;   // shown above, as the status
       (isObj(v) ? groups : facts).push([k, v]);
     }
     let inner = facts.length ? `<div class="tiles">${facts.map(([k, v]) => tile(k, v)).join("")}</div>` : "";
@@ -8013,10 +8018,13 @@ function renderDiagReport(rep, cur) {
           }).join("")
         + `<div class="tiles" style="margin-top:8px">${Object.entries(o).map(([k, v]) => tile(k, v)).join("")}</div>`;
     }
-    if (!inner) inner = `<span class="pill ok">ok</span> <span class="mono">${esc(typeof h.body === "string" ? h.body : "")}</span>`;
-    if (isObj(h.body)) inner += `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(h.body, null, 1))}</pre></details>`;
-    html += card(`Health <span class="hint">— what GET /health answered</span>`, inner);
-  }
+    if (!inner) inner = `<span class="pill ok">ok</span> <span class="mono">${esc(typeof bodyObj === "string" ? bodyObj : "")}</span>`;
+    if (isObj(bodyObj)) inner += `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(bodyObj, null, 1))}</pre></details>`;
+    return inner;
+  };
+  if (h && h.ok) html += card(`Health <span class="hint">— what GET /health answered</span>`, factsBlock(h.body, true));
+  const es = good("status");
+  if (es) html += card(`Engine status <span class="hint">— what GET /v1/status answered</span>`, factsBlock(es.body, false));
 
   let grid = "";
   if (rep.swap && rep.swap.is_swap) {

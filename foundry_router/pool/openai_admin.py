@@ -43,7 +43,10 @@ _QUICK_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 # UI renders a card per present probe; a flavor asks only for endpoints its
 # server actually implements, so we don't spam 404s.
 _PROBES: dict[str, list[str]] = {
-    "llamacpp": ["health", "swap", "props", "slots", "models", "metrics"],
+    # "status" (v0.181.152): Strata's /v1/status, the engine's own counters. Its
+    # gateway's /health is a short summary without the expert tiers that the bare
+    # engine's /health (the Unbiased Strata fork) carries. Absent on plain llama.cpp.
+    "llamacpp": ["health", "swap", "props", "slots", "models", "metrics", "status"],
     "unsloth":  ["models"],
     "vllm":     ["health", "version", "models", "metrics"],
     "openai":   ["models"],
@@ -152,6 +155,15 @@ class OpenAIAdmin:
             if r.status_code >= 400:
                 return {**probe_failure(status=r.status_code), "body": body}
             return {"ok": True, "status_code": r.status_code, "body": body}
+        except Exception as e:
+            return probe_failure(e)
+
+    async def _probe_status(self, root: str, headers: dict) -> dict:
+        """Strata GET /v1/status: whatever the engine reports about itself (expert
+        tiers, cache and request counters). Passed on as it is: the page lays out
+        any JSON object as tiles."""
+        try:
+            return {"ok": True, "body": await self._get_json(f"{root}/v1/status", headers)}
         except Exception as e:
             return probe_failure(e)
 
@@ -290,6 +302,7 @@ class OpenAIAdmin:
             "metrics": lambda: self._probe_metrics(root, headers, flavor),
             "swap": lambda: self._probe_swap(root, headers),
             "version": lambda: self._probe_version(root, headers),
+            "status": lambda: self._probe_status(root, headers),
         }
         names = [p for p in _PROBES.get(flavor, ["models"]) if p in calls]
         # v0.181.135: asked together. One after another, a host that was slow on

@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.152 — Host Admin asks a Strata server for its engine status; the shrink's real progress
+
+- **Host Admin, llama.cpp-kind servers: `GET /v1/status`.** Asked directly (2026-11-15): the brain host (Unbiased Strata fork, the bare engine's own server) puts the expert tiers in `/health` and has no `/props`, `/slots`, `/metrics`; the Strata host (Niko1221/Strata, a Python gateway) answers `/health` with a short summary without the tiers, and its source names `/v1/status` for the engine's counters. The page now asks for it and lays the reply out as an "Engine status" card (any JSON object: values as tiles, nested objects as groups, the reply itself in a fold). A server without it is listed under "Not offered by this server".
+- **Training → Capture store**: after a restart the card said "records are stored with each message once" and offered "Shrink again" while most records were still unpacked (the shrink stops at every restart). It now says how many older records are left and offers "Continue shrinking".
+
+Not verified live: what the Strata gateway returns from `/v1/status` (it needs the backend's key, which only the router holds).
+
+Tests: `tests/test_openai_admin.py`.
+
 ## v0.181.151 — a running record count blocks neither capture nor the Training page
 
 **What was recorded** (live, v0.181.150, right after a restart, Training tab opened): a 12.2 s freeze at `insert_later (capture.py)`, and the Training page took very long to load. The background count of capture records holds the shared read-only connection's lock for the whole of its query (the store was still about 103 GB).
