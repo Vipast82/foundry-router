@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.139 — settings that were typed as JSON are edited through forms (backends first)
+
+Phase 1 of the one-chat-persona plan: the admin page only. No setting changes its meaning, its storage or its API; every form writes the same JSON the box held, and the box stays under "Edit as JSON".
+
+- **Backends → Pool → Add or edit.** The backend list was one JSON box. It is a table: an on/off switch, Test, Edit and Remove per backend, and "+ Add backend". The form picks the kind of server from a list (llama.cpp, Ollama, vLLM, Unsloth, OpenAI-compatible, CLIProxyAPI, Meridian, Anthropic API), which sets the protocol and flavor, and shows only the settings that kind has (limits, lane for short jobs, subscription and plan limits, Meridian, Anthropic). A setting the form does not show is kept as it was; a key shown masked is kept by the server. A new backend is tested as soon as it is saved. The name is fixed after creation (personas, budgets and logs refer to it). The whole list as JSON is still there under a fold.
+- **One form widget for JSON fields** (`enhanceJForms`, `data-jform="<schema>"`): labelled number boxes, switches and pick-lists for the known keys, name/value rows for any other key, one block per rule for rule lists. Used for: a persona's limits, selection weights, sampling options, notes per chat program and turn assist; the global sampling defaults; MCP endpoint profiles; an MCP server's extra call defaults; the semantic cache's lifetime per category; the global turn assist defaults, block rules, fix rules and error markers; the budget rules.
+- A rule with an empty pattern (or a budget rule without a name) is not written: an empty pattern would match every command.
+
+Tests: `tests/test_ui_kit.py` (the form widget, every marked field, the backends form).
+
 ## v0.181.138 — the short freezes left on v0.181.135 (control center overview and graph, budget page)
 
 **What was recorded.** In two days on v0.181.135 the stall watchdog logged seven freezes of 0.3 to 4.9 s and 40 slow database calls. One cause throughout: a large read holding the one database lock, either on the event loop or on a thread while the loop waited for the lock.

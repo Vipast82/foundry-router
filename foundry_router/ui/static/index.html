@@ -240,6 +240,39 @@
   .mpick-all { color:var(--accent); border-bottom:1px solid var(--line); }
   .mpick-free { color:var(--dim); border-top:1px solid var(--line); font-style:italic; }
   .mpick-group { padding:5px 10px 2px; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.04em; }
+  /* v0.181.139: forms over JSON-backed settings (enhanceJForms) and the backend editor */
+  .jf { flex:1 1 100%; min-width:0; }
+  .row .jf label, .modal .be-form label { min-width:0; }
+  .jf-grid { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:flex-end; margin:4px 0; }
+  .jf-f { display:flex; flex-direction:column; gap:2px; font-size:12px; color:var(--dim); }
+  .jf-f.jf-wide { flex:1 1 300px; }
+  .jf-f.jf-wide > input, .jf-f.jf-wide > textarea, .jf-f.jf-wide > .mpick { width:100%; box-sizing:border-box; }
+  .jf-f input[type=number] { width:104px; }
+  .jf-f.jf-check { flex-direction:row; align-items:center; gap:5px; padding-bottom:4px; }
+  .jf-f.jf-check input { margin:0; accent-color:var(--accent); }
+  .jf-grp { margin:4px 0; border:1px solid var(--line); border-radius:6px; padding:3px 9px; }
+  .jf-grp > summary, .jf-raw > summary { cursor:pointer; font-size:12px; color:var(--dim); }
+  .jf-grp[open] > summary { color:var(--accent); }
+  .jf-raw { margin-top:5px; }
+  .jf-raw > summary { font-size:11px; }
+  .jf-raw textarea, .jf-raw > input { width:100%; box-sizing:border-box; font-family:monospace; font-size:12px; margin-top:4px; }
+  .jf-pair { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:3px 0; }
+  .jf-pair .jf-k { width:190px; }
+  .jf-pair .jf-v { flex:1; min-width:150px; }
+  .jf-pair .mpick { min-width:150px; }
+  .jf-item { border:1px solid var(--line); border-radius:6px; padding:4px 8px; margin:5px 0; display:flex; gap:8px; align-items:flex-start; }
+  .jf-item > div { flex:1; min-width:0; }
+  .jf-rm { border:0; background:none; color:var(--dim); cursor:pointer; font-size:16px; line-height:1; padding:2px 4px; }
+  .jf-rm:hover { color:var(--bad); }
+  .jf-add { margin-top:3px; font-size:12px; }
+  .be-table td, .be-table th { vertical-align:middle; }
+  .be-table .be-off td { opacity:.55; }
+  .be-table .be-off td:first-child, .be-table .be-off td:last-child { opacity:1; }
+  .be-form { display:flex; flex-direction:column; gap:8px; }
+  .be-form .jf-f > input[type=text], .be-form .jf-f > select { min-width:230px; }
+  .be-form .be-main .jf-f { flex:1 1 240px; }
+  .be-form .be-main .jf-f > input[type=text], .be-form .be-main .jf-f > select { width:100%; box-sizing:border-box; }
+  .be-form .be-main .jf-f.jf-check { flex:0 0 auto; }
   .modal { position:fixed; inset:0; z-index:25; background:rgba(0,0,0,.55);
          display:flex; align-items:flex-start; justify-content:center;
          padding:6vh 14px; overflow-y:auto; }
@@ -688,6 +721,7 @@ document.addEventListener("scroll", e => {
   if (_pickOpen && !_pickOpen.menu.contains(e.target)) _pickOpen.place();
 }, true);
 function enhancePickers(root) {
+  enhanceJForms(root);
   (root || document).querySelectorAll("input[data-multi]:not([data-picker])").forEach(input => {
     input.dataset.picker = "1";
     const fmt = input.dataset.multi, key = input.dataset.options || "";
@@ -798,6 +832,413 @@ function enhancePickers(root) {
   });
 }
 
+/* ---------------------------------------------------------- JSON forms -- */
+// v0.181.139: a setting stored as JSON is edited through a form. Mark the field with
+//   data-jform="<name in window._jforms>"
+// The field stays the source of truth (the same JSON as before, kept under "Edit as
+// JSON"), so the load and save code is unchanged; assigning field.value redraws the form.
+// Kinds: object (labelled fields + any other key as a name/value row), map (name ->
+// value rows), rows (a list of objects, one block each), strings (a list of text lines).
+const _taValueDesc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+const _JF_EFFORT = ["off", "low", "medium", "high"];
+const _JF_SAMPLING = [
+  {key: "temperature", label: "temperature", type: "number", step: "0.05", hint: "Higher = more varied answers. Typical 0.1 to 1.0."},
+  {key: "top_p", label: "top_p", type: "number", step: "0.05", hint: "Only the most likely words that add up to this share are considered."},
+  {key: "top_k", label: "top_k", type: "number", hint: "Only the k most likely words are considered."},
+  {key: "min_p", label: "min_p", type: "number", step: "0.01"},
+  {key: "repeat_penalty", label: "repeat_penalty", type: "number", step: "0.05", hint: "Above 1 discourages repeating."},
+  {key: "presence_penalty", label: "presence_penalty", type: "number", step: "0.1"},
+  {key: "frequency_penalty", label: "frequency_penalty", type: "number", step: "0.1"},
+  {key: "seed", label: "seed", type: "number", hint: "A fixed number makes answers repeatable."}];
+const _JF_ASSIST = [
+  {group: "Thinking", key: "think_policy", label: "thinking level set by", type: "select", options: ["client", "persona", "sticky", "adaptive"],
+   hint: "client = what the chat program sends; persona = this persona's reasoning effort, constant; sticky = raised once when the model is stuck; adaptive = a level per turn (each change makes a local model re-read its context)."},
+  {group: "Thinking", key: "think_levels.routine", label: "adaptive: routine turn", type: "select", options: _JF_EFFORT},
+  {group: "Thinking", key: "think_levels.after_edit", label: "adaptive: after an edit", type: "select", options: _JF_EFFORT},
+  {group: "Thinking", key: "think_levels.after_failure", label: "adaptive: after a failure", type: "select", options: _JF_EFFORT},
+  {group: "Thinking", key: "think_base", label: "sticky: normal level", type: "select", options: _JF_EFFORT},
+  {group: "Thinking", key: "think_escalate", label: "sticky: level once stuck", type: "select", options: _JF_EFFORT},
+  {group: "Thinking", key: "think_escalate_after", label: "sticky: findings before raising", type: "number"},
+  {group: "Repeated calls", key: "loop_block_at", label: "block identical call no. (same result)", type: "number", hint: "0 = off"},
+  {group: "Repeated calls", key: "loop_block_any_at", label: "block identical call no. (any result)", type: "number"},
+  {group: "Repeated calls", key: "loop_block_max", label: "blocks before the turn ends", type: "number"},
+  {group: "Context savers", key: "dedupe_reads", label: "drop repeated file reads", type: "bool"},
+  {group: "Context savers", key: "dedupe_min_chars", label: "only reads longer than (chars)", type: "number"},
+  {group: "Context savers", key: "roblox_cleanup", label: "trim Roblox tool output", type: "bool"},
+  {group: "Context savers", key: "image_keep", label: "pictures kept in context", type: "number", hint: "0 = all"},
+  {group: "Context savers", key: "soft_budget_tokens", label: "soft context budget (tokens)", type: "number", hint: "0 = off"},
+  {group: "Command check (pre-judge)", key: "prejudge", label: "mode", type: "select", options: ["off", "observe", "enforce"]},
+  {group: "Command check (pre-judge)", key: "prejudge_max_edit_chars", label: "largest edit checked (chars)", type: "number"},
+  {group: "Command check (pre-judge)", key: "prejudge_disabled_rules", label: "rules to skip", type: "list", wide: true},
+  {group: "Supervisor (stuck detection)", key: "supervisor", label: "mode", type: "select", options: ["off", "observe", "nudge", "escalate"]},
+  {group: "Supervisor (stuck detection)", key: "sup_loop_repeats", label: "identical call + result in a row", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_error_streak", label: "failures in a row", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_error_window_fails", label: "or failures within the window", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_error_window", label: "window (calls)", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_edit_fails", label: "failed edits to one file", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_play_calls", label: "playtest calls", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_play_window", label: "within (tool calls)", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_sleep_run", label: "sleep commands in a row", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_capture_repeats", label: "same output lost (times)", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_escalate_advice_at", label: "finding no. that asks the advisor", type: "number"},
+  {group: "Supervisor (stuck detection)", key: "sup_escalate_block_at", label: "finding no. that stops the task", type: "number"},
+  {group: "Completion auditor", key: "auditor", label: "mode", type: "select", options: ["off", "observe", "enforce"]},
+  {group: "Completion auditor", key: "auditor_min_tool_turns", label: "only after tool turns", type: "number"},
+  {group: "Completion auditor", key: "auditor_max_rejections", label: "rejections at most", type: "number"},
+  {group: "Completion auditor", key: "auditor_min_report_chars", label: "only reports longer than (chars)", type: "number"},
+  {group: "Completion auditor", key: "auditor_required_patterns", label: "the report must match (regex)", type: "list", wide: true},
+  {group: "Completion auditor", key: "auditor_forbidden_patterns", label: "the report must not match (regex)", type: "list", wide: true},
+  {group: "Completion auditor", key: "auditor_prompt", label: "judge instructions (empty = built-in)", type: "longtext", wide: true},
+  {group: "Frontier advisor", key: "advisor", label: "offer the consult_senior tool", type: "bool"},
+  {group: "Frontier advisor", key: "frontier_models", label: "frontier models, tried in order", type: "list", options: "models", ordered: true, wide: true},
+  {group: "Frontier advisor", key: "frontier_max_calls", label: "calls per conversation", type: "number"},
+  {group: "Frontier advisor", key: "frontier_rounds", label: "rounds", type: "number"},
+  {group: "Frontier advisor", key: "packet_turns", label: "recent turns sent", type: "number"},
+  {group: "Frontier advisor", key: "advisor_prompt", label: "advisor instructions (empty = built-in)", type: "longtext", wide: true}];
+const _JF_GLOB = "A name, a pattern with * (meridian*), or several separated by commas. Empty = any.";
+window._jforms = {
+  guard: {kind: "object", fields: [
+    {key: "max_steps_per_request", label: "steps per request", type: "number", placeholder: "global", hint: "Model and tool rounds one request may take. Empty = the global limit."},
+    {key: "max_paid_calls_per_request", label: "paid calls per request", type: "number", placeholder: "global", hint: "0 = this persona never uses a paid model."},
+    {key: "daily_spend_cap_usd", label: "daily spend cap ($)", type: "number", step: "0.5", placeholder: "global"},
+    {key: "weekly_spend_cap_usd", label: "weekly spend cap ($)", type: "number", step: "0.5", placeholder: "global"}]},
+  weights: {kind: "object", fields: [
+    {key: "primary", label: "benchmark score", type: "number", step: "0.1", hint: "Weight of the score in this persona's category."},
+    {key: "tool_calling", label: "tool calling", type: "number", step: "0.1"},
+    {key: "adequacy", label: "judged quality", type: "number", step: "0.1", hint: "What the outcome judge observed for the model."},
+    {key: "latency", label: "speed", type: "number", step: "0.1", hint: "Warm tokens per second."}]},
+  sampling: {kind: "object", fields: _JF_SAMPLING, addLabel: "Add another option"},
+  assist: {kind: "object", fields: _JF_ASSIST},
+  compat: {kind: "map", keyLabel: "chat program", valueType: "text", valueLabel: "note",
+           keyOptions: ["openwebui", "anythingllm", "cline", "kilo", "messaging-bridges"], addLabel: "Add a note"},
+  ttls: {kind: "map", keyLabel: "category", valueType: "number", valueLabel: "seconds (0 = never cached)",
+         keyOptions: ["coding", "reasoning", "general_chat", "tool_calling", "agentic"], addLabel: "Add a category"},
+  profiles: {kind: "map", keyLabel: "profile name", valueType: "list", valueOptions: "mcpServers", addLabel: "Add a profile"},
+  anymap: {kind: "map", keyLabel: "argument", valueType: "any", valueLabel: "value", addLabel: "Add an argument"},
+  strings: {kind: "strings", placeholder: "regular expression", addLabel: "Add a marker"},
+  blockRules: {kind: "rows", required: "pattern", addLabel: "Add a block rule", blank: {enabled: true}, fields: [
+    {key: "enabled", label: "on", type: "check"},
+    {key: "rule", label: "rule name", type: "text"},
+    {key: "pattern", label: "command matches (regex)", type: "text", wide: true},
+    {key: "unless", label: "unless it also matches (regex)", type: "text", wide: true},
+    {key: "advice", label: "what the model is told", type: "text", wide: true}]},
+  fixRules: {kind: "rows", required: "pattern", addLabel: "Add a fix rule", blank: {enabled: true}, fields: [
+    {key: "enabled", label: "on", type: "check"},
+    {key: "pattern", label: "command matches (regex)", type: "text", wide: true},
+    {key: "replacement", label: "replace with", type: "text", wide: true, keepEmpty: true},
+    {key: "desc", label: "description", type: "text", wide: true}]},
+  budgetRules: {kind: "rows", required: "name", addLabel: "Add a rule", blank: {enabled: true, mode: "enforce", match: {}, window_minutes: 300}, fields: [
+    {key: "enabled", label: "on", type: "check"},
+    {key: "name", label: "rule name", type: "text"},
+    {key: "mode", label: "mode", type: "select", options: ["enforce", "observe"], required: true, hint: "observe = only logs what it would refuse."},
+    {key: "match.backend", label: "backend", type: "globs", hint: _JF_GLOB},
+    {key: "match.persona", label: "persona", type: "globs", hint: _JF_GLOB},
+    {key: "match.client", label: "client", type: "globs", hint: _JF_GLOB},
+    {key: "match.account", label: "account", type: "globs", hint: _JF_GLOB + " e.g. meridian:claude, cliproxy:codex"},
+    {key: "match.model", label: "model", type: "globs", hint: _JF_GLOB},
+    {key: "match.paid", label: "paid or local", type: "bool", placeholder: "both", on: "paid only", off: "local only"},
+    {key: "per", label: "one allowance per", type: "select", placeholder: "shared by all",
+     options: ["client", "persona", "session", "task", "request", "backend", "account", "project", "work_task", "run", "role"]},
+    {key: "window_minutes", label: "window (minutes)", type: "number", hint: "0 = no window: the whole life of the group."},
+    {key: "max_calls", label: "calls at most", type: "number", placeholder: "no cap"},
+    {key: "max_tokens", label: "tokens at most", type: "number", placeholder: "no cap"},
+    {key: "max_concurrent", label: "calls in flight at most", type: "number", placeholder: "no cap"},
+    {key: "max_active", label: "active helpers at most", type: "number", placeholder: "no cap"},
+    {key: "active_by", label: "a helper is one", type: "select", options: ["task", "session", "client", "persona", "run"]},
+    {key: "idle_seconds", label: "idle after (seconds)", type: "number"},
+    {key: "wait_seconds", label: "wait for a free place (seconds)", type: "number"}]},
+};
+function _jfGet(o, path) {
+  return path.split(".").reduce((a, k) => (a && typeof a === "object" ? a[k] : undefined), o);
+}
+function _jfSet(o, path, v) {                      // v === undefined removes the key
+  const ks = path.split(".");
+  let a = o;
+  for (let i = 0; i < ks.length - 1; i++) {
+    const n = a[ks[i]];
+    if (!n || typeof n !== "object" || Array.isArray(n)) { if (v === undefined) return; a[ks[i]] = {}; }
+    a = a[ks[i]];
+  }
+  if (v === undefined) delete a[ks[ks.length - 1]]; else a[ks[ks.length - 1]] = v;
+  if (v === undefined && ks.length > 1 && path.split(".")[0] !== "match") {   // drop a parent left empty
+    const p = ks.slice(0, -1).join("."), pv = _jfGet(o, p);
+    if (pv && typeof pv === "object" && !Object.keys(pv).length) _jfSet(o, p, undefined);
+  }
+}
+function _jfControl(obj, f, commit) {
+  const lab = document.createElement(f.type === "list" ? "div" : "label");
+  lab.className = "jf-f" + (f.wide ? " jf-wide" : "");
+  if (f.hint) lab.title = f.hint;
+  const cap = document.createElement("span");
+  cap.textContent = f.label;
+  const cur = _jfGet(obj, f.key);
+  const put = v => { _jfSet(obj, f.key, v); commit(); };
+  let el;
+  if (f.type === "number") {
+    el = document.createElement("input");
+    el.type = "number";
+    if (f.step) el.step = f.step;
+    el.placeholder = f.placeholder || "default";
+    if (typeof cur === "number") el.value = cur;
+    el.oninput = () => put(el.value === "" || isNaN(+el.value) ? undefined : +el.value);
+  } else if (f.type === "bool") {
+    el = document.createElement("select");
+    el.innerHTML = `<option value="">${esc(f.placeholder || "default")}</option><option value="true">${esc(f.on || "on")}</option><option value="false">${esc(f.off || "off")}</option>`;
+    el.value = cur === true ? "true" : cur === false ? "false" : "";
+    el.onchange = () => put(el.value === "" ? undefined : el.value === "true");
+  } else if (f.type === "check") {
+    el = document.createElement("input");
+    el.type = "checkbox";
+    el.checked = cur === undefined ? f.default !== false : !!cur;
+    el.onchange = () => put(el.checked);
+    lab.classList.add("jf-check");
+  } else if (f.type === "select") {
+    el = document.createElement("select");
+    const opts = f.options.slice();
+    if (typeof cur === "string" && cur && !opts.includes(cur)) opts.push(cur);
+    el.innerHTML = (f.required ? "" : `<option value="">${esc(f.placeholder || "default")}</option>`)
+      + opts.map(o => `<option>${esc(o)}</option>`).join("");
+    el.value = typeof cur === "string" ? cur : (f.required ? opts[0] : "");
+    el.onchange = () => put(el.value === "" ? undefined : el.value);
+  } else if (f.type === "list") {
+    el = document.createElement("input");
+    el.dataset.multi = "json";
+    if (f.options) el.dataset.options = f.options;
+    if (f.ordered) el.dataset.ordered = "";
+    el.placeholder = f.placeholder || "type, Enter to add";
+    el.value = JSON.stringify(Array.isArray(cur) ? cur : []);
+    el.addEventListener("change", () => { const a = _pickParse(_valueDesc.get.call(el), "json"); put(a.length ? a : undefined); });
+  } else if (f.type === "globs") {
+    el = document.createElement("input");
+    el.type = "text";
+    el.placeholder = f.placeholder || "any";
+    el.value = Array.isArray(cur) ? cur.join(", ") : (cur == null ? "" : String(cur));
+    el.oninput = () => { const a = el.value.split(",").map(x => x.trim()).filter(Boolean); put(!a.length ? undefined : a.length === 1 ? a[0] : a); };
+  } else if (f.type === "longtext") {
+    el = document.createElement("textarea");
+    el.rows = 3;
+    el.value = typeof cur === "string" ? cur : "";
+    el.oninput = () => put(el.value === "" ? undefined : el.value);
+  } else {
+    el = document.createElement("input");
+    el.type = "text";
+    if (f.placeholder) el.placeholder = f.placeholder;
+    el.value = cur == null ? "" : (typeof cur === "string" ? cur : JSON.stringify(cur));
+    el.oninput = () => put(el.value === "" && !(f.keepEmpty && cur !== undefined) ? undefined : el.value);
+  }
+  if (f.type === "check") lab.append(el, cap); else lab.append(cap, el);
+  return lab;
+}
+function _jfFields(box, obj, fields, commit) {
+  let group, grid = null;
+  for (const f of fields) {
+    const g = f.group || "";
+    if (grid === null || g !== group) {
+      group = g;
+      grid = document.createElement("div");
+      grid.className = "jf-grid";
+      if (g) {
+        const d = document.createElement("details");
+        d.className = "jf-grp";
+        const set = fields.filter(x => (x.group || "") === g && _jfGet(obj, x.key) !== undefined).length;
+        d.innerHTML = `<summary>${esc(g)}${set ? ` <span class="hint">· ${set} set</span>` : ""}</summary>`;
+        d.open = set > 0;
+        d.appendChild(grid);
+        box.appendChild(d);
+      } else box.appendChild(grid);
+    }
+    grid.appendChild(_jfControl(obj, f, commit));
+  }
+}
+let _jfSeq = 0;
+// name -> value rows for every key of `val` that `keep` (the labelled fields) does not own
+function _jfPairs(box, val, keep, sch, commit) {
+  const pairs = Object.keys(val).filter(k => !keep.has(k)).map(k => [k, val[k]]);
+  const list = document.createElement("div");
+  box.appendChild(list);
+  const sync = () => {
+    Object.keys(val).forEach(k => { if (!keep.has(k)) delete val[k]; });
+    pairs.forEach(([k, v]) => { k = String(k).trim(); if (k && !keep.has(k)) val[k] = v; });
+    commit();
+  };
+  let dl = "";
+  if (sch.keyOptions) {
+    dl = "jf-dl-" + (++_jfSeq);
+    const d = document.createElement("datalist");
+    d.id = dl;
+    d.innerHTML = sch.keyOptions.map(o => `<option value="${esc(o)}">`).join("");
+    box.appendChild(d);
+  }
+  const draw = () => {
+    list.innerHTML = "";
+    pairs.forEach((p, i) => {
+      const row = document.createElement("div");
+      row.className = "jf-pair";
+      const k = document.createElement("input");
+      k.type = "text"; k.className = "jf-k"; k.value = p[0]; k.placeholder = sch.keyLabel || "name";
+      if (dl) k.setAttribute("list", dl);
+      k.oninput = () => { p[0] = k.value; sync(); };
+      let v;
+      const vt = sch.valueType || "any";
+      if (vt === "list") {
+        v = document.createElement("input");
+        v.dataset.multi = "json";
+        if (sch.valueOptions) v.dataset.options = sch.valueOptions;
+        v.value = JSON.stringify(Array.isArray(p[1]) ? p[1] : []);
+        v.addEventListener("change", () => { p[1] = _pickParse(_valueDesc.get.call(v), "json"); sync(); });
+      } else {
+        v = document.createElement("input");
+        v.className = "jf-v";
+        v.placeholder = sch.valueLabel || "value";
+        if (vt === "number") {
+          v.type = "number"; v.value = typeof p[1] === "number" ? p[1] : "";
+          v.oninput = () => { p[1] = v.value === "" || isNaN(+v.value) ? 0 : +v.value; sync(); };
+        } else if (vt === "text") {
+          v.type = "text"; v.value = p[1] == null ? "" : String(p[1]);
+          v.oninput = () => { p[1] = v.value; sync(); };
+        } else {                               // any: a number, true / false, a list or plain text
+          v.type = "text"; v.value = typeof p[1] === "string" ? p[1] : JSON.stringify(p[1]);
+          v.title = "A number, true or false, or text.";
+          v.oninput = () => { try { p[1] = JSON.parse(v.value); } catch (e) { p[1] = v.value; } sync(); };
+        }
+      }
+      const rm = document.createElement("button");
+      rm.type = "button"; rm.className = "jf-rm"; rm.title = "Remove"; rm.textContent = "×";
+      rm.onclick = () => { pairs.splice(i, 1); sync(); draw(); };
+      row.append(k, v, rm);
+      list.appendChild(row);
+    });
+    enhancePickers(list);
+  };
+  draw();
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "act jf-add"; add.textContent = "+ " + (sch.addLabel || "Add another setting");
+  add.onclick = () => {
+    pairs.push(["", sch.valueType === "number" ? 0 : sch.valueType === "list" ? [] : ""]);
+    draw();
+    const ks = list.querySelectorAll(".jf-k");
+    if (ks.length) ks[ks.length - 1].focus();
+  };
+  box.appendChild(add);
+}
+const _JF_RENDER = {
+  object(form, val, sch, commit) {
+    _jfFields(form, val, sch.fields || [], commit);
+    if (sch.free !== false)
+      _jfPairs(form, val, new Set((sch.fields || []).map(f => f.key.split(".")[0])), sch, commit);
+  },
+  map(form, val, sch, commit) { _jfPairs(form, val, new Set(), sch, commit); },
+  // a list of objects. An item without its `required` field is not written (a rule with
+  // an empty pattern would match everything).
+  rows(form, val, sch, commit) {
+    const items = val.slice();
+    const sync = () => {
+      val.length = 0;
+      items.forEach(it => { if (it && typeof it === "object" && (!sch.required || it[sch.required])) val.push(it); });
+      commit();
+    };
+    const list = document.createElement("div");
+    form.appendChild(list);
+    const draw = () => {
+      list.innerHTML = "";
+      items.forEach((it, i) => {
+        const card = document.createElement("div");
+        card.className = "jf-item";
+        const body = document.createElement("div");
+        if (it && typeof it === "object" && !Array.isArray(it)) _jfFields(body, it, sch.fields, sync);
+        else body.textContent = JSON.stringify(it);
+        const rm = document.createElement("button");
+        rm.type = "button"; rm.className = "jf-rm"; rm.title = "Remove"; rm.textContent = "×";
+        rm.onclick = () => { items.splice(i, 1); sync(); draw(); };
+        card.append(body, rm);
+        list.appendChild(card);
+      });
+      enhancePickers(list);
+    };
+    draw();
+    const add = document.createElement("button");
+    add.type = "button"; add.className = "act jf-add"; add.textContent = "+ " + (sch.addLabel || "Add");
+    add.onclick = () => {
+      items.push(JSON.parse(JSON.stringify(sch.blank || {})));
+      draw();
+      const last = list.lastElementChild, first = last && last.querySelector("input[type=text]");
+      if (first) first.focus();
+    };
+    form.appendChild(add);
+  },
+  strings(form, val, sch, commit) {
+    const items = val.map(String);
+    const sync = () => { val.length = 0; items.forEach(x => { if (x !== "") val.push(x); }); commit(); };
+    const list = document.createElement("div");
+    form.appendChild(list);
+    const draw = () => {
+      list.innerHTML = "";
+      items.forEach((x, i) => {
+        const row = document.createElement("div");
+        row.className = "jf-pair";
+        const v = document.createElement("input");
+        v.type = "text"; v.className = "jf-v"; v.value = x; v.placeholder = sch.placeholder || "";
+        v.oninput = () => { items[i] = v.value; sync(); };
+        const rm = document.createElement("button");
+        rm.type = "button"; rm.className = "jf-rm"; rm.title = "Remove"; rm.textContent = "×";
+        rm.onclick = () => { items.splice(i, 1); sync(); draw(); };
+        row.append(v, rm);
+        list.appendChild(row);
+      });
+    };
+    draw();
+    const add = document.createElement("button");
+    add.type = "button"; add.className = "act jf-add"; add.textContent = "+ " + (sch.addLabel || "Add");
+    add.onclick = () => { items.push(""); draw(); list.lastElementChild.querySelector("input").focus(); };
+    form.appendChild(add);
+  },
+};
+function enhanceJForms(root) {
+  (root || document).querySelectorAll("[data-jform]:not([data-jf])").forEach(src => {
+    const sch = window._jforms[src.dataset.jform];
+    if (!sch) return;
+    src.dataset.jf = "1";
+    const desc = src.tagName === "TEXTAREA" ? _taValueDesc : _valueDesc;
+    const isList = sch.kind === "rows" || sch.kind === "strings";
+    const wrap = document.createElement("div"), form = document.createElement("div"),
+          raw = document.createElement("details");
+    wrap.className = "jf"; form.className = "jf-form"; raw.className = "jf-raw";
+    raw.innerHTML = "<summary>Edit as JSON</summary>";
+    src.after(wrap);
+    wrap.append(form, raw);
+    raw.appendChild(src);
+    let val;
+    const read = () => {
+      const t = (desc.get.call(src) || "").trim();
+      if (!t) return isList ? [] : {};
+      try {
+        const v = JSON.parse(t);
+        return (isList ? Array.isArray(v) : (v && typeof v === "object" && !Array.isArray(v))) ? v : null;
+      } catch (e) { return null; }
+    };
+    const commit = () => {
+      desc.set.call(src, src.tagName === "TEXTAREA" ? JSON.stringify(val, null, 1) : JSON.stringify(val));
+      src.dispatchEvent(new Event("input", {bubbles: true}));
+    };
+    const render = () => {
+      val = read();
+      form.innerHTML = "";
+      if (val === null) {
+        form.innerHTML = '<span class="pill bad">not valid JSON</span> <span class="hint">correct it under "Edit as JSON"</span>';
+        raw.open = true;
+        return;
+      }
+      _JF_RENDER[sch.kind || "object"](form, val, sch, commit);
+      enhancePickers(form);
+    };
+    Object.defineProperty(src, "value", {configurable: true,
+      get() { return desc.get.call(src); },
+      set(v) { desc.set.call(src, v); render(); }});
+    src.addEventListener("change", render);       // typed under "Edit as JSON"
+    render();
+  });
+}
+
 /* --------------------------------------------------------------- modal -- */
 const _modal = document.createElement("div");
 _modal.className = "modal"; _modal.hidden = true;
@@ -815,6 +1256,203 @@ function openModal(title, html) {
 $(".modal-x", _modal).onclick = closeModal;
 _modal.addEventListener("click", e => { if (e.target === _modal) closeModal(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !_modal.hidden) closeModal(); });
+
+/* ------------------------------------------------------------ backends -- */
+// v0.181.139: the backend list as rows with a form (it was one JSON box). The whole list
+// still goes to POST config/backends; a key shown masked is kept by the server.
+const BE_KINDS = [
+  {id: "llamacpp", label: "llama.cpp server", type: "openai-compatible", flavor: "llamacpp", url: "http://server:8080/v1",
+   note: "llama.cpp's own server (llama-server). The address usually ends in /v1."},
+  {id: "ollama", label: "Ollama", type: "ollama", flavor: null, url: "http://server:11434",
+   note: "Ollama. Foundry can also pull, copy and delete its models (Host Admin)."},
+  {id: "vllm", label: "vLLM", type: "openai-compatible", flavor: "vllm", url: "http://server:8000/v1",
+   note: "A vLLM server. The address usually ends in /v1."},
+  {id: "unsloth", label: "Unsloth", type: "openai-compatible", flavor: "unsloth", url: "http://server:8000/v1",
+   note: "An Unsloth server."},
+  {id: "openai", label: "OpenAI-compatible API (any other server)", type: "openai-compatible", flavor: "openai", url: "https://api.example.com/v1",
+   note: "Any other server or service that speaks the OpenAI API."},
+  {id: "cliproxyapi", label: "CLIProxyAPI (ChatGPT, Claude Code or Gemini sign-in)", type: "openai-compatible", flavor: "cliproxyapi", url: "http://server:8317/v1",
+   note: "CLIProxyAPI in front of subscription sign-ins. Its models count as a paid subscription."},
+  {id: "meridian", label: "Meridian (Claude subscription)", type: "anthropic-compatible", flavor: null, url: "http://server:3456",
+   note: "Meridian in front of a Claude subscription. Always counted as a paid subscription."},
+  {id: "anthropic", label: "Anthropic API (API key, paid per token)", type: "anthropic-api", flavor: null, url: "https://api.anthropic.com",
+   note: "Anthropic's own API with an API key. Paid per token, not a subscription."}];
+function beKind(b) {
+  if (b.type === "ollama") return "ollama";
+  if (b.type === "anthropic-compatible") return "meridian";
+  if (b.type === "anthropic-api") return "anthropic";
+  return BE_KINDS.some(k => k.id === b.flavor) ? b.flavor : "openai";
+}
+const BE_FIELDS = [
+  {s: "Limits", key: "max_concurrent", label: "requests at once", t: "int", ph: "no limit",
+   hint: "How many calls run on this backend at the same time; more wait in a queue that takes turns between clients. A llama.cpp server with one slot: 1."},
+  {s: "Limits", key: "helpers_allowed", label: "helper streams", t: "int", ph: "no limit",
+   hint: "Sessions served next to the main one: 0 = the main stream only, 1 = main plus one helper."},
+  {s: "Limits", key: "queue_timeout_seconds", label: "queue wait (seconds)", t: "num", ph: "300",
+   hint: "How long a call waits for a free place before it is refused."},
+  {s: "Limits", key: "session_hold_seconds", label: "session hold (seconds)", t: "num", ph: "60",
+   hint: "How long a session keeps its stream after a call that ended in a tool call. A final answer frees it at once."},
+  {s: "Limits", key: "priority", label: "priority", t: "int", ph: "100",
+   hint: "Order among backends that serve the same model."},
+  {s: "Lane for short jobs", key: "lane", label: "use this backend as a lane for short jobs", t: "check",
+   hint: "A small local backend for short jobs. Its models are left out of automatic routing; a persona reaches it by naming its model or through divert-when-busy."},
+  {s: "Lane for short jobs", key: "lane_max_prompt_tokens", label: "largest prompt (tokens)", t: "int", ph: "3000"},
+  {s: "Lane for short jobs", key: "lane_max_output_tokens", label: "largest answer (tokens)", t: "int", ph: "400", hint: "0 = the persona's own cap."},
+  {s: "Lane for short jobs", key: "lane_allow_tools", label: "requests with tools allowed", t: "check"},
+  {s: "Lane for short jobs", key: "lane_thinking", label: "thinking on", t: "check"},
+  {s: "Subscription and plan limits", key: "subscription", label: "this is a paid subscription, not a local server", t: "check",
+   kinds: ["openai", "llamacpp", "vllm", "unsloth"], hint: "Its models then count as paid for the guardrails."},
+  {s: "Subscription and plan limits", key: "call_budget_5h", label: "calls per 5 hours", t: "int", ph: "no cap",
+   kinds: ["openai", "llamacpp", "vllm", "unsloth", "cliproxyapi", "meridian"]},
+  {s: "Subscription and plan limits", key: "call_budget_daily", label: "calls per day", t: "int", ph: "no cap",
+   kinds: ["openai", "llamacpp", "vllm", "unsloth", "cliproxyapi", "meridian"]},
+  {s: "Subscription and plan limits", key: "usage_limit_pct", label: "stop at plan usage (%)", t: "num", ph: "global",
+   kinds: ["cliproxyapi", "meridian"], hint: "Models of this backend are not used once a usage window reaches this percentage."},
+  {s: "Subscription and plan limits", key: "management_url", label: "management address", t: "text", ph: "the address without /v1",
+   kinds: ["cliproxyapi"], wide: true},
+  {s: "Subscription and plan limits", key: "management_key", label: "management key", t: "text", ph: "none",
+   kinds: ["cliproxyapi"], hint: "Lets Foundry read each account's usage windows. Shown masked once saved."},
+  {s: "Meridian", key: "meridian_profile", label: "profile (Claude account)", t: "text", ph: "Meridian decides", kinds: ["meridian"]},
+  {s: "Meridian", key: "meridian_agent", label: "adapter", t: "text", ph: "Meridian's default", kinds: ["meridian"]},
+  {s: "Meridian", key: "meridian_session_affinity", label: "keep one Claude session per conversation", t: "check", kinds: ["meridian"]},
+  {s: "Anthropic API", key: "cache_ttl", label: "prompt cache lifetime", t: "select", options: ["1h", "5m"], kinds: ["anthropic"]},
+  {s: "Model list", key: "models", label: "models, only when the server cannot list them (comma-separated)", t: "csv", wide: true}];
+function beSummary(b) {
+  const out = [];
+  if (b.max_concurrent != null) out.push(b.max_concurrent + " at once");
+  if (b.helpers_allowed != null) out.push(b.helpers_allowed + (b.helpers_allowed === 1 ? " helper" : " helpers"));
+  if (b.lane) out.push("lane");
+  if (b.subscription || b.type === "anthropic-compatible" || b.flavor === "cliproxyapi") out.push("subscription");
+  return out.join(" · ") || "no limits";
+}
+async function beSave(list, msg) {
+  await api("config/backends", {method: "POST", body: list});
+  toast(msg);
+}
+function beRenderList(list, status) {
+  const box = $("#be-list");
+  if (!box) return;
+  if (!list.length) { box.innerHTML = '<p class="hint">No backends yet. Add one to start.</p>'; return; }
+  const live = Object.fromEntries((status || []).map(x => [x.name, x]));
+  box.innerHTML = `<div class="tscroll"><table class="be-table"><tr><th>on</th><th>name</th><th>kind</th><th>address</th><th>limits</th><th>state</th><th></th></tr>${
+    list.map((b, i) => {
+      const on = b.enabled !== false, st = live[b.name] || {};
+      const kind = (BE_KINDS.find(k => k.id === beKind(b)) || {}).label || b.type;
+      const state = !on ? '<span class="pill">off</span>'
+        : st.healthy === true ? `<span class="pill ok">serving ${(st.models || []).length} model${(st.models || []).length === 1 ? "" : "s"}</span>`
+        : st.healthy === false ? `<span class="pill bad" title="${esc(st.last_error || "")}">not answering</span>`
+        : '<span class="pill warn">not checked yet</span>';
+      return `<tr class="${on ? "" : "be-off"}"><td><input type="checkbox" data-be-on="${i}" ${on ? "checked" : ""} title="Switch this backend on or off. Off keeps its settings."></td>
+        <td class="nw"><b>${esc(b.name)}</b></td><td>${esc(kind)}</td><td class="mono">${esc(b.url || "")}</td>
+        <td class="nw">${esc(beSummary(b))}</td><td class="nw">${state}</td>
+        <td class="nw">${on ? `<button class="act" data-be-test="${i}" title="Ask the server for its model list (free, no generation)">Test</button> ` : ""}<button class="act" data-be-edit="${i}">Edit</button> <button class="act" data-be-rm="${i}">Remove</button></td></tr>`;
+    }).join("")}</table></div>`;
+  const fail = e => toast(e.message, true);
+  box.querySelectorAll("[data-be-on]").forEach(el => el.onchange = async () => {
+    const b = list[+el.dataset.beOn];
+    try {
+      await api("backends/enabled", {method: "POST", body: {name: b.name, enabled: el.checked}});
+      toast(`${b.name} switched ${el.checked ? "on" : "off"}`);
+      render();
+    } catch (e) { el.checked = !el.checked; fail(e); }
+  });
+  box.querySelectorAll("[data-be-test]").forEach(el => el.onclick = () => beTest(list[+el.dataset.beTest].name, el));
+  box.querySelectorAll("[data-be-edit]").forEach(el => el.onclick = () => beEdit(list, +el.dataset.beEdit));
+  box.querySelectorAll("[data-be-rm]").forEach(el => el.onclick = async () => {
+    const b = list[+el.dataset.beRm];
+    if (!confirm(`Remove the backend "${b.name}" and its settings?\n\nPersonas that name its models will skip them. To keep the settings, switch it off instead.`)) return;
+    try { await beSave(list.filter(x => x !== b), `${b.name} removed`); render(); } catch (e) { fail(e); }
+  });
+}
+async function beTest(name, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Testing…"; }
+  try {
+    const r = await api("backends/test", {method: "POST", body: {name}});
+    toast(r.ok ? `${name}: answering, ${r.models} model${r.models === 1 ? "" : "s"}, ${r.latency_ms} ms` : `${name}: ${r.error}`, !r.ok);
+  } catch (e) { toast(`${name}: ${e.message}`, true); }
+  if (btn) { btn.disabled = false; btn.textContent = "Test"; }
+}
+function beEdit(list, idx) {
+  const isNew = idx === null, orig = isNew ? {enabled: true} : list[idx];
+  const kind0 = isNew ? "llamacpp" : beKind(orig);
+  const field = f => {
+    const v = orig[f.key], attr = `data-key="${f.key}" data-t="${f.t}"`;
+    const kinds = f.kinds ? ` data-kinds="${f.kinds.join(",")}"` : "", title = f.hint ? ` title="${esc(f.hint)}"` : "";
+    if (f.t === "check")
+      return `<label class="jf-f jf-check"${kinds}${title}><input type="checkbox" ${attr} ${v ? "checked" : ""}><span>${esc(f.label)}</span></label>`;
+    let ctl;
+    if (f.t === "select")
+      ctl = `<select ${attr}>${f.options.map(o => `<option ${o === v ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+    else if (f.t === "int" || f.t === "num")
+      ctl = `<input type="number" ${attr} min="0" ${f.t === "num" ? 'step="any"' : ""} value="${v == null ? "" : esc(String(v))}" placeholder="${esc(f.ph || "")}">`;
+    else
+      ctl = `<input type="text" ${attr} autocomplete="off" value="${esc(f.t === "csv" ? (v || []).join(", ") : (v == null ? "" : String(v)))}" placeholder="${esc(f.ph || "")}">`;
+    return `<label class="jf-f${f.wide ? " jf-wide" : ""}"${kinds}${title}><span>${esc(f.label)}</span>${ctl}</label>`;
+  };
+  const sections = [...new Set(BE_FIELDS.map(f => f.s))].map(sec => {
+    const fs = BE_FIELDS.filter(f => f.s === sec);
+    const open = sec === "Limits" || fs.some(f => !f.key.startsWith("lane_max") && orig[f.key] != null && orig[f.key] !== false && !(Array.isArray(orig[f.key]) && !orig[f.key].length));
+    return `<details class="jf-grp" ${open ? "open" : ""}><summary>${esc(sec)}</summary><div class="jf-grid">${fs.map(field).join("")}</div></details>`;
+  }).join("");
+  const body = openModal(isNew ? "Add a backend" : `Edit backend ${orig.name}`, `<div class="be-form">
+    <div class="jf-grid be-main">
+      <label class="jf-f"><span>kind of server</span><select id="be-kind">${BE_KINDS.map(k => `<option value="${k.id}" ${k.id === kind0 ? "selected" : ""}>${esc(k.label)}</option>`).join("")}</select></label>
+      <label class="jf-f" title="${isNew ? "Letters, digits, dot, dash and underscore. Personas, budgets and logs refer to a backend by this name." : "The name cannot be changed here: personas, budgets and logs refer to it."}"><span>name</span><input type="text" id="be-name" value="${esc(orig.name || "")}" ${isNew ? "" : "disabled"} placeholder="e.g. strata"></label>
+      <label class="jf-f jf-wide"><span>address</span><input type="text" id="be-url" value="${esc(orig.url || "")}"></label>
+      <label class="jf-f" title="Leave empty when the server needs none. A saved key is shown masked and kept as it is. To read it from the environment or the secret store, type a reference such as &#36;{MERIDIAN_API_KEY}."><span>API key</span><input type="text" id="be-key" autocomplete="off" value="${esc(orig.api_key || "")}" placeholder="none"></label>
+      <label class="jf-f jf-check"><input type="checkbox" id="be-on" ${orig.enabled !== false ? "checked" : ""}><span>switched on</span></label>
+    </div>
+    <p class="hint" id="be-note" style="margin:0"></p>
+    ${sections}
+    <div class="row"><button class="act primary" id="be-save">${isNew ? "Add backend" : "Save backend"}</button>
+      <button class="act" id="be-cancel">Cancel</button><span class="hint" id="be-msg"></span></div>
+  </div>`);
+  const q = sel => body.querySelector(sel);
+  const kindNow = () => BE_KINDS.find(k => k.id === q("#be-kind").value);
+  const sync = () => {
+    const k = kindNow();
+    q("#be-note").textContent = k.note;
+    q("#be-url").placeholder = k.url;
+    body.querySelectorAll("[data-kinds]").forEach(el => { el.hidden = !el.dataset.kinds.split(",").includes(k.id); });
+    body.querySelectorAll("details.jf-grp").forEach(d => { d.hidden = ![...d.querySelectorAll(".jf-f")].some(el => !el.hidden); });
+  };
+  q("#be-kind").onchange = sync;
+  sync();
+  q("#be-cancel").onclick = closeModal;
+  q("#be-save").onclick = async () => {
+    const msg = t => { q("#be-msg").textContent = t; };
+    const k = kindNow(), name = q("#be-name").value.trim(), url = q("#be-url").value.trim();
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) return msg("Give it a name: letters, digits, dot, dash or underscore.");
+    if (isNew && list.some(x => x.name === name)) return msg(`A backend named ${name} already exists.`);
+    if (!/^https?:\/\/\S+$/.test(url)) return msg("The address must start with http:// or https://");
+    const b = isNew ? {} : JSON.parse(JSON.stringify(orig));
+    b.name = name; b.url = url;
+    if (isNew || k.id !== kind0) { b.type = k.type; if (k.flavor) b.flavor = k.flavor; else delete b.flavor; }
+    const key = q("#be-key").value.trim();
+    if (key) b.api_key = key; else delete b.api_key;
+    b.enabled = q("#be-on").checked;
+    for (const el of body.querySelectorAll("[data-key]")) {
+      if (el.closest(".jf-f").hidden) continue;             // not a setting of this kind: left as it was
+      const key2 = el.dataset.key, t = el.dataset.t;
+      if (t === "check") { if (el.checked) b[key2] = true; else if (key2 in b) b[key2] = false; }
+      else if (t === "int" || t === "num") {
+        if (el.value === "" || isNaN(+el.value)) delete b[key2]; else b[key2] = t === "int" ? Math.round(+el.value) : +el.value;
+      } else if (t === "csv") {
+        const a = el.value.split(",").map(x => x.trim()).filter(Boolean);
+        if (a.length) b[key2] = a; else delete b[key2];
+      } else if (el.value.trim() === "") delete b[key2]; else b[key2] = el.value.trim();
+    }
+    const next = list.slice();
+    if (isNew) next.push(b); else next[idx] = b;
+    q("#be-save").disabled = true;
+    try {
+      await beSave(next, isNew ? `${name} added` : `${name} saved`);
+      closeModal();
+      if (b.enabled) await beTest(name);
+      render();
+    } catch (e) { q("#be-save").disabled = false; msg(e.message); }
+  };
+}
 
 /* ---------------------------------------------------------------- help -- */
 // Longer explanations behind the small "?" buttons. Short hover text lives in
@@ -1487,7 +2125,7 @@ function postRender() {
 // above it (a title, a search row) stay in view for every section. A section with no
 // blocks gets no button. The choice is kept while the page is open.
 const TAB_SECTIONS = {
-  Pool: [["Backends", null], ["Add or edit", /^Edit backend list/], ["Routing and brain", /^Routing mode/],
+  Pool: [["Backends", null], ["Add or edit", /^Add, edit or remove backends/], ["Routing and brain", /^Routing mode/],
          ["Global settings", /^Global settings/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
   "Model Registry": [["Reachable now", /^Reachable now/], ["Known catalog", /^Known catalog/]],
   "Usage Log": [["Requests", null], ["Budgets and plans", /^(Budgets & usage|Claude usage window|Subscription usage)/],
@@ -4735,40 +5373,23 @@ async function tabBackends() {
       </details>
     </div>
     <div class="card">
-      <h2 style="margin-top:0">Edit backend list (internal mode)</h2>
-      <p class="hint">JSON list. Each backend needs <code>name</code>, <code>type</code>
-      (<code>ollama</code> / <code>openai-compatible</code> / <code>anthropic-compatible</code>),
-      and <code>url</code>. Use <code>\${MERIDIAN_API_KEY}</code>-style references for api_key —
-      the value is written into config.yaml verbatim. Saving rebuilds the pool live.</p>
-      <p class="hint">Optional <code>flavor</code> on an <code>openai-compatible</code> backend names the
-      server software so <b>Host Admin</b> shows the right panel:
-      <code>llamacpp</code>, <code>unsloth</code>, <code>vllm</code>, <code>cliproxyapi</code>
-      or <code>openai</code> (default). <code>cliproxyapi</code> =
-      <a href="https://github.com/router-for-me/CLIProxyAPI" target="_blank">CLIProxyAPI</a>
-      (ChatGPT/Codex, Claude Code, Gemini sign-ins behind one endpoint): its models count as
-      <b>paid subscription</b> models (persona paid cascades, max_paid_calls, cost report) and
-      get the full reasoning scale (Xhigh → <code>xhigh</code>). Any other subscription proxy:
-      add <code>"subscription": true</code>. Ollama backends always get full model CRUD; the openai-dialect flavors get
-      read-only diagnostics. The flavor also unlocks that server's extra sampling knobs
-      (llama.cpp DRY/XTC/top-n-sigma…, vLLM repetition_penalty/min_tokens/guided decoding…),
-      thinking on/off, engine metrics on the Live tab and context auto-detection.
-      Examples: <code>{"name":"llamacpp-1","type":"openai-compatible",
-      "url":"http://192.168.30.206:8080","flavor":"llamacpp"}</code> ·
-      <code>{"name":"vllm-1","type":"openai-compatible","url":"http://192.168.30.207:8000",
-      "flavor":"vllm"}</code>.</p>
-      <p class="hint"><code>helpers_allowed</code>: how many helper streams (sub-agents) a backend serves next to
-      your main one, counted as client sessions active on it: <code>0</code> = main stream only, <code>1</code> = main + one
-      helper, … <code>null</code> = no limit. Each backend has its own. A session over the limit waits up to
-      <code>queue_timeout_seconds</code> for a slot, then is refused. After a call that ended in a tool call a
-      session holds its slot for <code>session_hold_seconds</code> (default 60); a final answer frees it at once.
-      Dashboard → <i>Can it serve?</i> shows who holds each one.</p>
-      <textarea id="backends-json" rows="12"></textarea>
-      <div class="row"><button class="act primary" id="save-backends">Save backends</button>
+      <h2 style="margin-top:0">Add, edit or remove backends</h2>
+      <p class="hint">A backend is a server that runs models. A change here is saved at once and the pool is
+      rebuilt live. Switching a backend off keeps its settings; Remove deletes them.</p>
+      <div id="be-list"><span class="hint">loading…</span></div>
+      <div class="row"><button class="act primary" id="be-add">+ Add backend</button></div>
+      <div class="row"><label title="internal = Foundry talks to each backend itself (the list above). olla / litellm = one external proxy does it.">pool mode</label>
       <select id="pool-mode">
         ${["internal","olla","litellm"].map(m =>
           `<option ${m === st.pool_mode ? "selected" : ""}>${m}</option>`).join("")}
       </select>
       <button class="act" id="save-mode">Switch pool mode</button></div>
+      <details class="jf-raw"><summary>Edit the whole list as JSON</summary>
+        <p class="hint">Every backend with every setting, as stored in config.yaml. Keys are shown masked;
+        a masked key is kept as it is.</p>
+        <textarea id="backends-json" rows="12"></textarea>
+        <div class="row"><button class="act" id="save-backends">Save JSON</button></div>
+      </details>
     </div>
     <div class="card">
       <h2 style="margin-top:0;display:flex;align-items:center">Routing mode ${help("routing")}
@@ -4857,8 +5478,8 @@ async function tabBackends() {
           <option value="max">max</option>
         </select></div>
       <div class="hint" style="font-weight:600;margin:6px 0 2px">Sampling defaults (Ollama options)</div>
-      <div class="row"><label title="Global default generation options merged into every worker call, e.g. {&quot;temperature&quot;:0.7,&quot;top_p&quot;:0.9,&quot;top_k&quot;:40}. A persona's sampling_options override these; a client's explicit options override both. Empty {} = send nothing (each model's own defaults).">sampling_defaults (JSON obj)</label>
-        <input id="brain-samp" size="70" value="{}" placeholder='{"temperature": 0.7, "top_p": 0.9, "top_k": 40, "repeat_penalty": 1.1}'>
+      <div class="row"><label title="Global default generation options merged into every worker call, e.g. {&quot;temperature&quot;:0.7,&quot;top_p&quot;:0.9,&quot;top_k&quot;:40}. A persona's sampling_options override these; a client's explicit options override both. Empty {} = send nothing (each model's own defaults).">sampling_defaults</label>
+        <input id="brain-samp" data-jform="sampling" size="70" value="{}" placeholder='{"temperature": 0.7, "top_p": 0.9, "top_k": 40, "repeat_penalty": 1.1}'>
         <button class="act primary" id="save-global">Save global settings</button></div>
     </div>
     <div class="card">
@@ -4873,8 +5494,8 @@ async function tabBackends() {
         <input id="agg-base" size="12" value="/mcp">
         <label title="Externally reachable base URL of THIS Foundry, used to fill in the example client configs below (e.g. http://192.168.1.50:8080 or https://foundry.mydomain). Leave blank to use the configured server host:port.">public base URL</label>
         <input id="agg-url" size="34" placeholder="http://192.168.1.50:8080 (blank = server host:port)"></div>
-      <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base endpoint always exposes them all.">profiles (JSON obj)</label>
-        <input id="agg-profiles" size="60" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'>
+      <div class="row"><label title="Profiles = curated tool subsets ('MCP personas'), each served at {base}/p/{name}. JSON object: profile name -> list of MCP server names. The base endpoint always exposes them all.">profiles</label>
+        <input id="agg-profiles" data-jform="profiles" size="60" value="{}" placeholder='{"music": ["acestep-music"], "voice": ["kokoro-tts","chatterbox-tts"]}'>
         <label title="Keep-alive for long tool calls (music/audio generation). 0 = off (single JSON reply). >0 = endpoints stream (SSE) and emit a progress notification every N seconds while a tool runs, so the client sees 'still working…' and the connection never idles out. Needs a client that sends a progressToken (e.g. 20). Changing this needs a restart.">heartbeat (s)</label>
         <input id="agg-hb" type="number" min="0" step="5" size="6" value="0" style="width:70px">
         <label title="Poll guard: after this many identical (same tool + same args) calls within ~2 minutes, the aggregator stops executing them and returns a 'stop polling' message to the client. Defends against a client agent (AnythingLLM/Cline) tight-polling a status tool (e.g. check_music_job) to its own tool-call limit while a job is still running. 0 = off. Applies immediately, no restart.">poll guard</label>
@@ -4901,6 +5522,10 @@ async function tabBackends() {
   const cfg = await api("config");
   $("#backends-json").value =
     JSON.stringify(cfg.backend_pool.internal.backends, null, 2);
+  { const ms = cfg.mcp_servers || {};
+    window._pickerOptions.mcpServers = Array.isArray(ms) ? ms.map(m => m.name) : Object.keys(ms); }
+  beRenderList(cfg.backend_pool.internal.backends || [], st.backends || []);
+  $("#be-add").onclick = () => beEdit(cfg.backend_pool.internal.backends || [], null);
   $("#brain-trl").value = cfg.agent_brain.tool_result_limit_chars;
   $("#brain-mrl").value = cfg.agent_brain.mcp_result_limit_chars;
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
@@ -5725,8 +6350,8 @@ async function tabPersonas() {
         <select id="pe-mcp-loading"><option value="">all up front (default)</option><option value="finder">find on demand (2 tools)</option></select>
         <label title="Tool rounds this persona may run in one request before it is asked for its final answer. Empty = the global 'tool steps per request' (Agent brain settings). Also sets this persona's brain step limit (+2).">tool steps</label>
         <input id="pe-tsteps" type="number" min="1" max="200" placeholder="(global)" style="width:80px"></div>
-      <div class="row"><label>guardrail_overrides (JSON obj)</label>
-        <input id="pe-guard" size="70" value="{}"></div>
+      <div class="row"><label title="Limits for this persona only. Empty = the global limit (Guardrails).">limits for this persona</label>
+        <input id="pe-guard" data-jform="guard" size="70" value="{}"></div>
       <h3 class="pe-sec">Models</h3>
       <div class="row"><label title="Ordered list of model ids tried in priority order. In brain (agent) mode: boosted to the top of candidates, guardrail/quota denial falls to the next pin, then the normal pool. In DIRECT mode (Cline) with local_bias_strength=prefer_paid: the paid pins are tried top-down as a cascade — each usage/cost-gated — before degrading to a local model on exhaustion (e.g. Opus 4.8 → Sonnet 5 → local). Local pins are honored as the local fallback, not the paid cascade.">pinned_models (priority order)</label>
         <input id="pe-pins" data-multi="json" data-options="models" data-ordered value="[]" placeholder="pick models in priority order"></div>
@@ -5794,12 +6419,12 @@ async function tabPersonas() {
         <label title="chat = a model clients pick; image = an image policy (generate_image / edit_image with model = this persona), never listed or served as a chat model">kind</label>
         <select id="pe-kind"><option value="">chat</option><option value="media">image</option></select></div>
       <h3 class="pe-sec">Advanced</h3>
-      <div class="row tight"><label title="Turn assist for coding clients in direct mode (Cline Act) — JSON object, every key optional, {} = all off. think_policy: client|persona|adaptive (+ think_levels {routine, after_edit, after_failure}); dedupe_reads; roblox_cleanup; image_keep N; soft_budget_tokens N; prejudge: off|observe|enforce; supervisor: off|observe|nudge|escalate; auditor: off|observe|enforce (+ auditor_min_tool_turns, auditor_max_rejections, auditor_required_patterns [regex]); advisor true + frontier_models [ids, tried in order] + frontier_max_calls per conversation; frontier_rounds. See docs/TURN_ASSIST.md. Results: Dashboard → Scoreboard.">turn assist (JSON obj)</label>
-        <textarea id="pe-assist" rows="3" cols="70" placeholder='{"think_policy": "adaptive", "dedupe_reads": true, "prejudge": "observe", "supervisor": "observe", "auditor": "observe"}'>{}</textarea></div>
-      <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection_weights (JSON obj)</label>
-        <input id="pe-weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
-      <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">client_compat (JSON obj)</label>
-        <input id="pe-compat" size="90" value="{}" placeholder='{"openwebui": "HTML renders as Artifacts", "anythingllm": "code blocks only"}'>
+      <div class="row tight"><label title="Turn assist for coding clients in direct mode (Cline Act) — JSON object, every key optional, {} = all off. think_policy: client|persona|adaptive (+ think_levels {routine, after_edit, after_failure}); dedupe_reads; roblox_cleanup; image_keep N; soft_budget_tokens N; prejudge: off|observe|enforce; supervisor: off|observe|nudge|escalate; auditor: off|observe|enforce (+ auditor_min_tool_turns, auditor_max_rejections, auditor_required_patterns [regex]); advisor true + frontier_models [ids, tried in order] + frontier_max_calls per conversation; frontier_rounds. See docs/TURN_ASSIST.md. Results: Dashboard → Scoreboard.">turn assist</label>
+        <textarea id="pe-assist" data-jform="assist" rows="3" cols="70" placeholder='{"think_policy": "adaptive", "dedupe_reads": true, "prejudge": "observe", "supervisor": "observe", "auditor": "observe"}'>{}</textarea></div>
+      <div class="row"><label title="Optional JSON overriding the multi-signal ranking weights for this persona. Signals: primary (requested category), tool_calling, adequacy (observed outcome-judge quality), latency (warm tokens/sec). e.g. a speed-sensitive persona: {&quot;latency&quot;: 0.5}. Empty = defaults.">selection weights</label>
+        <input id="pe-weights" data-jform="weights" size="50" value="{}" placeholder='{"latency": 0.4, "adequacy": 0.8}'></div>
+      <div class="row"><label title="JSON object: client name → compatibility note (how that client experiences this persona). Documentation only — surfaced as badges in the list above. Don't fork a persona per client; note the differences here instead.">notes per chat program</label>
+        <input id="pe-compat" data-jform="compat" size="90" value="{}" placeholder='{"openwebui": "HTML renders as Artifacts", "anythingllm": "code blocks only"}'>
         <label title="plain_text: steer workers to clean plain text / simple markdown (no HTML/SVG) — for messaging-bridge clients (Hermes/OpenClaw) that can't render markup. Default: no steering.">output_style</label>
         <select id="pe-style"><option value="">default</option><option>plain_text</option></select>
         <label title="Reasoning effort for THIS persona's worker, overriding the global agent_brain setting. Sent as Ollama's think level (low/medium/high/max) to thinking-capable locals, and as a Claude extended-thinking budget to Claude-via-Meridian. Applied only where the model supports it. Blank = use the global default. Great for a Cline-plan persona: set high/max so plan-mode gets deep Claude thinking, while Cline-act stays low/off on a fast local.">reasoning_effort</label>
@@ -5808,8 +6433,8 @@ async function tabPersonas() {
         <label title="Make THIS reasoning_effort win over a think value the client sends. Cline (and some clients) send their own think on/off — normally the client wins (passthrough). Turn this on so Foundry's persona setting controls thinking instead. e.g. force claude-cline-act to 'off' or 'low' regardless of what Cline sends, and claude-cline-plan to 'high'.">force (override client)</label>
         <input type="checkbox" id="pe-force-effort"></div>
       <div class="row tight">
-        <label title="Per-persona sampling options (Ollama), overriding the global sampling_defaults. JSON obj, e.g. a coding persona {&quot;temperature&quot;:0.2}. Client-sent options still win. Empty {} = inherit the global defaults.">sampling_options (JSON obj)</label>
-        <input id="pe-samp" size="46" value="{}" placeholder='{"temperature": 0.2, "top_p": 0.9}'>
+        <label title="Per-persona sampling options (Ollama), overriding the global sampling_defaults. JSON obj, e.g. a coding persona {&quot;temperature&quot;:0.2}. Client-sent options still win. Empty {} = inherit the global defaults.">sampling options</label>
+        <input id="pe-samp" data-jform="sampling" size="46" value="{}" placeholder='{"temperature": 0.2, "top_p": 0.9}'>
         <label title="Structured output for this persona: 'json' forces valid JSON (Ollama format=json / OpenAI json_object), or paste a JSON schema to constrain the shape. Improves data/extraction reliability. NOTE: skipped automatically on tool-calling turns (Cline / worker tool loops), since forcing JSON breaks tool_calls. Blank = free-form.">output_format</label>
         <input id="pe-fmt" size="30" placeholder='json  (or a JSON schema)'></div>
       <div class="row">
@@ -6368,8 +6993,8 @@ async function tabGuardrails() {
         <input id="sc-ttl" type="number" value="${scCfg.default_ttl_seconds ?? 604800}">
         <label>max_entries</label>
         <input id="sc-max" type="number" value="${scCfg.max_entries ?? 2000}"></div>
-      <div class="row"><label title="JSON: persona benchmark_category → TTL seconds. 0 = bypass the cache for that category (agentic/tool_calling default to 0 — freshness and side effects beat latency there).">category_ttls (JSON obj)</label>
-        <input id="sc-cats" size="70" value='${esc(JSON.stringify(scCfg.category_ttls || {}))}'></div>
+      <div class="row"><label title="JSON: persona benchmark_category → TTL seconds. 0 = bypass the cache for that category (agentic/tool_calling default to 0 — freshness and side effects beat latency there).">cache lifetime per category</label>
+        <input id="sc-cats" data-jform="ttls" size="70" value='${esc(JSON.stringify(scCfg.category_ttls || {}))}'></div>
       <div class="row">
         <button class="act primary" id="sc-save">Save cache settings</button>
         <button class="act" id="sc-test">Test embedding ▶</button>
@@ -6439,16 +7064,16 @@ async function renderTurnAssistCard() {
   const hits = Object.entries(d.hits || {});
   card.innerHTML = `
     <h2 style="margin-top:0">Turn assist (global) <span class="hint">— docs/TURN_ASSIST.md</span></h2>
-    <p class="hint">Applies to every persona with turn assist; a persona's own <code>assist</code> JSON overrides these. Empty tables = built-in rules (shown pre-filled). Thresholds were tuned by replaying recorded Cline sessions: <code>python -m foundry_router.evalharness replay &lt;sessions dir&gt; --sweep</code>.</p>
-    <div class="row tight"><label title="Any built-in key: thresholds (sup_*), dedupe_min_chars, prejudge_max_edit_chars, auditor_*, packet_*, frontier_*, advisor_prompt, auditor_prompt, think_levels…">defaults (JSON obj)</label>
-      <textarea id="ta-defaults" rows="5" cols="90">${esc(pretty(ta.defaults || {}))}</textarea></div>
+    <p class="hint">Applies to every persona with turn assist; a persona's own turn assist settings override these. The rule lists start from the built-in rules. Thresholds were tuned by replaying recorded Cline sessions: <code>python -m foundry_router.evalharness replay &lt;sessions dir&gt; --sweep</code>.</p>
+    <div class="row tight"><label title="Any built-in key: thresholds (sup_*), dedupe_min_chars, prejudge_max_edit_chars, auditor_*, packet_*, frontier_*, advisor_prompt, auditor_prompt, think_levels…">defaults</label>
+      <textarea id="ta-defaults" data-jform="assist" rows="5" cols="90">${esc(pretty(ta.defaults || {}))}</textarea></div>
     <details><summary class="hint">built-in defaults (reference)</summary><pre style="white-space:pre-wrap;font-size:11px">${esc(pretty(d.builtin_defaults))}</pre></details>
-    <div class="row tight"><label title="[{pattern, rule, advice, unless, enabled}] — pattern/unless are regexes (case-insensitive). unless exempts a command that also matches it.">block rules (JSON list)</label>
-      <textarea id="ta-block" rows="8" cols="90">${esc(pretty(ta.block_rules && ta.block_rules.length ? ta.block_rules : d.builtin_block_rules))}</textarea></div>
-    <div class="row tight"><label title="[{pattern, replacement, desc, enabled}] — regex rewrite applied to each shell command in enforce mode.">fix rules (JSON list)</label>
-      <textarea id="ta-fix" rows="5" cols="90">${esc(pretty(ta.fix_rules && ta.fix_rules.length ? ta.fix_rules : d.builtin_fix_rules))}</textarea></div>
-    <div class="row tight"><label title="Regexes that mark a tool RESULT as failed (used by the supervisor, adaptive thinking and the scoreboard).">error markers (JSON list)</label>
-      <textarea id="ta-err" rows="4" cols="90">${esc(pretty(ta.error_patterns && ta.error_patterns.length ? ta.error_patterns : d.builtin_error_patterns))}</textarea></div>
+    <div class="row tight"><label title="[{pattern, rule, advice, unless, enabled}] — pattern/unless are regexes (case-insensitive). unless exempts a command that also matches it.">block rules</label>
+      <textarea id="ta-block" data-jform="blockRules" rows="8" cols="90">${esc(pretty(ta.block_rules && ta.block_rules.length ? ta.block_rules : d.builtin_block_rules))}</textarea></div>
+    <div class="row tight"><label title="[{pattern, replacement, desc, enabled}] — regex rewrite applied to each shell command in enforce mode.">fix rules</label>
+      <textarea id="ta-fix" data-jform="fixRules" rows="5" cols="90">${esc(pretty(ta.fix_rules && ta.fix_rules.length ? ta.fix_rules : d.builtin_fix_rules))}</textarea></div>
+    <div class="row tight"><label title="Regexes that mark a tool RESULT as failed (used by the supervisor, adaptive thinking and the scoreboard).">error markers</label>
+      <textarea id="ta-err" data-jform="strings" rows="4" cols="90">${esc(pretty(ta.error_patterns && ta.error_patterns.length ? ta.error_patterns : d.builtin_error_patterns))}</textarea></div>
     <div class="row"><button class="act primary" id="ta-save">Save turn assist</button>
       <button class="act" id="ta-reset" title="Clear the global tables so the built-in rules apply again">Use built-in rules</button></div>
     <div class="card-h" style="margin-top:8px">Rule / detector hits</div>
@@ -6456,6 +7081,7 @@ async function renderTurnAssistCard() {
       `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${esc((v.last || "").slice(0, 16).replace("T", " "))}</td></tr>`).join("")}</table>`
       : `<span class="hint">no hits yet</span>`}`;
   $("#main").appendChild(card);
+  enhancePickers(card);
   const parse = (id, kind) => {
     const v = JSON.parse($(id).value || (kind === "obj" ? "{}" : "[]"));
     if (kind === "obj" ? (typeof v !== "object" || Array.isArray(v)) : !Array.isArray(v))
@@ -6941,8 +7567,8 @@ async function tabMCP() {
         <label title="Network access. OFF (default) is force-applied over the model's request, so a model cannot enable network itself. The real block is the container's --network none — keep both aligned.">network access</label>
         <input type="checkbox" id="mcp-net"></div>
       <div id="mcp-sandbox2" class="row" style="display:none">
-        <label title="Advanced: extra call defaults as JSON, force-merged over the model's arguments (config wins). Use this to match the exact argument names YOUR sandbox expects — nothing is hardcoded. The CPU/memory/network fields above write into cpus/memory_mb/network keys; anything here is merged alongside.">extra call_defaults (JSON)</label>
-        <input id="mcp-defaults" size="60" value="{}" placeholder='{"language": "python"}'></div>
+        <label title="Advanced: extra call defaults as JSON, force-merged over the model's arguments (config wins). Use this to match the exact argument names YOUR sandbox expects — nothing is hardcoded. The CPU/memory/network fields above write into cpus/memory_mb/network keys; anything here is merged alongside.">extra call defaults</label>
+        <input id="mcp-defaults" data-jform="anymap" size="60" value="{}" placeholder='{"language": "python"}'></div>
       <div class="row">
       <button class="act primary" id="mcp-add">Save server</button>
       <button class="act" id="mcp-clear" title="Clear the form to add a new server">new</button></div>
@@ -7689,9 +8315,9 @@ function budgetCard(b) {
     <p class="hint">Measured = ${esc(b.sources.measured)}. Provider-reported = ${esc(b.sources.provider)}. ${esc(b.sources.estimate)}.</p>
     <h3>Rules</h3>
     <table><tr><th>rule</th><th>covers</th><th>limit</th><th>current use</th></tr>${ruleRows || '<tr><td colspan="4" class="hint">no rules</td></tr>'}</table>
-    <details><summary style="cursor:pointer">Edit rules (JSON)</summary>
-      <p class="hint">Each rule: name, match {backend, persona, client, account, model: glob or list; paid: true/false}, per (client | persona | session | task | request | backend | account), window_minutes (0 = no window), max_calls, max_tokens, max_concurrent, max_active + active_by + idle_seconds, wait_seconds, mode (enforce | observe), enabled. See docs/BUDGETS.md.</p>
-      <textarea id="bg-rules" rows="10" style="width:100%" class="mono">${esc(JSON.stringify((b.rules || []).map(r => { const {usage, ...rest} = r; return rest; }), null, 2))}</textarea>
+    <details><summary style="cursor:pointer">Edit rules</summary>
+      <p class="hint">Each rule covers the calls that match every box you fill in (empty = any) and limits them. A rule without a name is not saved. See docs/BUDGETS.md.</p>
+      <textarea id="bg-rules" data-jform="budgetRules" rows="10" style="width:100%" class="mono">${esc(JSON.stringify((b.rules || []).map(r => { const {usage, ...rest} = r; return rest; }), null, 2))}</textarea>
       <div class="row"><input type="checkbox" id="bg-enabled" ${b.enabled ? "checked" : ""}><label for="bg-enabled">enforce budgets</label>
         <button class="act primary" onclick="saveBudgetRules()">Save rules</button></div>
     </details>
