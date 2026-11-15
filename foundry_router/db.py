@@ -677,8 +677,17 @@ class Database:
 
     def _seed_personas(self) -> None:
         now = utcnow()
+        # v0.181.140: a starter the operator retired or deleted is not seeded again
+        # (persona_setup.py keeps the names in the kv entry personas.retired)
+        try:
+            row = self._conn.execute("SELECT value FROM kv WHERE key='personas.retired'").fetchone()
+            skip = {str(k).lower() for k in (json.loads(row[0]) if row and row[0] else {})}
+        except Exception:                                         # noqa: BLE001
+            skip = set()
         with self._lock:
             for p in STARTER_PERSONAS:
+                if p["virtual_name"].lower() in skip:
+                    continue
                 self._conn.execute(
                     """INSERT OR IGNORE INTO personas
                        (virtual_name, description, benchmark_category,

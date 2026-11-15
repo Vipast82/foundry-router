@@ -613,6 +613,7 @@ class InternalPool(BackendPool):
                                       detail)
                 finally:
                     s.busy = max(0, s.busy - 1)
+                    s.last_done = time.monotonic()      # main_route.idle_seconds
                     self._release(s)
                     if not settled:            # cancelled or an unexpected error
                         self._settle(eid, "error", detail="call did not complete")
@@ -869,6 +870,7 @@ class InternalPool(BackendPool):
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
         finally:
             s.busy = max(0, s.busy - 1)
+            s.last_done = time.monotonic()
             self._release(s)
             self._inflight_exit(model, call_id)
             self._settle(eid, usage["status"], usage["pt"], usage["ct"], usage["detail"],

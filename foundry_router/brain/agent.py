@@ -1712,6 +1712,12 @@ class AgentRunner:
         and better-reasoning than the 6GB brain, so they should own the loop.
         Any failure hands the request to the brain-mediated path (self.run)."""
         persona = ctx.persona or {}
+        if getattr(self.brain, "skip_reason", None) and self.brain.skip_reason():
+            # v0.181.140: no router model (switched off, not configured, or down). The
+            # fallbacks below all end in the brain; main-model mode never needs it.
+            async for ev in self.run_main(ctx):
+                yield ev
+            return
         effective = self.guardrails.effective(persona)
         yield AgentEvent("think", "Worker-side tool mode: selecting a worker to "
                                   "own the tool loop for this request...")
@@ -1742,8 +1748,95 @@ class AgentRunner:
         async for ev in self._worker_tool_loop(ctx, worker, mcp_tools, effective):
             yield ev
 
+    # ------------------------------------------------ main-model mode (v0.181.140) --
+
+    async def _main_ladder(self, ctx: RequestContext, persona: dict) -> tuple[list, list]:
+        """The persona's models in the order to try them for this request
+        (main_route.py), and the reasons for any change from the route order."""
+        import json as _json
+        from types import SimpleNamespace
+
+        from .. import main_route
+        from ..budget import estimate_tokens
+        category = persona.get("benchmark_category") or "general_chat"
+        available = self.pool.available_models()
+        overrides = _json_obj(persona.get("selection_weights"))
+        ranked = self.model_registry.ranked_for_category(
+            category, list(available.keys()), limit=12, blend_tool_calling=True,
+            weights=overrides or None,
+            permissive_mode="prefer" if persona.get("prefer_permissive") else "neutral")
+        ranked = _steer_vision_when_images(ranked, ctx.messages)
+        ranked = _filter_required_tags(ranked, persona)
+        ranked = _filter_model_allowlist(ranked, persona)
+        ranked = _apply_pins(ranked, persona)
+        ids = [r["id"] for r in ranked]
+        try:
+            pins = [str(p) for p in _json.loads(persona.get("pinned_models") or "[]")]
+        except (ValueError, TypeError):
+            pins = []
+        if pins and any(p in ids for p in pins):
+            # a route was set: it is the whole ladder (no drift onto unlisted models)
+            ids = [m for m in ids if m in pins]
+        try:
+            est = int(estimate_tokens(ctx.messages))
+        except Exception:                                         # noqa: BLE001
+            est = 0
+        ids, notes = main_route.fit(self.model_registry, ids, est)
+        svc = SimpleNamespace(pool=self.pool, registry=self.model_registry)
+        cfg = self.brain.cfg
+        key = main_route.conv_key(persona, ctx.messages)
+        ids, more = main_route.order(
+            svc, ids, est_tokens=est, home=main_route.home_get(key),
+            return_idle_seconds=float(getattr(cfg, "main_return_idle_seconds", 5.0)),
+            return_max_tokens=int(getattr(cfg, "main_return_max_tokens", 8000)))
+        return ids, notes + more
+
+    async def run_main(self, ctx: RequestContext) -> AsyncIterator[AgentEvent]:
+        """Main-model mode: no router model. The first model on the persona's
+        route that may take the request reads it, runs the tools and answers; a
+        model that fails hands the request to the next one on the route."""
+        from .. import main_route
+        persona = ctx.persona or {}
+        effective = self.guardrails.effective(persona)
+        ladder, notes = await self._main_ladder(ctx, persona)
+        for n in notes:
+            yield AgentEvent("think", n[0].upper() + n[1:] + ".")
+            ctx.logger.record_guardrail("main: " + n)
+        mcp_tools = self.tool_registry.offered_mcp_tools(persona)
+        key = main_route.conv_key(persona, ctx.messages)
+        limit = int(getattr(self.brain.cfg, "main_max_tries", 3) or 3)
+        tried, last_why = 0, ""
+        for mid in ladder:
+            info = self.pool.backend_info(mid)
+            if info is None:
+                continue
+            verdict = await self.guardrails.check_paid_call(
+                mid, info, self.model_registry.get(mid), ctx.guard, effective)
+            if not verdict.allowed:
+                ctx.logger.record_guardrail(f"main: {mid} denied ({verdict.reason})")
+                last_why = f"{mid} is not allowed right now ({verdict.reason})"
+                continue
+            tried += 1
+            yield AgentEvent("think", f"{mid} takes this request"
+                             + (f" with {len(mcp_tools)} tool(s)." if mcp_tools else "."))
+            main_route.home_set(key, mid)
+            failed: list = []
+            async for ev in self._worker_tool_loop(ctx, mid, mcp_tools, effective,
+                                                   on_fail=failed.append):
+                yield ev
+            if not failed:
+                return
+            last_why = failed[0]
+            ctx.logger.record_guardrail(f"main: {last_why} → next model on the route")
+            if tried >= limit:
+                break
+            yield AgentEvent("think", f"{last_why} — the next model on this persona's "
+                                      f"route takes over.")
+        yield AgentEvent("error", "no model on this persona's route could answer"
+                         + (f": {last_why}" if last_why else " (none is reachable)"))
+
     async def _worker_tool_loop(self, ctx: RequestContext, worker: str,
-                                mcp_tools: list, effective: dict):
+                                mcp_tools: list, effective: dict, on_fail=None):
         """The worker's own bounded tool-call loop. On ANY failure (dispatch
         error, unknown tool, tool execution failure, step-cap exhaustion) the
         original request is handed to the brain-mediated path — the safety net
@@ -1767,6 +1860,10 @@ class AgentRunner:
         seen_calls: dict = {}       # tool_call_key -> result, for the poll guard
 
         async def hand_to_brain(reason: str):
+            if on_fail is not None:
+                # main-model mode: the caller gives the request to the next model
+                on_fail(reason)
+                return
             yield AgentEvent("think", f"{reason} — handing this request to the brain "
                                       f"to complete with its own tool loop.")
             ctx.logger.record_guardrail(f"worker-tools fallback: {reason}")
@@ -1792,7 +1889,7 @@ class AgentRunner:
                          and wt_info and wt_info.get("type") == "ollama")
         from .. import tool_finder
         step, free_finds = 0, 0
-        offer: Optional[list] = specs      # the tools offered on the next turn
+        offer: Optional[list] = specs or None      # the tools offered on the next turn
         tool_failures = 0
         while step < cap:
             step += 1
@@ -2020,6 +2117,33 @@ class AgentRunner:
                 step -= 1
 
         # Step cap hit without a final answer.
+        if on_fail is not None:
+            # main-model mode: the work is done, so the same model answers from it
+            # (another model would start the whole loop again)
+            yield AgentEvent("think", f"{worker} used all {cap} tool steps — asking it for "
+                                      f"its answer from what it has.")
+            messages.append({"role": "user", "content":
+                             "You have used every tool step for this request. Do not call "
+                             "more tools. Answer now from what you already have, and say "
+                             "plainly what is still missing."})
+            task = asyncio.create_task(self.pool.chat(
+                worker, messages, tools=None, options=wt_options,
+                max_tokens=self.brain.cfg.worker_max_tokens, think=self._think_for(worker)))
+            async for hb in self._heartbeat_events(task, f"{worker} (final answer)"):
+                yield hb
+            try:
+                result, backend = await task
+            except AllBackendsFailed as e:
+                on_fail(f"{worker} dispatch failed ({describe_exception(e)})")
+                return
+            _, clean = prompts.split_think(result.content)
+            ctx.logger.record_model_call(worker, backend, result.prompt_tokens,
+                                         result.completion_tokens, 0.0)
+            final = clean.strip() or "(the model returned no answer)"
+            if expose_trail:
+                final += _tool_trail_footer(trail)
+            yield AgentEvent("answer", final)
+            return
         async for ev in hand_to_brain(f"{worker} hit the {cap}-step tool cap"):
             yield ev
 

@@ -612,7 +612,7 @@ async def show(request: Request) -> JSONResponse:
     svc = _svc(request)
     body = await request.json()
     name = body.get("model") or body.get("name") or ""
-    persona = svc.personas.get(name)
+    persona = svc.personas.resolve(name)
     if persona is None:
         raw = await _raw_show(svc, name)
         return JSONResponse(raw) if raw is not None else _model_not_found(name)
@@ -667,7 +667,7 @@ async def _chat_dispatch(svc, body: dict):
                          f"model={model_name}"
                          + (f" sampling={client_sampling}" if client_sampling else ""))
 
-    persona = svc.personas.get(model_name)
+    persona = svc.personas.resolve(model_name)      # a retired name -> its stand-in
     summary_req = _is_client_summary_request(messages)
     request_context.note_route(client_tools=len(client_tools or []), compaction=summary_req)
     denied = _client_model_denied(model_name, persona)
@@ -736,6 +736,20 @@ async def _chat_dispatch(svc, body: dict):
                                            client_think=client_think,
                                            client_format=client_format,
                                            client_keep_alive=body.get("keep_alive"))
+    # v0.181.140 MAIN-MODEL mode: no router model. With MCP tools the first model on
+    # the route owns the tool loop (agent.run_main); without them it is a plain
+    # direct dispatch. A client's own tools, a structured-output request and a
+    # compaction summary take the direct path below, as for every persona.
+    if exec_mode == "main" and not client_tools and client_format is None and not summary_req:
+        if _persona_has_mcp_tools(persona):
+            return await _agent_chat(svc, persona, model_name, messages, stream,
+                                     user_text, mode="main")
+        return await _direct_dispatch_chat(svc, persona, model_name, messages,
+                                           client_tools, options, stream, user_text,
+                                           client_think=client_think,
+                                           client_format=client_format,
+                                           log_mode="main", note="main-model mode",
+                                           client_keep_alive=body.get("keep_alive"))
     brain_skip = svc.brain.skip_reason() if hasattr(svc.brain, "skip_reason") else None
     if brain_skip and not client_tools and exec_mode == "agent" \
             and not _persona_has_mcp_tools(persona):
@@ -752,7 +766,8 @@ async def _chat_dispatch(svc, body: dict):
     # {"text": ...} schema), in any mode: neither the brain loop nor the
     # pipeline carries the client's format, and their tools and narration don't
     # belong in a JSON answer.
-    if client_tools or exec_mode == "direct" or client_format is not None             or (summary_req and exec_mode != "pipeline"):
+    if client_tools or exec_mode in ("direct", "main") or client_format is not None \
+            or (summary_req and exec_mode != "pipeline"):
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
                                            client_tools, options, stream, user_text,
                                            client_think=client_think,
@@ -1320,6 +1335,8 @@ def _run_events(svc, ctx: RequestContext):
     """Select the event source for this request's execution mode."""
     if ctx.logger.mode == "pipeline":
         return svc.agent.run_pipeline(ctx)
+    if ctx.logger.mode == "main":
+        return svc.agent.run_main(ctx)
     persona = ctx.persona or {}
     # Worker-side tool calling is the opt-out default: a persona with MCP tools
     # attached lets the selected worker own the tool loop, unless it explicitly
@@ -1438,7 +1455,7 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
     if (status == "ok" and (fell_back or any(a.strip() for a in answers)) and used
             and route_visible(svc, ctx.persona)):
         last = used[-1]
-        brain = "" if ctx.logger.mode in ("fallback", "cache") else getattr(svc.brain, "model", "")
+        brain = "" if ctx.logger.mode in ("fallback", "cache", "main") else getattr(svc.brain, "model", "")
         yield tr.chat_chunk(model_name, route_footer(svc, last["model"], last.get("backend") or "",
                                                      len(used), brain))
     yield tr.chat_chunk(model_name, "", done=True,

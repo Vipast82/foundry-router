@@ -2,6 +2,31 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.140 — main-model mode: a persona with no router model in front of it; the one-chat-persona setup
+
+Phase 2 of the one-chat-persona plan. Nothing changes for an install until a persona is set to the new mode or the setup is applied: every existing persona keeps its mode, and the Kilo and Cline personas are not touched by any of it.
+
+**Main-model mode** (persona → "who runs the request" → *main model*; `execution_mode = "main"`).
+- No router model. The first model on the persona's route that may take the request reads it, runs the MCP tools and answers (`AgentRunner.run_main`). A persona without MCP tools is a plain direct dispatch. A client's own tools, a structured-output request and a compaction summary take the direct path, as for every persona.
+- **A failed model hands over to the next model on the route**, not to the brain (dispatch failure, tool calls that could not be read, an unknown tool). Up to `main_max_tries` (3) models per request; then a plain error.
+- **The step cap ends in an answer**: the same model is asked once more, without tools, to answer from what it has (another model would start the whole loop again).
+- **A route is the whole ladder**: when the persona pins models, only those are used.
+- **Instant overflow** (`main_route.py`): a local model with no free stream or slot is not waited for; the next free model on the route takes the request, the busy local ones go last. A request queues only when nothing else on the route may be used.
+- **A conversation stays where it landed.** It goes back to the main model only when that model is free, has been idle `main_return_idle_seconds` (5) and the conversation is at most `main_return_max_tokens` (8,000): the main model has not seen it and reads all of it before the first word. Both are on Backends → Pool → Global settings.
+- **Context fit**: a model whose window is smaller than the conversation is left out.
+- The pool stamps when each backend finished its last call (`last_done`).
+
+**Router model off.** Backends → Pool → Routing: "router model: off" (the stored value is still `passthrough`). With it off, a tool persona left on the older mode runs through the main-model path too, so nothing ends in a brain call; the small model is then only a normal backend.
+
+**The one-chat-persona setup** (Personas tab, `persona_setup.py`, `GET/POST /admin/api/personas/setup`).
+- Shows what it would change and each persona's requests and last use over 30 days, then on a click: Foundry-Chat goes to main-model mode (its route and tools are kept), Foundry-Local (local models only, paid calls never allowed) and Foundry-Max (paid models first) are created from it, and the ticked one-per-task personas (Foundry-Agent, -Coding, -Creative, -RAG, -Research, -Vision) are switched off.
+- Nothing is deleted by it. A retired name is answered by Foundry-Chat (`PersonaStore.resolve`), so a chat program still set to it keeps working. "Switch back on" undoes one.
+- "Remove retired personas" is the delete, behind a confirmation. A removed starter persona is not seeded again at the next start (it was: `INSERT OR IGNORE` on every start); the same now holds for a starter deleted by hand.
+
+Not in this release: the answer of a main-model persona still arrives whole on llama.cpp backends (progress lines show while it works); streaming it word by word is the next piece. Helpers (asking another model for help) are Phase 3.
+
+Tests: `tests/test_main_mode.py`.
+
 ## v0.181.139 — settings that were typed as JSON are edited through forms (backends first)
 
 Phase 1 of the one-chat-persona plan: the admin page only. No setting changes its meaning, its storage or its API; every form writes the same JSON the box held, and the box stays under "Edit as JSON".

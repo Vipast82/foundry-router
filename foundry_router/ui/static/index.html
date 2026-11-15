@@ -1454,6 +1454,56 @@ function beEdit(list, idx) {
   };
 }
 
+/* ------------------------------------------------------- persona setup -- */
+// v0.181.140: the one-chat-persona setup (persona_setup.py). Shown on the Personas tab.
+async function personaSetupCard() {
+  const box = $("#ps-setup");
+  if (!box) return;
+  let d;
+  try { d = await api("personas/setup"); } catch (e) { box.innerHTML = ""; return; }
+  if (!$("#ps-setup")) return;
+  const day = t => t ? esc(t.slice(0, 10)) : "never";
+  const live = d.retire.filter(r => r.exists && r.enabled);
+  const off = d.retire.filter(r => r.exists && !r.enabled && r.retired);
+  const route = r => r.length ? esc(r.join(" → ")) : '<span class="hint">ranked automatically</span>';
+  const rows = d.retire.filter(r => r.exists).map(r => `<tr class="${r.enabled ? "" : "is-off"}">
+      <td>${r.enabled ? `<input type="checkbox" class="ps-ret" value="${esc(r.name)}" checked>` : ""}</td>
+      <td class="nw"><b>${esc(r.name)}</b></td>
+      <td>${r.enabled ? '<span class="pill ok">on</span>' : '<span class="pill">retired</span>'}</td>
+      <td class="nw">${r.requests.toLocaleString()}</td><td class="nw">${day(r.last_used)}</td>
+      <td class="nw">${!r.enabled && r.retired ? `<button class="act" data-ps-restore="${esc(r.name)}">Switch back on</button>` : ""}</td></tr>`).join("");
+  box.innerHTML = `<details class="card how" ${d.applied && !live.length ? "" : "open"}>
+    <summary><b>One chat persona</b> ${d.applied ? '<span class="pill ok">in use</span>' : '<span class="pill warn">not set up</span>'}
+      <span class="hint">one persona does every kind of work; personas differ by where a chat may be answered</span></summary>
+    <p class="hint">${esc(d.main.name)} gets every tool on demand and runs in main-model mode: its first free model reads the
+      request, uses the tools and answers, with no router model in front. Two more names share its tools:
+      <b>${esc(d.variants[0].name)}</b> (${esc(d.variants[0].what)}) and <b>${esc(d.variants[1].name)}</b> (${esc(d.variants[1].what)}).
+      The older one-per-task personas are switched off, not deleted, and a chat program still asking for one is answered by ${esc(d.main.name)}.</p>
+    <div class="tscroll"><table><tr><th>persona</th><th>now</th><th>after</th><th>route</th></tr>
+      <tr><td class="nw"><b>${esc(d.main.name)}</b></td><td>${d.main.exists ? (d.main.is_main ? "main model" : esc(d.main.mode === "agent" ? "router model picks" : d.main.mode)) : "missing"}</td><td>main model</td><td>${route(d.main.route)}</td></tr>
+      ${d.variants.map(v => `<tr><td class="nw"><b>${esc(v.name)}</b></td><td>${v.exists ? "exists (kept as it is)" : "missing"}</td><td>${v.exists ? "unchanged" : "created"}</td><td>${v.exists ? "" : route(v.route)}</td></tr>`).join("")}
+    </table></div>
+    ${rows ? `<div class="card-h" style="margin-top:10px">Personas to retire <span class="hint">traffic over the last ${d.days} days</span></div>
+    <div class="tscroll"><table><tr><th></th><th>persona</th><th>state</th><th>requests</th><th>last used</th><th></th></tr>${rows}</table></div>` : ""}
+    <div class="row" style="margin-top:8px">
+      <button class="act primary" id="ps-apply">${d.applied ? (live.length ? "Retire the ticked personas" : "Apply again") : "Switch to the one-persona setup"}</button>
+      ${off.length ? `<button class="act" id="ps-remove" title="Deletes the ${off.length} retired persona(s) that are switched off. Their names keep being answered by ${esc(d.main.name)}.">Remove retired personas…</button>` : ""}
+      <span class="hint">Kilo and Cline personas are never touched.</span></div>
+  </details>`;
+  const post = async (body, msg) => {
+    try { const r = await api("personas/setup", {method: "POST", body}); toast(msg(r)); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $("#ps-apply").onclick = () => post({retire: [...box.querySelectorAll(".ps-ret:checked")].map(x => x.value)},
+    r => r.changes.length ? `Done: ${r.changes.length} change${r.changes.length === 1 ? "" : "s"}` : "Nothing to change");
+  box.querySelectorAll("[data-ps-restore]").forEach(b => b.onclick = () =>
+    post({restore: b.dataset.psRestore}, () => `${b.dataset.psRestore} switched back on`));
+  if ($("#ps-remove")) $("#ps-remove").onclick = () => {
+    if (!confirm(`Delete the retired personas for good?\n\n${off.map(r => r.name).join(", ")}\n\nTheir settings are lost. Chats asking for these names are still answered by ${d.main.name}.`)) return;
+    post({remove: true}, r => `${r.removed.length} persona${r.removed.length === 1 ? "" : "s"} removed`);
+  };
+}
+
 /* ---------------------------------------------------------------- help -- */
 // Longer explanations behind the small "?" buttons. Short hover text lives in
 // title="" on the element itself; this is the "what does this mean and what
@@ -5396,15 +5446,15 @@ async function tabBackends() {
         <span style="margin-left:10px">${st.brain.active
           ? '<span class="pill ok" title="Persona requests are routed by the brain">brain routing active</span>'
           : `<span class="pill warn" title="${esc(st.brain.reason || "")}">passthrough — ${esc(st.brain.reason || "")}</span>`}</span></h2>
-      <p class="hint">How persona requests are served. <b>Auto</b> uses the brain while it's configured and
-        healthy and switches to passthrough the moment it isn't — no waiting on timeouts. <b>Passthrough</b>
-        never calls the brain: Foundry becomes a smart proxy that picks a model per persona policy, forwards the
-        request as-is, fails over between backends and still manages MCP servers. <b>Brain</b> always routes
-        through the brain (per-request fallback if it fails).</p>
-      <div class="row"><label>routing mode</label>
-        <select id="brain-routing">${[["auto", "auto — brain when available, else passthrough"],
-            ["brain", "brain — always route through the brain"],
-            ["passthrough", "passthrough — no brain, direct routing"]].map(([v, l]) =>
+      <p class="hint">Whether a small router model (the "brain") sits in front of personas set to
+        <i>router model picks</i>. <b>Off</b>: no request ever waits on a router model; every persona is served
+        by the models on its own route, and the small model is only a normal backend. <b>Auto</b> uses the
+        router model while it is healthy. <b>Always</b> routes through it. Personas set to <i>main model</i>,
+        <i>pass-through</i> or strict routing never use it, whatever is chosen here.</p>
+      <div class="row"><label>router model</label>
+        <select id="brain-routing">${[["passthrough", "off — no router model"],
+            ["auto", "auto — used while it is healthy"],
+            ["brain", "always — every such request goes through it"]].map(([v, l]) =>
           `<option value="${v}" ${v === (st.brain.routing_mode || "auto") ? "selected" : ""}>${l}</option>`).join("")}</select>
         <button class="act primary" id="save-routing">Save routing mode</button></div>
     </div>
@@ -5439,6 +5489,14 @@ async function tabBackends() {
         <input id="brain-uip" type="number" size="8">
         <label title="How many tool rounds a model may run in ONE request before Foundry asks it for its final answer (worker tool loop, direct mode; the brain gets this + 2 steps). High by default so an intricate task can use many tools at once. Turns that only search for a tool (find on demand) do not count, up to 6. A persona's own 'tool steps' overrides this. Runaway loops are still stopped by the poll guard, the paid-call cap and the context guard.">tool steps per request</label>
         <input id="brain-tsteps" type="number" min="1" max="200" size="5"></div>
+      <div class="hint" style="font-weight:600;margin:6px 0 2px">Main-model personas</div>
+      <div class="row tight">
+        <label title="A chat that overflowed to another model (its main model was busy) goes back to the main model only when that model has been idle this many seconds.">back to the main model after idle (s)</label>
+        <input id="brain-mri" type="number" min="0" max="3600" step="1" size="5">
+        <label title="...and only when the conversation is at most this many tokens: the main model has not seen it, so it reads all of it before the first word. Larger conversations stay on the model they overflowed to.">and conversation at most (tokens)</label>
+        <input id="brain-mrt" type="number" min="0" step="1000" size="8">
+        <label title="How many models on the route are tried for one request before it fails.">models tried per request</label>
+        <input id="brain-mmt" type="number" min="1" max="10" size="4"></div>
       <div class="hint" style="font-weight:600;margin:6px 0 2px">Keep-alive / streaming</div>
       <div class="row tight">
         <label title="While a worker/brain/MCP call is in flight, emit a 'still working' narration line every N seconds so reverse proxies and clients never mistake a slow request (failover + cold model load) for a dead one. 0 disables. (AGENT-mode narration.)">heartbeat_seconds (agent)</label>
@@ -5531,6 +5589,9 @@ async function tabBackends() {
   $("#brain-wmt").value = cfg.agent_brain.worker_max_tokens;
   $("#brain-uip").value = cfg.agent_brain.user_input_preview_chars;
   $("#brain-tsteps").value = cfg.agent_brain.worker_tool_max_steps;
+  $("#brain-mri").value = cfg.agent_brain.main_return_idle_seconds ?? 5;
+  $("#brain-mrt").value = cfg.agent_brain.main_return_max_tokens ?? 8000;
+  $("#brain-mmt").value = cfg.agent_brain.main_max_tries ?? 3;
   $("#brain-hb").value = cfg.agent_brain.heartbeat_seconds;
   $("#brain-ka").value = cfg.agent_brain.worker_keep_alive || "";
   $("#brain-ds").checked = !!cfg.agent_brain.direct_stream;
@@ -5764,6 +5825,9 @@ async function tabBackends() {
       worker_max_tokens: +$("#brain-wmt").value,
       user_input_preview_chars: +$("#brain-uip").value,
       worker_tool_max_steps: Math.max(1, Math.min(200, parseInt($("#brain-tsteps").value, 10) || 25)),
+      main_return_idle_seconds: Math.max(0, +$("#brain-mri").value || 0),
+      main_return_max_tokens: Math.max(0, parseInt($("#brain-mrt").value, 10) || 0),
+      main_max_tries: Math.max(1, Math.min(10, parseInt($("#brain-mmt").value, 10) || 3)),
       heartbeat_seconds: +$("#brain-hb").value,
       worker_keep_alive: $("#brain-ka").value.trim() || null,
       direct_stream: $("#brain-ds").checked,
@@ -6302,8 +6366,10 @@ async function tabPersonas() {
         <button class="act" onclick='clonePersona(${JSON.stringify(p.virtual_name)})'>clone</button>
         <button class="act" onclick='run(api("personas/delete",{method:"POST",body:{virtual_name:${JSON.stringify(p.virtual_name)}}}))'>delete</button></td>
     </tr>`).join("");
+  setTimeout(personaSetupCard, 0);
   $("#main").innerHTML = `
     <h2 style="margin-top:0">Personas <span class="hint" style="font-weight:normal">— each one is a model name clients can ask for, with its own routing</span></h2>
+    <div id="ps-setup"></div>
     <p class="hint">Each row is a routing policy. Adding a workload type (e.g. Foundry-Creative)
     is adding a row here — never a code change (§4.8).</p>
     ${(pf.profiles || []).map(profileCard).join("")}
@@ -6363,8 +6429,8 @@ async function tabPersonas() {
         <button type="button" class="act" style="padding:1px 7px;font-size:11px" title="Clear the restriction (brain picks from all)." onclick="allowClear()">✕</button>
         <span class="hint">empty = brain picks · 1 = locked · few = limited choice</span></div>
       <div class="row">
-        <label title="agent = generic brain loop (uses ask_<model> delegation — do NOT use for agentic clients like Cline); direct = thin proxy: pick ONE model per policy (allowlist + bias + usage) and forward the client's request/tools verbatim (correct for Cline/Kilo); pipeline = Prepare (cheapest Claude) → Execute (local coder) → Check (paid review)">execution_mode</label>
-        <select id="pe-mode"><option value="">agent</option><option>direct</option><option>pipeline</option></select>
+        <label title="Who runs the request. main model = no router model: the first model on the route that is free reads the request, runs the tools and answers; a busy local model is skipped at once and a failed model hands over to the next one (for chat personas). router model = the small router model picks the model first (the older way). pass-through = one model per policy, the client's request and tools forwarded as they are (Cline, Kilo). pipeline = Prepare (cheapest Claude) → Execute (local coder) → Check (paid review).">who runs the request</label>
+        <select id="pe-mode"><option value="main">main model (no router)</option><option value="">router model picks</option><option value="direct">pass-through</option><option value="pipeline">pipeline</option></select>
         <label title="pipeline mode only: paid review of the local output (one bounded retry)">pipeline_check</label>
         <input type="checkbox" id="pe-check" checked>
         <label title="After a LOCAL answer, this judge decides adequate/escalate. paid = cheapest Claude; local_large = best other local model (free); brain = routing brain itself">outcome_judge</label>
