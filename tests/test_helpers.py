@@ -250,6 +250,6 @@ def test_wiring():
     assert 'helpers: JSON.parse($("#pe-helpers").value || "[]")' in html
     assert 'helpers: {kind: "rows", required: "role"' in html
     import re
-    form = html[html.index('  helpers: {kind: "rows"'):html.index("  budgetRules: {kind")]
+    form = html[html.index('  helpers: {kind: "rows"'):html.index("  a2aAgents: {kind")]
     assert set(re.findall(r'\{key: "([a-z_]+)"', form)) == {
-        "role", "what", "models", "tools", "paid", "max_calls", "digest_over", "instruction"}
+        "role", "what", "models", "agent", "tools", "paid", "max_calls", "digest_over", "instruction"}

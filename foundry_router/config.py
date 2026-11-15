@@ -217,6 +217,9 @@ class AgentBrainConfig(BaseModel):
     # reading the prompt, or writing a tool call), a status line goes out this often
     # with what it is doing. 0 = only the ordinary keep-alive lines.
     main_progress_seconds: float = Field(default=3.0, ge=0, le=120)
+    # v0.181.158: helpers the main model asks for in one turn run at the same
+    # time. Off = one after another.
+    helpers_parallel: bool = True
     # Input-side twin of tool_result_limit_chars: caps what the brain sees of
     # a large pasted user message (file/code) before its FIRST routing
     # decision — otherwise a 23k-char paste blows the brain's context before
@@ -945,6 +948,26 @@ class MediaConfig(BaseModel):
     fallback_poll_seconds: float = 3.0
 
 
+class A2AAgentConfig(BaseModel):
+    """A remote A2A agent a persona's helper row may name (a2a.py)."""
+    name: str
+    url: str                           # its base address, or the address of its agent card (.json)
+    token: str = ""                    # sent as Authorization: Bearer; empty = none
+    what: str = ""
+    timeout_s: int = Field(default=300, ge=5, le=3600)
+    paid: bool = False                 # true = a helper row with "paid models allowed" off may not use it
+    enabled: bool = True
+
+
+class A2AConfig(BaseModel):
+    """A2A (Agent2Agent protocol), both directions. Serving is off by default."""
+    serve: bool = False                # answer A2A calls on /v1/a2a and publish agent cards
+    default_persona: str = "Foundry-Chat"
+    personas: list[str] = Field(default_factory=list)       # further personas offered, each at /v1/a2a/<name>
+    public_url: str = ""               # the address callers reach this router at; empty = as the request came in
+    agents: list[A2AAgentConfig] = Field(default_factory=list)
+
+
 class TrainingCaptureConfig(BaseModel):
     """Opt-in capture of inference traffic for training data (capture.py).
     Off by default; redacted before it is written; a separate store."""
@@ -1200,6 +1223,7 @@ class AppConfig(BaseModel):
     persona_profiles: list[str] = Field(default_factory=list)
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     training_capture: TrainingCaptureConfig = Field(default_factory=TrainingCaptureConfig)
+    a2a: A2AConfig = Field(default_factory=A2AConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)

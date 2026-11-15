@@ -114,6 +114,9 @@ async def get_config(request: Request):
         cfg["backend_pool"]["litellm"]["api_key"] = _mask(cfg["backend_pool"]["litellm"]["api_key"])
     if cfg.get("mcp_aggregator", {}).get("token"):
         cfg["mcp_aggregator"]["token"] = _mask(cfg["mcp_aggregator"]["token"])
+    for a in cfg.get("a2a", {}).get("agents") or []:
+        if a.get("token"):
+            a["token"] = _mask(a["token"])
     if cfg.get("training_capture", {}).get("archive_smb_password"):
         cfg["training_capture"]["archive_smb_password"] = _mask(
             cfg["training_capture"]["archive_smb_password"])
@@ -202,7 +205,7 @@ async def set_brain(request: Request):
                "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
                "routing_mode", "worker_tool_result_chars", "worker_tool_max_steps",
                "main_return_idle_seconds", "main_return_max_tokens", "main_max_tries",
-               "stream_answers", "main_progress_seconds"}
+               "stream_answers", "main_progress_seconds", "helpers_parallel"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if _is_masked(updates.get("api_key")):
         updates.pop("api_key")                       # masked echo: keep the stored key
@@ -3348,6 +3351,64 @@ async def client_install_guide(request: Request):
     truth; client_guide.py extracts and renders the install sections)."""
     from ..client_guide import guide_html
     return guide_html()
+
+
+@router.post("/admin/api/a2a")
+async def a2a_set(request: Request):
+    """A2A settings: serving (on/off, default persona, further personas, public
+    address) and the remote agents helpers may use. A token that comes back as
+    the masked echo keeps the stored one. `{"test": "<agent name>"}` instead
+    fetches that agent's card and reports what it found."""
+    from .. import a2a
+    from ..config import A2AConfig
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    cur = svc.config_store.config.a2a
+    if isinstance(body, dict) and body.get("test"):
+        agent = a2a.find_agent(cur.agents, body["test"])
+        if agent is None:
+            return {"ok": False, "error": f"no enabled agent named {body['test']!r} is saved"}
+        try:
+            card = await a2a.fetch_card(svc.http, agent)
+            url, ver = a2a.endpoint(card)
+        except Exception as e:                                    # noqa: BLE001
+            return {"ok": False, "error": describe_exception(e)}
+        return {"ok": True, "name": card.get("name") or "", "description": card.get("description") or "",
+                "version": card.get("version") or "", "endpoint": url, "protocol": ver,
+                "skills": [s.get("name") or s.get("id") for s in card.get("skills") or [] if isinstance(s, dict)]}
+    stored = {a.name.lower(): a.token for a in cur.agents}
+    new = {"serve": bool(body.get("serve")),
+           "default_persona": str(body.get("default_persona") or "").strip() or cur.default_persona,
+           "personas": [str(x).strip() for x in body.get("personas") or [] if str(x).strip()][:50],
+           "public_url": str(body.get("public_url") or "").strip()[:300], "agents": []}
+    seen = set()
+    for a in body.get("agents") or []:
+        if not isinstance(a, dict) or not str(a.get("name") or "").strip():
+            continue
+        a = dict(a)
+        a["name"] = str(a["name"]).strip()
+        if a["name"].lower() in seen:
+            return JSONResponse({"error": f"the agent {a['name']!r} is listed twice"}, status_code=400)
+        seen.add(a["name"].lower())
+        if not str(a.get("url") or "").strip().lower().startswith(("http://", "https://")):
+            return JSONResponse({"error": f"agent {a['name']!r}: the address must start with http:// or https://"},
+                                status_code=400)
+        tok = a.get("token")
+        if tok is None or _is_masked(tok):
+            a["token"] = stored.get(a["name"].lower(), "")
+        new["agents"].append(a)
+    try:
+        A2AConfig(**new)
+
+        def mutate(raw):
+            raw["a2a"] = new
+        svc.config_store.save(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.db.log_event("info", "admin", f"A2A settings changed: serving {'on' if new['serve'] else 'off'}, "
+                                      f"{len(new['agents'])} remote agent(s)")
+    return {"ok": True}
 
 
 @router.get("/admin/api/host/traffic")

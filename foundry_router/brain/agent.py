@@ -1917,16 +1917,21 @@ class AgentRunner:
                             f"{counts[row['role']]} time(s) in this request, which is its limit. "
                             f"Continue with what you have.")
             return
+        counts[row["role"]] = counts.get(row["role"], 0) + 1
+        if row.get("agent"):
+            async for ev in self._run_agent_helper(ctx, worker, row, args, task_text, counts, hold):
+                yield ev
+            return
         model, skipped = await self._helper_model(ctx, row, worker, effective)
         for why in skipped:
             ctx.logger.record_guardrail(f"helper {row['role']}: {why}")
         if model is None:
+            counts[row["role"]] -= 1                     # nothing was asked
             hold["text"] = (f"ERROR: the {row['role']} helper is not available right now ("
                             + "; ".join(skipped) + "). Do this part yourself.")
             yield AgentEvent("think", f"The {row['role']} helper is not available: "
                                       + "; ".join(skipped) + ".")
             return
-        counts[row["role"]] = counts.get(row["role"], 0) + 1
         context = str(args.get("context") or "").strip()
         user = task_text + (f"\n\n---\n{context}" if context else "")
         system = row.get("instruction") or helpers.HELPER_SYSTEM
@@ -1970,6 +1975,92 @@ class AgentRunner:
         yield AgentEvent("think", f"The {row['role']} helper ({model}) answered in "
                                   f"{secs:.1f}s ({len(text):,} chars).")
         hold["text"] = f"[answer from the {row['role']} helper, {model}]\n{text}"
+
+    async def _a2a_ask(self, agent: dict, text: str) -> str:
+        """One call to a remote A2A agent (a2a.py). Its own method so a test can
+        stand in for the network."""
+        import httpx
+
+        from .. import a2a
+        async with httpx.AsyncClient() as client:
+            return await a2a.ask(client, agent, text)
+
+    async def _run_agent_helper(self, ctx: RequestContext, worker: str, row: dict, args: dict,
+                                task_text: str, counts: dict, hold: dict):
+        """ask_helper for a row that names a remote A2A agent (v0.181.158): the task
+        goes to that agent, its answer is the tool result. It sees nothing else."""
+        from .. import a2a
+        role, name = row["role"], row["agent"]
+        cfg_fn = getattr(self.guardrails, "config_fn", None)
+        cfg = cfg_fn() if callable(cfg_fn) else None
+        agent = a2a.find_agent(getattr(getattr(cfg, "a2a", None), "agents", None), name)
+        why = ""
+        if agent is None:
+            why = f"no enabled remote agent named {name!r} is set up (Backends → Pool → A2A agents)"
+        elif agent.get("paid") and row.get("paid") is False:
+            why = f"the agent {name} is marked as paid and this helper may not use a paid one"
+        if why:
+            counts[role] -= 1
+            ctx.logger.record_guardrail(f"helper {role}: {why}")
+            hold["text"] = f"ERROR: the {role} helper is not available right now ({why}). Do this part yourself."
+            yield AgentEvent("think", f"The {role} helper is not available: {why}.")
+            return
+        context = str(args.get("context") or "").strip()
+        user = ((row.get("instruction") + "\n\n") if row.get("instruction") else "") \
+            + task_text + (f"\n\n---\n{context}" if context else "")
+        yield AgentEvent("think", f"{worker} asks the {role} helper (remote agent {name})…")
+        t0 = time.monotonic()
+        task = asyncio.create_task(self._a2a_ask(agent, user))
+        async for hb in self._heartbeat_events(task, f"{role} helper (agent {name})"):
+            yield hb
+        try:
+            text = (await task or "").strip()
+            err = "" if text else "it returned nothing"
+        except Exception as e:                                    # noqa: BLE001
+            text, err = "", describe_exception(e)
+        secs = time.monotonic() - t0
+        if err:
+            hold["text"] = (f"ERROR: the {role} helper (remote agent {name}) failed: {err}. "
+                            f"Do this part yourself.")
+            yield AgentEvent("think", f"The {role} helper failed ({err[:160]}).")
+            return
+        yield AgentEvent("think", f"The {role} helper (remote agent {name}) answered in "
+                                  f"{secs:.1f}s ({len(text):,} chars).")
+        hold["text"] = f"[answer from the {role} helper, remote agent {name}]\n{text}"
+
+    async def _helpers_together(self, ctx: RequestContext, worker: str, calls: list,
+                                effective: dict, pre: dict):
+        """Several ask_helper calls of one turn run at the same time (v0.181.158).
+        Their progress lines are passed on as they come; each result is kept in
+        `pre` for the tool loop, which then handles the calls in order as before."""
+        yield AgentEvent("think", f"{worker} asks {len(calls)} helpers at the same time…")
+        q: asyncio.Queue = asyncio.Queue()
+
+        async def one(tc):
+            held: dict = {}
+            t0 = time.monotonic()
+            try:
+                async for ev in self._run_helper(ctx, worker, tc.get("arguments"), effective, held):
+                    await q.put(ev)
+            except Exception as e:                                # noqa: BLE001
+                held["text"] = (f"ERROR: the helper call failed: {describe_exception(e)}. "
+                                f"Do this part yourself.")
+            pre[id(tc)] = (held, time.monotonic() - t0)
+
+        async def all_():
+            await asyncio.gather(*(one(tc) for tc in calls))
+            await q.put(None)
+
+        runner = asyncio.create_task(all_())
+        try:
+            while True:
+                ev = await q.get()
+                if ev is None:
+                    break
+                yield ev
+        finally:
+            if not runner.done():
+                runner.cancel()
 
     async def _digest(self, ctx: RequestContext, worker: str, tool_label: str, out: str,
                       effective: dict, hold: dict):
@@ -2212,6 +2303,17 @@ class AgentRunner:
                                   "function": {"name": tc["name"],
                                                "arguments": tc["arguments"]}}
                                  for tc in result.tool_calls]})
+            # v0.181.158: helpers asked for in the same turn run at the same time
+            from .. import helpers as _hp
+            pre_helped: dict = {}
+            if getattr(self.brain.cfg, "helpers_parallel", True):
+                together = [tc for tc in result.tool_calls
+                            if tc["name"] == _hp.TOOL and not tc.get("arguments_error")
+                            and getattr(by_name.get(_hp.TOOL), "server", None) == _hp.SERVER]
+                if len(together) > 1:
+                    async for ev in self._helpers_together(ctx, worker, together, effective,
+                                                           pre_helped):
+                        yield ev
             for tc in result.tool_calls:
                 # Poll guard: an identical (name+args) re-call is a tight status
                 # poll the model is spinning on because it can't sleep. Stop the
@@ -2267,9 +2369,13 @@ class AgentRunner:
                         # v0.181.143: ask_helper — another model does part of the task
                         from ..tools.mcp_client import ToolResult
                         hheld: dict = {}
-                        async for ev in self._run_helper(ctx, worker, tc.get("arguments"),
-                                                         effective, hheld):
-                            yield ev
+                        if id(tc) in pre_helped:             # already asked, with the others
+                            hheld, took = pre_helped.pop(id(tc))
+                            t0 -= took
+                        else:
+                            async for ev in self._run_helper(ctx, worker, tc.get("arguments"),
+                                                             effective, hheld):
+                                yield ev
                         rich = ToolResult([{"type": "text", "text": hheld.get("text") or ""}])
                     else:
                         rich = await request_context.mcp_attributed(

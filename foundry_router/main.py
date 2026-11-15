@@ -856,6 +856,8 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(provider_keys_router)
     from .backup import router as backup_router
     app.include_router(backup_router)
+    from .a2a_routes import router as a2a_router
+    app.include_router(a2a_router)
     from .ui.setup_wizard import router as setup_wizard_router
     app.include_router(setup_wizard_router)
     app.include_router(ui_router)
