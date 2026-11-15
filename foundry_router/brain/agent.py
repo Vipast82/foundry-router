@@ -1915,6 +1915,13 @@ class AgentRunner:
                     hb = float(self.brain.cfg.heartbeat_seconds or 0)
                     pacer = keepalive.Pacer(keepalive.visible_every(self.brain.cfg))
                     t_hb = time.monotonic()
+                    # v0.181.142: a silent stretch (prompt being read, a tool call being
+                    # written) shows what the model is doing every few seconds
+                    tick = (float(getattr(self.brain.cfg, "main_progress_seconds", 3.0) or 0)
+                            if stream_answer else 0.0)
+                    prog: dict = {}
+                    if tick:
+                        hb = min(hb, tick) if hb else tick
                     src = (self.pool.chat_stream(
                         worker, messages, tools=offer, options=wt_options,
                         think=self._think_for(worker),
@@ -1922,7 +1929,12 @@ class AgentRunner:
                         else self.pool.chat_stream(
                             worker, messages, tools=offer, options=wt_options,
                             think=self._think_for(worker)))
-                    async for kind, chunk in keepalive.stream_with_heartbeat(src, hb, t_hb):
+                    async for kind, chunk in keepalive.stream_with_heartbeat(
+                            src, hb, t_hb, progress=prog if tick else None):
+                        if kind == "beat" and tick:
+                            yield AgentEvent("think", keepalive.status_line(
+                                worker, chunk, keepalive.progress_detail(prog)).rstrip())
+                            continue
                         if kind == "beat":     # silent prefill: keep the stream alive
                             line = pacer.line(f"{worker} (tool step {step}/{cap})", chunk)
                             yield (AgentEvent("think", line.rstrip("\n")) if line

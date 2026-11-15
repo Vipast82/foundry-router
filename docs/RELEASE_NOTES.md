@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.142 — a streamed main-model call shows what the model is doing while it is silent
+
+**What was measured** (live, v0.181.141, Foundry-Chat on Strata). Streaming worked: a plain answer started at 4.8 s and arrived in 212 pieces. Two silences were left: 4.6 s before the first word while the prompt was read, and 21.1 s in a web-search chat while the model wrote a tool call (tool-call text is not shown, and the visible keep-alive line comes only every 60 s).
+
+- During a streamed main-model call, every `main_progress_seconds` (3) of silence a status line goes to the chat: the model, the time so far, and what it is doing (reading the prompt with tokens and percent, or writing a tool call with its size). Backends → Pool → Global settings; 0 = the ordinary keep-alive lines only.
+
+Tests: `tests/test_main_mode.py`.
+
 ## v0.181.141 — a main-model persona's answer streams word by word
 
 **What was measured.** A live chat through Foundry-Chat in main-model mode (v0.181.140, Strata): the first line arrived after 0.1 s, then 8.3 s of silence, then the whole answer in one piece. The tool loop called the model without streaming on every backend except Ollama.

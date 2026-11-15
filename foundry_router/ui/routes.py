@@ -198,7 +198,7 @@ async def set_brain(request: Request):
                "stream_worker_reasoning", "reasoning_effort", "sampling_defaults",
                "routing_mode", "worker_tool_result_chars", "worker_tool_max_steps",
                "main_return_idle_seconds", "main_return_max_tokens", "main_max_tries",
-               "stream_answers"}
+               "stream_answers", "main_progress_seconds"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if _is_masked(updates.get("api_key")):
         updates.pop("api_key")                       # masked echo: keep the stored key
