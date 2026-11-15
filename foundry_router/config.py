@@ -207,6 +207,12 @@ class AgentBrainConfig(BaseModel):
     main_return_max_tokens: int = Field(default=8000, ge=0, le=2_000_000)
     # models tried for one request before it fails
     main_max_tries: int = Field(default=3, ge=1, le=10)
+    # v0.181.141: a main-model persona's answer goes to the client word by word as
+    # the model writes it (its reasoning too), on every backend type. Off = the
+    # answer arrives whole once the model has finished (progress lines meanwhile).
+    # A persona with a review pass always gets the whole answer: the review may
+    # change it.
+    stream_answers: bool = True
     # Input-side twin of tool_result_limit_chars: caps what the brain sees of
     # a large pasted user message (file/code) before its FIRST routing
     # decision — otherwise a 23k-char paste blows the brain's context before

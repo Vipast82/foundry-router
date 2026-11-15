@@ -1887,6 +1887,15 @@ class AgentRunner:
         # so the loop still gets the whole turn to act on.
         stream_reason = (getattr(self.brain.cfg, "stream_worker_reasoning", False)
                          and wt_info and wt_info.get("type") == "ollama")
+        # v0.181.141: in main-model mode the ANSWER streams too, on every backend type
+        # (the protocol adapters already split reasoning from text and hold back a
+        # tool call the model writes as text). Not with a review pass: it may change
+        # the answer after the fact.
+        stream_answer = bool(on_fail is not None
+                             and getattr(self.brain.cfg, "stream_answers", True)
+                             and hasattr(self.pool, "chat_stream")
+                             and not (ctx.persona or {}).get("review_enabled"))
+        said = False                 # answer text already sent to the client
         from .. import tool_finder
         step, free_finds = 0, 0
         offer: Optional[list] = specs or None      # the tools offered on the next turn
@@ -1896,7 +1905,8 @@ class AgentRunner:
             result = backend = None
             err = None
             t_step = time.monotonic()
-            if stream_reason:
+            step_said = False
+            if stream_reason or stream_answer:
                 from ..pool.protocols import ChatResult
                 parts, acc_tcs, done_tcs = [], [], []
                 done_frame: dict = {}
@@ -1905,9 +1915,13 @@ class AgentRunner:
                     hb = float(self.brain.cfg.heartbeat_seconds or 0)
                     pacer = keepalive.Pacer(keepalive.visible_every(self.brain.cfg))
                     t_hb = time.monotonic()
-                    src = self.pool.chat_stream(
+                    src = (self.pool.chat_stream(
                         worker, messages, tools=offer, options=wt_options,
-                        think=self._think_for(worker))
+                        think=self._think_for(worker),
+                        max_tokens=self.brain.cfg.worker_max_tokens) if stream_answer
+                        else self.pool.chat_stream(
+                            worker, messages, tools=offer, options=wt_options,
+                            think=self._think_for(worker)))
                     async for kind, chunk in keepalive.stream_with_heartbeat(src, hb, t_hb):
                         if kind == "beat":     # silent prefill: keep the stream alive
                             line = pacer.line(f"{worker} (tool step {step}/{cap})", chunk)
@@ -1925,6 +1939,9 @@ class AgentRunner:
                                 acc_tcs.extend(chunk["tool_calls"])
                             if chunk.get("content"):
                                 parts.append(chunk["content"])
+                                if stream_answer:
+                                    step_said = said = True
+                                    yield AgentEvent("answer_delta", chunk["content"])
                     result = ChatResult.from_done_frame(
                         done_frame, content="".join(parts),
                         tool_calls=(acc_tcs or done_tcs))
@@ -1950,6 +1967,8 @@ class AgentRunner:
                     yield AgentEvent("think", f"{worker} is an embedding-only model "
                                      f"(no chat support) — flagged so it's no longer "
                                      f"offered as a worker.")
+                if step_said:
+                    yield AgentEvent("answer_delta", "\n\n")     # the next model starts a new paragraph
                 async for ev in hand_to_brain(f"{worker} dispatch failed "
                                                f"({describe_exception(err)})"):
                     yield ev
@@ -1982,6 +2001,11 @@ class AgentRunner:
                                              result.completion_tokens, 0.0)
                 yield AgentEvent("think", f"{worker} finished after {step - 1} tool "
                                           f"call(s).")
+                if step_said and clean.strip():
+                    # the answer is already on the client's screen, word by word
+                    if expose_trail and _tool_trail_footer(trail):
+                        yield AgentEvent("answer_delta", _tool_trail_footer(trail))
+                    return
                 # Review pass (async generators can't hand emit a live queue —
                 # narration is buffered and yielded before the answer).
                 buf: list[AgentEvent] = []
@@ -1996,6 +2020,8 @@ class AgentRunner:
                 yield AgentEvent("answer", final)
                 return
 
+            if step_said:
+                yield AgentEvent("answer_delta", "\n\n")     # text written before a tool call
             # The worker asked to call tools — execute each through the SAME MCP
             # infrastructure the brain uses (so request_log.tool_calls logging is
             # identical regardless of who initiated the call).

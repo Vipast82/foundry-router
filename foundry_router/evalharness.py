@@ -193,15 +193,18 @@ class EvalHarness:
             logger=RequestLogger(self.db, persona["virtual_name"],
                                  f"eval:{persona['virtual_name']}", mode, prompt))
         answers = []
+        deltas = []                 # a main-model persona streams its answer in pieces
         try:
             async for ev in _run_events(self.svc, ctx):
-                if ev.kind in ("answer", "ask_user"):
+                if ev.kind == "answer_delta":
+                    deltas.append(ev.text)
+                elif ev.kind in ("answer", "ask_user"):
                     answers.append(ev.text)
                 elif ev.kind in ("error", "brain_down"):
                     answers.append("")
         finally:
             ctx.logger.finish("ok")
-        return "\n\n".join(a for a in answers if a).strip()
+        return "\n\n".join(a for a in ["".join(deltas)] + answers if a).strip()
 
     async def _judge(self, judge_model: str, prompt: str,
                      response: str) -> tuple[Optional[float], str]:
