@@ -2,6 +2,31 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.158 — Phase 3 finished: helpers at the same time, A2A both ways
+
+- **Helpers asked for in one turn run at the same time.** When the main model
+  calls `ask_helper` more than once in a turn, the calls run together and their
+  progress lines interleave; results are handed back in the order asked. Each
+  call counts against its helper's limit before it starts. Backends → Pool →
+  Global settings → "ask helpers at the same time" (on); off = one after another.
+- **A remote agent as a helper (A2A, outgoing).** A helper row may name a remote
+  A2A agent instead of models. Agents are saved under Backends → Pool → A2A
+  agents (name, address, optional token, time limit, "costs money"); "Test agent"
+  fetches the card. The task text is all the agent gets. Both protocol versions
+  are spoken (1.0: `SendMessage`; 0.3: `message/send`), chosen from the agent's
+  card; a task that is not finished at once is asked for until it is.
+- **This router as an agent (A2A, incoming).** Off by default. When on, other
+  agents can call a persona: agent card at `/.well-known/agent-card.json`, calls
+  at `/v1/a2a` (the default persona) and `/v1/a2a/<persona>` for further ones.
+  A call runs through the same chat path as a chat program (route, tools,
+  helpers, guardrails, logging) and sits behind the same client key. Follow-up
+  messages with the same `contextId` continue the conversation (kept in memory).
+  The answer is one finished message; no partial pieces and no task tracking.
+- Modules: `a2a.py` (protocol), `a2a_routes.py` (endpoints). Config: `a2a.*`,
+  `agent_brain.helpers_parallel`.
+
+Tests: `tests/test_a2a.py`, additions to `tests/test_helpers.py`.
+
 ## v0.181.157 — Host Admin traffic card: three corrections
 
 - The engine's own decode speed is averaged only over calls the server timed; for

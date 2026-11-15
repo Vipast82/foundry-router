@@ -14,6 +14,9 @@ persona appears in a chat program's model list). Each row:
     max_calls     calls per request (default 3)
     digest_over   characters; a tool result longer than this is condensed by
                   this helper before the main model reads it (0 / unset = off)
+    agent         instead of models: the name of a remote A2A agent (a2a.agents,
+                  v0.181.158). The task goes to that agent and its answer comes
+                  back. An agent row has no tools of ours and no digest.
 
 The main model gets ONE extra tool, `ask_helper(helper, task, context)`. The
 helper does not see the conversation: the task text is all it gets. Roles, not
@@ -66,11 +69,18 @@ def clean(value) -> tuple[list, list]:
         if isinstance(models, str):
             models = [m.strip() for m in models.split(",")]
         models = [str(m).strip() for m in models if str(m).strip()]
-        if not models:
+        agent = str(r.get("agent") or "").strip()
+        if agent and models:
+            errors.append(f"helpers[{role}]: give models or a remote agent, not both")
+            continue
+        if not models and not agent:
             errors.append(f"helpers[{role}]: pick at least one model")
             continue
         row = {"role": role, "models": list(dict.fromkeys(models)),
                "what": str(r.get("what") or "").strip()[:300]}
+        if agent:
+            row["agent"] = agent[:80]
+            r = {k: v for k, v in r.items() if k not in ("tools", "digest_over")}
         if str(r.get("instruction") or "").strip():
             row["instruction"] = str(r["instruction"]).strip()[:8000]
         if r.get("tools"):
@@ -119,10 +129,14 @@ def describe(rows: list) -> str:
     lines = ["Ask another model for help with part of the task and get its answer back. "
              "Use it when a part of the task suits a helper better than you, or when the user "
              "asks for a particular model. The helper does NOT see this conversation: put "
-             "everything it needs into `task` (and long material into `context`). Helpers:"]
+             "everything it needs into `task` (and long material into `context`). To ask "
+             "several helpers at once, call this tool several times in the same turn: they "
+             "run at the same time. Helpers:"]
     for r in rows:
         what = r.get("what") or "general help"
-        lines.append(f"- {r['role']}: {what} (models: {', '.join(r['models'])}"
+        lines.append(f"- {r['role']}: {what} ("
+                     + (f"a remote agent: {r['agent']}" if r.get("agent")
+                        else f"models: {', '.join(r['models'])}")
                      + ("; can use your tools" if r.get("tools") else "") + ")")
     return "\n".join(lines)
 

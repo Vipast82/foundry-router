@@ -950,11 +950,20 @@ window._jforms = {
     {key: "role", label: "role name", type: "text", placeholder: "fast, deep, vision…", hint: "The name the main model uses for this helper. Lower-case letters, digits, - or _."},
     {key: "what", label: "what it is for (the main model reads this)", type: "text", wide: true, placeholder: "e.g. hard reasoning, a second opinion, long code"},
     {key: "models", label: "models, tried in order", type: "list", options: "models", ordered: true, wide: true, placeholder: "pick one or more models"},
+    {key: "agent", label: "or a remote agent (A2A), by its name", type: "text", placeholder: "none", hint: "Instead of models: the name of an agent saved under Backends → Pool → A2A agents. The task is sent to that agent and its answer comes back."},
     {key: "tools", label: "may use this persona's tools", type: "check", default: false, hint: "The helper runs its own tool loop (search, read pages…) and reports back."},
     {key: "paid", label: "paid models allowed", type: "check"},
     {key: "max_calls", label: "calls per request", type: "number", placeholder: "3"},
     {key: "digest_over", label: "condense tool results over (chars)", type: "number", placeholder: "off", hint: "A tool result longer than this is condensed by this helper before the main model reads it. Worth it only with a fast helper. Empty = off."},
     {key: "instruction", label: "instructions for the helper (empty = built-in)", type: "longtext", wide: true}]},
+  a2aAgents: {kind: "rows", required: "name", addLabel: "Add a remote agent", blank: {enabled: true}, fields: [
+    {key: "enabled", label: "on", type: "check"},
+    {key: "name", label: "name", type: "text", placeholder: "e.g. research-agent", hint: "The name a persona's helper row uses for this agent."},
+    {key: "url", label: "address", type: "text", wide: true, placeholder: "https://agent.example.com  (or the address of its agent card, ending in .json)"},
+    {key: "what", label: "what it is", type: "text", wide: true},
+    {key: "token", label: "access token (if it needs one)", type: "text", placeholder: "none", hint: "Sent as Authorization: Bearer. A saved token is shown shortened; leave it as it is to keep it."},
+    {key: "timeout_s", label: "wait at most (s)", type: "number", placeholder: "300"},
+    {key: "paid", label: "costs money", type: "check", default: false, hint: "A helper row with 'paid models allowed' off will not use it."}]},
   budgetRules: {kind: "rows", required: "name", addLabel: "Add a rule", blank: {enabled: true, mode: "enforce", match: {}, window_minutes: 300}, fields: [
     {key: "enabled", label: "on", type: "check"},
     {key: "name", label: "rule name", type: "text"},
@@ -2204,7 +2213,7 @@ function postRender() {
 // blocks gets no button. The choice is kept while the page is open.
 const TAB_SECTIONS = {
   Pool: [["Backends", null], ["Add or edit", /^Add, edit or remove backends/], ["Routing and brain", /^Routing mode/],
-         ["Global settings", /^Global settings/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
+         ["Global settings", /^Global settings/], ["A2A agents", /^A2A agents/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
   "Model Registry": [["Reachable now", /^Reachable now/], ["Known catalog", /^Known catalog/]],
   "Usage Log": [["Requests", null], ["Budgets and plans", /^(Budgets & usage|Claude usage window|Subscription usage)/],
                 ["Images", /^Images \(/], ["Code runs", /^⚠ Code-execution audit/], ["MCP tools", /^MCP tool usage/]],
@@ -5633,7 +5642,9 @@ async function tabBackends() {
         <label title="Main-model personas: the answer goes to the chat word by word as the model writes it, with its reasoning, on every backend. Off = the whole answer at once when the model has finished. A persona with a review pass always gets the whole answer.">stream answers word by word</label>
         <input type="checkbox" id="brain-sa">
         <label title="Main-model personas: while the model shows nothing (it is reading the prompt or writing a tool call), a status line goes to the chat this often, saying what it is doing. 0 = only the ordinary keep-alive lines.">status line while silent, every (s)</label>
-        <input id="brain-mps" type="number" min="0" max="120" step="1" size="4"></div>
+        <input id="brain-mps" type="number" min="0" max="120" step="1" size="4">
+        <label title="Main-model personas: when the model asks several helpers in one turn, they run at the same time. Off = one after another.">ask helpers at the same time</label>
+        <input type="checkbox" id="brain-hpar"></div>
       <div class="row tight">
         <label title="Backend read timeout (seconds): the MAX gap Foundry waits for the next streamed token from a backend (Ollama/Claude) before failing with ReadTimeout. Too low + heavy prompt-eval or reasoning = dropped streams. Old installs default to 300; try 1800. Baked into the HTTP client at startup, so a change needs a Restart (button below the aggregator).">backend read timeout (s)</label>
         <input id="brain-rto" type="number" min="30" step="60" style="width:90px">
@@ -5654,6 +5665,29 @@ async function tabBackends() {
       <div class="row"><label title="Global default generation options merged into every worker call, e.g. {&quot;temperature&quot;:0.7,&quot;top_p&quot;:0.9,&quot;top_k&quot;:40}. A persona's sampling_options override these; a client's explicit options override both. Empty {} = send nothing (each model's own defaults).">sampling_defaults</label>
         <input id="brain-samp" data-jform="sampling" size="70" value="{}" placeholder='{"temperature": 0.7, "top_p": 0.9, "top_k": 40, "repeat_penalty": 1.1}'>
         <button class="act primary" id="save-global">Save global settings</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0" title="A2A (Agent2Agent) is the open protocol agents use to call each other. Both directions are optional.">A2A agents <span class="hint" style="font-weight:normal">— let other agents call this router, and let a persona's helpers call other agents</span></h2>
+      <div class="hint" style="font-weight:600;margin:6px 0 2px">This router as an agent</div>
+      <div class="row tight">
+        <label title="Other agents and harnesses can call a persona here over A2A. Calls go through the same chat path as any chat program, behind the same client key when client keys are on.">answer A2A calls</label>
+        <input type="checkbox" id="a2a-serve">
+        <label title="The persona that answers at /v1/a2a and is described by the agent card.">persona that answers</label>
+        <input id="a2a-default" size="18" data-pick="personas">
+        <label title="Further personas offered, each at its own address /v1/a2a/<name>. Empty = only the one above.">further personas</label>
+        <input id="a2a-personas" data-multi="json" data-options="personas" value="[]" placeholder="none"></div>
+      <div class="row tight">
+        <label title="The address other machines reach this router at, written into the agent card. Empty = the address the request came in on.">public address</label>
+        <input id="a2a-public" size="34" placeholder="e.g. http://192.168.0.112:11435"></div>
+      <p class="hint" id="a2a-where" style="margin:2px 0 8px"></p>
+      <div class="hint" style="font-weight:600;margin:6px 0 2px">Remote agents a helper may use</div>
+      <textarea id="a2a-agents" data-jform="a2aAgents" rows="3" cols="70">[]</textarea>
+      <div class="row tight" style="margin-top:8px">
+        <button class="act primary" id="a2a-save">Save A2A settings</button>
+        <select id="a2a-test-name"></select>
+        <button class="act" id="a2a-test" title="Fetches the saved agent's card and shows what it offers. Save first.">Test agent</button>
+        <span class="hint" id="a2a-msg"></span></div>
+      <p class="hint" style="margin:6px 0 0">To use a remote agent: add a helper row to a persona (persona editor → Models → helpers) and put the agent's name in "or a remote agent".</p>
     </div>
     <div class="card">
       <h2 style="margin-top:0" title="Foundry-MCP: re-expose Foundry's own connected MCP tools as a single Streamable-HTTP MCP server. Point AnythingLLM (or any MCP client) at it so it gains ALL of Foundry's tools alongside its own local MCP servers. The client owns the tool loop; Foundry executes the calls.">Foundry-MCP aggregator</h2>
@@ -5719,6 +5753,19 @@ async function tabBackends() {
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-sa").checked = cfg.agent_brain.stream_answers !== false;
   $("#brain-mps").value = cfg.agent_brain.main_progress_seconds ?? 3;
+  $("#brain-hpar").checked = cfg.agent_brain.helpers_parallel !== false;
+  { const a = cfg.a2a || {};
+    $("#a2a-serve").checked = !!a.serve;
+    $("#a2a-default").value = a.default_persona || "Foundry-Chat";
+    $("#a2a-personas").value = JSON.stringify(a.personas || []);
+    $("#a2a-public").value = a.public_url || "";
+    $("#a2a-agents").value = JSON.stringify(a.agents || []);
+    const base = (a.public_url || location.origin).replace(/\/+$/, "");
+    $("#a2a-where").innerHTML = a.serve
+      ? `Agent card: <span class="mono">${esc(base)}/.well-known/agent-card.json</span> · calls: <span class="mono">${esc(base)}/v1/a2a</span> (a further persona: <span class="mono">${esc(base)}/v1/a2a/&lt;name&gt;</span>)`
+      : "Off: other agents cannot call this router over A2A.";
+    const names = (a.agents || []).filter(x => x.enabled !== false).map(x => x.name);
+    $("#a2a-test-name").innerHTML = names.map(n => `<option>${esc(n)}</option>`).join("") || '<option value="">no agent saved</option>'; }
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
   $("#brain-samp").value = JSON.stringify(cfg.agent_brain.sampling_defaults || {});
@@ -5957,8 +6004,29 @@ async function tabBackends() {
       stream_worker_reasoning: $("#brain-swr").checked,
       stream_answers: $("#brain-sa").checked,
       main_progress_seconds: Math.max(0, +$("#brain-mps").value || 0),
+      helpers_parallel: $("#brain-hpar").checked,
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));
+  $("#a2a-save").onclick = async () => {
+    try {
+      const r = await api("a2a", {method: "POST", body: {
+        serve: $("#a2a-serve").checked, default_persona: $("#a2a-default").value.trim(),
+        personas: JSON.parse($("#a2a-personas").value || "[]"), public_url: $("#a2a-public").value.trim(),
+        agents: JSON.parse($("#a2a-agents").value || "[]")}});
+      if (r.error) { toast(r.error, true); return; }
+      toast("A2A settings saved"); render();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#a2a-test").onclick = async () => {
+    const name = $("#a2a-test-name").value, msg = $("#a2a-msg");
+    if (!name) { msg.textContent = "save an agent first"; return; }
+    msg.textContent = "asking " + name + "…";
+    try {
+      const r = await api("a2a", {method: "POST", body: {test: name}});
+      msg.innerHTML = r.ok ? `<span class="pill ok">found</span> ${esc(r.name)}${r.version ? " " + esc(r.version) : ""} · A2A ${esc(r.protocol)} at <span class="mono">${esc(r.endpoint)}</span>${(r.skills || []).length ? " · skills: " + esc(r.skills.join(", ")) : ""}`
+        : `<span class="pill bad">failed</span> ${esc(r.error)}`;
+    } catch (e) { msg.innerHTML = `<span class="pill bad">failed</span> ${esc(e.message)}`; }
+  };
   $("#save-rto").onclick = async () => {
     try {
       const r = await api("config/backend-timeout", {method: "POST",
