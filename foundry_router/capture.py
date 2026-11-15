@@ -237,6 +237,10 @@ class CaptureStore:
         self._lock = threading.Lock()
         self._ro: Optional[sqlite3.Connection] = None
         self._ro_lock = threading.Lock()
+        # v0.181.151: its own lock. Starting the writer thread took _ro_lock, which the
+        # background record count holds for the whole of its query: after a restart the
+        # first captured request waited for it ON THE EVENT LOOP (a 12.2 s freeze).
+        self._writer_lock = threading.Lock()
         self._q: queue.Queue = queue.Queue()             # rows waiting for the writer thread
         self._writer: Optional[threading.Thread] = None
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
@@ -299,7 +303,7 @@ class CaptureStore:
         (called by every read) waits for the records still queued."""
         self._q.put((row, on_error))
         if self._writer is None or not self._writer.is_alive():
-            with self._ro_lock:
+            with self._writer_lock:
                 if self._writer is None or not self._writer.is_alive():
                     self._writer = threading.Thread(target=self._drain, name="foundry-capture-writer",
                                                     daemon=True)
@@ -366,10 +370,17 @@ class CaptureStore:
                 self.conn.execute("INSERT INTO capture_meta (k, v) VALUES (?, ?) ON CONFLICT(k) "
                                   "DO UPDATE SET v=excluded.v", (k, v))
             return v
-        # read on the second connection: the page's status call must not wait for
-        # the lock a long VACUUM holds
-        r = self.ro_query("SELECT v FROM capture_meta WHERE k=?", (k,), flush=False)
-        return r[0]["v"] if r else None
+        # v0.181.151: read on a connection of its own. Not the main one (a long VACUUM
+        # holds its lock) and not the shared read-only one (the record count holds its
+        # lock for the whole query: the Training page hung behind it).
+        c = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            r = c.execute("SELECT v FROM capture_meta WHERE k=?", (k,)).fetchone()
+        except sqlite3.Error:
+            r = None
+        finally:
+            c.close()
+        return r[0] if r else None
 
     def compact(self, batch: int = 8, pause: float = 0.05, verify_every: int = 100,
                 reclaim: bool = True, yield_factor: float = 3.0) -> dict:
