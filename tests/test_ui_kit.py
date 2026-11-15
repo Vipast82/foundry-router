@@ -219,7 +219,7 @@ def test_host_admin_tells_an_endpoint_that_is_not_offered_from_one_that_failed()
     assert '(probeState(p) === "absent" && k !== "models" ? absent : failed).push([k, p]);' in fn
     assert "Not offered by this server" in fn and "Did not answer" in fn
     assert '<span class="pill bad">unreachable</span>' not in fn      # the old card for every miss
-    assert "JSON.stringify(h.body, null, 1)" in fn and 'class="raw mono"' in fn      # wrapped, on request
+    assert "JSON.stringify(bodyObj, null, 1)" in fn and 'class="raw mono"' in fn      # wrapped, on request
     assert "_HEALTH_RATIOS.filter(" in fn and 'class="ov-kpis"' in fn
     assert '<div class="chips">' in fn                                # names only: no one-column table
     tab = html[html.index("async function tabHostAdmin() {"):html.index("async function hostRenderDiag(")]

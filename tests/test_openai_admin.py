@@ -206,3 +206,21 @@ def test_host_endpoints_shape_and_guarded(client):
     # unknown backend -> clean {ok:False,error}, never a 500
     d = client.get("/admin/api/host/diag", params={"backend": "nope"}).json()
     assert d["ok"] is False and d["error"]
+
+
+def test_a_strata_server_is_asked_for_its_engine_status():
+    """v0.181.152: the Strata gateway's /health is a short summary; the expert tiers
+    the bare engine reports in /health are in the gateway's /v1/status."""
+    import inspect
+    from pathlib import Path
+
+    from foundry_router.pool import openai_admin
+    assert openai_admin._PROBES["llamacpp"][-1] == "status"
+    assert "status" not in openai_admin._PROBES["vllm"]
+    src = inspect.getsource(openai_admin.OpenAIAdmin._probe_status)
+    assert 'f"{root}/v1/status"' in src and "probe_failure(e)" in src
+    html = (Path(openai_admin.__file__).parent.parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'status: ["/v1/status",' in html
+    assert "what GET /v1/status answered" in html and "const factsBlock = (bodyObj, skipStatus) =>" in html
+    assert '["health", "version", "props", "slots", "models", "metrics", "status"]' in html
+
