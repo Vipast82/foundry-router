@@ -4193,7 +4193,8 @@ async function tabTraining() {
         return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Capture store</b>
           <span class="stat" style="margin-left:0">size <b>${c.store_bytes != null ? gb(c.store_bytes) : "—"}</b></span>
           <button class="act" id="cap-compact" ${k.state === "running" ? "disabled" : ""} title="Every captured call holds the whole conversation before it. This stores each message once: the records written before v0.181.145 are rewritten a few at a time (every 100th is read back and compared first), then the freed space is returned to the disk. Capture keeps running. It can be started again after a restart and continues where it stopped.">${k.state === "running" ? "Shrinking…" : done ? "Shrink again" : "Shrink the store"}</button>
-          <span class="hint">${prog || (done ? "records are stored with each message once" : "records written before v0.181.145 repeat the whole conversation in every call")}</span></div>`;
+          ${k.state === "running" ? '<button class="act" id="cap-compact-stop" title="Ends the shrink after the few records in hand. Start it again later and it continues from there.">Stop</button>' : ""}
+          <span class="hint">${prog || (k.state === "stopped" ? "stopped; start it again to continue" : done ? "records are stored with each message once" : "records written before v0.181.145 repeat the whole conversation in every call")}</span></div>`;
       })()}
       <div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Download captured calls</b>
         <select id="cap-dl-q" title="ok = the router saw the call succeed with no thumbs-down and no failed gate/review; verified = ok plus a gate PASS, review APPROVED or vision approval from the coordinator"><option value="">all calls</option><option value="ok">router ok</option><option value="verified">verified by the coordinator</option></select>
@@ -4237,6 +4238,10 @@ async function tabTraining() {
   if ($("#cap-compact")) $("#cap-compact").onclick = async () => {
     if (!confirm("Shrink the capture store now?\n\nIt rewrites the older records so each message is stored once, then returns the freed space to the disk. It runs in the background and capture keeps working. On a large store it takes a while.")) return;
     try { await api("training/capture/compact", {method: "POST", body: {}}); toast("Shrinking started"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#cap-compact-stop")) $("#cap-compact-stop").onclick = async () => {
+    try { await api("training/capture/compact", {method: "POST", body: {stop: true}}); toast("Stopping after the records in hand"); render(); }
     catch (e) { toast(e.message, true); }
   };
   $("#cap-dl").onclick = () => _downloadAdmin(

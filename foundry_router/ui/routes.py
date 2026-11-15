@@ -1279,6 +1279,12 @@ async def training_capture_compact(request: Request):
     cap = getattr(_svc(request), "capture", None)
     if cap is None:
         return JSONResponse({"error": "training capture is not set up"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:                                             # noqa: BLE001
+        body = {}
+    if isinstance(body, dict) and body.get("stop"):
+        return {"ok": True, "compaction": cap.store.compact_stop()}
     return {"ok": True, "compaction": await asyncio.to_thread(cap.store.compact_start)}
 
 

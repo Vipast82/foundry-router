@@ -143,3 +143,46 @@ def test_tiers():
     assert sessions.tier_of(["ok", "ok"], []) == "ok"
     assert sessions.tier_of([None], []) == "unknown" and sessions.tier_of([], []) == "unknown"
     assert sessions.tier_of(["ok", "error"], []) == "failed"
+
+
+def test_only_the_tools_an_example_uses_are_listed(tmp_path):
+    """v0.181.146: 60-180 tool definitions (about 40,000 tokens) came before the first
+    word of every coding example; the first live run left 5,540 conversations out."""
+    st = TrainingStore(str(tmp_path / "s"), allow_in_repo=True)
+    many = TOOLS + [{"type": "function", "function": {"name": f"tool_{i}", "description": "d" * 2000,
+                                                      "parameters": {"type": "object"}}} for i in range(60)]
+    st.put_events([Event(
+        "foundry", "capture:T-1", "model_call", project_id="au", timestamp=1.0, session_id="T",
+        task_id="UI-1", request_id="r", actor_role="assistant", actor_model="qwen", actual_model="qwen",
+        actual_backend="b", requested_persona="P", capture_status="complete",
+        facts={"status": "ok", "messages": _turns(2), "tools": many, "content": "done", "tool_calls": [],
+               "role": "implementer", "quality": {"outcome": "ok"}})])
+    m = sessions.export(st, ["au"], name="used", max_tokens=8000, validation_fraction=0.0, log=lambda s: None)
+    assert m["examples"] == {"train": 1} and m["skipped"] == {} and m["tools"] == "used"
+    row, = _read(tmp_path / "s" / "datasets" / "used" / "train.jsonl")
+    assert [t["function"]["name"] for t in row["tools"]] == ["write_file"]      # of 61
+    assert row["meta"]["tokens"] < 2000
+    # all of them: the 61 definitions alone are larger than the example
+    m = sessions.export(st, ["au"], name="alltools", max_tokens=8000, tools="all",
+                        validation_fraction=0.0, log=lambda s: None)
+    assert m["examples"] == {} and m["skipped"] == {"system_prompt_fills_the_example": 1}
+    m = sessions.export(st, ["au"], name="alltools2", max_tokens=80000, tools="all",
+                        validation_fraction=0.0, log=lambda s: None)
+    row, = _read(tmp_path / "s" / "datasets" / "alltools2" / "train.jsonl")
+    assert len(row["tools"]) == 61
+
+
+def test_a_turn_larger_than_an_example_is_shortened_not_dropped(tmp_path):
+    st = TrainingStore(str(tmp_path / "s"), allow_in_repo=True)
+    msgs = _turns(3)
+    msgs[3]["content"] = "START " + "line of tool output\n" * 3000 + " END"      # one huge tool result
+    _call(st, "H", 0, "qwen", 1, reply="finished", msgs=msgs)
+    m = sessions.export(st, ["au"], name="big", max_tokens=3000, validation_fraction=0.0, log=lambda s: None)
+    assert m["skipped"] == {} and m["examples_with_a_shortened_turn"] >= 1
+    rows = _read(tmp_path / "s" / "datasets" / "big" / "train.jsonl")
+    assert all(r["meta"]["tokens"] <= 3000 for r in rows)
+    steps = [x["content"] for r in rows for x in r["messages"] if x["role"] == "assistant"]
+    assert steps == ["step 0", "step 1", "step 2", "finished"]                 # no turn was lost
+    big = next(x["content"] for r in rows for x in r["messages"] if x["role"] == "tool" and "START" in x["content"])
+    assert big.startswith("START ") and big.endswith(" END") and "characters left out of this message" in big
+

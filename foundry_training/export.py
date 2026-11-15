@@ -312,7 +312,7 @@ def export(store, projects: list, kind: str, target: str, cfgs: dict, purpose: s
                     if any(a.get("status") != "present" for a in la):
                         skipped["missing_artifact"] += 1
                         continue
-                allow = bool(cfg.export.get("allow_frontier_targets", False))
+                allow = cfg.frontier_targets()
                 rsn = bool(cfg.export.get("include_reasoning", False))
                 if target == "canonical":
                     c = canonical(ep, r, allow)
@@ -441,7 +441,7 @@ def call_lines(store, pid: str, cfg, target: str, purpose: str, tok, guard: set,
     if quality not in CALL_QUALITY:
         raise ExportError(f"calls_quality must be one of {CALL_QUALITY}")
     purposes = set(cfg.export.get("calls_purposes") or ["agent_turn"])
-    allow = bool(cfg.export.get("allow_frontier_targets", False))
+    allow = cfg.frontier_targets()
     rsn = bool(cfg.export.get("include_reasoning", False))
     limit = int((cfg.policy.get("sft") or {}).get("max_tokens") or 32768)
     labels: dict = defaultdict(list)
@@ -484,7 +484,8 @@ def call_lines(store, pid: str, cfg, target: str, purpose: str, tok, guard: set,
             continue
         q = f.get("quality") or {}
         st = quality_state(q, (q.get("labels") or []) + labels.get(e.get("request_id"), []))
-        if not st["ok"] or (quality == "verified" and not st["positive"]):
+        if getattr(cfg, "exclude", False) and (
+                not st["ok"] or (quality == "verified" and not st["positive"])):
             skipped["call_quality"] += 1
             continue
         author = _author(e["actual_model"], e["requested_persona"], cfg)
