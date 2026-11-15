@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.141 — a main-model persona's answer streams word by word
+
+**What was measured.** A live chat through Foundry-Chat in main-model mode (v0.181.140, Strata): the first line arrived after 0.1 s, then 8.3 s of silence, then the whole answer in one piece. The tool loop called the model without streaming on every backend except Ollama.
+
+- In main-model mode every model call of the tool loop is a stream, on every backend type. The model's reasoning goes out as it is written, and so does the answer text (`answer_delta` events → content chunks). The protocol adapters already split reasoning from text and hold back a tool call the model writes as text, so neither reaches the answer.
+- Text a model writes before a tool call is shown and closed with a blank line; the tool trail follows a streamed answer; the answer is not sent a second time whole.
+- A stream that breaks hands the request to the next model on the route, as before.
+- Not streamed: a persona with a review pass (the review may change the answer), and everything when Backends → Pool → Global settings → "stream answers word by word" (`agent_brain.stream_answers`) is off.
+- The eval harness reads the streamed pieces as the answer.
+
+Tests: `tests/test_main_mode.py`.
+
 ## v0.181.140 — main-model mode: a persona with no router model in front of it; the one-chat-persona setup
 
 Phase 2 of the one-chat-persona plan. Nothing changes for an install until a persona is set to the new mode or the setup is applied: every existing persona keeps its mode, and the Kilo and Cline personas are not touched by any of it.

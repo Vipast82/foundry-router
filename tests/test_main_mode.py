@@ -423,3 +423,105 @@ def test_the_setup_routes(tmp_path, monkeypatch):
     for key in ("main_return_idle_seconds", "main_return_max_tokens", "main_max_tries"):
         assert f'"{key}"' in src
         assert key in AgentBrainConfig.model_fields
+
+
+# -- the answer streams word by word (v0.181.141) -----------------------------------------------
+
+class StreamPool(Pool):
+    """Each script step is a list of stream chunks (or an exception)."""
+
+    async def chat_stream(self, model, messages, tools=None, options=None, keep_alive=None,
+                          think=None, max_tokens=None, fmt=None):
+        self.asked.append((model, tools is not None))
+        step = self.scripts[model].pop(0)
+        if isinstance(step, Exception):
+            raise step
+        for chunk in step:
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
+
+
+def _say(*pieces, think=""):
+    out = [{"content": "", "thinking": think, "done": False}] if think else []
+    out += [{"content": p, "thinking": "", "done": False} for p in pieces]
+    return out + [{"done": True, "content": "", "prompt_tokens": 10, "completion_tokens": 5}]
+
+
+def _call(name, text="", **args):
+    out = [{"content": text, "thinking": "", "done": False}] if text else []
+    return out + [{"done": True, "content": "",
+                   "tool_calls": [{"id": "1", "name": name, "arguments": args}]}]
+
+
+def _stream(tmp_path, scripts, **kw):
+    runner, ctx, pool, mcp = _make(tmp_path, scripts, **kw)
+    sp = StreamPool(scripts)
+    runner.pool = sp
+    return runner, ctx, sp, mcp
+
+
+def test_the_answer_goes_out_word_by_word(tmp_path):
+    runner, ctx, pool, _ = _stream(tmp_path, {
+        "main": [_say("RAM is ", "system memory. ", "VRAM is on the GPU.", think="comparing the two")],
+        "small": []})
+    evs = _run(runner.run_main(ctx))
+    kinds = [e.kind for e in evs]
+    assert [e.text for e in evs if e.kind == "answer_delta"] == ["RAM is ", "system memory. ", "VRAM is on the GPU."]
+    assert "answer" not in kinds                                         # not sent a second time, whole
+    assert [e.text for e in evs if e.kind == "think_raw"] == ["comparing the two"]
+    assert kinds.index("think_raw") < kinds.index("answer_delta")
+    row = ctx.logger.models_used[-1]
+    assert row["model"] == "main" and row["prompt_tokens"] == 10         # the call is still accounted
+
+
+def test_tools_then_a_streamed_answer_with_the_tool_trail(tmp_path):
+    runner, ctx, pool, mcp = _stream(tmp_path, {
+        "main": [_call("searxng_web_search", "Let me look that up.", query="foundry router"),
+                 _say("It is ", "an LLM router.")],
+        "small": []})
+    ctx.persona["expose_tool_trail"] = 1
+    evs = _run(runner.run_main(ctx))
+    deltas = [e.text for e in evs if e.kind == "answer_delta"]
+    assert deltas[:4] == ["Let me look that up.", "\n\n", "It is ", "an LLM router."]
+    assert len(deltas) == 5 and "search" in deltas[4]                    # the trail follows the answer
+    assert len(mcp.calls) == 1 and not [e for e in evs if e.kind == "answer"]
+
+
+def test_a_stream_that_breaks_hands_over_to_the_next_model(tmp_path):
+    runner, ctx, pool, _ = _stream(tmp_path, {
+        "main": [[{"content": "Half an ans", "thinking": "", "done": False}, RuntimeError("socket closed")]],
+        "small": [_say("The whole answer.")]})
+    evs = _run(runner.run_main(ctx))
+    assert [e.text for e in evs if e.kind == "answer_delta"] == ["Half an ans", "\n\n", "The whole answer."]
+    assert [m for m, _ in pool.asked] == ["main", "small"]
+    assert not [e for e in evs if e.kind == "error"]
+
+
+def test_a_reviewed_persona_and_the_switch_keep_the_answer_whole(tmp_path):
+    """Switched off, the answer arrives whole. A persona with a review pass never
+    streams (the review may change the answer): checked in the source below."""
+    runner, ctx, pool, _ = _stream(tmp_path, {"main": [ChatResult(content="Whole answer.")], "small": []})
+    runner.brain.cfg.stream_answers = False
+    evs = _run(runner.run_main(ctx))
+    assert [e.text for e in evs if e.kind == "answer"] == ["Whole answer."]
+    assert not [e for e in evs if e.kind == "answer_delta"]
+    import inspect
+    src = inspect.getsource(AgentRunner._worker_tool_loop)
+    assert 'and not (ctx.persona or {}).get("review_enabled"))' in src
+    assert "stream_answer = bool(on_fail is not None" in src            # main-model mode only
+
+
+def test_the_chat_stream_carries_the_pieces():
+    import inspect
+
+    from foundry_router import evalharness
+    from foundry_router.facade import ollama_api
+    src = inspect.getsource(ollama_api._agent_events_to_chat_chunks)
+    assert 'elif ev.kind == "answer_delta":\n                deltas.append(ev.text)\n                yield tr.chat_chunk(model_name, ev.text)' in src
+    assert 'answers.insert(0, "".join(deltas))' in src                  # the route footer and the cache see it
+    assert 'if ev.kind == "answer_delta":' in inspect.getsource(evalharness.EvalHarness._answer_for)
+    assert AgentBrainConfig().stream_answers is True
+    from pathlib import Path
+    html = (Path(persona_setup.__file__).parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="brain-sa"' in html and 'stream_answers: $("#brain-sa").checked' in html

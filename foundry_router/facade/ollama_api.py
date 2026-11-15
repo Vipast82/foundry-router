@@ -1392,11 +1392,15 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
 
     status, error = "ok", ""
     answers: list[str] = []
+    deltas: list[str] = []          # v0.181.141: answer text streamed word by word
     fell_back = False
     try:
         async for ev in _run_events(svc, ctx):
             if ev.kind == "keepalive":
                 yield tr.chat_chunk(model_name, "")      # bytes only, nothing rendered
+            elif ev.kind == "answer_delta":
+                deltas.append(ev.text)
+                yield tr.chat_chunk(model_name, ev.text)
             elif ev.kind == "think_raw":
                 # A model's own reasoning streamed token by token — verbatim.
                 # (Appending "\n" per event put one token per line.)
@@ -1438,6 +1442,8 @@ async def _agent_events_to_chat_chunks(svc, ctx: RequestContext, model_name: str
         yield tr.chat_chunk(model_name, f"\n[foundry-router] internal error: {e}")
     finally:
         ctx.logger.finish(status, error)
+    if deltas:
+        answers.insert(0, "".join(deltas))
     # Images/audio persona tools made: links after the answer (tool_media.py).
     media_md = _media_footer(svc, ctx.media)
     if media_md:
