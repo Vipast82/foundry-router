@@ -213,6 +213,10 @@ class AgentBrainConfig(BaseModel):
     # A persona with a review pass always gets the whole answer: the review may
     # change it.
     stream_answers: bool = True
+    # v0.181.142: while a streaming main-model call shows nothing (the model is
+    # reading the prompt, or writing a tool call), a status line goes out this often
+    # with what it is doing. 0 = only the ordinary keep-alive lines.
+    main_progress_seconds: float = Field(default=3.0, ge=0, le=120)
     # Input-side twin of tool_result_limit_chars: caps what the brain sees of
     # a large pasted user message (file/code) before its FIRST routing
     # decision — otherwise a 23k-char paste blows the brain's context before

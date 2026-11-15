@@ -5520,7 +5520,9 @@ async function tabBackends() {
         <label title="AGENT mode (Foundry-Chat etc.): stream the worker's REASONING (its thinking tokens) live as narration while it generates, but BUFFER the answer so the brain still reviews it (refusal/permissive fallback, outcome-judge) before showing it. Watch the model reason in real time; the final answer stays gated. Ollama workers only. (AGENT path.)">stream_worker_reasoning</label>
         <input type="checkbox" id="brain-swr">
         <label title="Main-model personas: the answer goes to the chat word by word as the model writes it, with its reasoning, on every backend. Off = the whole answer at once when the model has finished. A persona with a review pass always gets the whole answer.">stream answers word by word</label>
-        <input type="checkbox" id="brain-sa"></div>
+        <input type="checkbox" id="brain-sa">
+        <label title="Main-model personas: while the model shows nothing (it is reading the prompt or writing a tool call), a status line goes to the chat this often, saying what it is doing. 0 = only the ordinary keep-alive lines.">status line while silent, every (s)</label>
+        <input id="brain-mps" type="number" min="0" max="120" step="1" size="4"></div>
       <div class="row tight">
         <label title="Backend read timeout (seconds): the MAX gap Foundry waits for the next streamed token from a backend (Ollama/Claude) before failing with ReadTimeout. Too low + heavy prompt-eval or reasoning = dropped streams. Old installs default to 300; try 1800. Baked into the HTTP client at startup, so a change needs a Restart (button below the aggregator).">backend read timeout (s)</label>
         <input id="brain-rto" type="number" min="30" step="60" style="width:90px">
@@ -5605,6 +5607,7 @@ async function tabBackends() {
   $("#brain-csticky").checked = cfg.agent_brain.context_guard_sticky !== false;
   $("#brain-swr").checked = !!cfg.agent_brain.stream_worker_reasoning;
   $("#brain-sa").checked = cfg.agent_brain.stream_answers !== false;
+  $("#brain-mps").value = cfg.agent_brain.main_progress_seconds ?? 3;
   $("#brain-re").value = (cfg.agent_brain.reasoning_effort === "xhigh" ? "max"
     : cfg.agent_brain.reasoning_effort) || "";
   $("#brain-samp").value = JSON.stringify(cfg.agent_brain.sampling_defaults || {});
@@ -5842,6 +5845,7 @@ async function tabBackends() {
       context_guard_sticky: $("#brain-csticky").checked,
       stream_worker_reasoning: $("#brain-swr").checked,
       stream_answers: $("#brain-sa").checked,
+      main_progress_seconds: Math.max(0, +$("#brain-mps").value || 0),
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));
   $("#save-rto").onclick = async () => {

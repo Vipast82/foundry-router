@@ -525,3 +525,33 @@ def test_the_chat_stream_carries_the_pieces():
     from pathlib import Path
     html = (Path(persona_setup.__file__).parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="brain-sa"' in html and 'stream_answers: $("#brain-sa").checked' in html
+
+
+def test_a_silent_stretch_shows_what_the_model_is_doing(tmp_path):
+    """v0.181.142: live, a search chat still had a 21 s gap with nothing on screen (the
+    model was writing a tool call). A status line now goes out every few seconds of
+    silence, with the prompt-reading or tool-writing progress."""
+    class SlowPool(StreamPool):
+        async def chat_stream(self, model, messages, **kw):
+            self.asked.append((model, True))
+            yield {"content": "", "done": False, "progress": {"prefill": {"processed": 2000, "total": 6000, "cache": 0}}}
+            await asyncio.sleep(0.35)
+            yield {"content": "Done.", "thinking": "", "done": False}
+            yield {"done": True, "content": ""}
+
+    runner, ctx, pool, _ = _make(tmp_path, {"main": [], "small": []})
+    runner.pool = SlowPool({"main": [], "small": []})
+    runner.brain.cfg.main_progress_seconds = 0.1
+    evs = _run(runner.run_main(ctx))
+    lines = [e.text for e in evs if e.kind == "think" and "still working" in e.text]
+    assert len(lines) >= 2 and all(l.startswith("⏳ main") for l in lines)
+    assert "reading the prompt · 2,000 / 6,000 new tokens (33%)" in lines[0]
+    assert [e.text for e in evs if e.kind == "answer_delta"] == ["Done."]
+    # 0 = the ordinary keep-alive only
+    runner, ctx, pool, _ = _make(tmp_path, {"main": [], "small": []})
+    runner.pool = SlowPool({"main": [], "small": []})
+    runner.brain.cfg.main_progress_seconds = 0
+    lanes._PINS.clear()
+    evs = _run(runner.run_main(ctx))
+    assert not [e for e in evs if e.kind == "think" and "still working" in e.text]
+    assert AgentBrainConfig().main_progress_seconds == 3.0
