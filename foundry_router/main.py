@@ -574,6 +574,12 @@ class Services:
             except Exception:
                 log.exception("media / ledger prune failed")
             try:
+                from . import training_archive
+                if training_archive.due(self):
+                    training_archive.start(self)          # its own thread; never awaited
+            except Exception:
+                log.exception("training archive check failed")
+            try:
                 await asyncio.to_thread(self.secret_store.prune,
                                         self.config_store.config.secrets.pull_log_days)
             except Exception:
