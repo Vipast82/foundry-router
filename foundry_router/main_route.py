@@ -18,7 +18,10 @@ answers. This module decides which model that is for ONE request:
   `main_return_max_tokens` (8,000) long: the main model has not seen it, so it
   reads all of it before the first word, and a long read is a long wait.
 * **Context fit.** A model whose context window is smaller than the
-  conversation is left out.
+  conversation is left out. A model can also carry the router's own limit
+  (`route_max_tokens`, Model Registry): the largest conversation it is given,
+  whatever its real window is. A small local model reads a deep prompt slowly
+  (the brain host: about 35 s for 20K tokens), so it can be kept to short chats.
 
 Nothing here calls a model.
 """
@@ -66,10 +69,19 @@ def fit(registry, ids: list[str], est_tokens: int) -> tuple[list[str], list[str]
     """Models whose context window holds the conversation. Never empties the list."""
     keep, notes = [], []
     for m in ids:
+        meta = registry.get(m) or {}
         try:
-            window = int(((registry.get(m) or {}).get("context_length")) or 0)
+            window = int(meta.get("context_length") or 0)
         except (TypeError, ValueError):
             window = 0
+        try:
+            cap = int(meta.get("route_max_tokens") or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        if cap and est_tokens > cap:
+            notes.append(f"{m} is left out: the conversation is about {est_tokens:,} tokens "
+                         f"and it is given at most {cap:,}")
+            continue
         if window and est_tokens + FIT_RESERVE_TOKENS > window:
             notes.append(f"{m} is left out: the conversation is about {est_tokens:,} tokens "
                          f"and its window is {window:,}")
