@@ -3180,10 +3180,10 @@ async def ollama_tags(request: Request, backend: str):
     except Exception as e:
         return {"ok": False, "models": [], "loaded": [], "error": describe_exception(e)}
     try:
-        loaded = await admin.loaded(backend)     # non-fatal — just a warm-status hint
+        running = await admin.running(backend)   # non-fatal — just a warm-status hint
     except Exception:
-        loaded = []
-    return {"ok": True, "models": models, "loaded": loaded}
+        running = []
+    return {"ok": True, "models": models, "loaded": [m["name"] for m in running], "running": running}
 
 
 @router.post("/admin/api/ollama/show")
@@ -3348,6 +3348,22 @@ async def client_install_guide(request: Request):
     truth; client_guide.py extracts and renders the install sections)."""
     from ..client_guide import guide_html
     return guide_html()
+
+
+@router.get("/admin/api/host/traffic")
+async def host_traffic_view(request: Request, backend: str, hours: int = 24):
+    """What the router itself sent to this backend (any kind): calls, tokens and
+    speed over the last `hours`, per hour, and the models used. From the
+    performance history; nothing is asked of the backend."""
+    import asyncio
+
+    from .. import host_traffic
+    from ..errors import describe_exception
+    svc = _svc(request)
+    try:
+        return {"ok": True, "traffic": await asyncio.to_thread(host_traffic.traffic, svc.db, backend, hours)}
+    except Exception as e:                                        # noqa: BLE001
+        return {"ok": False, "error": describe_exception(e)}
 
 
 @router.get("/admin/api/host/diag")

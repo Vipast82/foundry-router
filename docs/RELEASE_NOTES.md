@@ -2,6 +2,22 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.156 — Host Admin for every kind of backend
+
+- **What the router sent here**, on every Host Admin page (Ollama, llama.cpp,
+  vLLM, Strata, a generic OpenAI endpoint, CLIProxyAPI, Meridian, and any kind
+  added later): calls, tokens read and written, wait for the first token, speed,
+  call time, calls per hour for the last 24 hours and the models used. It comes
+  from the router's own record of its calls (`GET /admin/api/host/traffic`), so
+  it does not depend on what the server reports about itself.
+- **Bare engine (the Unbiased Strata fork)**: the expert tiers in `/health` are
+  drawn as figures and bars; the reply as sent is in a fold.
+- **Ollama**: a "Loaded now" card from `/api/ps`: each loaded model's memory, the
+  share of it on the GPU, its context and when Ollama unloads it.
+- **Refresh every 5 s** (off unless ticked, remembered in the browser) on the
+  diagnostics pages; paused while a fold is open or the tab is hidden.
+- A single model already named at the top no longer gets a Models card of its own.
+
 ## v0.181.155 — the Strata host page is drawn like Strata's Monitor
 
 - Host Admin for a server with a monitor reply (Strata): eight figures with trend

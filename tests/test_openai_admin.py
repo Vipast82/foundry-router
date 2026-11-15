@@ -254,7 +254,7 @@ async def test_a_json_metrics_reply_is_passed_on_as_the_monitor():
     # v0.181.155: drawn like Strata's own Monitor, and the cards that repeat it are left out
     assert "function renderEngineMonitor(mon, tile) {" in html
     assert "if (monOn) html += renderEngineMonitor(mt.monitor, tile);" in html
-    assert "if (sl && !(monOn && sl.count <= 1)) {" in html and "if (m && !(monOn && ids.length <= 1)) {" in html
+    assert "if (sl && !(monOn && sl.count <= 1)) {" in html and "if (m && !(ids.length <= 1 && (monOn || bare))) {" in html
     assert "Everything the server reported" in html and ".mon-stat svg {" in html
     # v0.181.154: times, byte counts and lists of objects are laid out readably
     assert "const nice = (k, v) =>" in html and "Array.isArray(v) && v.length && v.every(isObj)" in html
