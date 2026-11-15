@@ -42,6 +42,8 @@ _QUICK_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
 # Which read-only probes each flavor supports, in display order. The Host Admin
 # UI renders a card per present probe; a flavor asks only for endpoints its
 # server actually implements, so we don't spam 404s.
+_MONITOR_REQUESTS = 25
+
 _PROBES: dict[str, list[str]] = {
     # "status" (v0.181.152): Strata's /v1/status, the engine's own counters. Its
     # gateway's /health is a short summary without the expert tiers that the bare
@@ -268,6 +270,20 @@ class OpenAIAdmin:
                 hint = (" — start llama-server with --metrics to enable"
                         if flavor == "llamacpp" else "")
                 return probe_failure(status=r.status_code, hint=hint)
+            if (r.text or "").lstrip().startswith("{"):
+                # v0.181.153: the Strata gateway answers /metrics with JSON (what its
+                # own Monitor page reads): hardware, engine, conversation cache,
+                # totals, recent requests. The time series ("history") is left out
+                # and the request list is cut to the latest _MONITOR_REQUESTS.
+                try:
+                    j = r.json()
+                except Exception:                                   # noqa: BLE001
+                    j = None
+                if isinstance(j, dict):
+                    mon = {k: v for k, v in j.items() if k != "history"}
+                    if isinstance(mon.get("requests"), list):
+                        mon["requests"] = mon["requests"][:_MONITOR_REQUESTS]
+                    return {"ok": True, "summary": {}, "metrics": {}, "monitor": mon}
             parsed = prom.parse(r.text or "")
             prefix = "llamacpp:" if flavor == "llamacpp" else "vllm:"
             raw = {}

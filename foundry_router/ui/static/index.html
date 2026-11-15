@@ -8016,7 +8016,8 @@ function renderDiagReport(rep, cur) {
             const pct = Math.min(100, 100 * o[a] / o[b]);
             return `<div class="ratio" title="${esc(a)} ÷ ${esc(b)}"><span>${esc(what)}</span><span class="meter"><span style="width:${pct.toFixed(1)}%"></span></span><b>${pct.toFixed(1)}%<small>${esc(val(o[a]))} of ${esc(val(o[b]))}</small></b></div>`;
           }).join("")
-        + `<div class="tiles" style="margin-top:8px">${Object.entries(o).map(([k, v]) => tile(k, v)).join("")}</div>`;
+        + `<div class="tiles" style="margin-top:8px">${Object.entries(o).flatMap(([k, v]) => isObj(v)
+            ? Object.entries(v).map(([k2, v2]) => [k + " " + k2, v2]) : [[k, v]]).map(([k, v]) => tile(k, v)).join("")}</div>`;
     }
     if (!inner) inner = `<span class="pill ok">ok</span> <span class="mono">${esc(typeof bodyObj === "string" ? bodyObj : "")}</span>`;
     if (isObj(bodyObj)) inner += `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(bodyObj, null, 1))}</pre></details>`;
@@ -8025,6 +8026,19 @@ function renderDiagReport(rep, cur) {
   if (h && h.ok) html += card(`Health <span class="hint">— what GET /health answered</span>`, factsBlock(h.body, true));
   const es = good("status");
   if (es) html += card(`Engine status <span class="hint">— what GET /v1/status answered</span>`, factsBlock(es.body, false));
+  // Strata answers /metrics with JSON: what its own Monitor page shows
+  if (mt && isObj(mt.monitor)) {
+    const mon = Object.assign({}, mt.monitor), reqs = Array.isArray(mon.requests) ? mon.requests : [];
+    delete mon.requests;
+    let inner = factsBlock(mon, false);
+    const cols = reqs.length ? Object.keys(reqs[0]).filter(k => reqs.some(r => r && !isObj(r[k]) && !Array.isArray(r[k]) && r[k] != null)) : [];
+    const cell = (k, v) => typeof v === "number" && v > 1e9 && /time|at$|^ts$|start|end/i.test(k)
+      ? new Date(v > 1e11 ? v : v * 1000).toLocaleTimeString() : val(v);
+    if (cols.length) inner += `<div class="tgroup">recent requests <span class="hint">— the latest ${reqs.length}</span></div>
+      <div style="overflow-x:auto"><table class="no-tools"><tr>${cols.map(k => `<th>${esc(label(k))}</th>`).join("")}</tr>${reqs.map(r =>
+        `<tr>${cols.map(k => `<td class="mono">${esc(cell(k, (r || {})[k]))}</td>`).join("")}</tr>`).join("")}</table></div>`;
+    html += card(`Engine monitor <span class="hint">— what GET /metrics answered: hardware, experts, conversation cache, recent requests</span>`, inner);
+  }
 
   let grid = "";
   if (rep.swap && rep.swap.is_swap) {

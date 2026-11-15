@@ -224,3 +224,31 @@ def test_a_strata_server_is_asked_for_its_engine_status():
     assert "what GET /v1/status answered" in html and "const factsBlock = (bodyObj, skipStatus) =>" in html
     assert '["health", "version", "props", "slots", "models", "metrics", "status"]' in html
 
+
+@pytest.mark.asyncio
+async def test_a_json_metrics_reply_is_passed_on_as_the_monitor():
+    """v0.181.153: the Strata gateway's /metrics is JSON (its Monitor page reads it);
+    read as Prometheus text it gave nothing."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from foundry_router.pool import openai_admin
+    body = {"engine": {"experts_in_vram": 15778}, "hardware": {"gpu": {"temp_c": 34}},
+            "conversation_cache": {"parked": 4, "slots": 4}, "history": {"speed": [1, 2, 3]},
+            "requests": [{"time": 1794775566, "prompt": 19, "output": 2}] * 60}
+
+    class Client:
+        async def get(self, url, headers=None, timeout=None):
+            import json as _json
+            return SimpleNamespace(status_code=200, text=_json.dumps(body), json=lambda: body)
+
+    adm = openai_admin.OpenAIAdmin.__new__(openai_admin.OpenAIAdmin)
+    adm.client = Client()
+    out = await adm._probe_metrics("http://x", {}, "llamacpp")
+    assert out["ok"] and out["summary"] == {} and out["metrics"] == {}
+    mon = out["monitor"]
+    assert mon["engine"] == {"experts_in_vram": 15778} and "history" not in mon
+    assert len(mon["requests"]) == openai_admin._MONITOR_REQUESTS == 25
+    html = (Path(openai_admin.__file__).parent.parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "if (mt && isObj(mt.monitor)) {" in html and "what GET /metrics answered" in html
+
