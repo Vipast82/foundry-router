@@ -258,3 +258,68 @@ def test_the_last_five_tabs_have_numbers_on_top_and_sections():
     assert 'class="seg" id="au-hours"' in au and 'class="ov-kpis"' in au
     assert "Share of requests" in au and 'class="clamp2"' in au
     assert "<th>IP · app</th>" not in au                               # folded under the client's name
+
+
+def test_json_settings_are_edited_through_forms():
+    """v0.181.139: every setting that was typed as JSON has a form over it. The field
+    stays the source of truth, so each one keeps its id and its save code."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    marks = {"pe-guard": "guard", "pe-assist": "assist", "pe-weights": "weights", "pe-compat": "compat",
+             "pe-samp": "sampling", "brain-samp": "sampling", "agg-profiles": "profiles",
+             "sc-cats": "ttls", "mcp-defaults": "anymap", "ta-defaults": "assist",
+             "ta-block": "blockRules", "ta-fix": "fixRules", "ta-err": "strings", "bg-rules": "budgetRules"}
+    for fid, schema in marks.items():
+        assert f'id="{fid}" data-jform="{schema}"' in html, fid
+    kit = html[html.index("/* ---------------------------------------------------------- JSON forms -- */"):
+               html.index("/* --------------------------------------------------------------- modal -- */")]
+    for schema in set(marks.values()):
+        assert f"\n  {schema}: {{kind: " in kit, schema
+    assert "function enhancePickers(root) {\n  enhanceJForms(root);" in html      # every render and modal
+    assert "<summary>Edit as JSON</summary>" in kit                                # the box is still there
+    assert 'Object.defineProperty(src, "value"' in kit                             # field.value = ... redraws
+    assert "(!sch.required || it[sch.required])" in kit                            # no rule with an empty pattern
+    assert 'required: "pattern"' in kit and 'required: "name"' in kit
+    assert "(JSON obj)</label>" not in html and "(JSON list)</label>" not in html and "(JSON)</label>" not in html
+    # the turn assist card is added after the page's own pass
+    ta = html[html.index("async function renderTurnAssistCard() {"):html.index("// Logs -> Data:")]
+    assert '$("#main").appendChild(card);\n  enhancePickers(card);' in ta
+    # every turn assist key a form field names is a real default
+    import re
+
+    from foundry_router.turn_assist import ASSIST_DEFAULTS
+    assist = kit[kit.index("const _JF_ASSIST = ["):kit.index("const _JF_GLOB")]
+    keys = re.findall(r'key: "([a-z_.]+)"', assist)
+    assert len(keys) > 30
+    for k in keys:
+        top, _, sub = k.partition(".")
+        assert top in ASSIST_DEFAULTS, k
+        if sub:
+            assert sub in ASSIST_DEFAULTS[top], k
+
+
+def test_backends_are_edited_through_a_form():
+    """v0.181.139: add, edit, switch off and remove a backend without typing JSON."""
+    import re
+
+    from foundry_router.config import BackendConfig
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '["Add or edit", /^Add, edit or remove backends/]' in html
+    card = html[html.index('<h2 style="margin-top:0">Add, edit or remove backends</h2>'):html.index("Routing mode ${help")]
+    assert 'id="be-list"' in card and 'id="be-add"' in card
+    assert card.index('<summary>Edit the whole list as JSON</summary>') < card.index('id="backends-json"') < card.index('id="save-backends"')
+    js = html[html.index("/* ------------------------------------------------------------ backends -- */"):
+              html.index("/* ---------------------------------------------------------------- help -- */")]
+    # every form field is a real backend setting, and every kind a real protocol / flavor
+    fields = BackendConfig.model_fields
+    keys = re.findall(r'\{s: "[^"]+", key: "([a-z_0-9]+)"', js)
+    assert len(keys) >= 20 and set(keys) <= set(fields), set(keys) - set(fields)
+    types = set(re.findall(r'type: "([a-z-]+)", flavor', js))
+    assert types == {"ollama", "openai-compatible", "anthropic-compatible", "anthropic-api"}
+    for flavor in re.findall(r'flavor: "([a-z]+)"', js):
+        BackendConfig(name="x", type="openai-compatible", url="http://x", flavor=flavor)
+    assert 'api("config/backends", {method: "POST", body: list})' in js           # the same route as the JSON box
+    assert 'api("backends/enabled", {method: "POST"' in js and 'api("backends/test", {method: "POST"' in js
+    assert "if (el.closest(\".jf-f\").hidden) continue;" in js                     # other kinds' settings are kept
+    assert "const b = isNew ? {} : JSON.parse(JSON.stringify(orig));" in js       # unknown keys are kept
+    assert "confirm(`Remove the backend" in js
+

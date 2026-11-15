@@ -29,7 +29,7 @@ the Act persona during a sprint.
 
 ## 2. Add the backend
 
-Backends → Pool → Edit backend list:
+Backends → Pool → Add or edit (the form, or "Edit the whole list as JSON"):
 
 ```json
 {"name": "strata", "type": "openai-compatible", "flavor": "llamacpp",
