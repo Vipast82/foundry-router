@@ -18,6 +18,7 @@ dependencies = [
     "langgraph>=0.2",
     "mcp>=1.2",
     "cryptography>=42",
+    "smbprotocol>=1.15",
 ]
 
 [project.optional-dependencies]

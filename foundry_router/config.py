@@ -976,6 +976,14 @@ class TrainingCaptureConfig(BaseModel):
     # fine-tuning data: a second disk, or a network share mounted on the host and
     # passed into the container. Empty = off. The working database stays local.
     archive_dir: str = ""
+    # v0.181.150: "smb" = a share the router connects to itself (server, share,
+    # sub-folder, user, password); nothing is mounted on the host.
+    archive_type: Literal["folder", "smb"] = "folder"
+    archive_smb_server: str = ""
+    archive_smb_share: str = ""
+    archive_smb_path: str = ""
+    archive_smb_user: str = ""
+    archive_smb_password: str = ""     # masked wherever the configuration is shown
     archive_capture: bool = True       # a consistent copy of the capture store
     archive_datasets: bool = True      # the prepared datasets, as a trainer reads them
     archive_hours: int = Field(default=24, ge=0, le=8760)    # 0 = only on demand

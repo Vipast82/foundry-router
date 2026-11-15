@@ -2,6 +2,18 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.150 — the training archive can be an SMB share, set up entirely on the admin page
+
+**Why.** The archive of v0.181.147 needed a folder, and a network share had to be mounted on the host and passed into the container by hand (an unprivileged container cannot mount one). Victor: "everything should be configurable and usable on the UI". A direct NFS client was tried against the live TrueNAS (pyNfsClient 0.1.5, alpha): mount, create and directory calls worked, every write failed; not used.
+
+- **Logs → Training → Capture → Archive → "to an SMB share"**: server, share, sub-folder, user and password. The router connects to the share itself (`smbprotocol`, pure Python; new dependency `smbprotocol==1.17.0`); nothing is mounted and nothing is set up on the host.
+- **Test connection** (`POST /admin/api/training/archive {"test": true}`): writes a small file to the destination, reads it back, removes it, and shows the result and the free space.
+- The password is typed on the page, kept in the configuration, masked in the configuration view and never returned by the status; an empty field keeps the saved one.
+- Over SMB the capture store is first copied to a temporary file on the router (it needs that much free space there), uploaded as `capture.sqlite.part`, renamed when complete, and the temporary file removed. Datasets and capture images are sent file by file, unchanged ones skipped.
+- "a folder on the router" stays as the other destination type (a second disk, `/archive` from the compose file).
+
+Tests: `tests/test_training_archive.py` (a simulated share; the first copy to a real SMB server is the operator's Test connection).
+
 ## v0.181.149 — the router container has an /archive mount for the training archive
 
 - `docker-compose.yml`: `${FOUNDRY_ARCHIVE_DIR_HOST:-./archive}:/archive`. Set `FOUNDRY_ARCHIVE_DIR_HOST` in `.env` to a second disk or a mounted network share, then use `/archive` as the Archive folder (Logs -> Training -> Capture). Without the variable it is a folder next to the compose file.
