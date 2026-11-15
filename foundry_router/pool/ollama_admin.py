@@ -167,6 +167,24 @@ class OllamaAdmin:
         return [m.get("name") or m.get("model") for m in r.json().get("models", [])
                 if m.get("name") or m.get("model")]
 
+    async def running(self, backend: str) -> list[dict]:
+        """What /api/ps says about each loaded model (v0.181.156): its memory, how
+        much of it is on the GPU, its context and when Ollama will unload it."""
+        r = await self.client.get(f"{self._url(backend)}/api/ps", timeout=_QUICK_TIMEOUT)
+        r.raise_for_status()
+        out = []
+        for m in r.json().get("models", []):
+            name = m.get("name") or m.get("model")
+            if not name:
+                continue
+            det = m.get("details") or {}
+            out.append({"name": name, "size": m.get("size") or 0, "size_vram": m.get("size_vram") or 0,
+                        "context_length": m.get("context_length") or 0,
+                        "expires_at": m.get("expires_at") or "",
+                        "parameter_size": det.get("parameter_size") or "",
+                        "quantization_level": det.get("quantization_level") or ""})
+        return out
+
     async def show(self, backend: str, model: str) -> dict:
         r = await self.client.post(f"{self._url(backend)}/api/show",
                                    json={"model": model, "name": model},

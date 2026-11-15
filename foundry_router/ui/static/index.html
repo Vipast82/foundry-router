@@ -517,6 +517,10 @@
   .mon-bar-h { display:flex; justify-content:space-between; gap:10px; font-size:13px; margin-bottom:4px; }
   .mon-bar-h b { font:500 12.5px var(--num-font); color:var(--dim); white-space:nowrap; }
   .mon-bar .meter { display:block; width:100%; }
+  .hbars { display:block; width:100%; height:64px; margin:6px 0 2px; }
+  .hbars rect { fill:var(--accent); opacity:.85; }
+  .hbars rect.zero { fill:var(--line); opacity:1; }
+  .hbars-x { display:flex; justify-content:space-between; color:var(--dim); font-size:11.5px; }
   .mon-state { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 10px; font-size:13.5px; }
   .ratio b small { font-weight:400; color:var(--dim); margin-left:6px; }
   pre.raw { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
@@ -7915,7 +7919,9 @@ async function hostRenderDiag(cur, selector) {
   $("#main").innerHTML = `
     <h2 style="display:flex;align-items:center">Host Admin ${help(cur.flavor === "vllm" ? "host_vllm" : cur.flavor === "llamacpp" ? "host_llamacpp" : "")}</h2>
     ${selector("")}
+    <label class="hint" style="display:flex;align-items:center;gap:6px;justify-content:flex-end;margin:-4px 0 6px" title="Asks the server again every 5 seconds while this page is open. Paused while a fold is open or the tab is hidden."><input type="checkbox" id="host-auto"> refresh every 5 s</label>
     <div id="host-diag"><p class="hint">Asking ${esc(cur.name)}…</p></div>
+    <div id="host-traffic"></div>
     ${cur.flavor === "unsloth" ? `<div class="card">
       <div class="card-h">Load a model (host CLI)</div>
       <p class="hint">There is no REST load endpoint — run this on the Unsloth host:</p>
@@ -7926,6 +7932,7 @@ async function hostRenderDiag(cur, selector) {
     if (window._hostBackend !== cur.name || !$("#host-diag")) return;
     $("#host-diag").innerHTML = html;
   };
+  loadHostTraffic(cur.name);
   try {
     const r = await api("host/diag?backend=" + encodeURIComponent(cur.name));
     paint(r.ok ? renderDiagReport(r.report, cur)
@@ -7933,6 +7940,24 @@ async function hostRenderDiag(cur, selector) {
   } catch (e) {
     paint(`<p class="hint"><span class="pill bad">error</span> ${esc(e.message)}</p>`);
   }
+  // live refresh (v0.181.156): off unless ticked, remembered in this browser
+  const auto = $("#host-auto");
+  if (auto) {
+    try { auto.checked = localStorage.getItem("fr.hostAuto") === "1"; } catch (e) {}
+    auto.onchange = () => { try { localStorage.setItem("fr.hostAuto", auto.checked ? "1" : "0"); } catch (e) {} };
+  }
+  clearInterval(window._hostTimer);
+  let asking = false;
+  window._hostTimer = setInterval(async () => {
+    const box = $("#host-auto"), el = $("#host-diag");
+    if (window._hostBackend !== cur.name || !el || !box) { clearInterval(window._hostTimer); return; }
+    if (!box.checked || asking || document.hidden || el.querySelector("details[open]")) return;
+    asking = true;
+    try {
+      const r = await api("host/diag?backend=" + encodeURIComponent(cur.name));
+      if (r.ok) paint(renderDiagReport(r.report, cur));
+    } catch (e) {} finally { asking = false; }
+  }, 5000);
 }
 
 // v0.181.135. Why a probe did not succeed: the server does not offer that endpoint
@@ -7957,6 +7982,69 @@ const _PROBE_INFO = {
 const _HEALTH_RATIOS = [["vram_hits", "lookups", "expert lookups answered from VRAM"],
                         ["vram_held", "vram_slots", "VRAM expert slots filled"],
                         ["vram_held", "experts", "experts held in VRAM"]];
+
+// What the router itself sent to a backend (v0.181.156): the same card on every Host
+// Admin page, whatever the server reports about itself.
+function renderHostTraffic(t) {
+  const isN = v => typeof v === "number" && isFinite(v);
+  const num = (v, d) => isN(v) ? v.toLocaleString(undefined, {maximumFractionDigits: d || 0}) : "—";
+  const big = v => !isN(v) ? "—" : v >= 1e9 ? (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1e4 ? (v / 1e3).toFixed(0) + "k" : num(v);
+  const head = `<div class="card-h">What the router sent here <span class="hint">— the last ${esc(t.hours)} hours, from the router's own record of its calls</span></div>`;
+  if (!t.calls) return `<div class="card">${head}<p class="hint" style="margin:0">Nothing in the last ${esc(t.hours)} hours.</p></div>`;
+  const stat = (l, v, unit, sub) => `<div class="mon-stat" style="padding-bottom:12px"><div class="mon-l">${esc(l)}</div><div class="mon-v">${esc(v)}<small>${esc(unit || "")}</small></div><div class="mon-s">${esc(sub || "")}</div></div>`;
+  const cachedPct = t.prompt_tokens > 0 ? 100 * t.cached_tokens / t.prompt_tokens : null;
+  const figs = `<div class="mon-grid">`
+    + stat("Calls", num(t.calls), "", t.last_ts ? "last " + new Date(/Z|[+-]\d\d:?\d\d$/.test(t.last_ts) ? t.last_ts : t.last_ts + "Z").toLocaleTimeString() : "")
+    + stat("Tokens written", big(t.completion_tokens), "", t.cut_short ? `${num(t.cut_short)} call(s) hit the length limit` : "")
+    + stat("Tokens read", big(t.prompt_tokens), "", cachedPct != null && t.cached_tokens ? `${cachedPct.toFixed(0)}% from the cache` : "")
+    + stat("First token", isN(t.ttft_ms) ? num(t.ttft_ms / 1000, 1) : "—", "s", "mean wait")
+    + stat("Speed", num(t.eff_tps, 1), "tok/s", isN(t.decode_tps) ? `engine's own figure ${num(t.decode_tps, 1)}` : "tokens ÷ call time")
+    + stat("Call time", isN(t.wall_ms) ? num(t.wall_ms / 1000, 1) : "—", "s", "mean")
+    + `</div>`;
+  const b = t.buckets || [], hi = Math.max(1, ...b.map(x => x.calls || 0));
+  const bars = b.length ? `<svg class="hbars" viewBox="0 0 ${b.length * 10} 40" preserveAspectRatio="none" role="img" aria-label="calls per hour">${b.map((x, i) => {
+      const hgt = x.calls ? Math.max(1.5, 38 * x.calls / hi) : 1;
+      return `<rect class="${x.calls ? "" : "zero"}" x="${i * 10 + 1}" y="${(40 - hgt).toFixed(1)}" width="8" height="${hgt.toFixed(1)}"><title>${esc(new Date(x.hour).toLocaleString([], {weekday: "short", hour: "numeric"}))}: ${x.calls} call(s), ${num(x.completion_tokens)} tokens written</title></rect>`;
+    }).join("")}</svg><div class="hbars-x"><span>${esc(new Date(b[0].hour).toLocaleString([], {weekday: "short", hour: "numeric"}))}</span><span>calls per hour · most ${num(hi)}</span><span>now</span></div>` : "";
+  const ms = t.models || [];
+  const table = ms.length ? `<table class="no-tools" style="margin-top:10px"><tr><th>model</th><th>calls</th><th>read</th><th>written</th><th title="mean wait for the first token">first token</th><th title="tokens written ÷ call time">tok/s</th></tr>${ms.map(m =>
+      `<tr><td class="mono">${esc(m.model)}</td><td class="mono">${num(m.calls)}</td><td class="mono">${big(m.prompt_tokens)}</td><td class="mono">${big(m.completion_tokens)}</td>
+        <td class="mono">${isN(m.ttft_ms) ? num(m.ttft_ms / 1000, 1) + " s" : "—"}</td><td class="mono">${num(m.eff_tps, 1)}</td></tr>`).join("")}</table>` : "";
+  return `<div class="card">${head}${figs}${bars}${table}</div>`;
+}
+async function loadHostTraffic(name) {
+  const el = $("#host-traffic");
+  if (!el) return;
+  try {
+    const r = await api("host/traffic?backend=" + encodeURIComponent(name));
+    if (window._hostBackend !== name || !$("#host-traffic")) return;
+    $("#host-traffic").innerHTML = r.ok ? renderHostTraffic(r.traffic) : "";
+  } catch (e) {}
+}
+
+// The bare engine's expert tiers (the Unbiased Strata fork reports them in /health)
+function renderExpertTiers(t) {
+  const isN = v => typeof v === "number" && isFinite(v);
+  const num = (v, d) => isN(v) ? v.toLocaleString(undefined, {maximumFractionDigits: d || 0}) : "—";
+  const stat = (l, v, unit, sub) => `<div class="mon-stat" style="padding-bottom:12px"><div class="mon-l">${esc(l)}</div><div class="mon-v">${esc(v)}<small>${esc(unit || "")}</small></div><div class="mon-s">${esc(sub || "")}</div></div>`;
+  const bar = (l, part, whole, right) => !isN(part) || !isN(whole) || whole <= 0 ? "" :
+    `<div class="mon-bar"><div class="mon-bar-h"><span>${esc(l)}</span><b>${esc(right)}</b></div><span class="meter"><span style="width:${Math.min(100, 100 * part / whole).toFixed(1)}%"></span></span></div>`;
+  const heldGb = isN(t.vram_held) && isN(t.mean_blob) ? t.vram_held * t.mean_blob / 1073741824 : null;
+  const hit = t.lookups > 0 && isN(t.vram_hits) ? 100 * t.vram_hits / t.lookups : null;
+  const known = ["experts", "vram_slots", "vram_held", "mapped", "mean_blob", "vram_hits", "lookups", "file_reads", "file_mb", "major_faults", "max_context", "ram_copies", "ram_reads"];   // max_context is in the figures at the top
+  const rest = Object.entries(t).filter(([k, v]) => !known.includes(k) && (typeof v !== "object" || v === null));
+  return `<div class="mon-grid">`
+    + stat("Experts", num(t.experts), "", isN(t.mapped) ? `${num(t.mapped)} read from the file when needed` : "")
+    + stat("In VRAM", num(t.vram_held), isN(t.vram_slots) ? `of ${num(t.vram_slots)} slots` : "", heldGb != null ? `about ${heldGb.toFixed(1)} GB · ${num(t.mean_blob / 1048576, 1)} MB each` : "")
+    + stat("Answered from VRAM", hit != null ? hit.toFixed(1) : "—", "%", isN(t.lookups) ? `${num(t.vram_hits)} of ${num(t.lookups)} lookups` : "")
+    + stat("Read from disk", num(t.file_reads), "times", `${num(t.file_mb, 1)} MB${isN(t.major_faults) ? ` · ${num(t.major_faults)} page faults` : ""}`)
+    + (isN(t.ram_copies) ? stat("Kept in RAM", num(t.ram_copies), "experts", isN(t.ram_reads) ? `${num(t.ram_reads)} lookups answered from RAM` : "") : "")
+    + `</div>`
+    + bar("VRAM expert slots filled", t.vram_held, t.vram_slots, `${num(t.vram_held)} of ${num(t.vram_slots)}`)
+    + bar("Experts held in VRAM", t.vram_held, t.experts, `${num(t.vram_held)} of ${num(t.experts)}`)
+    + bar("Lookups answered from VRAM", t.vram_hits, t.lookups, `${num(t.vram_hits)} of ${num(t.lookups)}`)
+    + (rest.length ? `<p class="hint" style="margin:0">${rest.map(([k, v]) => `${esc(String(k).replace(/_/g, " "))} ${esc(typeof v === "number" ? num(v, 2) : v)}`).join(" · ")}</p>` : "");
+}
 
 // Strata's /metrics JSON (v0.181.155), drawn like its own Monitor page: figures with
 // their trend, bars for what fills up, the latest requests. Each thing once.
@@ -8128,7 +8216,11 @@ function renderDiagReport(rep, cur) {
   const monOn = !!(mt && isObj(mt.monitor));
   const es = good("status");
   if (monOn) html += renderEngineMonitor(mt.monitor, tile);
-  else {
+  else if (h && h.ok && isObj(body.tiers)) {
+    html += card(`Experts <span class="hint">— where the model's experts are held, from GET /health</span>`, renderExpertTiers(body.tiers)
+      + `<details style="margin-top:10px"><summary>The reply as the server sent it</summary><pre class="raw mono">${esc(JSON.stringify(h.body, null, 1))}</pre></details>`);
+    if (es) html += card(`Engine status <span class="hint">— what GET /v1/status answered</span>`, factsBlock(es.body, false));
+  } else {
     if (h && h.ok) html += card(`Health <span class="hint">— what GET /health answered</span>`, factsBlock(h.body, true));
     if (es) html += card(`Engine status <span class="hint">— what GET /v1/status answered</span>`, factsBlock(es.body, false));
   }
@@ -8161,7 +8253,8 @@ function renderDiagReport(rep, cur) {
             <td class="mono">${esc(x.n_ctx || "")}</td><td class="mono">${esc(x.n_decoded || 0)}</td><td>${x.speculative ? "yes" : ""}</td></tr>`).join("")}</table>`
         : `<p class="hint">no slots reported</p>`);
   }
-  if (m && !(monOn && ids.length <= 1)) {                            // one model is named above
+  const bare = (m ? m.details || [] : []).every(x => !(x.max_model_len || x.n_ctx_train || x.size || x.n_params || x.status));
+  if (m && !(ids.length <= 1 && (monOn || bare))) {                   // one model is named above
     const det = m.details || (m.models || []).map(id => ({id}));
     const hasCtx = det.some(x => x.max_model_len || x.n_ctx_train), hasSize = det.some(x => x.size || x.n_params),
           hasStatus = det.some(x => x.status);
@@ -8193,18 +8286,18 @@ function renderDiagReport(rep, cur) {
   }
 
   if (absent.length) {
-    html += card(`Not offered by this server <span class="hint">— it answered "not found"; these are optional and nothing is wrong</span>`,
-      `<ul class="plain">${absent.map(([k]) => `<li><span class="mono">${esc(_PROBE_INFO[k][0])}</span> <span class="hint">${esc(_PROBE_INFO[k][1])}</span></li>`).join("")}</ul>`);
+    html += card(`<details style="width:100%"><summary>Not offered by this server (${absent.length}) <span class="hint">— it answered "not found"; these are optional and nothing is wrong</span></summary>
+      <ul class="plain" style="margin-top:8px">${absent.map(([k]) => `<li><span class="mono">${esc(_PROBE_INFO[k][0])}</span> <span class="hint">${esc(_PROBE_INFO[k][1])}</span></li>`).join("")}</ul></details>`, "");
   }
   return html || `<p class="hint">no diagnostics available for this flavor</p>`;
 }
 
 // -- full Ollama model-management panel (CRUD via the Ollama REST API) --------
 async function hostRenderOllama(be, d, selector) {
-  let models = [], loaded = [], tagErr = "";
+  let models = [], loaded = [], running = [], tagErr = "";
   try {
     const t = await api("ollama/tags?backend=" + encodeURIComponent(be));
-    if (t.ok) { models = t.models || []; loaded = t.loaded || []; } else tagErr = t.error;
+    if (t.ok) { models = t.models || []; loaded = t.loaded || []; running = t.running || []; } else tagErr = t.error;
   } catch (e) { tagErr = e.message; }
   const isLoaded = nm => loaded.includes(nm);
 
@@ -8231,6 +8324,14 @@ async function hostRenderOllama(be, d, selector) {
     ${selector("Add / pull / copy / rename / delete models directly on this Ollama host via its REST API.")}
     ${tagErr ? `<p class="hint"><span class="pill bad">unreachable</span> ${esc(tagErr)}</p>` : ""}
     <div id="oll-jobs"></div>
+    <div class="card"><div class="card-h">Loaded now <span class="hint">— what Ollama holds in memory (/api/ps)</span></div>${running.length ? running.map(m => {
+        const gpu = m.size > 0 ? Math.min(100, 100 * m.size_vram / m.size) : 0, exp = m.expires_at ? new Date(m.expires_at) : null;
+        const far = exp && exp.getFullYear() > new Date().getFullYear() + 5;
+        return `<div class="mon-bar"><div class="mon-bar-h"><span><span class="mono">${esc(m.name)}</span> <span class="hint">${esc([m.parameter_size, m.quantization_level, m.context_length ? formatCtx(m.context_length) + " context" : ""].filter(Boolean).join(" · "))}</span></span>
+          <b>${(m.size / 1073741824).toFixed(2)} GB · ${gpu.toFixed(0)}% on the GPU${exp && !isNaN(exp) ? far ? " · kept loaded" : " · unloads " + esc(exp.toLocaleTimeString()) : ""}</b></div>
+          <span class="meter${gpu < 99.5 ? " warn" : ""}" title="share of this model's memory that is on the GPU; the rest runs on the CPU, slower"><span style="width:${gpu.toFixed(1)}%"></span></span></div>`;
+      }).join("") : '<p class="hint" style="margin:0">Nothing is loaded; the next request for a model loads it.</p>'}</div>
+    <div id="host-traffic"></div>
     <h2>Installed models (${models.length})</h2>
     <table><tr><th>model</th><th>size</th><th>params</th><th>quant</th><th></th></tr>${modelRows}</table>
     <pre id="oll-detail" class="mono" style="display:none;white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:340px;overflow:auto"></pre>
@@ -8256,6 +8357,7 @@ SYSTEM You are a helpful assistant."></textarea></details>
         <span class="hint">Bakes a system prompt/params into a named model. A raw Modelfile is parsed into Ollama's structured create fields (FROM → from, SYSTEM, PARAMETER…). Needs a FROM/base.</span></div>
     </div>`;
 
+  loadHostTraffic(be);
   window.ollShow = async name => {
     const el = $("#oll-detail");
     try {
