@@ -2,6 +2,21 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.143 — helpers: a main-model persona can ask other models for help
+
+Phase 3 of the one-chat-persona plan, first part (A2A agents as helpers come next). Nothing changes for a persona without helpers.
+
+- **A helper list inside the persona** (persona editor → Models → "helpers it may call"; column `personas.helpers`; `helpers.py`). No extra persona appears in a chat program's model list. Each row: a role name, what it is for, the models tried in order (any backend), whether it may use the persona's tools, whether paid models are allowed, calls per request (3), optional instructions.
+- **One extra tool for the main model: `ask_helper(helper, task, context)`.** It sees helpers by role and purpose, not by model name, so a model can be swapped without touching a prompt. The helper does not see the conversation; the task text is all it gets. Its answer comes back as the tool result.
+- **A helper with tools runs its own tool loop** on the persona's tools ("research this and report back"); its steps show indented in the chat's reasoning. A helper can never ask a helper.
+- **Rules.** A paid helper call passes the same usage guardrail as any paid call (Foundry-Local, with paid calls at 0, gets none). A helper whose model sits on the backend the main model is running on is skipped when that backend serves one request at a time: it would take the main model's slot and prompt cache. A missing helper, an empty task, a used-up limit or a failed call is told to the main model as the tool result ("do this part yourself"), never raised.
+- **Long tool results condensed first** (`digest_over` on a helper row): a tool result longer than that many characters is condensed by that helper, with the user's request as the focus, before the main model reads it. Measured live on v0.181.142: one 76,000-character page cost Strata about 20 s of reading. Off unless set; a failed or no-shorter digest lets the result through unchanged.
+- Helper calls are logged like any model call and tool call of the request.
+
+Not in this release: helpers called in the same turn run one after another, not at the same time.
+
+Tests: `tests/test_helpers.py`.
+
 ## v0.181.142 — a streamed main-model call shows what the model is doing while it is silent
 
 **What was measured** (live, v0.181.141, Foundry-Chat on Strata). Streaming worked: a plain answer started at 4.8 s and arrived in 212 pieces. Two silences were left: 4.6 s before the first word while the prompt was read, and 21.1 s in a web-search chat while the model wrote a tool call (tool-call text is not shown, and the visible keep-alive line comes only every 60 s).

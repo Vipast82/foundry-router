@@ -1803,6 +1803,10 @@ class AgentRunner:
             yield AgentEvent("think", n[0].upper() + n[1:] + ".")
             ctx.logger.record_guardrail("main: " + n)
         mcp_tools = self.tool_registry.offered_mcp_tools(persona)
+        from .. import helpers
+        ask = helpers.tooldef(persona)
+        if ask is not None:
+            mcp_tools = list(mcp_tools) + [ask]      # v0.181.143: ask_helper
         key = main_route.conv_key(persona, ctx.messages)
         limit = int(getattr(self.brain.cfg, "main_max_tries", 3) or 3)
         tried, last_why = 0, ""
@@ -1834,6 +1838,171 @@ class AgentRunner:
                                       f"route takes over.")
         yield AgentEvent("error", "no model on this persona's route could answer"
                          + (f": {last_why}" if last_why else " (none is reachable)"))
+
+    # ---------------------------------------------------------- helpers (v0.181.143) --
+
+    async def _helper_model(self, ctx: RequestContext, row: dict, worker: str,
+                            effective: dict) -> tuple[Optional[str], list]:
+        """The first model of a helper row that may be used now, and why the ones
+        before it were not."""
+        from ..facade.ollama_api import _is_paid_backend
+        skipped: list = []
+        winfo = self.pool.backend_info(worker) or {}
+        for m in row["models"]:
+            info = self.pool.backend_info(m)
+            if info is None:
+                skipped.append(f"{m} is not reachable")
+                continue
+            paid = _is_paid_backend(info)
+            if paid and row.get("paid") is False:
+                skipped.append(f"{m} is a paid model and this helper may not use one")
+                continue
+            if info.get("name") and info.get("name") == winfo.get("name") and m != worker:
+                st = (getattr(self.pool, "backends", None) or {}).get(info["name"])
+                if st is not None and int(getattr(st.config, "max_concurrent", 0) or 0) == 1:
+                    skipped.append(f"{m} shares {info['name']}'s single stream with {worker} "
+                                   f"(it would take the main model's slot and prompt cache)")
+                    continue
+            verdict = await self.guardrails.check_paid_call(
+                m, info, self.model_registry.get(m), ctx.guard, effective)
+            if not verdict.allowed:
+                skipped.append(f"{m} is not allowed right now ({verdict.reason})")
+                continue
+            return m, skipped
+        return None, skipped
+
+    async def _helper_chat(self, ctx: RequestContext, model: str, system: str, user: str,
+                           label: str, hold: dict):
+        """One plain call to a helper model: heartbeat events while it runs, the
+        answer in hold["text"] (or hold["error"])."""
+        task = asyncio.create_task(self.pool.chat(
+            model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            tools=None, options=dict(self._req_sampling or {}) or None,
+            max_tokens=self.brain.cfg.worker_max_tokens, think=self._think_for(model)))
+        async for hb in self._heartbeat_events(task, label):
+            yield hb
+        try:
+            result, backend = await task
+        except Exception as e:                                    # noqa: BLE001
+            self.model_registry.record_call_outcome(model, ok=False)
+            hold["error"] = describe_exception(e)
+            return
+        _, text = prompts.split_think(result.content)
+        self.model_registry.record_call_outcome(model, ok=bool(text.strip()))
+        ctx.logger.record_model_call(model, backend, result.prompt_tokens,
+                                     result.completion_tokens, 0.0)
+        hold["text"] = text.strip()
+
+    async def _run_helper(self, ctx: RequestContext, worker: str, args: dict,
+                          effective: dict, hold: dict):
+        """ask_helper: run one helper for the main model. hold["text"] is what the
+        main model reads as the tool result; failures are told to it as text."""
+        from .. import helpers
+        args = args if isinstance(args, dict) else {}
+        rows = helpers.parse(ctx.persona)
+        row = helpers.find(rows, args.get("helper"))
+        if row is None:
+            hold["text"] = (f"ERROR: there is no helper named {args.get('helper')!r}. "
+                            f"Helpers: {', '.join(r['role'] for r in rows) or 'none'}.")
+            return
+        task_text = str(args.get("task") or "").strip()
+        if not task_text:
+            hold["text"] = "ERROR: `task` is empty. Say what you want from the helper."
+            return
+        counts = getattr(ctx, "helper_calls", None)
+        if counts is None:
+            counts = ctx.helper_calls = {}
+        if counts.get(row["role"], 0) >= helpers.max_calls(row):
+            hold["text"] = (f"ERROR: the {row['role']} helper was already asked "
+                            f"{counts[row['role']]} time(s) in this request, which is its limit. "
+                            f"Continue with what you have.")
+            return
+        model, skipped = await self._helper_model(ctx, row, worker, effective)
+        for why in skipped:
+            ctx.logger.record_guardrail(f"helper {row['role']}: {why}")
+        if model is None:
+            hold["text"] = (f"ERROR: the {row['role']} helper is not available right now ("
+                            + "; ".join(skipped) + "). Do this part yourself.")
+            yield AgentEvent("think", f"The {row['role']} helper is not available: "
+                                      + "; ".join(skipped) + ".")
+            return
+        counts[row["role"]] = counts.get(row["role"], 0) + 1
+        context = str(args.get("context") or "").strip()
+        user = task_text + (f"\n\n---\n{context}" if context else "")
+        system = row.get("instruction") or helpers.HELPER_SYSTEM
+        yield AgentEvent("think", f"{worker} asks the {row['role']} helper ({model})"
+                         + (" with tools" if row.get("tools") else "") + "…")
+        t0 = time.monotonic()
+        if row.get("tools"):
+            # the helper runs its own tool loop on the persona's tools (never ask_helper)
+            sub = RequestContext(
+                persona={**(ctx.persona or {}), "helpers": None, "expose_tool_trail": 0,
+                         "review_enabled": 0},
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                guard=ctx.guard, logger=ctx.logger, media=ctx.media)
+            sub.helper_calls = counts
+            failed: list = []
+            parts: list = []
+            async for ev in self._worker_tool_loop(
+                    sub, model, self.tool_registry.offered_mcp_tools(sub.persona), effective,
+                    on_fail=failed.append):
+                if ev.kind in ("answer", "answer_delta"):
+                    parts.append(ev.text)
+                elif ev.kind == "think":
+                    yield AgentEvent("think", "  ↳ " + ev.text)
+                else:
+                    yield AgentEvent("keepalive", "")
+            text = "".join(parts).strip()
+            err = failed[0] if failed and not text else ""
+        else:
+            got: dict = {}
+            async for ev in self._helper_chat(ctx, model, system, user,
+                                              f"{row['role']} helper ({model})", got):
+                yield ev
+            text, err = got.get("text", ""), got.get("error", "")
+        secs = time.monotonic() - t0
+        if err or not text:
+            hold["text"] = (f"ERROR: the {row['role']} helper ({model}) failed: "
+                            f"{err or 'it returned nothing'}. Do this part yourself.")
+            yield AgentEvent("think", f"The {row['role']} helper failed ({(err or 'empty')[:160]}).")
+            return
+        yield AgentEvent("think", f"The {row['role']} helper ({model}) answered in "
+                                  f"{secs:.1f}s ({len(text):,} chars).")
+        hold["text"] = f"[answer from the {row['role']} helper, {model}]\n{text}"
+
+    async def _digest(self, ctx: RequestContext, worker: str, tool_label: str, out: str,
+                      effective: dict, hold: dict):
+        """A long tool result is condensed by the persona's digest helper before the
+        main model reads it. Any problem: the result goes through as it is."""
+        from .. import helpers
+        row = helpers.digest_row(helpers.parse(ctx.persona))
+        if row is None or len(out) <= int(row["digest_over"]):
+            return
+        model, skipped = await self._helper_model(ctx, row, worker, effective)
+        if model is None:
+            ctx.logger.record_guardrail(f"digest: no helper model ({'; '.join(skipped)})")
+            return
+        question = next((str(m.get("content") or "") for m in reversed(ctx.messages)
+                         if m.get("role") == "user"), "")
+        yield AgentEvent("think", f"{tool_label} returned {len(out):,} chars — the "
+                                  f"{row['role']} helper ({model}) condenses it first…")
+        t0 = time.monotonic()
+        got: dict = {}
+        async for ev in self._helper_chat(ctx, model, helpers.DIGEST_SYSTEM,
+                                          helpers.digest_prompt(question, tool_label, out),
+                                          f"{row['role']} helper ({model})", got):
+            yield ev
+        text = got.get("text", "")
+        if not text or len(text) >= len(out):
+            yield AgentEvent("think", f"The {row['role']} helper could not condense it "
+                                      f"({(got.get('error') or 'nothing shorter')[:120]}); "
+                                      f"{worker} reads it as it is.")
+            return
+        yield AgentEvent("think", f"Condensed to {len(text):,} chars in "
+                                  f"{time.monotonic() - t0:.1f}s.")
+        hold["text"] = (f"[condensed by {model} from {len(out):,} characters; ask for the "
+                        f"page again if a detail is missing]\n{text}")
 
     async def _worker_tool_loop(self, ctx: RequestContext, worker: str,
                                 mcp_tools: list, effective: dict, on_fail=None):
@@ -2092,13 +2261,23 @@ class AgentRunner:
                                   f"(executing code, sandboxed)..." if ex_code
                                   else f"{worker} → {tool.server}/{tool.mcp_tool}..."))
                 t0 = time.monotonic()
+                from .. import helpers as _helpers
                 try:
-                    rich = await request_context.mcp_attributed(
-                        call_tool_rich(self.tool_registry.mcp,
-                                       tool.server, tool.mcp_tool, tc["arguments"],
-                                       sink=ctx.media,
-                                       persona=(ctx.persona or {}).get("virtual_name")),
-                        "worker", f"{(ctx.persona or {}).get('virtual_name') or ''} · {worker}")
+                    if tool.server == _helpers.SERVER:
+                        # v0.181.143: ask_helper — another model does part of the task
+                        from ..tools.mcp_client import ToolResult
+                        hheld: dict = {}
+                        async for ev in self._run_helper(ctx, worker, tc.get("arguments"),
+                                                         effective, hheld):
+                            yield ev
+                        rich = ToolResult([{"type": "text", "text": hheld.get("text") or ""}])
+                    else:
+                        rich = await request_context.mcp_attributed(
+                            call_tool_rich(self.tool_registry.mcp,
+                                           tool.server, tool.mcp_tool, tc["arguments"],
+                                           sink=ctx.media,
+                                           persona=(ctx.persona or {}).get("virtual_name")),
+                            "worker", f"{(ctx.persona or {}).get('virtual_name') or ''} · {worker}")
                     out = rich.text
                 except Exception as e:
                     dur = int((time.monotonic() - t0) * 1000)
@@ -2132,6 +2311,12 @@ class AgentRunner:
                                             caller=worker, arguments=tc["arguments"],
                                             executes_code=ex_code)
                 self.model_registry.record_tool_call(worker, ok=True)
+                if tool.server != _helpers.SERVER and tc["name"] != tool_finder.FIND_TOOL:
+                    dheld: dict = {}
+                    async for ev in self._digest(ctx, worker, f"{tool.server}/{tool.mcp_tool}",
+                                                 out, effective, dheld):
+                        yield ev
+                    out = dheld.get("text") or out
                 seen_calls[key] = out                 # for the poll guard
                 trail.append((tool.mcp_tool, out))    # for the answer footer
                 yield AgentEvent("think", f"{tool.server}/{tool.mcp_tool} returned "
