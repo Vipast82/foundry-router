@@ -251,4 +251,6 @@ async def test_a_json_metrics_reply_is_passed_on_as_the_monitor():
     assert len(mon["requests"]) == openai_admin._MONITOR_REQUESTS == 25
     html = (Path(openai_admin.__file__).parent.parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")
     assert "if (mt && isObj(mt.monitor)) {" in html and "what GET /metrics answered" in html
+    # v0.181.154: times, byte counts and lists of objects are laid out readably
+    assert "const nice = (k, v) =>" in html and "Array.isArray(v) && v.length && v.every(isObj)" in html
 
