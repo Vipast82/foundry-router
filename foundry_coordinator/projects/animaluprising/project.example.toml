@@ -414,7 +414,8 @@ cooldown_minutes = 60
 # group_budget_minutes = 10               # a hung suite group -> UNKNOWN, the run moves on
 # run_budget_minutes = 30                 # whole run (150 for regression = full)
 # full_run_budget_minutes = 150
-# shared_lune_cache = false              # one Lune spec cache per machine for main + every lane (2026-11-14)
+# shared_lune_cache = false              # one Lune cache per lane on each slot (one entry per spec name; 2026-11-14)
+# shared_lune_cache_workstation = false  # also ONE shared folder on the workstation (needs shared_lune_cache; lanes overwrite each other)
 # gate_preflight = false                  # workstation gate waits for a TEST Studio and no playtest first
 
 # OPTIONAL (v0.123): the lead sprint manager, the last automated recovery tier

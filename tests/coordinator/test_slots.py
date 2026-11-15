@@ -360,11 +360,11 @@ def test_main_kilo_studio_mcp_points_at_the_slot_and_comes_back(tmp_path):
 
 
 # ----------------------------------------------------------------------------- item 24: shared Lune cache
-def test_the_slot_pipeline_gets_one_shared_lune_cache_only_when_asked(monkeypatch):
+def test_the_slot_pipeline_gets_a_per_lane_lune_cache_only_when_asked(monkeypatch):
     slot = {**SL.DEFAULTS, **SLOT_CFG, "id": "slot-1"}
     assert "--lune-cache-dir" not in SL.wrap_pipeline(slot, ["pipeline"], "C:/t", "T", "h")
     on = SL.wrap_pipeline(slot, ["pipeline"], "C:/t", "T", "h", lune_cache=True)
-    assert on[on.index("--lune-cache-dir") + 1] == SL.SLOT_LUNE_CACHE
+    assert on[on.index("--lune-cache-dir") + 1] == SL.SLOT_LUNE_CACHE + "/main"
     assert SL.SLOT_LUNE_CACHE.startswith("~/") and "AnimalUprising" not in SL.SLOT_LUNE_CACHE
     spawned = []
 
@@ -388,6 +388,7 @@ def test_the_slot_pipeline_gets_one_shared_lune_cache_only_when_asked(monkeypatc
         if cache:
             assert "mkdir -p" in spawned[-1] and ".cache/au-lune-spec-cache" in spawned[-1]
             assert "$HOME" in spawned[-1]
+            assert "au-lune-spec-cache/main" in spawned[-1]
 
 
 def test_a_slot_gate_asks_for_the_slot_cache_only_with_the_switch():
@@ -398,3 +399,54 @@ def test_a_slot_gate_asks_for_the_slot_cache_only_with_the_switch():
     assert "--lune-cache-dir" not in sc._command(P, "T1", {}, [], "rid", "A", head="abc123")
     P.profile.studio_calls = {"shared_lune_cache": True}
     assert "--lune-cache-dir" in sc._command(P, "T1", {}, [], "rid", "A", head="abc123")
+
+
+def _lane_dir(worktree):
+    slot = {**SL.DEFAULTS, **SLOT_CFG, "id": "slot-1"}
+    argv = SL.wrap_pipeline(slot, ["pipeline"], worktree, "T", "h", lune_cache=True)
+    return argv[argv.index("--lune-cache-dir") + 1]
+
+
+def test_two_lane_worktrees_get_two_slot_cache_folders_and_other_paths_get_main():
+    a = _lane_dir(r"C:\Roblox\AnimalUprising\.tracks\fix4")
+    b = _lane_dir("C:/Roblox/AnimalUprising/.tracks/mv2-14/")
+    assert a == SL.SLOT_LUNE_CACHE + "/fix4" and b == SL.SLOT_LUNE_CACHE + "/mv2-14" and a != b
+    assert _lane_dir("c:/roblox/animaluprising/.TRACKS/Fix4") == SL.SLOT_LUNE_CACHE + "/Fix4"
+    for non_lane in ("C:/Roblox/AnimalUprising", r"C:\Roblox\AnimalUprising\.tracks", "", "C:/t"):
+        assert _lane_dir(non_lane) == SL.SLOT_LUNE_CACHE + "/main"
+
+
+def test_lane_names_are_sanitised():
+    assert SL.lune_lane("C:/x/.tracks/we ird$name;rm") == "we_ird_name_rm"
+    assert SL.lune_lane("C:/x/.tracks/a\u00e9b") == "a_b"
+    assert SL.lune_lane("C:/x/.tracks/..") == "main"
+    assert SL.lune_lane("C:/x/.tracks/ ") == "_"
+
+
+def test_the_seed_copies_the_checkout_cache_without_overwriting_and_cannot_fail():
+    txt = SL.lune_cache_export(SL.SLOT_LUNE_CACHE + "/fix4",
+                               "/home/studio/work/AnimalUprising/tmp/lune/spec_cache")
+    q = '"$HOME"/.cache/au-lune-spec-cache/fix4'
+    assert f"if [ ! -d {q} ]" in txt                       # first time only
+    assert f"cp -rn /home/studio/work/AnimalUprising/tmp/lune/spec_cache/. {q}/" in txt
+    assert "|| true" in txt and "2>/dev/null" in txt       # the copy never fails the command
+    assert txt.index("mkdir -p") < txt.index("cp -rn") < txt.index("export AU_LUNE_CACHE_DIR")
+    assert f"if [ -d {q} ]; then export AU_LUNE_CACHE_DIR={q}; fi" in txt   # unset if mkdir failed
+    assert SL.lune_cache_export("") == ""
+    assert "cp -rn" not in SL.lune_cache_export("/x/y")    # no seed folder given: nothing to copy
+    # run it for real (POSIX shell only): the seed lands, nothing is overwritten, the variable is set
+    import os
+    import shutil
+    import subprocess
+    if shutil.which("bash") and os.name != "nt":
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(f"{d}/seed/specs")
+            open(f"{d}/seed/specs/a.json", "w").write("seed")
+            t = SL.lune_cache_export(f"{d}/lane", f"{d}/seed")
+            out = subprocess.run(["bash", "-c", t + "echo $AU_LUNE_CACHE_DIR"],
+                                 capture_output=True, text=True).stdout.strip()
+            assert out == f"{d}/lane" and open(f"{d}/lane/specs/a.json").read() == "seed"
+            open(f"{d}/lane/specs/a.json", "w").write("lane")
+            subprocess.run(["bash", "-c", t], check=True)
+            assert open(f"{d}/lane/specs/a.json").read() == "lane"   # folder exists: no re-seed

@@ -191,10 +191,13 @@ STUDIO_CALLS_DEFAULTS = {
     # is 37-49 min) and the most one block may take, whatever the request asks for
     "bot_run_budget_minutes": 75,
     "bot_block_budget_minutes": 600,
-    # 2026-11-14 time-saving item 24: every lane worktree / slot lane ran all ~2,800 Lune specs
-    # cold on its first gate (13 cold runs = 324 min in four days). true = one shared Lune
-    # spec cache per machine (AU_LUNE_CACHE_DIR) for the main checkout and every lane
+    # 2026-11-14 time-saving item 24: a slot's lanes share ONE checkout, so their Lune spec cache
+    # (one file per spec NAME) was overwritten by each other and every gate ran ~2,800 specs cold.
+    # true = one cache folder per lane on each slot (AU_LUNE_CACHE_DIR), seeded from the checkout's
     "shared_lune_cache": False,
+    # 2026-11-14 item 24b: also ONE shared folder on the workstation (main + every lane); off, as
+    # each lane worktree has its own warm cache and one folder would make them overwrite each other
+    "shared_lune_cache_workstation": False,
     # 2026-11-14 item 24: before a WORKSTATION gate spawns, check a Studio with the TEST place is
     # connected and no playtest runs; if not, wait and retry (no attempt, no verdict)
     "gate_preflight": False,
@@ -895,9 +898,14 @@ _SC_DESC = {
     "bot_run_budget_minutes": "BOT_MATCHES: wall budget of one bot match; past it the run is "
                               "stopped, recorded as timed out, and the block goes on.",
     "bot_block_budget_minutes": "BOT_MATCHES: the most one block of bot matches may take.",
-    "shared_lune_cache": "One shared Lune spec cache per machine (AU_LUNE_CACHE_DIR): the "
-                         "workstation's under the coordinator state folder, a slot's under "
-                         "its home; a new lane's first gate no longer runs every spec cold.",
+    "shared_lune_cache": "One Lune spec cache per lane on each slot (AU_LUNE_CACHE_DIR, under "
+                         "the slot's home, seeded from the checkout's cache): the runner keeps "
+                         "one entry per spec name, so lanes sharing a folder would overwrite "
+                         "each other. Does not touch the workstation (see the next key).",
+    "shared_lune_cache_workstation": "With shared_lune_cache also on: ONE shared Lune spec cache "
+                         "folder (under the coordinator state folder) for the main checkout and "
+                         "every lane on the workstation. Off by default: one entry per spec name, "
+                         "so lanes with different trees overwrite each other.",
     "gate_preflight": "Before a workstation gate starts, check a Studio with the TEST place is "
                       "connected and no playtest runs; otherwise wait and retry (no attempt "
                       "used, no verdict). Off = start at once.",

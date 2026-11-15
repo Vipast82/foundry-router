@@ -1022,11 +1022,19 @@ def test_bot_budgets_come_from_the_request_and_the_setting_caps_a_block(env):
 
 
 # ---------------------------------------------------------------- item 24
-def test_shared_lune_cache_is_off_by_default_and_one_directory_per_project(tmp_path):
+def test_workstation_lune_cache_needs_both_switches_and_is_one_directory_per_project(tmp_path):
     prof = SimpleNamespace(id="game", studio_calls={"shared_lune_cache": False})
-    assert SC.defaults()["shared_lune_cache"] is False and SC.defaults()["gate_preflight"] is False
+    d0 = SC.defaults()
+    assert d0["shared_lune_cache"] is False and d0["shared_lune_cache_workstation"] is False
+    assert d0["gate_preflight"] is False
     assert SC.shared_lune_env(prof, str(tmp_path)) == {}
-    prof.studio_calls["shared_lune_cache"] = True
+    prof.studio_calls["shared_lune_cache"] = True            # slot switch alone: workstation untouched
+    assert SC.shared_lune_env(prof, str(tmp_path)) == {}
+    prof.studio_calls = {"shared_lune_cache_workstation": True}
+    assert SC.shared_lune_env(prof, str(tmp_path)) == {}
+    prof.studio_calls = {"shared_lune_cache": True, "shared_lune_cache_workstation": 1}
+    assert SC.shared_lune_env(prof, str(tmp_path)) == {}
+    prof.studio_calls = {"shared_lune_cache": True, "shared_lune_cache_workstation": True}
     got = SC.shared_lune_env(prof, str(tmp_path))
     d = got["AU_LUNE_CACHE_DIR"]
     assert os.path.isabs(d) and os.path.isdir(d) and d.startswith(str(tmp_path))
@@ -1037,15 +1045,20 @@ def test_shared_lune_cache_is_off_by_default_and_one_directory_per_project(tmp_p
 def test_the_switches_are_validated_booleans(tmp_path):
     repo, _ = make_repo(tmp_path, "game", [T1])
     p = load(str(write_profile(tmp_path, "game", repo,
-                               extra="[studio_calls]\nshared_lune_cache = true\ngate_preflight = true\n")))
+                               extra="[studio_calls]\nshared_lune_cache = true\nshared_lune_cache_workstation = true\n"
+                                     "gate_preflight = true\n")))
     assert p.studio_calls["shared_lune_cache"] is True and p.studio_calls["gate_preflight"] is True
+    assert p.studio_calls["shared_lune_cache_workstation"] is True
     with pytest.raises(ProfileError):
         load(str(write_profile(tmp_path, "game", repo, extra="[studio_calls]\nshared_lune_cache = 1\n")))
 
 
-@pytest.mark.parametrize("on", [True, False])
-def test_the_gate_process_gets_the_shared_cache_variable_only_with_the_switch(env, on):
-    e = env([{"result": "PASS"}], extra="shared_lune_cache = true\n" if on else "")
+@pytest.mark.parametrize("extra,on", [
+    ("shared_lune_cache = true\nshared_lune_cache_workstation = true\n", True),
+    ("shared_lune_cache = true\n", False), ("shared_lune_cache_workstation = true\n", False),
+    ("", False)])
+def test_the_gate_process_gets_the_shared_cache_variable_only_with_both_switches(env, extra, on):
+    e = env([{"result": "PASS"}], extra=extra)
     seen = []
     calls = e.c.studio_calls
     orig = calls._spawn

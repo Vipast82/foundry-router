@@ -71,9 +71,10 @@ DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundr
             "community_mcp": "/usr/local/bin/robloxstudio-mcp", "enabled": True,
             "checkout_timeout_s": 600, "host": "", "ssh": SSH_DEFAULT,
             "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": ""}
-# 2026-11-14 item 24: the slot's ONE shared Lune spec cache ([studio_calls] shared_lune_cache): in
-# /home/studio (the persistent studio-home volume), outside the checkout, so every lane's gate on
-# the slot reuses it and `git clean` / a lane's removal never empties it. "~/" = the slot's $HOME.
+# 2026-11-14 item 24b: the slot's Lune spec caches ([studio_calls] shared_lune_cache), ONE FOLDER PER
+# LANE under this base: the runner keeps one entry per spec name, so lanes with different trees that
+# shared one folder would overwrite each other. In /home/studio (the persistent studio-home volume),
+# outside the checkout, so `git clean` never empties it. "~/" = the slot's $HOME.
 SLOT_LUNE_CACHE = "~/.cache/au-lune-spec-cache"
 FOUNDRY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -182,6 +183,15 @@ def exec_argv(slot: dict, args: list, interactive: bool = False) -> list:
                      + [slot["container"]] + [str(a) for a in args])
 
 
+def lune_lane(worktree: str) -> str:
+    """The lane name for the slot's per-lane Lune cache: the basename of a host worktree path under a
+    `.tracks` folder (either slash, any letter case), else "main"; only [A-Za-z0-9_.-] (2026-11-14)."""
+    parts = [x for x in re.split(r"[\\/]+", str(worktree or "")) if x]
+    name = parts[-1] if len(parts) >= 2 and parts[-2].lower() == ".tracks" else ""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    return "main" if not name.strip(".") else name
+
+
 def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, head: str,
                   lune_cache: bool = False) -> list:
     """The host command that runs `pipeline_args` (the `studio_calls pipeline ...` argv after the
@@ -197,17 +207,22 @@ def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, hea
             "--foundry", slot["foundry"], "--path-prefix", slot.get("path_prefix") or "",
             "--worktree", worktree, "--task", task, "--head", head,
             "--checkout-timeout", str(int(slot.get("checkout_timeout_s") or 600))] \
-        + remote + (["--lune-cache-dir", SLOT_LUNE_CACHE] if lune_cache else []) \
+        + remote + (["--lune-cache-dir", SLOT_LUNE_CACHE + "/" + lune_lane(worktree)] if lune_cache else []) \
         + ["--"] + list(pipeline_args)
 
 
-def lune_cache_export(path: str) -> str:
-    """Shell text that creates `path` on the slot and exports AU_LUNE_CACHE_DIR to it ("" for no
-    path; a failed mkdir leaves the variable unset, i.e. the checkout's own cache as before)."""
+def lune_cache_export(path: str, seed_from: str = "") -> str:
+    """Shell text that exports AU_LUNE_CACHE_DIR=`path` on the slot ("" for no path). The first time
+    (folder absent) it creates it and copies `seed_from` (the checkout's spec cache) in without
+    overwriting, so a new lane starts warm. A failed mkdir leaves the variable unset (the checkout's
+    own cache as before); the copy is guarded and never fails the command. 2026-11-14 item 24b."""
     if not path:
         return ""
     q = '"$HOME"/' + shlex.quote(path[2:]) if path.startswith("~/") else shlex.quote(path)
-    return f"mkdir -p {q} 2>/dev/null && export AU_LUNE_CACHE_DIR={q}; "
+    seed = (f"{{ cp -rn {shlex.quote(seed_from)}/. {q}/ 2>/dev/null || true; }}; "
+            if seed_from else "true; ")
+    return (f"if [ ! -d {q} ]; then mkdir -p {q} 2>/dev/null && {seed}fi; "
+            f"if [ -d {q} ]; then export AU_LUNE_CACHE_DIR={q}; fi; ")
 
 
 def slot_pipeline_args(args: list, slot_repo: str) -> list:
@@ -470,7 +485,8 @@ def run(a) -> int:
            f"FOUNDRY_GATE_RUN_ID={shlex.quote(os.environ.get('FOUNDRY_GATE_RUN_ID', ''))}; ")
     if a.path_prefix:
         env += f"export PATH={shlex.quote(a.path_prefix)}:$PATH; "
-    env += lune_cache_export(getattr(a, "lune_cache_dir", "") or "")
+    env += lune_cache_export(getattr(a, "lune_cache_dir", "") or "",
+                             repo.rstrip("/") + "/tmp/lune/spec_cache")
     script = (env + f"cd {shlex.quote(repo)} && python3 -m foundry_coordinator.studio_calls "
               + " ".join(shlex.quote(x) for x in args))
     print("SLOT run: " + script[:400], flush=True)

@@ -1508,8 +1508,8 @@ Change no code or test file in this session; if one needs changing, stop and rep
         import threading
         log = self._run_log(edir, name)
         env = dict(os.environ, AU_LUNE_WORKERS=str(workers)) if workers else None
-        # 2026-11-14 item 24: [studio_calls] shared_lune_cache: the same per-project spec cache
-        # directory as the gate's host half (run.luau's AU_LUNE_CACHE_DIR)
+        # 2026-11-14 item 24b: only with shared_lune_cache AND shared_lune_cache_workstation: the same
+        # spec cache folder as the gate's host half (run.luau's AU_LUNE_CACHE_DIR)
         from ...studio_calls import shared_lune_env
         extra = shared_lune_env(self.p, self.state_dir)
         if extra:

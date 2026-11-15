@@ -129,14 +129,14 @@ def settings(P) -> dict:
 
 
 def shared_lune_env(profile, state_dir: str) -> dict:
-    """{AU_LUNE_CACHE_DIR: <dir>} when [studio_calls] shared_lune_cache is on, else {}.
-    2026-11-14 time-saving item 24: every lane worktree had its own Lune spec cache, so each
-    new lane's first gate ran all ~2,800 specs cold (20-27 min; 13 cold runs = 324 min in
-    four days). run.luau's entries are content-keyed (one file per spec, written by
-    write-then-rename), so the main checkout and every lane share ONE directory per project,
-    outside any worktree. Failing to create it leaves the variable unset (the old cache)."""
+    """{AU_LUNE_CACHE_DIR: <dir>} when BOTH [studio_calls] shared_lune_cache and
+    shared_lune_cache_workstation are on, else {}. 2026-11-14 item 24b: run.luau keeps ONE entry
+    per spec name, so one folder shared by the main checkout and every lane makes them overwrite
+    each other; each worktree's own warm cache is better, so this is opt-in (default off).
+    Failing to create the folder leaves the variable unset (the worktree's own cache)."""
     sc = getattr(profile, "studio_calls", None)
-    if not state_dir or not (isinstance(sc, dict) and sc.get("shared_lune_cache") is True):
+    if not state_dir or not (isinstance(sc, dict) and sc.get("shared_lune_cache") is True
+                             and sc.get("shared_lune_cache_workstation") is True):
         return {}
     pid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(getattr(profile, "id", "") or "project"))
     d = os.path.join(os.path.abspath(state_dir), "lune_spec_cache", pid)
@@ -835,7 +835,7 @@ class StudioCalls:
             # 2026-10-31: a slot-bound track's gate runs inside the slot (checkout -> pipeline
             # -> outputs copied back into the worktree)
             from . import slots
-            # 2026-11-14 item 24: the slot's own shared Lune cache (home volume, not the checkout)
+            # 2026-11-14 item 24b: one Lune cache folder per lane on the slot (home volume)
             kw = {"lune_cache": True} if settings(P).get("shared_lune_cache") is True else {}
             return slots.wrap_pipeline(slot, args, P.profile.workspace, tid, head or P.ws.head(),
                                        **kw)
