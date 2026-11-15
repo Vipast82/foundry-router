@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.153 — Host Admin shows what Strata's own Monitor page shows
+
+- The Strata gateway answers `GET /metrics` with JSON (hardware, engine with the
+  experts in VRAM, conversation cache, totals, recent requests), not Prometheus
+  text. The router read it as Prometheus and showed nothing. Host Admin now shows
+  it as an "Engine monitor" card: tiles per group and a table of the latest 25
+  requests. The time series behind Strata's sparklines is left out.
+- A nested object inside a group is laid out as tiles of its own.
+
 ## v0.181.152 — Host Admin asks a Strata server for its engine status; the shrink's real progress
 
 - **Host Admin, llama.cpp-kind servers: `GET /v1/status`.** Asked directly (2026-11-15): the brain host (Unbiased Strata fork, the bare engine's own server) puts the expert tiers in `/health` and has no `/props`, `/slots`, `/metrics`; the Strata host (Niko1221/Strata, a Python gateway) answers `/health` with a short summary without the tiers, and its source names `/v1/status` for the engine's counters. The page now asks for it and lays the reply out as an "Engine status" card (any JSON object: values as tiles, nested objects as groups, the reply itself in a fold). A server without it is listed under "Not offered by this server".
