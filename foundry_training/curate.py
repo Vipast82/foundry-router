@@ -437,7 +437,7 @@ def record_human_preference(store, project_id: str, chosen_event: str, rejected_
                         (chosen_event, rejected_event, project_id))
     if len(rows) != 2:
         raise ValueError("both events must be model_call events of this project")
-    f = {r["event_id"]: json.loads(r["facts"]) for r in rows}
+    f = {r["event_id"]: store.unpack(json.loads(r["facts"])) for r in rows}
     ca = content_hash([f[chosen_event].get("messages"), f[chosen_event].get("tools")])
     cb = content_hash([f[rejected_event].get("messages"), f[rejected_event].get("tools")])
     if ca != cb:
