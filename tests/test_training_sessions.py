@@ -186,3 +186,16 @@ def test_a_turn_larger_than_an_example_is_shortened_not_dropped(tmp_path):
     big = next(x["content"] for r in rows for x in r["messages"] if x["role"] == "tool" and "START" in x["content"])
     assert big.startswith("START ") and big.endswith(" END") and "characters left out of this message" in big
 
+
+def test_a_secret_inside_tool_call_arguments_is_blanked_without_breaking_them(tmp_path):
+    """Found on the live store: blanking inside the arguments JSON string made it unparsable."""
+    st = TrainingStore(str(tmp_path / "s"), allow_in_repo=True)
+    _call(st, "S", 0, "qwen", 1, reply="saving",
+          tool_calls=[{"id": "c9", "name": "write_file",
+                       "arguments": {"path": "a.env", "text": 'TOKEN="sk-ant-api03-' + "b" * 40 + '" X=1'}}])
+    m = sessions.export(st, ["au"], name="sec", validation_fraction=0.0, log=lambda s: None)
+    assert m["examples"] == {"train": 1} and m["examples_redacted_again"] == 1
+    row, = _read(tmp_path / "s" / "datasets" / "sec" / "train.jsonl")
+    args = json.loads(row["messages"][-1]["tool_calls"][0]["function"]["arguments"])     # still valid JSON
+    assert args["path"] == "a.env" and "sk-ant-api03-" not in args["text"] and "X=1" in args["text"]
+

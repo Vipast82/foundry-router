@@ -329,12 +329,14 @@ def export(store, projects: list, name: str = "", max_tokens: int = 32768,
                         ex["tools"] = full_tools if tools == "all" else used_tools(ms, full_tools)
                         if any(ELIDED.split("{")[0].strip() in (x.get("content") or "") for x in ms):
                             stats["shortened"] += 1
-                        chat = to_chatml(ms, ex["tools"], None, reasoning=include_reasoning)
-                        # anything that still looks like a secret is blanked in place;
-                        # the example is kept
-                        chat, found = redactor.obj(chat)
+                        # anything that still looks like a secret is blanked in place and
+                        # the example is kept. Done on the messages BEFORE tool-call
+                        # arguments become a JSON string: blanking inside that string
+                        # broke the JSON (found on the live store).
+                        ms, found = redactor.obj(ms)
                         if found.count:
                             stats["redacted_again"] += 1
+                        chat = to_chatml(ms, ex["tools"], None, reasoning=include_reasoning)
                         text = _render_chatml(chat["messages"], ex["tools"])
                         key = _sha(text)
                         if key in seen:

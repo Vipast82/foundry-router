@@ -2,6 +2,16 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.147 — training archive: one more copy of the fine-tuning data in a folder of your choice
+
+- **Logs → Training → Capture → Archive** (`training_capture.archive_dir`, `training_archive.py`). A folder the router can write to: a second disk, or a network share (NFS, SMB) mounted on the host and passed into the container. To Foundry it is a path; it mounts nothing itself. Empty = off.
+- **What is copied**, each behind its own tick box: a consistent copy of the capture store (SQLite's online backup, taken while capture keeps writing; written as `capture.sqlite.part` and renamed when complete, so the previous copy stays until the new one is whole) with the images it refers to, and the prepared datasets in the layout a trainer reads.
+- **When**: every `archive_hours` (24; 0 = on demand only) from the maintenance loop, and "Copy now" (`POST /admin/api/training/archive`). The card shows the folder's free space, the last copy and any error; a copy that would not fit is not started and the previous one is kept.
+- The working database stays on the router's own disk: SQLite on a network filesystem is prone to corruption, so the share holds copies.
+- First result of the workstation store's conversion (v0.181.145 `compact`): 207.4 GB (raw + normalized) into 6.59 GB, with 4,393 rows read back and compared.
+
+Tests: `tests/test_training_archive.py`.
+
 ## v0.181.146 — training: excluding is off by default; the keep-everything dataset drops nothing for its size; the capture shrink yields the disk
 
 **Excluding is opt-in** (`[training] exclude = true` in a project profile). Off, the default: no episode is excluded for how it was judged or who wrote it. What the policy's `require` list would have said is kept on the episode as `notes`, every model's turns may be targets, and the `calls` kind keeps calls of any quality. Only text that still looks like a secret keeps an episode out. A profile that wants the old selection sets `exclude = true`; then its `require` lists and `allow_frontier_targets` apply as before. Decided by Victor, 2026-11-15; the policy had selected 2 of 1,169 episodes. The providers' terms on hosted-model output are unchanged and still printed in every manifest.

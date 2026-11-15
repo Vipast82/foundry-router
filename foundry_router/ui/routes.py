@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 from pathlib import Path
 
@@ -1219,7 +1220,9 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         personas = []
     # wait=False: the per-project counts read every record (49 s on the live store), so
     # the page gets the last counts and a recount runs in the background
+    from .. import training_archive
     return {"capture": await asyncio.to_thread(svc.capture.status, False), "pipelines": pipes,
+            "archive": await asyncio.to_thread(training_archive.status, svc),
             "episodes": eps,
             "options": {"backends": _configured_backends(svc), "personas": personas}}
 
@@ -1237,9 +1240,21 @@ async def training_capture_set(request: Request):
     svc = _svc(request)
     body = await request.json()
     updates: dict = {}
-    for k in ("enabled", "include_unbound", "operator_chat"):
+    for k in ("enabled", "include_unbound", "operator_chat", "archive_capture",
+              "archive_datasets"):
         if k in body:
             updates[k] = bool(body[k])
+    if "archive_dir" in body:
+        d = str(body["archive_dir"] or "").strip()
+        if d and not os.path.isabs(d):
+            return JSONResponse({"error": "the archive folder must be a full path, e.g. "
+                                          "/mnt/finetuning"}, status_code=400)
+        updates["archive_dir"] = d
+    if "archive_hours" in body:
+        try:
+            updates["archive_hours"] = max(0, min(8760, int(body["archive_hours"])))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "archive_hours must be a number"}, status_code=400)
     if "retention_days" in body:
         try:
             updates["retention_days"] = max(1, min(3650, int(body["retention_days"])))
@@ -1268,6 +1283,19 @@ async def training_capture_set(request: Request):
                      + ", ".join(sorted(updates)) if updates else "training capture saved")
     return {"ok": True, "training_capture": cfg.training_capture.model_dump(),
             "capture": await asyncio.to_thread(svc.capture.status, False)}
+
+
+@router.post("/admin/api/training/archive")
+async def training_archive_run(request: Request):
+    """Copy the fine-tuning data to the archive folder now (training_archive.py).
+    Runs in the background; GET /admin/api/training shows it under `archive`."""
+    import asyncio
+
+    from .. import training_archive
+    svc = _svc(request)
+    if training_archive.folder(svc) is None:
+        return JSONResponse({"error": "set an archive folder first"}, status_code=400)
+    return {"ok": True, "run": await asyncio.to_thread(training_archive.start, svc)}
 
 
 @router.post("/admin/api/training/capture/compact")

@@ -972,6 +972,13 @@ class TrainingCaptureConfig(BaseModel):
     # The Automation chat is captured only with this on (its own switch: it is
     # the operator's console, not client traffic).
     operator_chat: bool = False
+    # v0.181.147 (training_archive.py): a folder for one more copy of the
+    # fine-tuning data: a second disk, or a network share mounted on the host and
+    # passed into the container. Empty = off. The working database stays local.
+    archive_dir: str = ""
+    archive_capture: bool = True       # a consistent copy of the capture store
+    archive_datasets: bool = True      # the prepared datasets, as a trainer reads them
+    archive_hours: int = Field(default=24, ge=0, le=8760)    # 0 = only on demand
 
 
 class PerfConfig(BaseModel):
