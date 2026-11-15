@@ -655,6 +655,8 @@ class Database:
             # keep a conversation on the model that answered its first turn
             ("personas", "divert_when_busy", "INTEGER DEFAULT 0"),
             ("personas", "pin_conversation", "INTEGER DEFAULT 0"),
+            # v0.181.143 (helpers.py): models a main-model persona may ask for help
+            ("personas", "helpers", "TEXT"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

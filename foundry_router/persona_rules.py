@@ -238,6 +238,12 @@ def validate(svc, fields: dict, *, allow_unknown: bool = False) -> tuple[dict, l
                 errors.append(f"{k} must be a JSON object")
                 continue
             clean[k] = dv
+        elif k == "helpers":
+            from . import helpers as _helpers
+            rows, e = _helpers.clean(v)
+            errors += e
+            if not e:
+                clean[k] = rows
         elif k == "mcp_with_client_tools":
             out, e, w = validate_client_tools_policy(svc, v)
             errors += e

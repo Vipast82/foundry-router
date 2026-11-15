@@ -741,7 +741,8 @@ async def _chat_dispatch(svc, body: dict):
     # direct dispatch. A client's own tools, a structured-output request and a
     # compaction summary take the direct path below, as for every persona.
     if exec_mode == "main" and not client_tools and client_format is None and not summary_req:
-        if _persona_has_mcp_tools(persona):
+        from .. import helpers as _helpers
+        if _persona_has_mcp_tools(persona) or _helpers.parse(persona):
             return await _agent_chat(svc, persona, model_name, messages, stream,
                                      user_text, mode="main")
         return await _direct_dispatch_chat(svc, persona, model_name, messages,
