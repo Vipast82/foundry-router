@@ -6,6 +6,9 @@
                                  ingestion checkpoints and runs
   <root>/curated.sqlite          episodes, selection decisions, splits, datasets,
                                  dataset membership (lineage), deletions
+  <root>/blobs.sqlite            every message, tool list and large string ONCE
+                                 (blobs.py, v0.181.145); raw records and events hold
+                                 references to it
   <root>/datasets/<id>/          exported training datasets (+ manifest.json)
   <root>/eval/<id>/              evaluation datasets, never mixed with training
   <root>/artifacts/sha256/..     images and other binaries, content-addressed
@@ -147,6 +150,15 @@ class TrainingStore:
         self.raw = _DB(self.root / "raw" / "raw.sqlite", RAW)
         self.norm = _DB(self.root / "normalized.sqlite", NORMALIZED)
         self.cur = _DB(self.root / "curated.sqlite", CURATED)
+        # v0.181.145: each message once. FOUNDRY_TRAINING_PACK=0 writes records whole,
+        # as before (a store other tools still read with an older version).
+        from . import blobs as _blobs
+        self.blobs = _blobs.BlobStore(_DB(self.root / "blobs.sqlite", _blobs.SCHEMA))
+        self.packing = os.environ.get("FOUNDRY_TRAINING_PACK", "1") not in ("0", "false", "off")
+
+    def unpack(self, obj):
+        """A record as it was written, whether or not its text is stored once."""
+        return self.blobs.unpack(obj)
 
     def _check_not_committed(self, allow: bool) -> None:
         probe = self.root
@@ -171,13 +183,15 @@ class TrainingStore:
     def put_raw(self, source_adapter: str, source_record_id: str, project_id: str,
                 payload: dict, redaction: dict, provenance: dict) -> str:
         from .schema import content_hash
-        sha = content_hash(payload)
+        sha = content_hash(payload)                 # of the record as received
+        body = json.dumps(payload, default=str, ensure_ascii=False)
+        if self.packing:
+            body = json.dumps(self.blobs.pack(json.loads(body)), ensure_ascii=False)
         self.raw.x("INSERT OR IGNORE INTO raw_records (source_adapter, source_record_id, "
                    "project_id, payload_sha, ingested_ts, redaction, provenance, payload) "
                    "VALUES (?,?,?,?,?,?,?,?)",
                    (source_adapter, source_record_id, project_id, sha, time.time(),
-                    json.dumps(redaction), json.dumps(provenance, default=str),
-                    json.dumps(payload, default=str, ensure_ascii=False)))
+                    json.dumps(redaction), json.dumps(provenance, default=str), body))
         return f"raw:{source_adapter}:{source_record_id}:{sha[:16]}"
 
     # -- events ----------------------------------------------------------------------
@@ -193,6 +207,9 @@ class TrainingStore:
                 continue
             r = e.row()
             r["ingested_ts"] = now
+            if self.packing:
+                r["facts"] = json.dumps(self.blobs.pack(json.loads(r["facts"])),
+                                        ensure_ascii=False)
             rows.append(r)
         if bad:
             raise StoreError(f"invalid events: {bad[:3]}")
@@ -210,7 +227,12 @@ class TrainingStore:
         for r in rows:
             for k in ("facts", "inferred", "artifact_references"):
                 r[k] = json.loads(r[k] or ("[]" if k == "artifact_references" else "{}"))
+            r["facts"] = self.blobs.unpack(r["facts"])
         return rows
+
+    def raw_payload(self, row: dict) -> dict:
+        """A raw record's payload as it was received."""
+        return self.blobs.unpack(json.loads(row["payload"] or "{}"))
 
     def projects(self) -> list[str]:
         return [r["project_id"] for r in self.norm.q(

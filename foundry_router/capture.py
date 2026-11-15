@@ -199,6 +199,32 @@ def glob_match(globs, name: str) -> bool:
     return any(fnmatch.fnmatchcase(n, str(g).lower()) for g in globs or [])
 
 
+class _BlobDB:
+    """What foundry_training.blobs.BlobStore needs from a database, on top of the
+    capture store's own connections: writes on the main one under its lock, reads
+    on the read-only one."""
+
+    def __init__(self, store: "CaptureStore"):
+        self.s = store
+
+    def q(self, sql, args=()):
+        return self.s.ro_query(sql, tuple(args), flush=False)
+
+    def many(self, sql, rows):
+        with self.s._lock:
+            c = self.s.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                n = 0
+                for r in rows:
+                    n += c.execute(sql, r).rowcount
+                c.execute("COMMIT")
+                return n
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+
+
 class CaptureStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -226,13 +252,38 @@ class CaptureStore:
             self.conn.execute("ALTER TABLE capture_records ADD COLUMN purpose TEXT DEFAULT ''")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_capture_purpose ON "
                           "capture_records(purpose, id)")
+        # v0.181.145: each message once (foundry_training/blobs.py). A captured call
+        # carries the whole conversation before it; on the live router 148,000 calls
+        # of about 340 KB each were mostly the same text again. New records are
+        # packed as they are written; `compact()` packs the ones already there.
+        from foundry_training import blobs as _blobs
+        self.conn.executescript(_blobs.SCHEMA)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS capture_meta (k TEXT PRIMARY KEY, v TEXT)")
+        self.blobs = _blobs.BlobStore(_BlobDB(self), cache_bytes=64 * 1024 * 1024)
+        self.compaction: dict = {"state": "idle"}
+        self._compactor: Optional[threading.Thread] = None
         if new:
             try:
                 os.chmod(self.path, 0o600)
             except OSError:
                 pass
 
+    def pack_body(self, text: str) -> str:
+        """A record's body with its messages, tool list and long strings replaced by
+        references (the text itself goes to the blobs table, once)."""
+        try:
+            v = json.loads(text)
+        except ValueError:
+            return text
+        out = json.dumps(self.blobs.pack(v), ensure_ascii=False)
+        return out if len(out) < len(text) else text
+
+    def unpack_body(self, text: str):
+        return self.blobs.unpack(json.loads(text or "{}"))
+
     def insert(self, row: dict) -> int:
+        if isinstance(row.get("body"), str) and len(row["body"]) > 400:
+            row = {**row, "body": self.pack_body(row["body"])}     # `bytes` stays the real size
         cols = list(row)
         with self._lock:
             cur = self.conn.execute(
@@ -283,18 +334,125 @@ class CaptureStore:
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
-    def ro_query(self, sql: str, args=()) -> list[dict]:
+    def ro_query(self, sql: str, args=(), flush: bool = True) -> list[dict]:
         """A slow read (the per-project counts read every record) on a second,
         read-only connection: `insert`, which every captured request calls from the
         event loop, never waits for it. v0.181.125: the counts query held the one
         lock for 49 s and the router froze for as long."""
-        self.flush()
+        if flush:
+            self.flush()
         with self._ro_lock:
             if self._ro is None:
                 self._ro = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
                                            check_same_thread=False, timeout=30)
                 self._ro.row_factory = sqlite3.Row
             return [dict(r) for r in self._ro.execute(sql, args).fetchall()]
+
+    # -- shrinking a store written before v0.181.145 ---------------------------------
+
+    def size_bytes(self) -> int:
+        n = 0
+        for p in (self.path, Path(str(self.path) + "-wal")):
+            try:
+                n += p.stat().st_size
+            except OSError:
+                pass
+        return n
+
+    def _meta(self, k: str, v: Optional[str] = None) -> Optional[str]:
+        if v is not None:
+            with self._lock:
+                self.conn.execute("INSERT INTO capture_meta (k, v) VALUES (?, ?) ON CONFLICT(k) "
+                                  "DO UPDATE SET v=excluded.v", (k, v))
+            return v
+        # read on the second connection: the page's status call must not wait for
+        # the lock a long VACUUM holds
+        r = self.ro_query("SELECT v FROM capture_meta WHERE k=?", (k,), flush=False)
+        return r[0]["v"] if r else None
+
+    def compact(self, batch: int = 40, pause: float = 0.02, verify_every: int = 100,
+                reclaim: bool = True) -> dict:
+        """Pack every record written before packing existed, a few at a time, then
+        give the freed space back to the disk (VACUUM). Runs on its own thread
+        (`compact_start`); captured calls keep being written meanwhile (they wait
+        only during the final VACUUM, in the writer's queue). It continues after a
+        restart from the last record it packed. Every `verify_every`-th record is
+        read back and compared before it is replaced; a difference stops the run
+        with nothing changed in that batch."""
+        st = self.compaction = {"state": "running", "phase": "packing", "started": time.time(),
+                                "bytes_before": self.size_bytes(), "records": 0, "packed": 0,
+                                "verified": 0, "text_bytes": 0, "error": ""}
+        try:
+            last = int(self._meta("packed_through") or 0)
+            top = (self.ro_query("SELECT MAX(id) AS n FROM capture_records")[0]["n"]) or 0
+            st["from"], st["to"] = last, top
+            while last < top:
+                rows = self.ro_query("SELECT id, body FROM capture_records WHERE id > ? AND "
+                                     "id <= ? ORDER BY id LIMIT ?", (last, top, batch), flush=False)
+                if not rows:
+                    break
+                pending: dict = {}
+                updates = []
+                for r in rows:
+                    body = r["body"] or ""
+                    st["text_bytes"] += len(body)
+                    try:
+                        v = json.loads(body)
+                    except ValueError:
+                        continue
+                    packed = self.blobs._walk(v, pending)
+                    text = json.dumps(packed, ensure_ascii=False)
+                    if len(text) < len(body):
+                        updates.append((text, r["id"], v if r["id"] % verify_every == 0 else None,
+                                        packed))
+                self.blobs.flush(pending)
+                for text, rid, v, packed in updates:
+                    if v is not None:
+                        if self.blobs.unpack(packed) != v:
+                            raise RuntimeError(f"record {rid} does not read back the same; "
+                                               f"stopped, the record was left as it was")
+                        st["verified"] += 1
+                with self._lock:
+                    self.conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        for text, rid, _, _ in updates:
+                            self.conn.execute("UPDATE capture_records SET body=? WHERE id=?",
+                                              (text, rid))
+                        self.conn.execute(
+                            "INSERT INTO capture_meta (k, v) VALUES ('packed_through', ?) "
+                            "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(rows[-1]["id"]),))
+                        self.conn.execute("COMMIT")
+                    except BaseException:
+                        self.conn.execute("ROLLBACK")
+                        raise
+                last = rows[-1]["id"]
+                st["records"] += len(rows)
+                st["packed"] += len(updates)
+                st["at"] = last
+                if pause:
+                    time.sleep(pause)
+            if reclaim:
+                st["phase"] = "reclaiming disk space"
+                with self._lock:
+                    self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    self.conn.execute("VACUUM")
+                    self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            st["state"], st["phase"] = "done", ""
+        except Exception as e:                                    # noqa: BLE001
+            st["state"], st["error"] = "error", f"{type(e).__name__}: {e}"[:300]
+            log.exception("capture store compaction failed")
+        st["finished"] = time.time()
+        st["bytes_after"] = self.size_bytes()
+        return st
+
+    def compact_start(self) -> dict:
+        if self._compactor is not None and self._compactor.is_alive():
+            return self.compaction
+        self._compactor = threading.Thread(target=self.compact, name="foundry-capture-compact",
+                                           daemon=True)
+        self._compactor.start()
+        time.sleep(0.05)
+        return self.compaction
 
     def prune(self, days: int) -> int:
         """Old records go a few hundred at a time (they are large, and one DELETE held
@@ -573,7 +731,7 @@ class Capture:
         args.append(max(1, min(1000, limit)))
         rows = self.store.ro_query(q, args)
         for r in rows:
-            r["body"] = json.loads(r["body"] or "{}")
+            r["body"] = self.store.unpack_body(r["body"])
             r["redaction"] = json.loads(r["redaction"] or "{}")
             r["purpose"] = r.get("purpose") or DEFAULT_PURPOSE
         if db is not None:
@@ -662,6 +820,9 @@ class Capture:
                     out["counts"], out["today"], out["counts_at"] = c["counts"], c["today"], c["at"]
                 out["counts_pending"] = c is None
                 out["store"] = str(self.store.path)
+                out["store_bytes"] = self.store.size_bytes()
+                out["compaction"] = dict(self.store.compaction)
+                out["packed_through"] = int(self.store._meta("packed_through") or 0)
             except Exception as e:                                # noqa: BLE001
                 out["store_error"] = str(e)[:200]
         return out

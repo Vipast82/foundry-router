@@ -90,10 +90,19 @@ def normalize_outcome(r: dict, project_id: str, raw_ref: str, redaction: dict) -
 def from_db(path: str, after_id: int = 0) -> Iterator[dict]:
     c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
+    unpack = lambda v: v                                          # noqa: E731
+    if c.execute("SELECT 1 FROM sqlite_master WHERE name='blobs'").fetchone():
+        # v0.181.145: the router stores each message once (blobs.py)
+        from ..blobs import BlobStore
+
+        class _Ro:
+            def q(self, sql, args=()):
+                return [dict(x) for x in c.execute(sql, tuple(args)).fetchall()]
+        unpack = BlobStore(_Ro()).unpack
     try:
         for r in c.execute("SELECT * FROM capture_records WHERE id > ? ORDER BY id", (after_id,)):
             d = dict(r)
-            d["body"] = json.loads(d["body"] or "{}")
+            d["body"] = unpack(json.loads(d["body"] or "{}"))
             d["redaction"] = json.loads(d["redaction"] or "{}")
             yield d
     finally:

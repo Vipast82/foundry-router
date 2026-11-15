@@ -1270,6 +1270,18 @@ async def training_capture_set(request: Request):
             "capture": await asyncio.to_thread(svc.capture.status, False)}
 
 
+@router.post("/admin/api/training/capture/compact")
+async def training_capture_compact(request: Request):
+    """Shrink the capture store: pack the records written before v0.181.145 (each
+    message once) and give the freed space back to the disk. Runs in the
+    background; GET /admin/api/training shows its progress under capture.compaction."""
+    import asyncio
+    cap = getattr(_svc(request), "capture", None)
+    if cap is None:
+        return JSONResponse({"error": "training capture is not set up"}, status_code=400)
+    return {"ok": True, "compaction": await asyncio.to_thread(cap.store.compact_start)}
+
+
 @router.get("/admin/api/training/capture/download")
 async def training_capture_download(request: Request, hours: float = 0, backend: str = "",
                                     persona: str = "", project: str = "", quality: str = "",
