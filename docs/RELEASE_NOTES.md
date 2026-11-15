@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.151 — a running record count blocks neither capture nor the Training page
+
+**What was recorded** (live, v0.181.150, right after a restart, Training tab opened): a 12.2 s freeze at `insert_later (capture.py)`, and the Training page took very long to load. The background count of capture records holds the shared read-only connection's lock for the whole of its query (the store was still about 103 GB).
+
+- Starting the capture writer thread took that same lock, on the event loop: the first captured request after a restart waited for the count. It has its own lock now.
+- The page's status read of the shrink position (added in v0.181.145) went through that connection and waited for the count. It reads on a connection of its own.
+
+Tests: `tests/test_capture_store_once.py`.
+
 ## v0.181.150 — the training archive can be an SMB share, set up entirely on the admin page
 
 **Why.** The archive of v0.181.147 needed a folder, and a network share had to be mounted on the host and passed into the container by hand (an unprivileged container cannot mount one). Victor: "everything should be configurable and usable on the UI". A direct NFS client was tried against the live TrueNAS (pyNfsClient 0.1.5, alpha): mount, create and directory calls worked, every write failed; not used.

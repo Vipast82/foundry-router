@@ -196,3 +196,24 @@ def test_the_shrink_reads_on_its_own_connection(tmp_path):
     assert 'rd = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro"' in src
     assert "self.ro_query(\"SELECT id, body" not in src
 
+
+def test_a_long_count_blocks_neither_capture_nor_the_page(tmp_path):
+    """v0.181.151: with the record count holding the shared read connection's lock,
+    the first captured request after a restart froze the event loop for 12.2 s
+    (starting the writer thread took the same lock), and the Training page hung
+    (its status read went through that connection)."""
+    import threading
+    st = CaptureStore(tmp_path / "capture.sqlite")
+    st._meta("packed_through", "7")
+    done = []
+    with st._ro_lock:                                           # the count is running
+        t = threading.Thread(target=lambda: (st.insert_later(_row(3, "a")), done.append("insert")))
+        t.start()
+        t.join(5)
+        assert done == ["insert"]                               # handed to the writer at once
+        t = threading.Thread(target=lambda: done.append(st._meta("packed_through")))
+        t.start()
+        t.join(5)
+        assert done == ["insert", "7"]                          # the page's read did not wait
+    assert st.flush(10) and st.query("SELECT COUNT(*) AS n FROM capture_records")[0]["n"] == 1
+
