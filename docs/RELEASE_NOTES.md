@@ -2,6 +2,13 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.157 — Host Admin traffic card: three corrections
+
+- The engine's own decode speed is averaged only over calls the server timed; for
+  Claude it showed a meaningless figure derived from the stream.
+- An Ollama model with nothing on the GPU reads "runs on the CPU".
+- An empty traffic card says that embedding requests are not counted.
+
 ## v0.181.156 — Host Admin for every kind of backend
 
 - **What the router sent here**, on every Host Admin page (Ollama, llama.cpp,

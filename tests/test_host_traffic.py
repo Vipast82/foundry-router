@@ -14,14 +14,14 @@ def _db(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     now = datetime.now(timezone.utc)
 
-    def add(backend, model, hours_ago, prompt, out, cached=0, ttft=500.0, eff=20.0, finish="stop"):
+    def add(backend, model, hours_ago, prompt, out, cached=0, ttft=500.0, eff=20.0, finish="stop", src="server", dec=50.0):
         ts = (now - timedelta(hours=hours_ago, minutes=1)).replace(tzinfo=None).isoformat()
         db.execute("INSERT INTO perf_samples (ts, model, backend, prompt_tokens, completion_tokens, cached_tokens, "
-                   "ttft_ms, eff_tps, wall_ms, finish_reason) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                   (ts, model, backend, prompt, out, cached, ttft, eff, 2000, finish))
+                   "ttft_ms, eff_tps, wall_ms, finish_reason, timing_src, decode_tps) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (ts, model, backend, prompt, out, cached, ttft, eff, 2000, finish, src, dec))
     add("strata", "qwen", 0, 1000, 100, cached=800)
     add("strata", "qwen", 0, 1000, 300, ttft=1500.0, eff=40.0, finish="length")
-    add("strata", "other", 5, 10, 10)
+    add("strata", "other", 5, 10, 10, src="estimated", dec=5000.0)     # not the engine's own figure
     add("strata", "qwen", 30, 9, 9)                 # outside the window
     add("meridian", "sonnet", 1, 50, 50)
     return db
@@ -31,7 +31,7 @@ def test_the_routers_own_calls_to_one_backend(tmp_path):
     t = host_traffic.traffic(_db(tmp_path), "strata", 24)
     assert t["calls"] == 3 and t["prompt_tokens"] == 2010 and t["completion_tokens"] == 410
     assert t["cached_tokens"] == 800 and t["cut_short"] == 1
-    assert t["ttft_ms"] == 833 and t["eff_tps"] == 26.7
+    assert t["ttft_ms"] == 833 and t["eff_tps"] == 26.7 and t["decode_tps"] == 50.0
     assert len(t["buckets"]) == 24 and t["buckets"][-1]["hour"].endswith(":00:00Z")
     assert sum(b["calls"] for b in t["buckets"]) == 3 and t["buckets"][0]["calls"] == 0
     assert [(m["model"], m["calls"]) for m in t["models"]] == [("qwen", 2), ("other", 1)]

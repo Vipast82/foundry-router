@@ -32,7 +32,10 @@ def traffic(db, backend: str, hours: int = 24) -> dict:
     tot = (q("SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens, "
              "COALESCE(SUM(completion_tokens),0) AS completion_tokens, "
              "COALESCE(SUM(cached_tokens),0) AS cached_tokens, "
-             "AVG(ttft_ms) AS ttft_ms, AVG(eff_tps) AS eff_tps, AVG(decode_tps) AS decode_tps, "
+             "AVG(ttft_ms) AS ttft_ms, AVG(eff_tps) AS eff_tps, "
+             # the engine's own decode speed only where the server timed it: for a
+             # subscription backend it is derived from the stream and means nothing
+             "AVG(CASE WHEN timing_src = 'server' THEN decode_tps END) AS decode_tps, "
              "AVG(wall_ms) AS wall_ms, MAX(ts) AS last_ts, "
              "SUM(CASE WHEN finish_reason = 'length' THEN 1 ELSE 0 END) AS cut_short "
              f"FROM perf_samples WHERE {where}", args) or [{}])[0]

@@ -7990,7 +7990,7 @@ function renderHostTraffic(t) {
   const num = (v, d) => isN(v) ? v.toLocaleString(undefined, {maximumFractionDigits: d || 0}) : "—";
   const big = v => !isN(v) ? "—" : v >= 1e9 ? (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1e4 ? (v / 1e3).toFixed(0) + "k" : num(v);
   const head = `<div class="card-h">What the router sent here <span class="hint">— the last ${esc(t.hours)} hours, from the router's own record of its calls</span></div>`;
-  if (!t.calls) return `<div class="card">${head}<p class="hint" style="margin:0">Nothing in the last ${esc(t.hours)} hours.</p></div>`;
+  if (!t.calls) return `<div class="card">${head}<p class="hint" style="margin:0">No model calls recorded in the last ${esc(t.hours)} hours. Embedding requests are not counted here.</p></div>`;
   const stat = (l, v, unit, sub) => `<div class="mon-stat" style="padding-bottom:12px"><div class="mon-l">${esc(l)}</div><div class="mon-v">${esc(v)}<small>${esc(unit || "")}</small></div><div class="mon-s">${esc(sub || "")}</div></div>`;
   const cachedPct = t.prompt_tokens > 0 ? 100 * t.cached_tokens / t.prompt_tokens : null;
   const figs = `<div class="mon-grid">`
@@ -8328,8 +8328,8 @@ async function hostRenderOllama(be, d, selector) {
         const gpu = m.size > 0 ? Math.min(100, 100 * m.size_vram / m.size) : 0, exp = m.expires_at ? new Date(m.expires_at) : null;
         const far = exp && exp.getFullYear() > new Date().getFullYear() + 5;
         return `<div class="mon-bar"><div class="mon-bar-h"><span><span class="mono">${esc(m.name)}</span> <span class="hint">${esc([m.parameter_size, m.quantization_level, m.context_length ? formatCtx(m.context_length) + " context" : ""].filter(Boolean).join(" · "))}</span></span>
-          <b>${(m.size / 1073741824).toFixed(2)} GB · ${gpu.toFixed(0)}% on the GPU${exp && !isNaN(exp) ? far ? " · kept loaded" : " · unloads " + esc(exp.toLocaleTimeString()) : ""}</b></div>
-          <span class="meter${gpu < 99.5 ? " warn" : ""}" title="share of this model's memory that is on the GPU; the rest runs on the CPU, slower"><span style="width:${gpu.toFixed(1)}%"></span></span></div>`;
+          <b>${(m.size / 1073741824).toFixed(2)} GB · ${m.size_vram > 0 ? gpu.toFixed(0) + "% on the GPU" : "runs on the CPU"}${exp && !isNaN(exp) ? far ? " · kept loaded" : " · unloads " + esc(exp.toLocaleTimeString()) : ""}</b></div>
+          <span class="meter${gpu > 0 && gpu < 99.5 ? " warn" : ""}" title="share of this model's memory that is on the GPU; the rest runs on the CPU, slower"><span style="width:${gpu.toFixed(1)}%"></span></span></div>`;
       }).join("") : '<p class="hint" style="margin:0">Nothing is loaded; the next request for a model loads it.</p>'}</div>
     <div id="host-traffic"></div>
     <h2>Installed models (${models.length})</h2>
