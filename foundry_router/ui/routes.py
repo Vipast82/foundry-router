@@ -114,6 +114,9 @@ async def get_config(request: Request):
         cfg["backend_pool"]["litellm"]["api_key"] = _mask(cfg["backend_pool"]["litellm"]["api_key"])
     if cfg.get("mcp_aggregator", {}).get("token"):
         cfg["mcp_aggregator"]["token"] = _mask(cfg["mcp_aggregator"]["token"])
+    if cfg.get("training_capture", {}).get("archive_smb_password"):
+        cfg["training_capture"]["archive_smb_password"] = _mask(
+            cfg["training_capture"]["archive_smb_password"])
     for c in cfg.get("clients") or []:
         # client keys are secrets too (managed ones are only a hash, still hidden)
         for k in ("key", "key_hash"):
@@ -1250,6 +1253,18 @@ async def training_capture_set(request: Request):
             return JSONResponse({"error": "the archive folder must be a full path, e.g. "
                                           "/mnt/finetuning"}, status_code=400)
         updates["archive_dir"] = d
+    if "archive_type" in body:
+        if body["archive_type"] not in ("folder", "smb"):
+            return JSONResponse({"error": "archive_type must be folder or smb"}, status_code=400)
+        updates["archive_type"] = body["archive_type"]
+    for k in ("archive_smb_server", "archive_smb_share", "archive_smb_path", "archive_smb_user"):
+        if k in body:
+            updates[k] = str(body[k] or "").strip()[:300]
+    pw = body.get("archive_smb_password")
+    if isinstance(pw, str) and pw and not _is_masked(pw):
+        updates["archive_smb_password"] = pw         # empty or masked: the stored one is kept
+    if body.get("archive_smb_password_clear"):
+        updates["archive_smb_password"] = ""
     if "archive_hours" in body:
         try:
             updates["archive_hours"] = max(0, min(8760, int(body["archive_hours"])))
@@ -1293,8 +1308,15 @@ async def training_archive_run(request: Request):
 
     from .. import training_archive
     svc = _svc(request)
-    if training_archive.folder(svc) is None:
-        return JSONResponse({"error": "set an archive folder first"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:                                             # noqa: BLE001
+        body = {}
+    if isinstance(body, dict) and body.get("test"):
+        # writes a small file to the destination, reads it back, removes it
+        return await asyncio.to_thread(training_archive.test, svc)
+    if training_archive.destination(svc) is None:
+        return JSONResponse({"error": "set an archive destination first"}, status_code=400)
     return {"ok": True, "run": await asyncio.to_thread(training_archive.start, svc)}
 
 

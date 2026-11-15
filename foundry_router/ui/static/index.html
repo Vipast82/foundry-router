@@ -4197,22 +4197,33 @@ async function tabTraining() {
           <span class="hint">${prog || (k.state === "stopped" ? "stopped; start it again to continue" : done ? "records are stored with each message once" : "records written before v0.181.145 repeat the whole conversation in every call")}</span></div>`;
       })()}
       ${(() => {
-        const a = d.archive || {}, l = a.last || {}, r = a.run || {};
+        const a = d.archive || {}, l = a.last || {}, r = a.run || {}, smb = a.smb || {};
         const gb = b => b == null ? "—" : (b / 1e9).toFixed(b >= 1e10 ? 0 : 2) + " GB";
-        const state = !a.dir ? '<span class="pill">off</span>'
+        const isSmb = a.type === "smb";
+        const state = !a.on ? '<span class="pill">off</span>'
           : r.state === "running" ? `<span class="pill warn">copying: ${esc(r.phase || "")}${r.of ? " " + Math.round(100 * (r.pages || 0) / r.of) + "%" : ""}</span>`
-          : !a.exists ? '<span class="pill bad" title="The folder does not exist inside the router. A network share has to be mounted on the host and passed into the container.">folder not found</span>'
-          : !a.writable ? '<span class="pill bad">not writable</span>'
+          : !isSmb && !a.exists ? '<span class="pill bad" title="The folder does not exist inside the router.">folder not found</span>'
+          : !isSmb && !a.writable ? '<span class="pill bad">not writable</span>'
           : l.finished ? (l.ok ? '<span class="pill ok">last copy ok</span>' : `<span class="pill bad" title="${esc((l.errors || []).join("; "))}">last copy had errors</span>`)
           : '<span class="pill warn">no copy yet</span>';
         return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Archive</b> ${state}
-          <label title="A folder the router can write to, for one more copy of the fine-tuning data: a second disk, or a network share (NFS, SMB) mounted on the host and passed into the container. The working database stays on the router's own disk; the share holds copies. Empty = off.">folder <input type="text" id="arc-dir" style="width:260px" placeholder="off, e.g. /mnt/finetuning" value="${esc(a.dir || "")}"></label>
+          <label title="Where one more copy of the fine-tuning data goes. SMB share: the router connects to a Windows / SMB share itself (TrueNAS, a NAS, a Windows PC); nothing is set up on the host. Folder: a path on the router, such as a second disk.">to
+            <select id="arc-type"><option value="smb" ${isSmb ? "selected" : ""}>an SMB share</option><option value="folder" ${isSmb ? "" : "selected"}>a folder on the router</option></select></label>
+          <span id="arc-smb" style="display:${isSmb ? "contents" : "none"}">
+            <label title="Name or address of the server that has the share.">server <input type="text" id="arc-s-server" style="width:150px" placeholder="192.168.0.206" value="${esc(smb.server || "")}"></label>
+            <label title="The share's name, as the server lists it.">share <input type="text" id="arc-s-share" style="width:120px" placeholder="finetuning" value="${esc(smb.share || "")}"></label>
+            <label title="A folder inside the share. Empty = the top of the share.">sub-folder <input type="text" id="arc-s-path" style="width:120px" placeholder="(top)" value="${esc(smb.path || "")}"></label>
+            <label title="The user the router signs in as.">user <input type="text" id="arc-s-user" style="width:110px" autocomplete="off" value="${esc(smb.user || "")}"></label>
+            <label title="That user's password. Stored in the router's configuration and never shown again; leave it empty to keep the one already saved.">password <input type="password" id="arc-s-pw" style="width:120px" autocomplete="new-password" placeholder="${smb.has_password ? "saved — empty keeps it" : "not set"}"></label></span>
+          <span id="arc-folder" style="display:${isSmb ? "none" : "contents"}">
+            <label title="A full path the router can write to. Inside Docker the compose file offers /archive (FOUNDRY_ARCHIVE_DIR_HOST in .env).">folder <input type="text" id="arc-dir" style="width:240px" placeholder="off, e.g. /archive" value="${esc(a.dir || "")}"></label></span>
           <label title="One consistent copy of the capture store (every captured request), taken while capture keeps running."><input type="checkbox" id="arc-cap" ${a.capture !== false ? "checked" : ""}> full capture database</label>
           <label title="The prepared datasets, in the layout a trainer such as Unsloth Studio reads."><input type="checkbox" id="arc-ds" ${a.datasets !== false ? "checked" : ""}> datasets</label>
           <label title="How often the copy is refreshed. 0 = only when you press Copy now.">every <input type="number" id="arc-hours" min="0" max="8760" style="width:70px" value="${a.hours ?? 24}"> hours</label>
           <button class="act" id="arc-save">Save</button>
-          <button class="act" id="arc-run" ${a.dir && r.state !== "running" ? "" : "disabled"}>Copy now</button>
-          <span class="hint">${a.dir ? `free on the folder: ${gb(a.free_bytes)}` : ""}${l.finished ? ` · last copy ${when(l.finished)}${l.capture ? ", capture " + gb(l.capture.bytes) : ""}${l.datasets ? ", " + l.datasets.files + " dataset file(s)" : ""}` : ""}${(l.errors || []).length ? ` · <span style="color:var(--bad)">${esc(l.errors.join("; "))}</span>` : ""}</span></div>`;
+          <button class="act" id="arc-test" ${a.on ? "" : "disabled"} title="Writes a small file to the destination, reads it back and removes it.">Test connection</button>
+          <button class="act" id="arc-run" ${a.on && r.state !== "running" ? "" : "disabled"}>Copy now</button>
+          <span class="hint" id="arc-msg">${a.on ? esc(a.where || "") : ""}${a.free_bytes != null ? ` · free: ${gb(a.free_bytes)}` : ""}${l.finished ? ` · last copy ${when(l.finished)}${l.capture ? ", capture " + gb(l.capture.bytes) : ""}${l.datasets ? ", " + l.datasets.files + " dataset file(s)" : ""}` : ""}${(l.errors || []).length ? ` · <span style="color:var(--bad)">${esc(l.errors.join("; "))}</span>` : ""}</span></div>`;
       })()}
       <div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Download captured calls</b>
         <select id="cap-dl-q" title="ok = the router saw the call succeed with no thumbs-down and no failed gate/review; verified = ok plus a gate PASS, review APPROVED or vision approval from the coordinator"><option value="">all calls</option><option value="ok">router ok</option><option value="verified">verified by the coordinator</option></select>
@@ -4262,13 +4273,31 @@ async function tabTraining() {
     try { await api("training/capture/compact", {method: "POST", body: {stop: true}}); toast("Stopping after the records in hand"); render(); }
     catch (e) { toast(e.message, true); }
   };
+  if ($("#arc-type")) $("#arc-type").onchange = () => {
+    const smb = $("#arc-type").value === "smb";
+    $("#arc-smb").style.display = smb ? "contents" : "none";
+    $("#arc-folder").style.display = smb ? "none" : "contents";
+  };
   if ($("#arc-save")) $("#arc-save").onclick = async () => {
     try {
-      await api("training/capture", {method: "POST", body: {archive_dir: $("#arc-dir").value.trim(),
+      const body = {archive_type: $("#arc-type").value, archive_dir: $("#arc-dir").value.trim(),
+        archive_smb_server: $("#arc-s-server").value.trim(), archive_smb_share: $("#arc-s-share").value.trim(),
+        archive_smb_path: $("#arc-s-path").value.trim(), archive_smb_user: $("#arc-s-user").value.trim(),
         archive_capture: $("#arc-cap").checked, archive_datasets: $("#arc-ds").checked,
-        archive_hours: parseInt($("#arc-hours").value, 10) || 0}});
+        archive_hours: parseInt($("#arc-hours").value, 10) || 0};
+      if ($("#arc-s-pw").value) body.archive_smb_password = $("#arc-s-pw").value;
+      await api("training/capture", {method: "POST", body});
       toast("Archive settings saved"); render();
     } catch (e) { toast(e.message, true); }
+  };
+  if ($("#arc-test")) $("#arc-test").onclick = async () => {
+    $("#arc-msg").textContent = "testing…";
+    try {
+      const r = await api("training/archive", {method: "POST", body: {test: true}});
+      $("#arc-msg").innerHTML = r.ok
+        ? `<span class="pill ok">connection works</span> ${esc(r.where || "")}${r.free_bytes != null ? " · free: " + (r.free_bytes / 1e9).toFixed(0) + " GB" : ""}`
+        : `<span class="pill bad">failed</span> ${esc(r.error || "")}`;
+    } catch (e) { $("#arc-msg").textContent = e.message; }
   };
   if ($("#arc-run")) $("#arc-run").onclick = async () => {
     try { await api("training/archive", {method: "POST", body: {}}); toast("Copy started"); render(); }
