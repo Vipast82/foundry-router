@@ -55,3 +55,25 @@ services:
       - OLLAMA_NUM_PARALLEL=2
     volumes:
       - ${FOUNDRY_EMBEDDINGS_DIR:-./embeddings}:/root/.ollama
+
+  # The Luau checkers for Code checks (v0.181.165), in a container of their own so
+  # the router's image is unchanged and this stays optional. Started only with its
+  # profile, and reachable only on this network (no port on the host):
+  #   docker compose --profile code-checks up -d --build
+  # Then: Routing and brain -> Code checks -> Add a check, how = service,
+  #       address http://code-checks:8099, command e.g. "luau-lsp analyze {file}".
+  # contrib/code-checks/README.md explains the rest.
+  code-checks:
+    build: ./contrib/code-checks
+    image: foundry-code-checks:latest
+    container_name: foundry-code-checks
+    restart: unless-stopped
+    profiles: ["code-checks"]
+    # what it looks at was written by a model: nothing to read, nothing to keep
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

@@ -960,7 +960,8 @@ window._jforms = {
     {key: "enabled", label: "on", type: "check"},
     {key: "name", label: "name", type: "text", placeholder: "e.g. luau-analyze"},
     {key: "languages", label: "code blocks labelled", type: "list", wide: true, placeholder: "luau, lua…", hint: "The language on the code fence. * means every labelled block."},
-    {key: "kind", label: "how", type: "select", options: ["command", "python", "json"], required: true, hint: "command = run the program below on the code. python = compile it (never run it). json = parse it."},
+    {key: "kind", label: "how", type: "select", options: ["service", "command", "python", "json"], required: true, hint: "service = ask the code-checks container (contrib/code-checks: luau-lsp, selene, stylua). command = run the program below inside the router itself. python = compile it (never run it). json = parse it."},
+    {key: "url", label: "service address", type: "text", placeholder: "http://code-checks:8099", hint: "For \"service\": where the code-checks container listens. Start it with: docker compose --profile code-checks up -d --build"},
     {key: "command", label: "command (the code's file is {file})", type: "text", wide: true, placeholder: "luau-lsp analyze {file}", hint: "Only this program runs, with the code in a temporary file. It must be installed on the router. Anything other than a silent exit 0 is a failure, and its output is what the model is told."},
     {key: "timeout_seconds", label: "give up after (s)", type: "number", placeholder: "20"}]},
   a2aAgents: {kind: "rows", required: "name", addLabel: "Add a remote agent", blank: {enabled: true}, fields: [
@@ -5746,7 +5747,7 @@ async function tabBackends() {
         <button class="act" id="cc-test" title="Runs the chosen check on the snippet below, as a reply would be checked. Save first.">Try it</button>
         <input id="cc-test-code" size="34" placeholder="a snippet to try, e.g. local x =">
         <span class="hint" id="cc-msg"></span></div>
-      <p class="hint" style="margin:6px 0 0">A checker has to be installed on the router: <span class="mono">python</span> and <span class="mono">json</span> need nothing, a command needs its program in the router's image.</p>
+      <p class="hint" style="margin:6px 0 0"><b>python</b> and <b>json</b> need nothing. For Luau, start the checkers' own container — <span class="mono">docker compose --profile code-checks up -d --build</span> — and use <b>service</b> with the address <span class="mono">http://code-checks:8099</span> and a command such as <span class="mono">luau-lsp analyze {file}</span>, <span class="mono">selene {file}</span> or <span class="mono">stylua --check {file}</span>. A check that cannot run is reported here and never sent to the model as if the code were wrong.</p>
     </div>
     <div class="card">
       <h2 style="margin-top:0" title="A2A (Agent2Agent) is the open protocol agents use to call each other. Both directions are optional.">A2A agents <span class="hint" style="font-weight:normal">— let other agents call this router, and let a persona's helpers call other agents</span></h2>

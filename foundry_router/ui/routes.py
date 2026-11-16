@@ -3506,6 +3506,8 @@ async def code_checks_set(request: Request):
         lang = str(rule.pop("language", "") or "") or (rule.get("languages") or [""])[0]
         try:
             reason = await code_checks.run_one(rule, code, str(lang))
+        except code_checks.Unavailable as e:
+            return {"ok": False, "error": str(e)}
         except Exception as e:                                    # noqa: BLE001
             return {"ok": False, "error": describe_exception(e)}
         return {"ok": True, "passed": not reason, "reason": reason}
