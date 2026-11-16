@@ -34,6 +34,8 @@ from typing import Optional
 
 MAX_CASES = 500
 MAX_PROMPT_TOKENS = 24_000
+CASES_PER_CONVERSATION = 2     # one long session must not become the whole suite
+MIN_CONTEXT = 1                # one user turn is context enough: ask, then act
 _state: dict = {"state": "idle"}
 _lock = threading.Lock()
 
@@ -70,6 +72,75 @@ def cases(svc, name: str, limit: int = 0) -> list:
                         break
     except OSError:
         return []
+    return out
+
+
+def _fit(msgs: list, upto: int) -> Optional[list]:
+    """As much of the conversation before `upto` as fits in a prompt, kept whole:
+    the system turn, then the newest turns, never starting in the middle of a
+    tool exchange (a tool result whose call is not there confuses every model).
+
+    Keeping the newest turns rather than the oldest is what lets a real session
+    become a case at all: the sessions here run to hundreds of thousands of
+    tokens, and before this only the atypically short ones ever fit (v0.181.172)."""
+    from foundry_training import sessions
+    head = [m for m in msgs[:upto] if m.get("role") == "system"][:1]
+    body = [m for m in msgs[:upto] if m.get("role") != "system"]
+    for start in range(len(body)):
+        if body[start].get("role") not in ("user", "assistant"):
+            continue                           # never open on an orphaned tool result
+        if body[start].get("role") == "assistant" and body[start].get("tool_calls"):
+            continue                           # ... nor on a call whose result follows
+        trial = head + body[start:]
+        if len(trial) < MIN_CONTEXT:
+            return None
+        n, _how = sessions._tokens(json.dumps(trial, default=str))
+        if int(n) <= MAX_PROMPT_TOKENS:
+            return trial
+    return None
+
+
+def _case_at(example: dict, at: int) -> Optional[dict]:
+    """The case whose reference is the assistant turn at `at`."""
+    msgs = [m for m in (example.get("messages") or []) if isinstance(m, dict)]
+    if at <= 0 or at >= len(msgs):
+        return None
+    prefix = _fit(msgs, at)
+    if not prefix or not any(m.get("role") == "user" for m in prefix):
+        return None
+    ref = msgs[at]
+    meta = example.get("meta") or {}
+    return {"id": f"{meta.get('task_id') or 'case'}-{meta.get('session') or ''}-{at}".strip("-"),
+            "task_id": meta.get("task_id") or "", "tier": meta.get("tier") or "",
+            "tags": meta.get("tags") or [], "models": meta.get("models") or [],
+            "messages": prefix, "tools": example.get("tools") or [],
+            "reference": {"content": (ref.get("content") or "")[:20000],
+                          "tool_calls": [{"name": (tc.get("function") or tc).get("name") or "",
+                                          "arguments": (tc.get("function") or tc).get("arguments")}
+                                         for tc in (ref.get("tool_calls") or [])]}}
+
+
+def cases_from(example: dict) -> list:
+    """The cases this conversation can answer for, newest first. A turn where the
+    assistant REACHED FOR A TOOL is worth most - what tool, in what order, is the
+    half of the score that can actually be measured - so those come first, and the
+    closing answer is used only to fill up. Before this a suite was cut only at the
+    last turn, which is a prose summary, so every case scored as "no tool was
+    needed" and the measurement was empty (v0.181.172)."""
+    msgs = [m for m in (example.get("messages") or []) if isinstance(m, dict)]
+    acted, said = [], []
+    for i, m in enumerate(msgs):
+        if m.get("role") != "assistant":
+            continue
+        (acted if m.get("tool_calls") else said).append(i)
+    out, seen = [], set()
+    for at in list(reversed(acted)) + list(reversed(said)):
+        if len(out) >= CASES_PER_CONVERSATION:
+            break
+        c = _case_at(example, at)
+        if c and c["id"] not in seen:
+            seen.add(c["id"])
+            out.append(c)
     return out
 
 
@@ -137,20 +208,20 @@ def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=pri
                     continue
                 if want_tags and not (want_tags & set(meta.get("tags") or [])):
                     continue
-                c = _case_from(ex)
-                if not c or c["id"] in seen:
-                    continue
-                if too_long(c):
-                    continue
-                seen.add(c["id"])
-                picked.append(c)
+                for c in cases_from(ex):
+                    if c["id"] in seen or too_long(c):
+                        continue
+                    seen.add(c["id"])
+                    picked.append(c)
     picked.sort(key=lambda c: c.get("task_id") or "", reverse=True)
     picked = picked[:max(1, min(limit, MAX_CASES))]
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8") as fh:
         for c in picked:
             fh.write(json.dumps(c, ensure_ascii=False, default=str) + "\n")
-    log(f"suite {name}: {len(picked)} case(s)")
+    with_tools = sum(1 for c in picked if c["reference"]["tool_calls"])
+    log(f"suite {name}: {len(picked)} case(s), {with_tools} of them cut where a tool "
+        f"was reached for")
     return {"name": name, "cases": len(picked), "path": str(f),
             "with_tools": sum(1 for c in picked if c["reference"]["tool_calls"]),
             "tags": sorted({t for c in picked for t in c.get("tags") or []})}

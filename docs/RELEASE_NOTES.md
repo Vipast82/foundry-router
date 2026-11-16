@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.172 - the benchmark could not measure anything, and now can
+
+The first suite was cut from the live store and came back with **8 cases out of
+60 asked for, none of which could score a tool call**. Recall indexes 911 pieces
+of work from the same store under the same filter, so the benchmark was throwing
+away 99% of what it was offered. Two causes.
+
+**The sessions here are far longer than any prompt.** A case was the whole
+conversation up to the last assistant turn, and a real session runs to hundreds
+of thousands of tokens, so the 24,000-token cap rejected nearly everything. The
+few that fitted were the atypically short ones, and each still weighed 160 KB.
+A case now keeps **the newest turns that fit** instead of all of them - the
+system turn, then as far back as the cap allows - and never opens on an orphaned
+tool result or on a call whose result would be missing, which no model can read.
+
+**A case was cut where the session ENDED, which is the one place nothing is
+measurable.** The last assistant turn of a sprint is a prose summary ("BUILD
+complete for AS-A21..."), so every case scored as "no tool was needed" and
+`tool_score` - half the score, and the only part that really tests judgement -
+measured nothing at all. `with_tools: 0` on that first suite said so plainly.
+
+A suite is now cut at the turns where the assistant **reached for a tool**: what
+tool, in what order, given the state of the work. Those come first, the closing
+answer is used only to fill up, and at most two cases come from any one
+conversation so a single long session cannot become the whole suite. The build
+reports how many cases can score a tool call.
+
+Tests: `tests/test_bench.py` - that cases are cut at tool calls, that a session
+far too long to send still yields one, that a case never opens on an orphaned
+tool result, and that the closing answer only fills up.
+
 ## v0.181.171 - recall: the scaffold, and what is not work at all
 
 v0.181.170's index was searched on the live store and read honestly. Two of
