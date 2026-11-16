@@ -457,9 +457,17 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
                 _uncertain(c, P, t, revision, arts, actor, fingerprint, tries,
                            list(result.get("findings") or []))
             return
+        from .lead import PROCESS_START
         if prior["status"] == "deferred" and c.clock() >= float(
                 result.get("retry_at") or 0):
             pass
+        elif prior["status"] == "calling" and not result.get("restart_retry")                 and float(prior.get("created_ts") or 0) < PROCESS_START:
+            # 2026-11-16 FIN-3a: a coordinator restart cut the 09:23 review off and the sprint
+            # sat "outcome uncertain after restart" for good. As in asset_judge (VR-AS33): a
+            # review has no side effect but its cost, so a call this process never made is
+            # made once more; a second restart mid-call still waits for a human.
+            c.store.op_update(key, "calling", {**result, "restart_retry": True})
+            c.store.event(pid, tid, "visual_approval_restart_retry", detail={"key": key[:120]})
         else:
             if prior["status"] == "calling":
                 c.store.update_task(pid, tid, next_action="visual review call outcome "

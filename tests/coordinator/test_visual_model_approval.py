@@ -119,6 +119,87 @@ def test_visual_model_approval_sends_frame_and_records_bound_verdict(tmp_path):
     assert len(packet) == 1  # a completed call is never repeated
 
 
+def test_a_review_cut_off_by_a_coordinator_restart_is_made_once_more(tmp_path, monkeypatch):
+    """2026-11-16 FIN-3a: a restart cut a review call off and the sprint sat 'outcome
+    uncertain after restart; paid call not repeated'. A call begun before this process
+    started is made once more; one this process is making, or a second cut-off, waits."""
+    from foundry_coordinator import lead as L
+    project, spec, rule, rel, digest = _review_setup(tmp_path)
+    rule.kind = "visual"
+    project.id = "animaluprising"
+    project.profile.raw = {"approval": {"visual_model": True}}
+    project.profile.persona = lambda role, task: "vision"
+    project.ws = SimpleNamespace(head=lambda: "revision", status=lambda: [])
+    project.adapter = SimpleNamespace(approval_artifacts=lambda *_: {rel: digest})
+    calls, events, notes = [], [], []
+    project.foundry = SimpleNamespace(
+        persona_info=lambda _: {"exists": True, "enabled": True, "strict": True,
+                                "client_allowed": True,
+                                "routes": [{"model": "vision-model", "vision": True}]},
+        bind=lambda *a, **k: None,
+        chat=lambda persona, messages, **k: (calls.append(1) or json.dumps({
+            "verdict": "approve", "frames": [{"path": rel, "sha256": digest,
+            "image_seen": True, "subject_present": True, "validity": "ok",
+            "observation": "HUD is visible and legible", "findings": []}]}),
+            {"served_model": "vision-model"}))
+
+    class Store:
+        def __init__(self):
+            self.ops, self.approvals = {}, []
+        def update_task(self, *a, **k):
+            notes.append(k.get("next_action", ""))
+        def op_begin(self, key, *a):
+            if key in self.ops:
+                return self.ops[key]
+            self.ops[key] = {"status": "started", "created_ts": 50.0}
+            return None
+        def op_update(self, key, status, result):
+            self.ops[key] = {**self.ops.get(key, {}), "status": status, "result": result}
+        def session(self, sid):
+            return None
+        def add_session(self, *a, **k):
+            pass
+        def update_session(self, *a, **k):
+            pass
+        def event(self, pid, tid, kind, **k):
+            events.append(kind)
+        def add_approval(self, *a):
+            self.approvals.append(a)
+
+    store = Store()
+    c = SimpleNamespace(store=store, clock=lambda: 100.0, _valid_approval=lambda *a: None)
+    spec.spec = "HUD must be readable"
+    task = {"task_id": "UI-02", "run_id": "run", "session_id": "primary", "attempt": 1}
+
+    def cut_off():
+        for k in store.ops:
+            store.ops[k] = {"status": "calling", "created_ts": 50.0,
+                            "result": dict(store.ops[k].get("result") or {})}
+
+    # a call begun in this process, still in flight: never a second call
+    key = None
+    monkeypatch.setattr(L, "PROCESS_START", 10.0)
+    store.op_begin("probe", "x", "y", "z")
+    store.ops.clear()
+    step(c, project, task, spec, rule, "revision")          # first call
+    assert len(calls) == 1
+    cut_off()
+    step(c, project, task, spec, rule, "revision")
+    assert len(calls) == 1 and "uncertain after restart" in notes[-1]
+    # a restart since the call began: made once more, then recorded
+    monkeypatch.setattr(L, "PROCESS_START", 60.0)
+    step(c, project, task, spec, rule, "revision")
+    assert len(calls) == 2 and "visual_approval_restart_retry" in events
+    assert store.approvals
+    # cut off again after the retry: no third call
+    cut_off()
+    for k in store.ops:
+        store.ops[k]["result"]["restart_retry"] = True
+    monkeypatch.setattr(L, "PROCESS_START", 70.0)
+    step(c, project, task, spec, rule, "revision")
+    assert len(calls) == 2
+
+
 def test_frame_validity_and_verdict_synonyms_are_understood():
     """UI-D1 (2026-10-20): the prompt never named the allowed values, a model answered
     validity "valid" (and a verdict "approved"), and every good frame became an
