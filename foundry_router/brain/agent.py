@@ -1750,6 +1750,13 @@ class AgentRunner:
 
     # ------------------------------------------------ main-model mode (v0.181.140) --
 
+    def _app_cfg(self, name: str):
+        """One section of the router's configuration, through the guardrail engine
+        (the agent has no handle of its own). None when it is not wired up."""
+        fn = getattr(self.guardrails, "config_fn", None)
+        cfg = fn() if callable(fn) else None
+        return getattr(cfg, name, None)
+
     async def _main_ladder(self, ctx: RequestContext, persona: dict) -> tuple[list, list]:
         """The persona's models in the order to try them for this request
         (main_route.py), and the reasons for any change from the route order."""
@@ -1991,9 +1998,7 @@ class AgentRunner:
         goes to that agent, its answer is the tool result. It sees nothing else."""
         from .. import a2a
         role, name = row["role"], row["agent"]
-        cfg_fn = getattr(self.guardrails, "config_fn", None)
-        cfg = cfg_fn() if callable(cfg_fn) else None
-        agent = a2a.find_agent(getattr(getattr(cfg, "a2a", None), "agents", None), name)
+        agent = a2a.find_agent(getattr(self._app_cfg("a2a"), "agents", None), name)
         why = ""
         if agent is None:
             why = f"no enabled remote agent named {name!r} is set up (Backends → Pool → A2A agents)"
@@ -2151,10 +2156,17 @@ class AgentRunner:
         # (the protocol adapters already split reasoning from text and hold back a
         # tool call the model writes as text). Not with a review pass: it may change
         # the answer after the fact.
+        from .. import code_checks
+        cc = self._app_cfg("code_checks")
+        checking = code_checks.on_for(cc, ctx.persona, code_checks.task_bound())
+        fixes = 0
         stream_answer = bool(on_fail is not None
                              and getattr(self.brain.cfg, "stream_answers", True)
                              and hasattr(self.pool, "chat_stream")
-                             and not (ctx.persona or {}).get("review_enabled"))
+                             and not (ctx.persona or {}).get("review_enabled")
+                             # v0.181.164: the answer is checked before it is shown,
+                             # so it cannot already be on the client's screen
+                             and not checking)
         said = False                 # answer text already sent to the client
         from .. import tool_finder
         step, free_finds = 0, 0
@@ -2278,6 +2290,30 @@ class AgentRunner:
                     if expose_trail and _tool_trail_footer(trail):
                         yield AgentEvent("answer_delta", _tool_trail_footer(trail))
                     return
+                # v0.181.164: the code in the answer is checked; a failure goes back
+                # to the model, with the checker's own words, for another try
+                if checking and clean.strip():
+                    probs = await code_checks.check(
+                        cc, clean, log=lambda s: ctx.logger.record_guardrail(s))
+                    where = code_checks.summary(probs)
+                    if probs and fixes < int(getattr(cc, "max_fixes", 1) or 0):
+                        fixes += 1
+                        ctx.logger.record_guardrail(f"code check failed ({where}); {worker} "
+                                                    f"is asked to fix it (try {fixes})")
+                        yield AgentEvent("think", f"The code did not pass this router's checks "
+                                                  f"({where}) — {worker} is fixing it.")
+                        messages.append({"role": "assistant", "content": result.content or ""})
+                        messages.append({"role": "user", "content": code_checks.feedback(probs)})
+                        offer = None            # the next turn is the corrected answer
+                        continue
+                    if probs:
+                        # no tries left: the answer is shown as it is, and says so
+                        ctx.logger.record_guardrail(f"code check failed ({where}) and no try is "
+                                                    f"left; the answer is shown as it is")
+                        yield AgentEvent("think", f"The code still did not pass ({where}); "
+                                                  f"the answer is shown as it is.")
+                    else:
+                        yield AgentEvent("think", "The code in this answer passed every check.")
                 # Review pass (async generators can't hand emit a live queue —
                 # narration is buffered and yielded before the answer).
                 buf: list[AgentEvent] = []

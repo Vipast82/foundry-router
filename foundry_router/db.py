@@ -660,6 +660,8 @@ class Database:
             ("personas", "pin_conversation", "INTEGER DEFAULT 0"),
             # v0.181.143 (helpers.py): models a main-model persona may ask for help
             ("personas", "helpers", "TEXT"),
+            # v0.181.164 (code_checks.py): 0 leaves this persona's replies unchecked
+            ("personas", "code_checks", "INTEGER DEFAULT 1"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

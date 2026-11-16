@@ -956,6 +956,13 @@ window._jforms = {
     {key: "max_calls", label: "calls per request", type: "number", placeholder: "3"},
     {key: "digest_over", label: "condense tool results over (chars)", type: "number", placeholder: "off", hint: "A tool result longer than this is condensed by this helper before the main model reads it. Worth it only with a fast helper. Empty = off."},
     {key: "instruction", label: "instructions for the helper (empty = built-in)", type: "longtext", wide: true}]},
+  codeChecks: {kind: "rows", required: "name", addLabel: "Add a check", blank: {enabled: true, kind: "command", timeout_seconds: 20}, fields: [
+    {key: "enabled", label: "on", type: "check"},
+    {key: "name", label: "name", type: "text", placeholder: "e.g. luau-analyze"},
+    {key: "languages", label: "code blocks labelled", type: "list", wide: true, placeholder: "luau, lua…", hint: "The language on the code fence. * means every labelled block."},
+    {key: "kind", label: "how", type: "select", options: ["command", "python", "json"], required: true, hint: "command = run the program below on the code. python = compile it (never run it). json = parse it."},
+    {key: "command", label: "command (the code's file is {file})", type: "text", wide: true, placeholder: "luau-lsp analyze {file}", hint: "Only this program runs, with the code in a temporary file. It must be installed on the router. Anything other than a silent exit 0 is a failure, and its output is what the model is told."},
+    {key: "timeout_seconds", label: "give up after (s)", type: "number", placeholder: "20"}]},
   a2aAgents: {kind: "rows", required: "name", addLabel: "Add a remote agent", blank: {enabled: true}, fields: [
     {key: "enabled", label: "on", type: "check"},
     {key: "name", label: "name", type: "text", placeholder: "e.g. research-agent", hint: "The name a persona's helper row uses for this agent."},
@@ -2213,7 +2220,7 @@ function postRender() {
 // blocks gets no button. The choice is kept while the page is open.
 const TAB_SECTIONS = {
   Pool: [["Backends", null], ["Add or edit", /^Add, edit or remove backends/], ["Routing and brain", /^Routing mode/],
-         ["Global settings", /^Global settings/], ["A2A agents", /^A2A agents/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
+         ["Global settings", /^Global settings/], ["Code checks", /^Code checks/], ["A2A agents", /^A2A agents/], ["MCP endpoint", /^Foundry-MCP aggregator/]],
   "Model Registry": [["Reachable now", /^Reachable now/], ["Known catalog", /^Known catalog/]],
   "Usage Log": [["Requests", null], ["Budgets and plans", /^(Budgets & usage|Claude usage window|Subscription usage)/],
                 ["Images", /^Images \(/], ["Code runs", /^⚠ Code-execution audit/], ["MCP tools", /^MCP tool usage/]],
@@ -5723,6 +5730,25 @@ async function tabBackends() {
         <button class="act primary" id="save-global">Save global settings</button></div>
     </div>
     <div class="card">
+      <h2 style="margin-top:0" title="Checks the code in a reply before the client sees it. A failed check goes back to the model, with the checker's own words, for another try.">Code checks <span class="hint" style="font-weight:normal">— what the model writes is checked before you see it</span></h2>
+      <div class="row tight">
+        <label title="When this is off nothing is checked, whatever is listed below.">check code in replies</label>
+        <input type="checkbox" id="cc-on">
+        <label title="How many times a model may be asked to fix its code before the answer is shown anyway. 0 = check and report, never ask for a fix.">tries after a failure</label>
+        <input id="cc-fixes" type="number" min="0" max="5" style="width:60px">
+        <label title="A request a coordinator sprint owns is checked by that project's own gate (Studio, luau-lsp, the test suites). Leaving those out avoids checking the same code twice; chats and unbound work are still checked.">leave sprint work to its own gate</label>
+        <input type="checkbox" id="cc-skip-gated">
+        <span class="hint">While this is on, answers from a main-model persona are shown whole instead of word by word, because the code is checked first. A single persona can be left out in its own editor.</span></div>
+      <textarea id="cc-rules" data-jform="codeChecks" rows="3" cols="70">[]</textarea>
+      <div class="row tight" style="margin-top:8px">
+        <button class="act primary" id="cc-save">Save code checks</button>
+        <select id="cc-test-rule"></select>
+        <button class="act" id="cc-test" title="Runs the chosen check on the snippet below, as a reply would be checked. Save first.">Try it</button>
+        <input id="cc-test-code" size="34" placeholder="a snippet to try, e.g. local x =">
+        <span class="hint" id="cc-msg"></span></div>
+      <p class="hint" style="margin:6px 0 0">A checker has to be installed on the router: <span class="mono">python</span> and <span class="mono">json</span> need nothing, a command needs its program in the router's image.</p>
+    </div>
+    <div class="card">
       <h2 style="margin-top:0" title="A2A (Agent2Agent) is the open protocol agents use to call each other. Both directions are optional.">A2A agents <span class="hint" style="font-weight:normal">— let other agents call this router, and let a persona's helpers call other agents</span></h2>
       <div class="hint" style="font-weight:600;margin:6px 0 2px">This router as an agent</div>
       <div class="row tight">
@@ -5810,6 +5836,13 @@ async function tabBackends() {
   $("#brain-sa").checked = cfg.agent_brain.stream_answers !== false;
   $("#brain-mps").value = cfg.agent_brain.main_progress_seconds ?? 3;
   $("#brain-hpar").checked = cfg.agent_brain.helpers_parallel !== false;
+  { const cc = cfg.code_checks || {};
+    $("#cc-on").checked = !!cc.enabled;
+    $("#cc-fixes").value = cc.max_fixes ?? 1;
+    $("#cc-skip-gated").checked = !!cc.skip_gated_tasks;
+    $("#cc-rules").value = JSON.stringify(cc.rules || []);
+    const names = (cc.rules || []).map(r => r.name).filter(Boolean);
+    $("#cc-test-rule").innerHTML = names.map(n => `<option>${esc(n)}</option>`).join("") || '<option value="">no check saved</option>'; }
   { const a = cfg.a2a || {};
     $("#a2a-serve").checked = !!a.serve;
     $("#a2a-default").value = a.default_persona || "Foundry-Chat";
@@ -6063,6 +6096,29 @@ async function tabBackends() {
       helpers_parallel: $("#brain-hpar").checked,
       reasoning_effort: $("#brain-re").value.trim() || null,
       sampling_defaults: JSON.parse($("#brain-samp").value || "{}")}}));
+  $("#cc-save").onclick = async () => {
+    try {
+      const r = await api("code-checks", {method: "POST", body: {
+        enabled: $("#cc-on").checked, max_fixes: +$("#cc-fixes").value || 0,
+        skip_gated_tasks: $("#cc-skip-gated").checked,
+        rules: JSON.parse($("#cc-rules").value || "[]")}});
+      if (r.error) { toast(r.error, true); return; }
+      toast("Code checks saved"); render();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#cc-test").onclick = async () => {
+    const name = $("#cc-test-rule").value, msg = $("#cc-msg");
+    const rule = (JSON.parse($("#cc-rules").value || "[]")).find(r => r.name === name);
+    if (!rule) { msg.textContent = "save a check first"; return; }
+    msg.textContent = "running…";
+    try {
+      const r = await api("code-checks", {method: "POST",
+        body: {test: {...rule, code: $("#cc-test-code").value}}});
+      msg.innerHTML = !r.ok ? `<span class="pill bad">error</span> ${esc(r.error)}`
+        : r.passed ? '<span class="pill ok">passed</span>'
+        : `<span class="pill warn">failed</span> <span class="mono">${esc((r.reason || "").slice(0, 300))}</span>`;
+    } catch (e) { msg.innerHTML = `<span class="pill bad">error</span> ${esc(e.message)}`; }
+  };
   $("#a2a-save").onclick = async () => {
     try {
       const r = await api("a2a", {method: "POST", body: {
@@ -6759,6 +6815,8 @@ async function tabPersonas() {
       <div class="row">
         <label title="Tiered review pass (default OFF): after an answer is produced, the selected review model checks it and may return a corrected version — always delivered with a visible 🔎 marker, never a silent change. Paid review models pass the same guardrail/conservation ladder as any dispatch.">review_enabled</label>
         <input type="checkbox" id="pe-review">
+        <label title="Code checks (Routing and brain -> Code checks) run on this persona's replies. Turn it off for a persona whose code another gate already checks, such as a coding persona whose sprint runs the project's own gate.">check the code it writes</label>
+        <input type="checkbox" id="pe-codechecks" checked>
         <label>review_model</label>
         <select id="pe-review-model">${reviewOpts}</select>
         <label title="Free pre-filter: the local routing brain screens whether the answer plausibly needs review before the (possibly paid) review model is invoked. Recommended ON — it saves review spend on obviously-fine answers.">review_prefilter</label>
@@ -6838,6 +6896,7 @@ async function tabPersonas() {
     max_output_tokens: $("#pe-maxout").value ? parseInt($("#pe-maxout").value, 10) : null,
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
+    code_checks: $("#pe-codechecks").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
     review_prefilter: $("#pe-prefilter").checked ? 1 : 0,
     client_compat: JSON.parse($("#pe-compat").value || "{}"),
@@ -7147,6 +7206,7 @@ window.editPersona = name => {
   $("#pe-loaded").checked = !!p.prefer_loaded;
   $("#pe-weights").value = p.selection_weights || "{}";
   $("#pe-review").checked = !!p.review_enabled;
+  $("#pe-codechecks").checked = p.code_checks == null ? true : !!p.code_checks;
   // A configured review model may be temporarily unreachable (not in the
   // select's options) — inject it so editing doesn't silently drop it.
   const rm = $("#pe-review-model");
