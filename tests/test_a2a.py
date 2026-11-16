@@ -290,6 +290,20 @@ def _app(serve=True, personas=()):
         if body["messages"][-1]["content"] == "fail":
             from fastapi.responses import JSONResponse
             return JSONResponse({"error": {"message": "no model is reachable"}}, status_code=503)
+        if body.get("stream"):
+            from fastapi.responses import StreamingResponse
+            words = f"{body['model']} heard {len(body['messages'])} message(s)".split(" ")
+            slow = body["messages"][-1]["content"] == "slow"
+
+            async def sse():
+                yield 'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"hm"}}]}\n\n'
+                for i, w in enumerate(words):
+                    if slow:
+                        await asyncio.sleep(0.3)
+                    piece = w if i == 0 else " " + w
+                    yield "data: " + json.dumps({"choices": [{"delta": {"content": piece}}]}) + "\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(sse(), media_type="text/event-stream")
         return {"choices": [{"message": {"content": f"{body['model']} heard {len(body['messages'])} message(s)"}}]}
     rows = [{"virtual_name": "Foundry-Chat", "description": "main chat"}, {"virtual_name": "Foundry-Max"},
             {"virtual_name": "Kilo-Thing"}]
@@ -298,6 +312,7 @@ def _app(serve=True, personas=()):
         config_store=SimpleNamespace(config=cfg),
         personas=SimpleNamespace(list=lambda enabled_only=False: rows))
     a2a_routes._contexts = a2a.Contexts()
+    a2a_routes._tasks = a2a.Tasks()
     return TestClient(app), chats
 
 
@@ -336,17 +351,11 @@ def test_another_agent_calls_a_persona_and_continues_the_conversation():
     assert old["result"]["kind"] == "message" and old["result"]["role"] == "agent"
     assert old["result"]["parts"] == [{"kind": "text", "text": "Foundry-Max heard 1 message(s)"}]
 
-    r = client.post("/v1/a2a", json={"jsonrpc": "2.0", "id": 5, "method": "SendStreamingMessage",
-                                     "params": {"message": {"parts": [{"text": "s"}]}}})
-    assert r.headers["content-type"].startswith("text/event-stream")
-    ev = json.loads(r.text.split("data: ", 1)[1])
-    assert ev["id"] == 5 and ev["result"]["message"]["parts"][0]["text"].startswith("Foundry-Chat heard")
-
 
 def test_what_it_cannot_do_is_answered_as_an_error():
     client, _ = _app()
     assert _call(client, "GetTask", {"id": "t"})["error"]["code"] == a2a.ERR_TASK_NOT_FOUND
-    assert _call(client, "CancelTask", {"id": "t"})["error"]["code"] == a2a.ERR_UNSUPPORTED
+    assert _call(client, "CancelTask", {"id": "t"})["error"]["code"] == a2a.ERR_TASK_NOT_FOUND
     assert _call(client, "SendMessage", {"message": {"parts": [{"url": "x"}]}})["error"]["code"] == a2a.ERR_PARAMS
     assert _call(client, "SendMessage", {"message": {"parts": [{"text": "x"}]}},
                  path="/v1/a2a/Kilo-Thing")["error"]["code"] == a2a.ERR_PARAMS
@@ -370,3 +379,88 @@ def test_settings_route_and_page():
     assert 'data-jform="a2aAgents"' in html and 'a2aAgents: {kind: "rows", required: "name"' in html
     assert '{key: "agent", label: "or a remote agent (A2A), by its name"' in html
     assert 'helpers_parallel: $("#brain-hpar").checked' in html
+
+
+# -- streaming and tasks (v0.181.160) -----------------------------------------------------------
+
+def _events(r):
+    return [json.loads(line[5:])["result"] for line in r.text.splitlines() if line.startswith("data:")]
+
+
+def test_a_streaming_call_gets_a_task_then_the_text_in_pieces_then_the_end():
+    client, chats = _app()
+    with client:
+        r = client.post("/v1/a2a", json={"jsonrpc": "2.0", "id": 5, "method": "SendStreamingMessage",
+                                         "params": {"message": {"role": "ROLE_USER", "parts": [{"text": "s"}]}}})
+        assert r.headers["content-type"].startswith("text/event-stream") and chats[0][0]["stream"] is True
+        ev = _events(r)
+        assert list(ev[0]) == ["task"] and ev[0]["task"]["status"]["state"] == "TASK_STATE_WORKING"
+        tid, cid = ev[0]["task"]["id"], ev[0]["task"]["contextId"]
+        pieces = [e["artifactUpdate"] for e in ev[1:-1]]
+        assert len(pieces) == 4 and all(p["taskId"] == tid and p["contextId"] == cid for p in pieces)
+        assert [p["append"] for p in pieces] == [False, True, True, True]
+        assert "".join(p["artifact"]["parts"][0]["text"] for p in pieces) == "Foundry-Chat heard 1 message(s)"
+        assert len({p["artifact"]["artifactId"] for p in pieces}) == 1          # one artifact, appended to
+        assert list(ev[-1]) == ["statusUpdate"] and ev[-1]["statusUpdate"]["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert "final" not in ev[-1]["statusUpdate"]                            # 1.0: the state ends the stream
+        # the finished task can be read afterwards, and the conversation continues
+        got = _call(client, "GetTask", {"id": tid})["result"]
+        assert got["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert got["artifacts"][0]["parts"] == [{"text": "Foundry-Chat heard 1 message(s)"}]
+        more = _call(client, "SendMessage", {"message": {"parts": [{"text": "again"}], "contextId": cid}})
+        assert more["result"]["message"]["parts"][0]["text"] == "Foundry-Chat heard 3 message(s)"
+
+        old = client.post("/v1/a2a/Foundry-Chat", json={"jsonrpc": "2.0", "id": 6, "method": "message/stream",
+                                                        "params": {"message": {"parts": [{"kind": "text", "text": "s"}]}}})
+        ev = _events(old)
+        assert ev[0]["kind"] == "task" and ev[0]["status"]["state"] == "working"
+        assert ev[1]["kind"] == "artifact-update" and ev[1]["artifact"]["parts"][0] == {"kind": "text", "text": "Foundry-Chat"}
+        assert ev[-1]["kind"] == "status-update" and ev[-1]["final"] is True and ev[-1]["status"]["state"] == "completed"
+
+        bad = _events(client.post("/v1/a2a", json={"jsonrpc": "2.0", "id": 7, "method": "SendStreamingMessage",
+                                                   "params": {"message": {"parts": [{"text": "fail"}]}}}))
+        assert bad[-1]["statusUpdate"]["status"]["state"] == "TASK_STATE_FAILED"
+        assert "no model is reachable" in bad[-1]["statusUpdate"]["status"]["message"]["parts"][0]["text"]
+
+
+def test_a_call_that_does_not_wait_gets_a_task_it_can_read_and_stop():
+    client, _ = _app()
+    with client:
+        out = _call(client, "SendMessage", {"message": {"parts": [{"text": "hello"}]},
+                                            "configuration": {"returnImmediately": True}})
+        task = out["result"]["task"]
+        assert task["status"]["state"] == "TASK_STATE_WORKING" and "artifacts" not in task
+        for _ in range(100):
+            got = _call(client, "GetTask", {"id": task["id"]})["result"]
+            if got["status"]["state"] != "TASK_STATE_WORKING":
+                break
+            time.sleep(0.02)
+        assert got["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert got["artifacts"][0]["parts"][0]["text"] == "Foundry-Chat heard 1 message(s)"
+        assert _call(client, "CancelTask", {"id": task["id"]})["error"]["code"] == a2a.ERR_NOT_CANCELABLE
+
+        old = _call(client, "message/send", {"message": {"parts": [{"kind": "text", "text": "slow"}]},
+                                             "configuration": {"blocking": False}})["result"]
+        assert old["kind"] == "task" and old["status"]["state"] == "working"
+        stopped = _call(client, "tasks/cancel", {"id": old["id"]})["result"]
+        assert stopped["status"]["state"] == "canceled"
+        assert _call(client, "tasks/cancel", {"id": old["id"]})["result"]["status"]["state"] == "canceled"   # twice is fine
+        time.sleep(0.1)
+        assert _call(client, "tasks/get", {"id": old["id"]})["result"]["status"]["state"] == "canceled"
+
+
+def test_event_shapes_and_the_task_list():
+    assert a2a.state_name("input-required", a2a.V1) == "TASK_STATE_INPUT_REQUIRED"
+    assert a2a.state_name("working", a2a.V03) == "working"
+    assert a2a.wants_task({"configuration": {"returnImmediately": True}}, a2a.V1) is True
+    assert a2a.wants_task({}, a2a.V1) is False and a2a.wants_task({"configuration": {}}, a2a.V03) is False
+    assert a2a.wants_task({"configuration": {"blocking": False}}, a2a.V03) is True
+    ts = a2a.Tasks()
+    first = ts.new("p", "c", a2a.V1)
+    first["state"] = "completed"
+    busy = ts.new("p", "c", a2a.V1)
+    for _ in range(a2a.Tasks.MAX + 5):
+        ts.new("p", "c", a2a.V1)["state"] = "completed"
+    assert ts.get(first["id"]) is None and ts.get(busy["id"]) is busy      # a working task is never dropped
+    assert ts.get(None) is None
+

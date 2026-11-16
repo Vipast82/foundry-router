@@ -2,6 +2,43 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.160 — A2A streams and runs tasks; main-model personas keep their route with client tools
+
+**A2A, incoming**
+
+- **Word by word.** `SendStreamingMessage` (0.3: `message/stream`) now gives a
+  task, then the answer's text piece by piece as the model writes it (one
+  artifact, appended to), then the final status. Before, it sent the finished
+  message as one event.
+- **Tasks.** A send that asks not to wait (1.0 `returnImmediately: true`, 0.3
+  `blocking: false`) gets a task back at once; the work runs in the background.
+  `GetTask` reads it (with the answer once it is completed), `CancelTask` stops
+  it (a finished task is "not cancelable"; cancelling twice is fine). A plain
+  send still answers with the finished message.
+- Tasks, like conversations, are kept in memory (200, finished ones dropped
+  first): a router restart forgets them.
+
+**Main-model personas when the chat program brings its own tools**
+(AnythingLLM `@agent`, Open WebUI tools, a requested output format)
+
+- Such a request left main-model mode: the model was picked by the older
+  single-pick policy, and the persona's helpers were not there. Now:
+  - **the persona's route decides**, as in main-model mode: fit to each model's
+    window and routing cap, the conversation's home model, return to the local
+    model once it is idle. If the first model fails before answering, the next
+    one on the route takes over (up to `main_max_tries`).
+  - **`ask_helper` rides along** with the client's tools. The router runs it and
+    the model continues; the client's own tool calls go back to the client as
+    before. Several helper calls in one turn run at the same time.
+  - **a long result of a persona tool is condensed** by the persona's reader
+    helper first (`digest_over`), as in main-model mode.
+- Streaming, the status lines while the prompt is read, and persona tools next to
+  client tools were already there on this path.
+- Only personas in main-model mode are affected. Strict personas (Kilo) and
+  direct personas are picked exactly as before.
+
+Tests: `tests/test_a2a.py`, `tests/test_main_mode_client_tools.py`.
+
 ## v0.181.159 — the router prepares the dataset itself; clean-up; Host Admin controls
 
 **Training**

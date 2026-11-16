@@ -4,11 +4,17 @@ A call is answered by sending the message through the router's own
 /v1/chat/completions (in process), so a persona behaves for an A2A caller exactly
 as for a chat program: same route, tools, helpers, guardrails, logging, and the
 same client key when client keys are on. Protocol details: a2a.py.
+
+v0.181.160: a streaming call gets the answer piece by piece, and a call that
+asks not to wait gets a task it can read (GetTask) or stop (CancelTask). Tasks
+and conversations are kept in memory: a router restart forgets them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Optional
 
 import httpx
@@ -20,6 +26,8 @@ from .errors import describe_exception
 
 router = APIRouter()
 _contexts = a2a.Contexts()
+_tasks = a2a.Tasks()
+_FORWARD = ("authorization", "x-api-key", "x-foundry-client", "user-agent")
 
 
 def _svc(request: Request):
@@ -110,6 +118,103 @@ async def _chat(request: Request, persona: str, messages: list) -> str:
     return str(text).strip()
 
 
+async def _chat_stream(app, scope_from: dict, fwd: dict, persona: str, messages: list):
+    """The same chat, streamed: yields the answer's text piece by piece. The app is
+    called directly (httpx's in-process transport hands a response over only when
+    it is complete)."""
+    body = json.dumps({"model": persona, "messages": messages, "stream": True}).encode()
+    headers = [(k.encode(), v.encode()) for k, v in fwd.items()]
+    headers += [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+                (b"host", b"a2a.internal")]
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/v1/chat/completions", "raw_path": b"/v1/chat/completions",
+             "query_string": b"", "root_path": "", "headers": headers,
+             "client": scope_from.get("client"), "server": scope_from.get("server"), "app": app}
+    q: asyncio.Queue = asyncio.Queue()
+    given = False
+
+    async def receive():
+        nonlocal given
+        if not given:
+            given = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.Event().wait()                    # the caller never hangs up on us
+
+    async def send(msg):
+        await q.put(msg)
+
+    async def run():
+        try:
+            await app(scope, receive, send)
+        except Exception as e:                                    # noqa: BLE001
+            await q.put({"type": "error", "error": describe_exception(e)})
+        finally:
+            await q.put(None)
+    runner = asyncio.create_task(run())
+    status, buf = 200, b""
+    try:
+        while True:
+            msg = await q.get()
+            if msg is None:
+                break
+            if msg["type"] == "error":
+                raise a2a.A2AError(msg["error"])
+            if msg["type"] == "http.response.start":
+                status = msg["status"]
+            elif msg["type"] == "http.response.body":
+                buf += msg.get("body", b"")
+                if status >= 400:
+                    continue
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if not line.startswith(b"data:") or line[5:].strip() == b"[DONE]":
+                        continue
+                    try:
+                        d = json.loads(line[5:])
+                    except ValueError:
+                        continue
+                    if isinstance(d, dict) and d.get("error"):
+                        e = d["error"]
+                        raise a2a.A2AError(str(e.get("message") if isinstance(e, dict) else e))
+                    delta = ((d.get("choices") or [{}])[0].get("delta") or {}).get("content") \
+                        if isinstance(d, dict) else None
+                    if isinstance(delta, str) and delta:
+                        yield delta
+        if status >= 400:
+            try:
+                e = json.loads(buf).get("error")
+                msg = e.get("message") if isinstance(e, dict) else e
+            except Exception:                                     # noqa: BLE001
+                msg = None
+            raise a2a.A2AError(str(msg or f"HTTP {status}"))
+    finally:
+        if not runner.done():
+            runner.cancel()
+
+
+async def _run_task(app, scope_from: dict, fwd: dict, rec: dict, key: str, text: str,
+                    on_piece=None) -> None:
+    """Work on one task to its end. The result is kept in `rec` for GetTask."""
+    parts: list = []
+    try:
+        async for piece in _chat_stream(app, scope_from, fwd, rec["persona"],
+                                        _contexts.history(key) + [{"role": "user", "content": text}]):
+            parts.append(piece)
+            if on_piece is not None:
+                await on_piece(piece)
+        rec["text"] = "".join(parts).strip() or "(no answer)"
+        rec["state"] = "completed"
+        _contexts.add(key, text, rec["text"])
+    except asyncio.CancelledError:
+        rec["state"] = "canceled"
+        raise
+    except Exception as e:                                        # noqa: BLE001
+        rec["state"], rec["error"] = "failed", describe_exception(e)
+    finally:
+        rec["finished"] = time.time()
+
+
 async def _rpc(request: Request, name: Optional[str]):
     svc, cfg = _svc(request), _cfg(request)
     if not cfg.serve:
@@ -121,11 +226,25 @@ async def _rpc(request: Request, name: Optional[str]):
     rid, kind, ver, params, err = a2a.parse_call(body)
     if err is not None:
         return JSONResponse(err)
-    if kind == "get":
-        return JSONResponse(a2a.rpc_error(rid, a2a.ERR_TASK_NOT_FOUND,
-                                          "this agent answers with a message at once and keeps no tasks"))
-    if kind == "cancel":
-        return JSONResponse(a2a.rpc_error(rid, a2a.ERR_UNSUPPORTED, "there are no tasks to cancel"))
+    if kind in ("get", "cancel"):
+        rec = _tasks.get(params.get("id"))
+        if rec is None:
+            return JSONResponse(a2a.rpc_error(rid, a2a.ERR_TASK_NOT_FOUND,
+                                              f"no task {params.get('id')!r} (tasks are kept in memory "
+                                              "and lost when the router restarts)"))
+        if kind == "cancel":
+            if rec["state"] != "working":
+                if rec["state"] == "canceled":                   # asking twice is fine
+                    return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": _tasks.view(rec, ver)})
+                return JSONResponse(a2a.rpc_error(rid, a2a.ERR_NOT_CANCELABLE,
+                                                  f"the task already ended as {rec['state']}"))
+            runner = rec.get("runner")
+            if runner is not None and not runner.done():
+                runner.cancel()
+            rec["state"] = "canceled"
+        out = _tasks.view(rec, ver)
+        return JSONResponse({"jsonrpc": "2.0", "id": rid,
+                             "result": out})
     p, _ = _persona(svc, cfg, name)
     if p is None:
         return JSONResponse(a2a.rpc_error(rid, a2a.ERR_PARAMS,
@@ -135,6 +254,49 @@ async def _rpc(request: Request, name: Optional[str]):
         return JSONResponse(a2a.rpc_error(rid, a2a.ERR_PARAMS, "the message has no text part"))
     ctx_id = ctx_id or a2a.new_id()
     key = f"{p['virtual_name']}:{ctx_id}"
+    fwd = {k.lower(): v for k, v in request.headers.items() if k.lower() in _FORWARD}
+    scope_from = {"client": request.scope.get("client"), "server": request.scope.get("server")}
+    if kind == "stream":
+        # v0.181.160: a task, then the text as it is written, then the final status
+        rec = _tasks.new(p["virtual_name"], ctx_id, ver)
+        q: asyncio.Queue = asyncio.Queue()
+
+        async def piece(t):
+            await q.put(t)
+
+        async def work():
+            try:
+                await _run_task(request.app, scope_from, fwd, rec, key, text, piece)
+            finally:
+                await q.put(None)
+        rec["runner"] = asyncio.create_task(work())
+
+        def frame(result) -> str:
+            return "data: " + json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n\n"
+
+        async def events():
+            try:
+                yield frame(a2a.stream_task(_tasks.view(rec, ver), ver))
+                first = True
+                while True:
+                    t = await q.get()
+                    if t is None:
+                        break
+                    yield frame(a2a.stream_text(rec["id"], ctx_id, t, ver, append=not first))
+                    first = False
+                if rec["state"] == "completed" and first:        # an answer that came in no pieces
+                    yield frame(a2a.stream_text(rec["id"], ctx_id, rec["text"], ver, append=False, last=True))
+                yield frame(a2a.stream_status(_tasks.view(rec, ver), ver))
+            finally:
+                if not rec["runner"].done():                     # the caller went away
+                    rec["runner"].cancel()
+        return StreamingResponse(events(), media_type="text/event-stream")
+    if a2a.wants_task(params, ver):
+        # the caller does not want to wait: a task now, the answer through GetTask
+        rec = _tasks.new(p["virtual_name"], ctx_id, ver)
+        rec["runner"] = asyncio.create_task(_run_task(request.app, scope_from, fwd, rec, key, text))
+        out = _tasks.view(rec, ver)
+        return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {"task": out} if ver == a2a.V1 else out})
     try:
         answer = await _chat(request, p["virtual_name"],
                              _contexts.history(key) + [{"role": "user", "content": text}])
@@ -142,11 +304,6 @@ async def _rpc(request: Request, name: Optional[str]):
         return JSONResponse(a2a.rpc_error(rid, a2a.ERR_INTERNAL, describe_exception(e)))
     _contexts.add(key, text, answer)
     result = a2a.send_result(answer or "(no answer)", ver, ctx_id)
-    if kind == "stream":
-        # one event: the finished message (the card says so; no partial pieces)
-        async def events():
-            yield "data: " + json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n\n"
-        return StreamingResponse(events(), media_type="text/event-stream")
     return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": result})
 
 
