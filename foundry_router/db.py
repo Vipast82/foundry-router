@@ -663,6 +663,7 @@ class Database:
             # v0.181.164 (code_checks.py): 0 leaves this persona's replies unchecked
             ("personas", "code_checks", "INTEGER DEFAULT 1"),
             ("personas", "recall", "INTEGER DEFAULT 0"),
+            ("personas", "lessons", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

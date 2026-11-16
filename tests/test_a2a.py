@@ -232,10 +232,12 @@ def test_helpers_asked_in_one_turn_run_together(tmp_path):
         "h1": [ChatResult(content="ONE")], "h2": [ChatResult(content="TWO")]},
         [{"role": "one", "models": ["h1"]}, {"role": "two", "models": ["h2"]}])
     running = _slow(pool)
-    t0 = time.monotonic()
     evs = _run(runner.run_main(ctx))
-    took = time.monotonic() - t0
-    assert running["most"] == 2 and took < 0.45                          # together, not 2 × 0.25 s
+    # Both helpers were inside chat() at the same moment: the counter can only
+    # reach 2 if they overlapped, which is the whole claim. (A wall-clock bound
+    # used to stand here too; it proved nothing the counter does not and failed
+    # on a loaded machine, so it is gone.)
+    assert running["most"] == 2
     assert [e.text for e in evs if e.kind == "answer"] == ["both in"]
     tools = [m for m in pool.seen[-1]["messages"] if m.get("role") == "tool"]
     assert [(m["tool_call_id"], m["content"]) for m in tools] == [          # handed back in the order asked

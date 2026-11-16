@@ -1226,6 +1226,7 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         personas = []
     # wait=False: the per-project counts read every record (49 s on the live store), so
     # the page gets the last counts and a recount runs in the background
+    from .. import lessons as lessons_mod
     from .. import recall, training_archive, training_prep
     cap = await asyncio.to_thread(svc.capture.status, False)
     try:
@@ -1238,6 +1239,7 @@ async def training_view(request: Request, project: str = "", status: str = ""):
             "prep": await asyncio.to_thread(training_prep.status, svc),
             "archive": await asyncio.to_thread(training_archive.status, svc),
             "recall": await asyncio.to_thread(recall.status, svc),
+            "lessons": await asyncio.to_thread(lessons_mod.status, svc),
             "episodes": eps,
             "options": {"backends": _configured_backends(svc), "personas": personas}}
 
@@ -3619,6 +3621,84 @@ async def set_recall(request: Request):
                      f"recall changed: {'on' if cfg.recall.enabled else 'off'}, "
                      f"top {cfg.recall.top_k} at {cfg.recall.min_similarity:.0%} similarity")
     return {"ok": True, "recall": cfg.recall.model_dump()}
+
+
+@router.get("/admin/api/lessons")
+async def lessons_view(request: Request, state: str = ""):
+    """The lessons: what is waiting for you, what is approved, what you rejected."""
+    from .. import lessons
+    svc = _svc(request)
+    return {**await asyncio.to_thread(lessons.status, svc),
+            "lessons": await asyncio.to_thread(lessons.lessons, svc.db, state, 200)}
+
+
+@router.post("/admin/api/lessons/mine")
+async def lessons_mine(request: Request):
+    """Look through the findings for mistakes that recur (a background task).
+    `{"stop": true}` asks the running pass to stop. Nothing is applied: what it
+    finds waits for you."""
+    from .. import lessons
+    svc = _svc(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:                                             # noqa: BLE001
+        pass
+    if body.get("stop"):
+        return {"ok": True, **lessons.stop()}
+    return {"ok": True, **lessons.start(svc)}
+
+
+@router.post("/admin/api/lessons/draft")
+async def lessons_draft(request: Request):
+    """Ask a model to word one lesson's rule: {id, model}. The suggestion is
+    stored beside the rule, never as the rule."""
+    from .. import lessons
+    svc = _svc(request)
+    body = await request.json()
+    return await lessons.draft(svc, int(body.get("id") or 0), str(body.get("model") or ""))
+
+
+@router.post("/admin/api/lessons/decide")
+async def lessons_decide(request: Request):
+    """Your decision on one lesson: {id, state: active|rejected|proposed, rule}.
+    A rule only goes into a prompt once you have approved its wording."""
+    from .. import lessons
+    svc = _svc(request)
+    body = await request.json()
+    who = "operator"
+    try:
+        if str(body.get("state")) == "forget":
+            return {"ok": True, "removed": lessons.forget(svc, int(body.get("id") or 0))}
+        return lessons.decide(svc, int(body.get("id") or 0), str(body.get("state") or ""),
+                              str(body.get("rule") or ""), who)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/admin/api/config/lessons")
+async def set_lessons(request: Request):
+    """Lessons settings. Live: lessons.py reads the config per request."""
+    from ..config import LessonsConfig
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"enabled", "min_seen", "min_tasks", "cluster_similarity", "max_findings",
+               "max_chars", "mine_hours", "draft_model"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    try:
+        LessonsConfig(**{**svc.config_store.config.lessons.model_dump(), **updates})
+
+        def mutate(raw):
+            raw.setdefault("lessons", {}).update(updates)
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.db.log_event("info", "admin",
+                     f"lessons changed: {'on' if cfg.lessons.enabled else 'off'}, "
+                     f"a mistake counts after {cfg.lessons.min_seen} findings in "
+                     f"{cfg.lessons.min_tasks} task(s)")
+    return {"ok": True, "lessons": cfg.lessons.model_dump()}
 
 
 @router.post("/admin/api/code-checks")
