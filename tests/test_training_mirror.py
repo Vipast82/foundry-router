@@ -231,3 +231,37 @@ def test_wiring():
     html = (Path(routes.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="arc-prep"' in html and "archive_prepared: $(\"#arc-prep\").checked" in html
     assert "from other machines:" in html
+
+
+def test_the_same_intake_on_the_admin_api(ledgered, client):  # noqa: F811
+    """v0.181.163: a machine that reaches the admin panel needs no client key."""
+    from foundry_training import mirror
+    c = _client(ledgered, client)
+    assert mirror.paths(True) == ("/admin/api/training/events/cursor", "/admin/api/training/events")
+    assert mirror.paths(False)[1] == "/v1/foundry/training/events"
+    got = c.get("/admin/api/training/events/cursor", params={"source": "git"}).json()
+    assert got == {"source": "git", "sender": "workstation", "cursor": "",
+                   "waiting": {"files": 0, "bytes": 0, "oldest": None}}
+    r = c.post("/admin/api/training/events",
+               json={"source": "git", "cursor": "5", "events": [_event("git", "g1")]})
+    assert r.status_code == 200 and r.json()["accepted"] == 1
+    assert c.get("/admin/api/training/events/cursor", params={"source": "git"}).json()["cursor"] == "5"
+    bad = c.post("/admin/api/training/events", json={"source": "No!", "events": []})
+    assert bad.status_code == 400 and "short names" in bad.json()["error"]
+
+    local = TrainingStore(str(Path(ledgered.capture.data_dir).parent / "ws2"), allow_in_repo=True)
+    local.put_events([Event(**_event("git", f"g{i}", event_type="commit")) for i in range(3)])
+
+    def send(url, path, key, body=None, method="GET", timeout=120):
+        assert path.startswith("/admin/api/"), path
+        assert not key                                   # no client key is used
+        r = c.request(method, path, json=body)
+        assert r.status_code == 200, r.text
+        return r.json()
+    mirror._send = send
+    out = mirror.run(local, "http://router", "", sources=("git",), batch=2,
+                     log=lambda s: None, admin=True, sender="ws2")
+    assert out["errors"] == [] and out["sent"] == 3        # its own position, not the one above
+    assert c.get("/admin/api/training/events/cursor",
+                 params={"source": "git", "sender": "ws2"}).json()["cursor"] == "3"
+

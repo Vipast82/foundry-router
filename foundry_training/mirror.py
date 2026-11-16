@@ -43,6 +43,13 @@ JSON_FIELDS = ("artifact_references", "facts", "inferred")
 SKIP = {"event_id", "schema_version"}        # the router works them out itself
 
 
+def paths(admin: bool) -> tuple:
+    """(cursor path, send path). The admin API is the way in for a machine that
+    reaches the router's admin panel but holds no client key of its own."""
+    base = "/admin/api/training/events" if admin else "/v1/foundry/training/events"
+    return base + "/cursor", base
+
+
 def _send(url: str, path: str, key: str, body=None, method="GET", timeout=120):
     req = urllib.request.Request(url.rstrip("/") + path, method=method,
                                  data=None if body is None else json.dumps(body, default=str).encode())
@@ -72,11 +79,12 @@ def rows_after(store, source: str, after: int, limit: int) -> list:
 
 def run(store, url: str, key: str, sources=DEFAULT_SOURCES, batch: int = 300,
         max_minutes: float = 0, dry_run: bool = False, log=print,
-        sender: str = "workstation") -> dict:
+        sender: str = "workstation", admin: bool = False) -> dict:
+    cursor_path, send_path = paths(admin)
     deadline = time.monotonic() + max_minutes * 60 if max_minutes else 0
     report = {"sources": {}, "sent": 0, "errors": []}
     for source in sources:
-        got = _send(url, f"/v1/foundry/training/events/cursor?source={source}&sender={sender}", key)
+        got = _send(url, f"{cursor_path}?source={source}&sender={sender}", key)
         after = int(got.get("cursor") or 0)
         left = store.norm.q("SELECT COUNT(*) AS n FROM events WHERE source_adapter=? AND rowid > ? "
                             "AND deleted=0", (source, after))[0]["n"]
@@ -102,7 +110,7 @@ def run(store, url: str, key: str, sources=DEFAULT_SOURCES, batch: int = 300,
                     break
                 continue
             try:
-                _send(url, "/v1/foundry/training/events", key, method="POST",
+                _send(url, send_path, key, method="POST",
                       body={"source": source, "sender": sender, "cursor": str(rows[-1][0]),
                             "events": [e for _, e in rows]})
             except urllib.error.HTTPError as e:
@@ -139,17 +147,20 @@ def main(argv=None) -> int:
     ap.add_argument("--max-minutes", type=float, default=0,
                     help="stop after this long; the next run continues (0 = no limit)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--admin", action="store_true",
+                    help="send through the router's admin API instead of a client key "
+                         "(for a machine that already reaches the admin panel)")
     a = ap.parse_args(argv)
     from .store import TrainingStore
     key = os.environ.get(a.key_env, "")
-    if not key and not a.dry_run:
+    if not key and not a.dry_run and not a.admin:
         print(f"error: no key in {a.key_env} (the router needs a client key with the "
               f"orchestration scope)", file=sys.stderr)
         return 2
     store = TrainingStore(a.store, allow_in_repo=True)
     out = run(store, a.url, key, a.sources or list(DEFAULT_SOURCES), a.batch, a.max_minutes,
               a.dry_run, log=lambda s: print(time.strftime("%H:%M:%S"), s, flush=True),
-              sender=a.sender)
+              sender=a.sender, admin=a.admin)
     print(json.dumps(out, indent=1))
     return 1 if out["errors"] else 0
 

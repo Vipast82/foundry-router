@@ -2,6 +2,14 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.163 - the record intake is on the admin API too
+
+- `POST /admin/api/training/events` and `GET /admin/api/training/events/cursor`
+  do the same as their `/v1/foundry/...` counterparts, for a machine that already
+  reaches the router's admin panel and holds no client key of its own. They are
+  covered by the admin key when one is set.
+- The sender takes `--admin` to use them.
+
 ## v0.181.162 - records made on another machine are centralised on the router
 
 The router holds every model call it routed, but what the coding harness did
