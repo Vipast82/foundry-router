@@ -10,7 +10,11 @@ to it and the answer back.
                        GET  /v1/a2a/{persona}/agent-card.json
                        POST /v1/a2a/{persona}
                        Off unless a2a.serve is on. /v1/a2a sits behind the same
-                       client key as every /v1 path.
+                       client key as every /v1 path. A plain send answers with
+                       the finished message. A streaming send (v0.181.160) gives
+                       a task, then the text piece by piece, then the final
+                       status. A send that asks not to wait gets a task back at
+                       once; GetTask reads it, CancelTask stops it.
 
   Agents as helpers    A helper row of a persona may name a remote agent
                        (a2a.agents) instead of models; ask_helper then sends
@@ -45,7 +49,7 @@ METHODS = {"SendMessage": ("send", V1), "SendStreamingMessage": ("stream", V1),
            "GetTask": ("get", V1), "CancelTask": ("cancel", V1),
            "message/send": ("send", V03), "message/stream": ("stream", V03),
            "tasks/get": ("get", V03), "tasks/cancel": ("cancel", V03)}
-ERR_TASK_NOT_FOUND, ERR_UNSUPPORTED = -32001, -32004
+ERR_TASK_NOT_FOUND, ERR_NOT_CANCELABLE, ERR_UNSUPPORTED = -32001, -32002, -32004
 ERR_INVALID_REQUEST, ERR_NO_METHOD, ERR_PARAMS, ERR_INTERNAL = -32600, -32601, -32602, -32603
 DONE = {"completed", "failed", "canceled", "cancelled", "rejected"}
 WAITS_FOR_US = {"input-required", "input_required", "auth-required", "auth_required"}
@@ -139,6 +143,86 @@ def incoming_text(params: dict) -> tuple:
 def send_result(text: str, ver: str, context_id: str) -> dict:
     m = message(text, ver, agent=True, context_id=context_id)
     return {"message": m} if ver == V1 else m
+
+
+# -- tasks and stream events (v0.181.160) ---------------------------------------------------
+
+def state_name(state: str, ver: str) -> str:
+    """working / completed / failed / canceled, as each version writes it."""
+    return "TASK_STATE_" + state.upper().replace("-", "_") if ver == V1 else state
+
+
+def _part(text: str, ver: str) -> dict:
+    return {"text": text} if ver == V1 else {"kind": "text", "text": text}
+
+
+def artifact(task_id: str, text: str, ver: str) -> dict:
+    return {"artifactId": f"{task_id}-answer", "name": "answer", "parts": [_part(text, ver)]}
+
+
+def task_obj(task_id: str, context_id: str, state: str, ver: str, *, text: str = "",
+             error: str = "") -> dict:
+    t = {"id": task_id, "contextId": context_id,
+         "status": {"state": state_name(state, ver),
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}
+    if ver != V1:
+        t["kind"] = "task"
+    if text:
+        t["artifacts"] = [artifact(task_id, text, ver)]
+    if error:
+        t["status"]["message"] = message(error, ver, agent=True, context_id=context_id)
+    return t
+
+
+def stream_task(task: dict, ver: str) -> dict:
+    return {"task": task} if ver == V1 else task
+
+
+def stream_text(task_id: str, context_id: str, text: str, ver: str, *, append: bool,
+                last: bool = False) -> dict:
+    ev = {"taskId": task_id, "contextId": context_id, "artifact": artifact(task_id, text, ver),
+          "append": append, "lastChunk": last}
+    return {"artifactUpdate": ev} if ver == V1 else {"kind": "artifact-update", **ev}
+
+
+def stream_status(task: dict, ver: str) -> dict:
+    ev = {"taskId": task["id"], "contextId": task["contextId"], "status": task["status"]}
+    # 1.0 has no `final`: a terminal state ends the stream
+    return {"statusUpdate": ev} if ver == V1 else {"kind": "status-update", "final": True, **ev}
+
+
+def wants_task(params: dict, ver: str) -> bool:
+    """The caller asked not to wait: 1.0 `returnImmediately: true`, 0.3 `blocking: false`."""
+    cfg = params.get("configuration") if isinstance(params.get("configuration"), dict) else {}
+    return bool(cfg.get("returnImmediately")) if ver == V1 else cfg.get("blocking") is False
+
+
+class Tasks:
+    """The tasks this agent is working on or has finished, in memory. The oldest
+    finished ones are dropped first."""
+    MAX = 200
+
+    def __init__(self):
+        self._t: "OrderedDict[str, dict]" = OrderedDict()
+
+    def new(self, persona: str, context_id: str, ver: str) -> dict:
+        rec = {"id": new_id(), "contextId": context_id, "persona": persona, "ver": ver,
+               "state": "working", "text": "", "error": "", "created": time.time(), "runner": None}
+        self._t[rec["id"]] = rec
+        for k in [k for k, v in self._t.items() if v["state"] != "working"]:
+            if len(self._t) <= self.MAX:
+                break
+            del self._t[k]
+        return rec
+
+    def get(self, task_id) -> Optional[dict]:
+        return self._t.get(str(task_id or ""))
+
+    @staticmethod
+    def view(rec: dict, ver: Optional[str] = None) -> dict:
+        return task_obj(rec["id"], rec["contextId"], rec["state"], ver or rec["ver"],
+                        text=rec["text"] if rec["state"] == "completed" else "",
+                        error=rec["error"])
 
 
 class Contexts:

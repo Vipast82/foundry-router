@@ -2160,6 +2160,40 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         bool(client_tools) or (bool(persona.get("mcp_tools_in_direct", 1))
                                and _persona_has_mcp_tools(persona)))
     pins = [] if strict else _paid_pin_order(svc, persona)
+    # v0.181.160: a main-model persona keeps its route when the chat program brings
+    # its own tools (AnythingLLM @agent, Open WebUI tools) or asks for a format.
+    # Before, such a request left main-model mode entirely: the model was picked by
+    # the older single-pick policy (no fit to the model's window or its routing
+    # cap, no return to the local model once it is idle) and it had no helpers.
+    main_mode = (persona.get("execution_mode") == "main") and not strict and not summary_req
+    main_ladder: list = []
+    main_ctx = None
+    if main_mode:
+        from .. import main_route as _main_route
+        from ..brain.agent import RequestContext as _Ctx
+        main_ctx = _Ctx(persona=persona, messages=messages, guard=RequestGuardState(), logger=logger)
+        try:
+            main_ladder, _notes = await svc.agent._main_ladder(main_ctx, persona)
+        except Exception:                                         # noqa: BLE001
+            log.exception("main-model ladder failed; using the direct pick")
+            main_ladder, _notes = [], []
+        for n in _notes:
+            route_notes.append(n[0].upper() + n[1:])
+            logger.record_guardrail("main: " + n)
+        for cand in main_ladder:
+            info = svc.pool.backend_info(cand)
+            if info is None:
+                continue
+            v = await svc.guardrails.check_paid_call(cand, info, svc.registry.get(cand),
+                                                     RequestGuardState(), eff)
+            if v.allowed:
+                model_id = cand
+                _main_route.home_set(_main_route.conv_key(persona, messages), cand)
+                break
+            logger.record_guardrail(f"main: {cand} denied ({v.reason})")
+            denials.append(f"{cand}: {v.reason}")
+        if model_id is None:
+            main_mode, main_ladder = False, []        # nothing on the route: the direct pick decides
     if strict:
         # From here on the pool may only use this persona's backend (or the
         # single best one when none is set): no cross-backend failover.
@@ -2235,6 +2269,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if denials:
             route_notes.append("strict route: " + " → ".join(
                 [d.split(":")[0] + " denied" for d in denials] + [model_id]))
+    elif model_id is not None:
+        pass                                          # the main-model ladder chose (above)
     elif pins:
         # Paid-pin priority cascade (prefer_paid persona, e.g. Cline PLAN): try each
         # pinned paid model in pin order — Opus 4.8 -> Sonnet 5 -> ... — each probed
@@ -2378,6 +2414,21 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
     # runs guardrail checks for paid alternatives (which can call the Meridian
     # usage endpoint), so doing it up front added latency to EVERY request.
     async def _failover_factory():
+        if main_ladder:
+            # the next models on the persona's route, in the order chosen above
+            lst = [model_id]
+            cap = int(getattr(brain_cfg, "main_max_tries", 3) or 3)
+            for m in main_ladder:
+                if m in lst or len(lst) >= cap:
+                    continue
+                info = svc.pool.backend_info(m)
+                if info is None:
+                    continue
+                v = await svc.guardrails.check_paid_call(m, info, svc.registry.get(m),
+                                                         RequestGuardState(), eff)
+                if v.allowed:
+                    lst.append(m)
+            return lst
         lst = await _failover_list(svc, persona, model_id, user_text, eff)
         if need_vision:          # an image request fails over to vision models only
             lst = lst[:1] + [m for m in lst[1:] if not _known_blind(svc, m)]
@@ -2401,6 +2452,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         mcp_defs = {}
     else:
         mcp_defs, mcp_withheld, mcp_mode = _direct_mcp_split(svc, persona, client_tools)
+        if main_mode:
+            from .. import helpers as _helpers
+            _ask = _helpers.tooldef(persona)
+            if _ask is not None and _ask.name not in {
+                    ((t or {}).get("function") or {}).get("name") for t in (client_tools or [])}:
+                mcp_defs = {**mcp_defs, _ask.name: _ask}     # ask_helper, run here
     if mcp_withheld:
         logger.record_guardrail(f"{mcp_withheld} persona MCP tool(s) left out: the client "
                                 f"brought {len(client_tools or [])} of its own "
@@ -2648,6 +2705,20 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         from ..brain.agent import call_tool_rich, _model_has_vision
         limit = int(getattr(brain_cfg, "worker_tool_result_chars", 0) or 24000)
         out = []
+        from .. import helpers as _hp
+        helped: dict = {}
+
+        def _say(ev):
+            if narrate and getattr(ev, "kind", "") == "think" and ev.text:
+                narrate("🤝 " + ev.text + "\n")
+        if main_ctx is not None:
+            main_ctx.messages = convo or base_convo
+            main_ctx.media = media_sink
+            asks = [c for c in calls if c["name"] == _hp.TOOL and not c.get("arguments_error")
+                    and getattr(mcp_defs.get(_hp.TOOL), "server", None) == _hp.SERVER]
+            if len(asks) > 1 and getattr(brain_cfg, "helpers_parallel", True):
+                async for ev in svc.agent._helpers_together(main_ctx, model_id, asks, eff, helped):
+                    _say(ev)
         for tc in calls:
             if advisor_on and tc["name"] == fa.CONSULT_TOOL_NAME:
                 if narrate:
@@ -2668,6 +2739,24 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                             "content": text})
                 continue
             td = mcp_defs[tc["name"]]
+            if main_ctx is not None and td.server == _hp.SERVER and not tc.get("arguments_error"):
+                # ask_helper: another model does part of the task (brain/agent.py)
+                t_call = time.monotonic()
+                if id(tc) in helped:
+                    held, took = helped.pop(id(tc))
+                    t_call -= took
+                else:
+                    held = {}
+                    async for ev in svc.agent._run_helper(main_ctx, model_id, tc.get("arguments"),
+                                                          eff, held):
+                        _say(ev)
+                text = held.get("text") or "ERROR: the helper returned nothing. Do this part yourself."
+                logger.record_tool_call(tc["name"], td.server, int((time.monotonic() - t_call) * 1000),
+                                        ok=not text.startswith("ERROR:"), caller=model_id,
+                                        arguments=tc.get("arguments"))
+                out.append({"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
+                            "content": text})
+                continue
             if tc.get("arguments_error"):
                 out.append({"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
                             "content": f"ERROR: the arguments were not valid JSON "
@@ -2688,6 +2777,12 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
                                         arguments=tc.get("arguments"),
                                         executes_code=svc.mcp.executes_code(td.server))
                 text = rich.text or "(empty tool result)"
+                if main_ctx is not None:
+                    dheld: dict = {}
+                    async for ev in svc.agent._digest(main_ctx, model_id,
+                                                      f"{td.server}/{td.mcp_tool}", text, eff, dheld):
+                        _say(ev)
+                    text = dheld.get("text") or text
                 msg = {"role": "tool", "name": tc["name"], "tool_call_id": tc.get("id"),
                        "content": text[:limit] + (f"\n…[truncated: {len(text) - limit} more chars]"
                                                   if len(text) > limit else "")}
