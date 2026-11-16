@@ -399,6 +399,46 @@ async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
     return Response(content=await asyncio.to_thread(build), media_type="application/json")
 
 
+@router.get("/v1/foundry/training/events/cursor")
+async def training_events_cursor(request: Request, source: str = "", sender: str = ""):
+    """Where this sender got to last time (v0.181.162). An unknown source answers
+    with an empty cursor, which means "send everything you have"."""
+    from .. import training_mirror
+    svc = request.app.state.services
+    sender = sender or training_mirror.DEFAULT_SENDER
+    return {"source": source, "sender": sender,
+            "cursor": training_mirror.cursor(svc, source, sender),
+            "waiting": training_mirror.waiting(svc)}
+
+
+@router.post("/v1/foundry/training/events")
+async def training_events(request: Request):
+    """Normalized training events from another machine (the workstation's Kilo,
+    coordinator and git records): {"source", "cursor", "events": [...]}.
+
+    The router cannot read a workstation's database or checkout, so those records
+    are sent here and kept with everything else: the batch is spooled, the
+    preparation worker folds it into the prepared store, the nightly dataset is
+    built from it and the archive copies it to the NAS. An event that arrives
+    twice is ignored (its id comes from the source record), so a sender may
+    resend freely."""
+    import asyncio
+
+    from .. import training_mirror
+    svc = request.app.state.services
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("body must be a JSON object")
+        out = await asyncio.to_thread(
+            training_mirror.accept, svc, str(body.get("source") or ""),
+            body.get("events") or [], str(body.get("cursor") or ""),
+            str(body.get("sender") or training_mirror.DEFAULT_SENDER))
+    except ValueError as e:
+        return _bad(e)
+    return {"ok": True, **out}
+
+
 @router.get("/v1/foundry/training/outcomes")
 async def training_outcomes_list(request: Request, after_id: int = 0, limit: int = 500):
     """The coordinator's outcome labels, oldest first after `after_id`: the training

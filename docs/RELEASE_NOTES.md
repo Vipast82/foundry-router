@@ -2,6 +2,38 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.162 - records made on another machine are centralised on the router
+
+The router holds every model call it routed, but what the coding harness did
+(Kilo), what the coordinator decided and what was committed (git) is made on the
+workstation, and the router cannot read a workstation's database or checkout.
+Those records now come to it, so one place holds the whole record and one
+archive run puts it on the NAS.
+
+- **`POST /v1/foundry/training/events`** takes normalized events from another
+  machine (`{source, sender, cursor, events}`), behind the same client key as the
+  rest of `/v1/foundry`. A batch is written to a spool and answered at once; the
+  preparation worker folds it into the prepared store at the start of its next
+  run, because that worker owns the store. `GET .../events/cursor` says where a
+  sender got to, so it can stop and continue; an event that arrives twice is
+  ignored (its id comes from the source record), so resending is free.
+  A batch that cannot be read is kept aside as `.bad` instead of being retried
+  forever. `training_mirror.py`.
+- **The sender**: `python -m foundry_training.mirror --url <router> [--store ...]
+  [--source kilo --source coordinator --source git] [--sender <name>]
+  [--max-minutes N]`. It walks the local store oldest first and puts each event's
+  text back together before sending; the router stores each message once again at
+  its end. `foundry` events are left out by default - the router made those
+  itself. A different store on the same machine keeps its own position under its
+  own `--sender` name.
+- **The prepared store is archived too** (Training -> Archive -> "prepared store",
+  on by default). That is the copy that outlives the capture store's retention
+  and now holds the other machines' records as well.
+- A run of the preparation worker is due as soon as records are waiting, so what
+  a machine sends reaches the nightly dataset without anything else being started.
+
+Tests: `tests/test_training_mirror.py`.
+
 ## v0.181.161 — dataset preparation on the router is about four times faster
 
 - Measured on the live store after v0.181.160: the first run read about 5 records

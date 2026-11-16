@@ -38,7 +38,8 @@ def _cfg(svc):
 def _dirs(svc) -> dict:
     root = Path(svc.capture.data_dir) / "training"
     return {"root": root, "store": root / "prepared", "out": root / "datasets" / "router",
-            "status": root / "prep-status.json", "stop": root / "prep.stop"}
+            "status": root / "prep-status.json", "stop": root / "prep.stop",
+            "incoming": root / "incoming"}
 
 
 def dataset_dir(svc) -> Path:
@@ -62,7 +63,9 @@ def status(svc) -> dict:
         # the worker is gone without saying so (a router restart, a kill)
         st["state"], st["error"] = "stopped", st.get("error") or "interrupted (it continues on the next run)"
     cfg = _cfg(svc)
-    out = {"hours": int(getattr(cfg, "prep_hours", 24) or 0),
+    from . import training_mirror
+    out = {"mirror": training_mirror.status(svc),
+           "hours": int(getattr(cfg, "prep_hours", 24) or 0),
            "max_tokens": int(getattr(cfg, "prep_max_tokens", 32768) or 32768),
            "unbound_project": getattr(cfg, "prep_unbound_project", "chat") or "chat",
            "run": st or {"state": "never"}, "where": str(dataset_dir(svc)), "files": []}
@@ -85,9 +88,12 @@ def due(svc, now: Optional[float] = None) -> bool:
             return False
     except Exception:                                             # noqa: BLE001
         return False
-    run = status(svc)["run"]
+    s = status(svc)
+    run = s["run"]
     if run.get("state") == "stopped":
         return True                                               # unfinished: carry on
+    if (s.get("mirror") or {}).get("waiting", {}).get("files"):
+        return True                            # another machine sent records: take them in
     return (now or time.time()) - float(run.get("finished") or 0) >= hours * 3600
 
 
@@ -105,6 +111,7 @@ def start(svc) -> dict:
            "--capture", str(svc.capture.store.path), "--store", str(d["store"]),
            "--out", str(d["out"]), "--status", str(d["status"]),
            "--router-db", str(getattr(svc.db, "path", "") or ""),
+           "--incoming", str(d["incoming"]),
            "--unbound", str(getattr(cfg, "prep_unbound_project", "chat") or "chat"),
            "--name", NAME, "--max-tokens", str(int(getattr(cfg, "prep_max_tokens", 32768) or 32768))]
     d["status"].write_text(json.dumps({"state": "running", "phase": "starting", "started": time.time(),

@@ -1015,7 +1015,8 @@ class TrainingCaptureConfig(BaseModel):
     archive_smb_path: str = ""
     archive_smb_user: str = ""
     archive_smb_password: str = ""     # masked wherever the configuration is shown
-    archive_capture: bool = True       # a consistent copy of the capture store
+    archive_capture: bool = True
+    archive_prepared: bool = True      # the store the router keeps and builds datasets from       # a consistent copy of the capture store
     archive_datasets: bool = True      # the prepared datasets, as a trainer reads them
     archive_hours: int = Field(default=24, ge=0, le=8760)    # 0 = only on demand
 

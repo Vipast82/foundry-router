@@ -4249,6 +4249,7 @@ async function tabTraining() {
             <label title="A full path the router can write to. Inside Docker the compose file offers /archive (FOUNDRY_ARCHIVE_DIR_HOST in .env).">folder <input type="text" id="arc-dir" style="width:240px" placeholder="off, e.g. /archive" value="${esc(a.dir || "")}"></label></span>
           <label title="One consistent copy of the capture store (every captured request), taken while capture keeps running."><input type="checkbox" id="arc-cap" ${a.capture !== false ? "checked" : ""}> full capture database</label>
           <label title="The prepared datasets, in the layout a trainer such as Unsloth Studio reads."><input type="checkbox" id="arc-ds" ${a.datasets !== false ? "checked" : ""}> datasets</label>
+          <label title="The store the router keeps for good: every call it routed plus the records other machines sent. This is the copy that outlives the capture store's retention."><input type="checkbox" id="arc-prep" ${a.prepared !== false ? "checked" : ""}> prepared store</label>
           <label title="How often the copy is refreshed. 0 = only when you press Copy now.">every <input type="number" id="arc-hours" min="0" max="8760" style="width:70px" value="${a.hours ?? 24}"> hours</label>
           <button class="act" id="arc-save">Save</button>
           <button class="act" id="arc-test" ${a.on ? "" : "disabled"} title="Writes a small file to the destination, reads it back and removes it.">Test connection</button>
@@ -4271,7 +4272,12 @@ async function tabTraining() {
           <button class="act" id="prep-save">Save</button>
           <button class="act" id="prep-run" ${r.state === "running" ? "disabled" : ""}>Prepare now</button>
           ${r.state === "running" ? '<button class="act" id="prep-stop">Stop</button>' : ""}
-          <span class="hint">${r.state === "done" && ds.conversations != null ? `${(+ds.sessions || 0).toLocaleString()} sessions · ${(+ds.conversations).toLocaleString()} conversations · ${(+(ex.train || 0)).toLocaleString()} training and ${(+(ex.validation || 0)).toLocaleString()} validation examples · built ${when(r.finished)}` : r.error ? esc(r.error) : ""}
+          <span class="hint">${(() => {
+            const m = p.mirror || {}, w = m.waiting || {}, src = m.sources || {};
+            const names = Object.keys(src);
+            if (!names.length && !w.files) return "";
+            return `<span title="Records other machines sent to this router (Kilo, coordinator, git). They are folded into the store on the next run.">from other machines: ${esc(names.join(", ") || "none")}${w.files ? ` · ${w.files} batch(es) waiting (${(w.bytes / 1e6).toFixed(1)} MB)` : " · nothing waiting"}</span> · `;
+          })()}${r.state === "done" && ds.conversations != null ? `${(+ds.sessions || 0).toLocaleString()} sessions · ${(+ds.conversations).toLocaleString()} conversations · ${(+(ex.train || 0)).toLocaleString()} training and ${(+(ex.validation || 0)).toLocaleString()} validation examples · built ${when(r.finished)}` : r.error ? esc(r.error) : ""}
             ${files.length ? " · " + files.map(f => `<a href="#" onclick="_downloadAdmin('training/prep/file/${esc(f.name)}','all-sessions-${esc(f.name)}');return false" title="${esc(mb(f.bytes))}">${esc(f.name)}</a>`).join(" ") : ""}
             ${files.length ? ` · on the router at <span class="mono">${esc(p.where || "")}</span>; the archive copies it with "datasets" ticked` : ""}</span></div>`;
       })()}
@@ -4343,6 +4349,7 @@ async function tabTraining() {
         archive_smb_server: $("#arc-s-server").value.trim(), archive_smb_share: $("#arc-s-share").value.trim(),
         archive_smb_path: $("#arc-s-path").value.trim(), archive_smb_user: $("#arc-s-user").value.trim(),
         archive_capture: $("#arc-cap").checked, archive_datasets: $("#arc-ds").checked,
+      archive_prepared: $("#arc-prep").checked,
         archive_hours: parseInt($("#arc-hours").value, 10) || 0};
       if ($("#arc-s-pw").value) body.archive_smb_password = $("#arc-s-pw").value;
       await api("training/capture", {method: "POST", body});

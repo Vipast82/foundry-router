@@ -244,6 +244,7 @@ def status(svc) -> dict:
            "on": d is not None, "where": d.describe() if d is not None else "",
            "capture": bool(getattr(cfg, "archive_capture", True)),
            "datasets": bool(getattr(cfg, "archive_datasets", True)),
+           "prepared": bool(getattr(cfg, "archive_prepared", True)),
            "hours": int(getattr(cfg, "archive_hours", 24) or 0),
            "run": dict(_state), "last": last(svc)}
     if isinstance(d, Folder):                # cheap, local: shown on every page load
@@ -370,6 +371,43 @@ def _archive_capture(svc, d, store, out: dict) -> None:
     out["capture"]["media_files"] = files
 
 
+def _archive_prepared(svc, d, out: dict) -> None:
+    """The prepared store (v0.181.162): what the router keeps for good, including
+    the records other machines sent. Each file is copied consistently, as the
+    capture store is."""
+    from . import training_prep
+    root = training_prep._dirs(svc)["store"]
+    names = ["normalized.sqlite", "blobs.sqlite", "raw/raw.sqlite", "curated.sqlite"]
+    files, total = 0, 0
+    for rel in names:
+        src = root / rel.replace("/", os.sep)
+        if not src.is_file():
+            continue
+
+        class _Store:                       # what _backup_to needs
+            path = src
+        target = f"prepared/{rel.replace('/', '_')}"
+        direct = d.local_path(target)
+        if direct is not None:
+            part = direct.with_name(direct.name + ".part")
+            n = _backup_to(_Store, part, lambda a, b: None)
+            os.replace(part, direct)
+        else:
+            tmp = Path(svc.capture.data_dir) / "training" / "archive-tmp" / rel.replace("/", "_")
+            try:
+                _backup_to(_Store, tmp, lambda a, b: None)
+                n = d.put(tmp, target)
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        files += 1
+        total += n
+    if files:
+        out["prepared"] = {"files": files, "bytes": total}
+
+
 def run(svc) -> dict:
     """One archive pass. Never raises: what failed is in the result."""
     if not _lock.acquire(blocking=False):
@@ -400,6 +438,12 @@ def run(svc) -> dict:
                     _archive_capture(svc, d, cap.store, out)
                 except Exception as e:                            # noqa: BLE001
                     out["errors"].append(f"capture store: {type(e).__name__}: {str(e)[:200]}")
+            if getattr(cfg, "archive_prepared", True):
+                _state["phase"] = "prepared store"
+                try:
+                    _archive_prepared(svc, d, out)
+                except Exception as e:                            # noqa: BLE001
+                    out["errors"].append(f"prepared store: {type(e).__name__}: {str(e)[:200]}")
             out["free_bytes"] = d.free()
             try:
                 d.write_text("ARCHIVE.json", json.dumps({**out, "finished": time.time()}, indent=1))
