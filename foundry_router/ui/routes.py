@@ -1255,7 +1255,7 @@ async def training_capture_set(request: Request):
     body = await request.json()
     updates: dict = {}
     for k in ("enabled", "include_unbound", "operator_chat", "archive_capture",
-              "archive_datasets"):
+              "archive_datasets", "archive_prepared"):
         if k in body:
             updates[k] = bool(body[k])
     if "archive_dir" in body:

@@ -108,6 +108,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--status", required=True)
     ap.add_argument("--router-db", default="")
+    ap.add_argument("--incoming", default="", help="spool of records sent by other machines")
     ap.add_argument("--unbound", default="chat")
     ap.add_argument("--name", default="all-sessions")
     ap.add_argument("--max-tokens", type=int, default=32768)
@@ -142,6 +143,16 @@ def main(argv=None) -> int:
         from foundry_training.ingest import Ingestor
         from foundry_training.store import TrainingStore
         store = TrainingStore(a.store, allow_in_repo=True)
+        if a.incoming:
+            # v0.181.162: what other machines sent (training_mirror.py). First, so a run
+            # that is stopped later has still taken in what was waiting.
+            from foundry_router import training_mirror
+            st["phase"] = "records from other machines"
+            save(True)
+            st["mirror"] = training_mirror.ingest(store, Path(a.incoming), log=lambda s: None,
+                                                  stop=should_stop)
+            st["phase"] = "reading"
+            save(True)
         ing = Ingestor(store)
         ing.redactor = lambda extra_domains=(): _AlreadyRedacted()
         key = "foundry:capture"
