@@ -380,11 +380,23 @@ async def capture_records(request: Request, after_id: int = 0, limit: int = 200,
     cap = svc.capture
     if not cap.cfg.enabled and cap._store is None:
         return {"records": [], "enabled": False, "next_after_id": after_id}
-    rows = cap.records(after_id, limit, project, backend=backend, persona=persona,
-                       purpose=purpose, db=svc.db)
-    return {"records": rows, "enabled": bool(cap.cfg.enabled),
-            "next_after_id": rows[-1]["id"] if rows else after_id, "boundary": rows[0]["boundary"]
-            if rows else None}
+    # v0.181.159: read AND turned into JSON on a worker thread. Reading unpacks
+    # every record's messages (measured live: the event loop stood still for 5.2 s
+    # and 10.1 s), and writing a page of whole conversations as JSON held it for
+    # another 0.3 to 0.5 s each time.
+    import asyncio
+    import json as _json
+
+    from fastapi.responses import Response
+
+    def build() -> bytes:
+        rows = cap.records(after_id, limit, project, backend=backend, persona=persona,
+                           purpose=purpose, db=svc.db)
+        return _json.dumps({"records": rows, "enabled": bool(cap.cfg.enabled),
+                            "next_after_id": rows[-1]["id"] if rows else after_id,
+                            "boundary": rows[0]["boundary"] if rows else None},
+                           ensure_ascii=False, default=str).encode("utf-8")
+    return Response(content=await asyncio.to_thread(build), media_type="application/json")
 
 
 @router.get("/v1/foundry/training/outcomes")

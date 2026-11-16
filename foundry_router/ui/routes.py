@@ -1226,8 +1226,16 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         personas = []
     # wait=False: the per-project counts read every record (49 s on the live store), so
     # the page gets the last counts and a recount runs in the background
-    from .. import training_archive
-    return {"capture": await asyncio.to_thread(svc.capture.status, False), "pipelines": pipes,
+    from .. import training_archive, training_prep
+    cap = await asyncio.to_thread(svc.capture.status, False)
+    try:
+        cap["sweep"] = dict(svc.capture.store.sweep)
+        cap["sweep_last"] = json.loads(svc.capture.store._meta("blob_sweep") or "{}")
+        cap["blob_sweep_days"] = svc.config_store.config.training_capture.blob_sweep_days
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"capture": cap, "pipelines": pipes,
+            "prep": await asyncio.to_thread(training_prep.status, svc),
             "archive": await asyncio.to_thread(training_archive.status, svc),
             "episodes": eps,
             "options": {"backends": _configured_backends(svc), "personas": personas}}
@@ -1273,6 +1281,15 @@ async def training_capture_set(request: Request):
             updates["archive_hours"] = max(0, min(8760, int(body["archive_hours"])))
         except (TypeError, ValueError):
             return JSONResponse({"error": "archive_hours must be a number"}, status_code=400)
+    for k, lo, hi in (("prep_hours", 0, 8760), ("prep_max_tokens", 1024, 1_000_000),
+                      ("blob_sweep_days", 0, 365)):
+        if k in body:
+            try:
+                updates[k] = max(lo, min(hi, int(body[k])))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": f"{k} must be a number"}, status_code=400)
+    if "prep_unbound_project" in body:
+        updates["prep_unbound_project"] = (str(body["prep_unbound_project"] or "").strip() or "chat")[:60]
     if "retention_days" in body:
         try:
             updates["retention_days"] = max(1, min(3650, int(body["retention_days"])))
@@ -1321,6 +1338,48 @@ async def training_archive_run(request: Request):
     if training_archive.destination(svc) is None:
         return JSONResponse({"error": "set an archive destination first"}, status_code=400)
     return {"ok": True, "run": await asyncio.to_thread(training_archive.start, svc)}
+
+
+@router.post("/admin/api/training/prep")
+async def training_prep_run(request: Request):
+    """Prepare the dataset on the router now (training_prep.py), or `{"stop": true}`.
+    Runs as a separate low-priority process; GET /admin/api/training shows it
+    under `prep`."""
+    import asyncio
+
+    from .. import training_prep
+    svc = _svc(request)
+    try:
+        body = await request.json()
+    except Exception:                                             # noqa: BLE001
+        body = {}
+    if isinstance(body, dict) and body.get("stop"):
+        return {"ok": True, "prep": await asyncio.to_thread(training_prep.stop, svc)}
+    return {"ok": True, "prep": await asyncio.to_thread(training_prep.start, svc)}
+
+
+@router.get("/admin/api/training/prep/file/{name}")
+async def training_prep_file(request: Request, name: str):
+    """Download one file of the dataset the router prepared."""
+    from fastapi.responses import FileResponse
+
+    from .. import training_prep
+    if name not in training_prep.FILES:
+        return JSONResponse({"error": "unknown file"}, status_code=400)
+    f = training_prep.dataset_dir(_svc(request)) / name
+    if not f.is_file():
+        return JSONResponse({"error": "not prepared yet"}, status_code=404)
+    return FileResponse(str(f), filename=f"all-sessions-{name}")
+
+
+@router.post("/admin/api/training/capture/sweep")
+async def training_capture_sweep(request: Request):
+    """Remove the message text no kept record uses any more, now (capture.sweep_blobs)."""
+    import asyncio
+    cap = getattr(_svc(request), "capture", None)
+    if cap is None:
+        return JSONResponse({"error": "training capture is not set up"}, status_code=400)
+    return {"ok": True, "sweep": await asyncio.to_thread(cap.store.sweep_start)}
 
 
 @router.post("/admin/api/training/capture/compact")
@@ -3296,6 +3355,9 @@ async def ollama_jobs(request: Request):
 # read-only diagnostics (llama.cpp / Unsloth / vLLM / OpenAI) behind one tab. #
 # --------------------------------------------------------------------------- #
 
+_VERSION_WAIT = 2.5
+
+
 @router.get("/admin/api/host/backends")
 async def host_backends(request: Request):
     """Every backend that has an admin surface, each tagged with its flavor so the
@@ -3304,21 +3366,39 @@ async def host_backends(request: Request):
     unsloth / vllm / openai) get read-only diagnostics (/admin/api/host/diag)."""
     svc = _svc(request)
     out = []
+    # v0.181.159: the versions are asked for together, each for at most
+    # _VERSION_WAIT seconds, and remembered for a minute. They were asked one
+    # after another with no limit, so one slow host (or every host, just after a
+    # restart) held the whole page.
+    import time as _t
+    cache = getattr(svc, "_host_versions", None)
+    if cache is None:
+        cache = svc._host_versions = {}
+
+    async def version_of(name: str, probe) -> str:
+        hit = cache.get(name)
+        if hit and _t.monotonic() - hit[0] < 60:
+            return hit[1]
+        try:
+            v = await asyncio.wait_for(probe(), _VERSION_WAIT) or ""
+        except Exception:                                         # noqa: BLE001
+            v = (hit[1] if hit else "")
+        cache[name] = (_t.monotonic(), v)
+        return v
+    asks = []
     for b in svc.ollama_admin.backends():
         out.append({"name": b["name"], "url": b["url"], "flavor": "ollama",
-                    "healthy": b["healthy"], "crud": True,
-                    "version": await svc.ollama_admin.version(b["name"])})
+                    "healthy": b["healthy"], "crud": True, "version": ""})
+        asks.append((out[-1], lambda n=b["name"]: svc.ollama_admin.version(n)))
     for b in svc.openai_admin.backends():
-        version = ""
         st = getattr(svc.pool, "backends", {}).get(b["name"])
         probe = getattr(getattr(st, "protocol", None), "server_version", None)
-        if probe and b["healthy"]:
-            try:
-                version = await probe()
-            except Exception:
-                version = ""
         out.append({"name": b["name"], "url": b["url"], "flavor": b["flavor"],
-                    "healthy": b["healthy"], "crud": False, "version": version})
+                    "healthy": b["healthy"], "crud": False, "version": ""})
+        if probe and b["healthy"]:
+            asks.append((out[-1], probe))
+    for (row, _), v in zip(asks, await asyncio.gather(*(version_of(r["name"], p) for r, p in asks))):
+        row["version"] = v
     for s in getattr(svc.pool, "backends", {}).values():
         if s.config.type == "anthropic-compatible":
             out.append({"name": s.config.name, "url": s.config.url, "flavor": "meridian",
@@ -3351,6 +3431,30 @@ async def client_install_guide(request: Request):
     truth; client_guide.py extracts and renders the install sections)."""
     from ..client_guide import guide_html
     return guide_html()
+
+
+@router.post("/admin/api/host/control")
+async def host_control(request: Request):
+    """Load or unload a model from Host Admin: `{backend, action: "unload" | "load",
+    model?, force?}`. Ollama unloads the named model; the Strata gateway loads or
+    unloads its one model. Servers without such an endpoint are refused."""
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    backend, action = str(body.get("backend") or ""), str(body.get("action") or "")
+    st = getattr(svc.pool, "backends", {}).get(backend)
+    if st is None:
+        return JSONResponse({"error": f"unknown backend {backend!r}"}, status_code=400)
+    try:
+        if st.config.type == "ollama":
+            if action != "unload" or not body.get("model"):
+                return JSONResponse({"error": "Ollama: action must be unload, with a model"}, status_code=400)
+            return {"ok": True, **await svc.ollama_admin.unload(backend, str(body["model"]))}
+        return {"ok": True, **await svc.openai_admin.control(backend, action, bool(body.get("force")))}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=502)
 
 
 @router.post("/admin/api/a2a")

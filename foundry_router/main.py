@@ -574,6 +574,18 @@ class Services:
             except Exception:
                 log.exception("media / ledger prune failed")
             try:
+                tc = self.config_store.config.training_capture
+                if tc.enabled and self.capture.store.sweep_due(int(tc.blob_sweep_days or 0)):
+                    self.capture.store.sweep_start()              # its own thread
+            except Exception:
+                log.exception("capture blob clean-up check failed")
+            try:
+                from . import training_prep
+                if training_prep.due(self):
+                    training_prep.start(self)                     # its own process
+            except Exception:
+                log.exception("training dataset preparation check failed")
+            try:
                 from . import training_archive
                 if training_archive.due(self):
                     training_archive.start(self)          # its own thread; never awaited

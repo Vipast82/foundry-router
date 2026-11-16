@@ -2,6 +2,48 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.159 — the router prepares the dataset itself; clean-up; Host Admin controls
+
+**Training**
+
+- **Dataset preparation on the router** (`training_prep.py`, `training_prep_worker.py`).
+  The router builds the keep-everything dataset (one example per conversation,
+  `foundry_training.sessions`) from its own capture store, every `prep_hours`
+  (24; 0 = only when asked), into `<data>/training/datasets/router/all-sessions/`.
+  The archive copies it with "datasets" ticked. A separate low-priority process
+  does the work: it reads the capture store a few hundred records at a time,
+  rests between pages, reads only what is new on each run, and can be stopped.
+  It keeps its own copy of what it has read (`<data>/training/prepared/`, each
+  message once), so the dataset still holds records that retention later removes
+  from the capture store. Calls outside a coordinator project are filed under
+  `prep_unbound_project` ("chat"). Training page → Dataset row: state, counts,
+  Prepare now / Stop, file downloads.
+- **Clean-up of unused message text** (`CaptureStore.sweep_blobs`). Retention
+  removed old records but the text they pointed at stayed, so a shrunk store grew
+  back. Every `blob_sweep_days` (7; 0 = never), after records were pruned, the text
+  no remaining record uses is removed, a few hundred pieces at a time. A record
+  written meanwhile never loses text: its packing and insert are one step for the
+  clean-up, which marks new records before every deleting step. Not run while the
+  shrink is. Training page → Clean-up row, with "Clean up now".
+- **The capture record list is read off the event loop** (`GET /v1/foundry/capture/records`,
+  what the workstation pipeline pulls). Measured live: unpacking a page of records
+  froze the router for 5.2 s and 10.1 s, and writing it as JSON for 0.3 to 0.5 s
+  each time. Both now happen on a worker thread.
+
+**Host Admin**
+
+- **Unload / load.** Ollama: an "unload" button on each loaded model (keep_alive 0;
+  the page says so when Ollama still lists it afterwards). Strata: "Unload model" /
+  "Load model" next to the state (`POST /unload`, `/load` on the gateway, with the
+  backend's key). An unload is refused while a request is running on the server.
+  Both ask for confirmation. Servers without such an endpoint (plain llama.cpp,
+  vLLM) get no button. `POST /admin/api/host/control`.
+- **First load.** The backends' versions are asked for together, each for at most
+  2.5 s, and remembered for a minute. They were asked one after another with no
+  limit, so one slow host held the page.
+
+Tests: `tests/test_training_prep.py`, `tests/test_host_control.py`.
+
 ## v0.181.158 — Phase 3 finished: helpers at the same time, A2A both ways
 
 - **Helpers asked for in one turn run at the same time.** When the main model

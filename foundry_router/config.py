@@ -979,6 +979,14 @@ class TrainingCaptureConfig(BaseModel):
     retention_days: int = 30
     max_body_bytes: int = 4_000_000
     store_path: Optional[str] = None   # default <data>/training/capture.sqlite
+    # v0.181.159: the router prepares the keep-everything dataset itself
+    # (training_prep.py). 0 hours = only when asked.
+    prep_hours: int = Field(default=24, ge=0, le=8760)
+    prep_max_tokens: int = Field(default=32768, ge=1024, le=1_000_000)
+    prep_unbound_project: str = "chat"     # the project name for calls no coordinator bound
+    # days between clean-ups of message text no kept record uses any more
+    # (after retention pruned records). 0 = never.
+    blob_sweep_days: int = Field(default=7, ge=0, le=365)
     allowed_email_domains: list[str] = Field(default_factory=list)
     # Per-call switches (globs, case-insensitive; empty include = every one).
     # A persona listed in `personas` is captured even outside a coordinator

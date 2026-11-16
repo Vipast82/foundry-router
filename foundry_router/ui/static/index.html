@@ -4255,6 +4255,35 @@ async function tabTraining() {
           <button class="act" id="arc-run" ${a.on && r.state !== "running" ? "" : "disabled"}>Copy now</button>
           <span class="hint" id="arc-msg">${a.on ? esc(a.where || "") : ""}${a.free_bytes != null ? ` · free: ${gb(a.free_bytes)}` : ""}${l.finished ? ` · last copy ${when(l.finished)}${l.capture ? ", capture " + gb(l.capture.bytes) : ""}${l.datasets ? ", " + l.datasets.files + " dataset file(s)" : ""}` : ""}${(l.errors || []).length ? ` · <span style="color:var(--bad)">${esc(l.errors.join("; "))}</span>` : ""}</span></div>`;
       })()}
+      ${(() => {
+        const p = d.prep || {}, r = p.run || {}, ds = r.dataset || {}, files = p.files || [];
+        const mb = b => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(1) + " MB";
+        const ex = ds.examples || {};
+        const state = r.state === "running" ? `<span class="pill warn">working: ${esc(r.phase || "")}${r.records ? " · " + (+r.records).toLocaleString() + " records read" : ""}</span>`
+          : r.state === "done" ? '<span class="pill ok">ready</span>'
+          : r.state === "error" ? `<span class="pill bad" title="${esc(r.error || "")}">failed</span>`
+          : r.state === "stopped" ? '<span class="pill warn">stopped, continues on the next run</span>'
+          : '<span class="pill">not prepared yet</span>';
+        return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b title="The router builds the keep-everything dataset itself: one example per conversation, in the layout a trainer such as Unsloth Studio reads. A separate low-priority process does the work; it keeps its own copy of what it has read, so the dataset still holds records that retention later removes from the capture store.">Dataset</b> ${state}
+          <label title="How often the dataset is rebuilt from the captured calls. Only new calls are read each time. 0 = only when you press Prepare now.">rebuild every <input type="number" id="prep-hours" min="0" max="8760" style="width:70px" value="${p.hours ?? 24}"> hours</label>
+          <label title="An example longer than this many tokens is cut into pieces of this size.">longest example <input type="number" id="prep-max" min="1024" step="1024" style="width:90px" value="${p.max_tokens ?? 32768}"> tokens</label>
+          <label title="Calls made outside a coordinator project (plain chats) are filed under this project name.">chats filed as <input type="text" id="prep-unbound" style="width:90px" value="${esc(p.unbound_project || "chat")}"></label>
+          <button class="act" id="prep-save">Save</button>
+          <button class="act" id="prep-run" ${r.state === "running" ? "disabled" : ""}>Prepare now</button>
+          ${r.state === "running" ? '<button class="act" id="prep-stop">Stop</button>' : ""}
+          <span class="hint">${r.state === "done" && ds.conversations != null ? `${(+ds.sessions || 0).toLocaleString()} sessions · ${(+ds.conversations).toLocaleString()} conversations · ${(+(ex.train || 0)).toLocaleString()} training and ${(+(ex.validation || 0)).toLocaleString()} validation examples · built ${when(r.finished)}` : r.error ? esc(r.error) : ""}
+            ${files.length ? " · " + files.map(f => `<a href="#" onclick="_downloadAdmin('training/prep/file/${esc(f.name)}','all-sessions-${esc(f.name)}');return false" title="${esc(mb(f.bytes))}">${esc(f.name)}</a>`).join(" ") : ""}
+            ${files.length ? ` · on the router at <span class="mono">${esc(p.where || "")}</span>; the archive copies it with "datasets" ticked` : ""}</span></div>`;
+      })()}
+      ${(() => {
+        const sw = c.sweep || {}, l = c.sweep_last || {};
+        return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b title="Retention removes old records; the message text only they used is removed by this clean-up, so the store does not grow back.">Clean-up</b>
+          ${sw.state === "running" ? `<span class="pill warn">working · ${(+sw.records || 0).toLocaleString()} records checked</span>` : sw.state === "error" ? `<span class="pill bad" title="${esc(sw.error || "")}">failed</span>` : ""}
+          <label title="Days between clean-ups of message text no kept record uses any more. It runs only after retention removed records. 0 = never on its own.">every <input type="number" id="sweep-days" min="0" max="365" style="width:60px" value="${c.blob_sweep_days ?? 7}"> days</label>
+          <button class="act" id="sweep-save">Save</button>
+          <button class="act" id="sweep-run" ${sw.state === "running" ? "disabled" : ""}>Clean up now</button>
+          <span class="hint">${l.finished ? `last ${when(l.finished)}: ${(+l.removed || 0).toLocaleString()} unused pieces removed, ${(+l.kept || 0).toLocaleString()} kept` : "not run yet"}</span></div>`;
+      })()}
       <div class="row" style="flex-wrap:wrap;gap:6px 12px"><b>Download captured calls</b>
         <select id="cap-dl-q" title="ok = the router saw the call succeed with no thumbs-down and no failed gate/review; verified = ok plus a gate PASS, review APPROVED or vision approval from the coordinator"><option value="">all calls</option><option value="ok">router ok</option><option value="verified">verified by the coordinator</option></select>
         <select id="cap-dl-h"><option value="0">everything kept</option><option value="24">last 24 h</option><option value="168">last 7 days</option></select>
@@ -4328,6 +4357,26 @@ async function tabTraining() {
         ? `<span class="pill ok">connection works</span> ${esc(r.where || "")}${r.free_bytes != null ? " · free: " + (r.free_bytes / 1e9).toFixed(0) + " GB" : ""}`
         : `<span class="pill bad">failed</span> ${esc(r.error || "")}`;
     } catch (e) { $("#arc-msg").textContent = e.message; }
+  };
+  const capSet = async (body, msg) => {
+    try { await api("training/capture", {method: "POST", body}); toast(msg); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#prep-save")) $("#prep-save").onclick = () => capSet({
+    prep_hours: +$("#prep-hours").value || 0, prep_max_tokens: +$("#prep-max").value || 32768,
+    prep_unbound_project: $("#prep-unbound").value.trim()}, "Dataset settings saved");
+  if ($("#prep-run")) $("#prep-run").onclick = async () => {
+    try { await api("training/prep", {method: "POST", body: {}}); toast("Preparing the dataset"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#prep-stop")) $("#prep-stop").onclick = async () => {
+    try { await api("training/prep", {method: "POST", body: {stop: true}}); toast("Stopping"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#sweep-save")) $("#sweep-save").onclick = () => capSet({blob_sweep_days: +$("#sweep-days").value || 0}, "Clean-up setting saved");
+  if ($("#sweep-run")) $("#sweep-run").onclick = async () => {
+    try { await api("training/capture/sweep", {method: "POST", body: {}}); toast("Clean-up started"); render(); }
+    catch (e) { toast(e.message, true); }
   };
   if ($("#arc-run")) $("#arc-run").onclick = async () => {
     try { await api("training/archive", {method: "POST", body: {}}); toast("Copy started"); render(); }
@@ -8001,6 +8050,21 @@ async function hostRenderDiag(cur, selector) {
     $("#host-diag").innerHTML = html;
   };
   loadHostTraffic(cur.name);
+  // load / unload buttons inside the report (v0.181.159)
+  $("#host-diag").onclick = async e => {
+    const b = e.target.closest("button[data-host-act]");
+    if (!b) return;
+    const act = b.dataset.hostAct;
+    if (!confirm(act === "unload"
+        ? `Unload the model on ${cur.name}?\n\nIt is removed from the GPUs. Requests sent to ${cur.name} wait while it loads again, which can take a few minutes. Running sprints that use it are held up for that long.`
+        : `Load the model on ${cur.name}? This can take a few minutes.`)) return;
+    b.disabled = true; b.textContent = act === "unload" ? "Unloading…" : "Loading…";
+    try {
+      const r = await api("host/control", {method: "POST", body: {backend: cur.name, action: act}});
+      toast(`${cur.name}: ${r.status || act + "ed"}`);
+    } catch (err) { toast(err.message, true); }
+    render();
+  };
   try {
     const r = await api("host/diag?backend=" + encodeURIComponent(cur.name));
     paint(r.ok ? renderDiagReport(r.report, cur)
@@ -8145,7 +8209,11 @@ function renderEngineMonitor(mon, tile) {
     <span>${working ? esc([live.phase, isN(live.prompt_total) ? `prompt ${num(live.prompt_read)} of ${num(live.prompt_total)}` : "",
         isN(live.generated) ? `written ${num(live.generated)}${isN(live.max_tokens) ? " of " + num(live.max_tokens) : ""}` : "",
         isN(live.tok_s) ? num(live.tok_s, 1) + " tok/s" : ""].filter(Boolean).join(" · "))
-      : state === "idle" ? "Waiting for a request" : ""}${live.queued ? ` · ${esc(live.queued)} queued` : ""}</span></div>`;
+      : state === "idle" ? "Waiting for a request" : ""}${live.queued ? ` · ${esc(live.queued)} queued` : ""}</span>
+    <span style="flex:1"></span>
+    ${state === "unloaded"
+      ? '<button class="act" data-host-act="load" title="Loads the model into memory again. This can take a few minutes.">Load model</button>'
+      : `<button class="act" data-host-act="unload" title="Removes the model from the GPUs. Refused while a request is running. The next request loads it again${eng.auto_load === false ? " only if you load it here" : ""}, which can take a few minutes.">Unload model</button>`}</div>`;
 
   // figures
   const dec = tot.decode_ms > 0 ? 1000 * tot.output_tokens / tot.decode_ms : null,
@@ -8396,7 +8464,7 @@ async function hostRenderOllama(be, d, selector) {
         const gpu = m.size > 0 ? Math.min(100, 100 * m.size_vram / m.size) : 0, exp = m.expires_at ? new Date(m.expires_at) : null;
         const far = exp && exp.getFullYear() > new Date().getFullYear() + 5;
         return `<div class="mon-bar"><div class="mon-bar-h"><span><span class="mono">${esc(m.name)}</span> <span class="hint">${esc([m.parameter_size, m.quantization_level, m.context_length ? formatCtx(m.context_length) + " context" : ""].filter(Boolean).join(" · "))}</span></span>
-          <b>${(m.size / 1073741824).toFixed(2)} GB · ${m.size_vram > 0 ? gpu.toFixed(0) + "% on the GPU" : "runs on the CPU"}${exp && !isNaN(exp) ? far ? " · kept loaded" : " · unloads " + esc(exp.toLocaleTimeString()) : ""}</b></div>
+          <b><button class="act" style="padding:0 8px;font-size:11.5px;margin-right:8px" onclick='ollUnload(${JSON.stringify(m.name)})' title="Removes it from memory now. The next request for it loads it again.">unload</button>${(m.size / 1073741824).toFixed(2)} GB · ${m.size_vram > 0 ? gpu.toFixed(0) + "% on the GPU" : "runs on the CPU"}${exp && !isNaN(exp) ? far ? " · kept loaded" : " · unloads " + esc(exp.toLocaleTimeString()) : ""}</b></div>
           <span class="meter${gpu > 0 && gpu < 99.5 ? " warn" : ""}" title="share of this model's memory that is on the GPU; the rest runs on the CPU, slower"><span style="width:${gpu.toFixed(1)}%"></span></span></div>`;
       }).join("") : '<p class="hint" style="margin:0">Nothing is loaded; the next request for a model loads it.</p>'}</div>
     <div id="host-traffic"></div>
@@ -8426,6 +8494,14 @@ SYSTEM You are a helpful assistant."></textarea></details>
     </div>`;
 
   loadHostTraffic(be);
+  window.ollUnload = async name => {
+    if (!confirm(`Unload ${name} on ${be}?\n\nIt is removed from memory now. The next request for it loads it again.`)) return;
+    try {
+      const r = await api("host/control", {method: "POST", body: {backend: be, action: "unload", model: name}});
+      toast(r.unloaded ? `${name} unloaded` : `${name}: asked, but Ollama still lists it as loaded`, !r.unloaded);
+    } catch (e) { toast(e.message, true); }
+    render();
+  };
   window.ollShow = async name => {
     const el = $("#oll-detail");
     try {
