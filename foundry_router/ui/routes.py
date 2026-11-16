@@ -2937,6 +2937,65 @@ async def gui_feedback(request: Request):
 # Eval harness (quality spec Phase 4)                                         #
 # --------------------------------------------------------------------------- #
 
+@router.get("/admin/api/bench")
+async def bench_view(request: Request):
+    """The benchmark: the suites that exist, the run in progress, and recent runs."""
+    from .. import bench
+    svc = _svc(request)
+    return {**await asyncio.to_thread(bench.status, svc),
+            "runs": await asyncio.to_thread(bench.runs, svc.db, 30)}
+
+
+@router.post("/admin/api/bench/suite")
+async def bench_suite(request: Request):
+    """Cut a suite out of the work this router already did: {name, limit, tiers, tags}."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    name = "".join(c for c in str(body.get("name") or "").strip() if c.isalnum() or c in "-_")
+    if not name:
+        return JSONResponse({"error": "a suite needs a name (letters, digits, - or _)"},
+                            status_code=400)
+    try:
+        out = await asyncio.to_thread(
+            bench.build, svc, name, int(body.get("limit") or 60),
+            tuple(body.get("tiers") or ("verified",)), tuple(body.get("tags") or ()),
+            lambda s: None)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, "suite": out}
+
+
+@router.post("/admin/api/bench/run")
+async def bench_run(request: Request):
+    """Run a suite against one model: {suite, model, label, limit} — or {stop: true}."""
+    from .. import bench
+    svc = _svc(request)
+    body = await request.json()
+    if body.get("stop"):
+        return {"ok": True, "run": bench.stop()}
+    suite, model = str(body.get("suite") or ""), str(body.get("model") or "")
+    if not suite or not model:
+        return JSONResponse({"error": "pick a suite and a model"}, status_code=400)
+    return {"ok": True, "run": await asyncio.to_thread(
+        bench.start, svc, suite, model, str(body.get("label") or ""), int(body.get("limit") or 0))}
+
+
+@router.get("/admin/api/bench/results")
+async def bench_results(request: Request, run_id: int, limit: int = 500):
+    from .. import bench
+    svc = _svc(request)
+    return {"results": await asyncio.to_thread(bench.results, svc.db, run_id, limit)}
+
+
+@router.get("/admin/api/bench/compare")
+async def bench_compare(request: Request, a: int, b: int):
+    from .. import bench
+    svc = _svc(request)
+    return await asyncio.to_thread(bench.compare, svc.db, a, b)
+
+
 @router.get("/admin/api/eval/prompts")
 async def eval_prompts(request: Request):
     return {"prompts": _svc(request).db.query(

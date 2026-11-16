@@ -1922,6 +1922,7 @@ const TABS = {
   "MCP Metrics":    tabMcpMetrics,
   "Agents":         tabAgents,
   "Research":       tabResearch,
+  "Benchmark":      tabBench,
   "Evals":          tabEvals,
   "Usage Log":      tabUsage,
   "Events":         tabEvents,
@@ -1945,7 +1946,7 @@ const GROUPS = [
   // its own page (operator sign-in, drafts, deploy): the group button opens it
   ["Automation",  []],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
-  ["Labs",        ["Research", "Evals"]],
+  ["Labs",        ["Research", "Benchmark", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
   ["Access",      ["Machines", "Clients & Keys", "Secrets", "Helpers & Limits"]],
   // the workstation app: download, connected clients, install guide
@@ -1961,7 +1962,7 @@ const GROUP_HELP = {
   Routing: "How requests pick a model: personas, spending guardrails and the route map.",
   Automation: "One place to run the coordinator: roles, ordered routes, backend cutoffs, settings, role rules and the queue (opens its own page).",
   "Tools & MCP": "Tools the models can call, the MCP servers behind them, and agents.",
-  Labs: "Research settings and evaluation runs for personas.",
+  Labs: "Your own benchmark, research settings and evaluation runs for personas.",
   Logs: "Every request, event and log line, plus data export and training capture.",
   Access: "Client keys and who may use what; helper capacity and limits.",
   Client: "The Foundry Client workstation app: download the installer, see connected clients, and the install guide."};
@@ -9067,6 +9068,125 @@ function modeBadge(m) {
 }
 
 /* ----------------------------------------------------------------- evals -- */
+// Your own benchmark (v0.181.167): cases cut from work this router already did.
+async function tabBench() {
+  const [d, md] = await Promise.all([api("bench"), api("models")]);
+  const r = d.run || {}, suites = d.suites || [], runs = d.runs || [];
+  const modelOpts = (md.models || []).filter(m => m.reachable && !m.embedding)
+    .map(m => `<option>${esc(m.id)}</option>`).join("");
+  const n = v => v == null ? "—" : (+v).toFixed(1);
+  const bar = v => v == null ? "—" : `<span class="meter" style="width:80px" title="${n(v)} of 100"><span style="width:${Math.max(0, Math.min(100, +v)).toFixed(0)}%"></span></span> ${n(v)}`;
+  const running = r.state === "running";
+  const suiteOpts = suites.map(s => `<option value="${esc(s.name)}">${esc(s.name)} — ${s.cases} case(s)</option>`).join("")
+    || '<option value="">no suite yet</option>';
+  const runRows = runs.map(x => `<tr>
+    <td class="mono nw">${esc((x.ts || "").slice(0, 16))}</td>
+    <td class="nw">${esc(x.model)}</td>
+    <td class="nw">${esc(x.suite)} <span class="hint">${x.scored}/${x.cases}</span></td>
+    <td>${esc(x.label || "")}</td>
+    <td class="nw">${bar(x.score)}</td>
+    <td class="nw">${n(x.tools_score)}</td>
+    <td class="nw">${x.code_score == null ? "—" : n(x.code_score)}</td>
+    <td class="nw">${x.seconds == null ? "—" : (+x.seconds).toFixed(1) + " s"}</td>
+    <td><span class="pill ${x.status === "done" ? "ok" : x.status === "failed" ? "bad" : "warn"}">${esc(x.status)}</span>${x.note ? ` <span class="hint">${esc(x.note)}</span>` : ""}</td>
+    <td class="nw"><button class="act" onclick="showBenchResults(${x.id})">cases</button>
+      <label class="hint"><input type="checkbox" class="bench-cmp" value="${x.id}"> compare</label></td>
+    </tr>`).join("");
+  $("#main").innerHTML = `
+    <h2>Benchmark — does a model do <i>your</i> work?</h2>
+    <p class="hint">Cases are cut from conversations this router captured and a gate or a review passed:
+      the conversation up to the point where the model had to act, the tools it was offered, and what it
+      actually did then. A run sends every case to one model and scores what comes back on what can be
+      measured — the tools it reached for, whether its code passes this router's code checks, and whether
+      it answered sensibly. Public benchmarks say nothing about your Luau; this does.</p>
+    <div class="card">
+      <div class="card-h">Make a suite</div>
+      <div class="row tight">
+        <label>name</label><input id="bs-name" size="18" value="verified-60">
+        <label title="How many cases. Each one costs a model call when the suite runs.">cases</label>
+        <input id="bs-limit" type="number" min="1" max="500" value="60" style="width:70px">
+        <label title="Which conversations to cut cases from. verified = a gate pass, a review approval or a vision approval.">quality</label>
+        <select id="bs-tier"><option value="verified">verified only</option><option value="verified,ok">verified and ok</option></select>
+        <label title="Only conversations with one of these tags. Empty = all of them.">tags</label>
+        <input id="bs-tags" data-multi="comma" size="22" placeholder="luau, blender…">
+        <button class="act primary" id="bs-build">Build the suite</button>
+        <span class="hint" id="bs-msg"></span></div>
+      <p class="hint" style="margin:6px 0 0">Built from the router's prepared store, newest work first.
+        ${suites.length ? "Suites: " + suites.map(s => `<b>${esc(s.name)}</b> (${s.cases})`).join(", ") : "None yet."}</p>
+    </div>
+    <div class="card">
+      <div class="card-h">Run one${running ? ` <span class="pill warn">running: ${r.done || 0} of ${r.cases || 0}${r.score != null ? `, ${n(r.score)} so far` : ""}</span>` : ""}</div>
+      <div class="row tight">
+        <label>suite</label><select id="br-suite">${suiteOpts}</select>
+        <label>model</label><select id="br-model">${modelOpts}</select>
+        <label title="What you are trying, in your own words. It is shown next to the score.">what is this trying?</label>
+        <input id="br-label" size="26" placeholder="e.g. after the route change">
+        <button class="act primary" id="br-go" ${running ? "disabled" : ""}>Run</button>
+        ${running ? '<button class="act" id="br-stop">Stop</button>' : ""}
+        <span class="hint" id="br-msg">${r.state === "failed" ? esc(r.error || "failed") : ""}</span></div>
+    </div>
+    <h2>Runs</h2>
+    ${runs.length ? `<table><tr><th>when</th><th>model</th><th>suite</th><th>trying</th><th>score</th>
+      <th title="Did it reach for the same tools?">tools</th><th title="Code that passed this router's checks">code</th>
+      <th>per case</th><th>state</th><th></th></tr>${runRows}</table>
+      <div class="row tight" style="margin-top:8px"><button class="act" id="bench-compare">Compare the two ticked</button>
+        <span class="hint" id="bench-cmp-msg"></span></div>`
+      : '<p class="hint">No runs yet.</p>'}
+    <div id="bench-detail"></div>`;
+  enhancePickers($("#main"));
+  $("#bs-build").onclick = async () => {
+    $("#bs-msg").textContent = "cutting the cases…";
+    try {
+      const out = await api("bench/suite", {method: "POST", body: {
+        name: $("#bs-name").value.trim(), limit: +$("#bs-limit").value || 60,
+        tiers: $("#bs-tier").value.split(","),
+        tags: ($("#bs-tags").value || "").split(",").map(x => x.trim()).filter(Boolean)}});
+      if (out.error) { $("#bs-msg").innerHTML = `<span class="pill bad">${esc(out.error)}</span>`; return; }
+      toast(`${out.suite.cases} case(s) in ${out.suite.name}`); render();
+    } catch (e) { $("#bs-msg").innerHTML = `<span class="pill bad">${esc(e.message)}</span>`; }
+  };
+  $("#br-go").onclick = async () => {
+    try {
+      const out = await api("bench/run", {method: "POST", body: {
+        suite: $("#br-suite").value, model: $("#br-model").value, label: $("#br-label").value.trim()}});
+      if (out.error) { toast(out.error, true); return; }
+      toast("Running"); render();
+    } catch (e) { toast(e.message, true); }
+  };
+  if ($("#br-stop")) $("#br-stop").onclick = async () => {
+    await api("bench/run", {method: "POST", body: {stop: true}}); toast("Stopping"); render();
+  };
+  if ($("#bench-compare")) $("#bench-compare").onclick = async () => {
+    const ticked = [...document.querySelectorAll(".bench-cmp:checked")].map(x => +x.value);
+    if (ticked.length !== 2) { $("#bench-cmp-msg").textContent = "tick exactly two runs"; return; }
+    const [b, a] = ticked;                       // newest first in the table
+    const c = await api(`bench/compare?a=${a}&b=${b}`);
+    const row = x => `<tr><td class="mono">${esc(x.case_id)}</td><td class="nw">${esc(x.task_id)}</td>
+      <td class="nw">${n(x.a)}</td><td class="nw">${n(x.b)}</td>
+      <td class="nw"><span class="pill ${x.change > 0 ? "ok" : x.change < 0 ? "bad" : ""}">${x.change > 0 ? "+" : ""}${n(x.change)}</span></td></tr>`;
+    $("#bench-detail").innerHTML = `<div class="card"><div class="card-h">Run ${a} → run ${b}</div>
+      <p class="hint">${c.shared} case(s) in both · ${c.better} better · ${c.worse} worse ·
+        ${esc((c.a || {}).model || "")} ${n((c.a || {}).score)} → ${esc((c.b || {}).model || "")} ${n((c.b || {}).score)}</p>
+      <table><tr><th>case</th><th>task</th><th>before</th><th>after</th><th>change</th></tr>
+        ${(c.cases || []).map(row).join("")}</table></div>`;
+    $("#bench-detail").scrollIntoView({behavior: "smooth", block: "nearest"});
+  };
+}
+window.showBenchResults = async id => {
+  const d = await api(`bench/results?run_id=${id}`);
+  const n = v => v == null ? "—" : (+v).toFixed(1);
+  $("#bench-detail").innerHTML = `<div class="card"><div class="card-h">Run ${id} — every case</div>
+    <table><tr><th>case</th><th>task</th><th>score</th><th>tools wanted</th><th>tools called</th>
+      <th>code</th><th>chars</th><th>took</th><th>problem</th></tr>
+    ${(d.results || []).map(r => `<tr><td class="mono">${esc(r.case_id)}</td><td class="nw">${esc(r.task_id || "")}</td>
+      <td class="nw">${n(r.score)}</td>
+      <td class="mono">${esc((JSON.parse(r.tools_expected || "[]") || []).join(", ") || "—")}</td>
+      <td class="mono">${esc((JSON.parse(r.tools_called || "[]") || []).join(", ") || "—")}</td>
+      <td class="nw">${r.code_pass == null ? "—" : r.code_pass ? '<span class="pill ok">pass</span>' : `<span class="pill bad" title="${esc(r.code_detail || "")}">fail</span>`}</td>
+      <td class="nw">${r.answer_chars || 0}</td><td class="nw">${(+r.seconds || 0).toFixed(1)} s</td>
+      <td>${esc((r.error || "").slice(0, 120))}</td></tr>`).join("")}</table></div>`;
+  $("#bench-detail").scrollIntoView({behavior: "smooth", block: "nearest"});
+};
 async function tabEvals() {
   const [pd, md, rd, ed] = await Promise.all([
     api("personas"), api("models"), api("eval/runs"), api("eval/prompts")]);

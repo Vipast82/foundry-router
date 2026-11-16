@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.167 - your own benchmark, built from work this router already did
+
+Item 1 of the "useful without fine-tuning" plan, and the thing that tells you
+whether any of the others helped. A model scores well on public benchmarks and
+then writes Luau that does not compile or calls the wrong tool; what matters is
+the work in front of it.
+
+- **A suite** (Labs -> Benchmark) is cut from the conversations this router
+  captured that a gate or a review passed. Each case is the conversation up to
+  the point where the model had to act, the tools it was offered, and what it
+  actually did then. Pick how many cases, which quality tiers and which tags;
+  they are cut from the prepared store, newest work first, and kept in
+  `<data>/bench/<name>.jsonl`.
+- **A run** sends every case to one model and scores what comes back on what can
+  be measured, with no human and no judge:
+  `tools` (did it reach for the same tools, in the same order - half the score),
+  `code` (does the code it wrote pass this router's code checks - 30%),
+  `answer` (did it answer at all, at a sensible length - 20%).
+  A part that does not apply to a case is left out of its score rather than
+  counted as zero.
+- **Two runs sit side by side**, case by case, so "we changed the route" has an
+  answer: what got better, what got worse, and which cases moved. Each run keeps
+  its own label in your words, its per-case detail, its seconds and its tokens.
+  `bench_runs` / `bench_results`.
+- Nothing is compared against a public leaderboard. Judging by a frontier model
+  comes later; everything here is measured.
+
+Also: **a checker's own log lines never reach the model.** luau-lsp prints which
+definitions file it loaded on every run, and that was going back as part of
+"what the checker said about your code". Those lines are now stripped from every
+checker's output (`code_checks.clean_output`).
+
+Tests: `tests/test_bench.py`.
+
 ## v0.181.166 - the code-checks image carries Roblox's type definitions
 
 Without them `luau-lsp analyze` does not know `game`, `Player` or any service:
