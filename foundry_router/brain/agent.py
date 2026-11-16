@@ -2170,8 +2170,23 @@ class AgentRunner:
         said = False                 # answer text already sent to the client
         # v0.181.168: work this router already did, that passed, for a request like
         # this one. Precedent in the prompt, not instruction, and the user is told.
-        from .. import recall
+        from .. import lessons, recall
         svc = getattr(self, "svc", None)
+        # v0.181.169: rules mined from mistakes that recurred here, each one approved
+        # by the operator. A static block: no lookup, no call, no cost.
+        if svc is not None and lessons.on_for(self._app_cfg("lessons"), ctx.persona):
+            lcfg = self._app_cfg("lessons")
+            rules = lessons.block(svc.db, int(getattr(lcfg, "max_chars", 1500) or 1500))
+            if rules:
+                at = 0
+                for i, m in enumerate(messages):
+                    if m.get("role") == "system":
+                        at = i + 1
+                messages.insert(at, {"role": "system", "content": rules})
+                n = rules.count("\n")
+                ctx.logger.record_guardrail(f"lessons: {n} approved rule(s) in the prompt")
+                yield AgentEvent("think", f"{n} rule(s) this project learned the hard way "
+                                          f"are in {worker}'s prompt.")
         if svc is not None and recall.on_for(self._app_cfg("recall"), ctx.persona):
             asked = next((m.get("content") or "" for m in reversed(messages)
                           if m.get("role") == "user" and (m.get("content") or "").strip()), "")

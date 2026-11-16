@@ -2,6 +2,59 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.169 - lessons: the mistakes that recur, as rules you approved
+
+Item 3 of the "useful without fine-tuning" plan, and the other half of recall.
+Recall carries the work that passed. This carries what went wrong, because a
+reviewer's finding is only worth something the second time if nobody has to
+find it again.
+
+- **Every finding is collected** from the prepared store: a check that failed,
+  a reviewer's text, a vision pass asking for changes, somebody rejecting the
+  work. There are thousands.
+- **They are grouped by what they MEAN**, not by how they were worded. Two
+  reviewers writing "keyboard copy is shown at touch sizes" and "Settings shows
+  key bindings in the pad frames" are the same lesson twice, and no regular
+  expression will ever say so - the embedding endpoint the semantic cache
+  already uses says so. (This is why the clustering is worth doing at all: the
+  findings in this store are prose, and the shapes a fingerprint can see -
+  `au.done_check.GATE`, `review:minor` - are the severity, not the lesson.)
+- **A mistake that happened more than once, in more than one piece of work,
+  becomes a candidate** (Logs → Training → Lessons): how often, which tasks,
+  and the real findings behind it. The thresholds are yours.
+- **Nothing is ever applied on its own.** A candidate waits for you. You write
+  the one line that would have prevented it - or press *Draft wording* and a
+  model suggests one, which is stored beside the rule and never as the rule -
+  and approve it. A rule cannot go active without wording. Rejected means
+  never offered again. Mining again updates how often a mistake has happened
+  and never touches what you decided.
+- **The approved rules go into the prompt** of a persona with **use the
+  rulebook** on, most-seen first, capped at how much of the prompt you allow.
+  A static block: no lookup, no call, no cost per request.
+- A pass can run on a schedule (`look every N hours`, 0 = only when you press
+  the button). A scheduled pass can only add to the review queue - it can
+  neither approve nor change a rule.
+- A Fable-class model is refused as the drafting model, by name, the way it is
+  refused everywhere else here.
+
+**Tried on the real findings before shipping it.** 300 reviewer findings from
+this project's own history, embedded and clustered: at 0.80 it found 8 mistakes
+worth a rule, and they are real ones - an asset re-uploaded with no slot-1
+ASSET_CHECK against the new id (9 findings, 3 tasks); `mesh_report.json` not
+regenerated after a rebuild (8 findings, 5 tasks); a gate PASS bound to a commit
+that is not the reviewed head (7, 2); ticked BUILD lines still citing the
+previous asset id and tri count (7, 2); and a diff rewriting non-ASCII
+characters into mojibake (4, 3). 0.72 merges everything into one 86-finding
+blob and 0.86 finds almost nothing, which is why the default is 0.80.
+
+Also: a test asserted that two helpers running together finished inside 0.45
+seconds of wall clock. It passed alone and failed under a loaded parallel run,
+and it never proved anything the overlap counter beside it does not - that
+counter can only reach 2 if both calls were in flight at the same moment. The
+wall clock is gone; the counter stays.
+
+Tests: `tests/test_lessons.py`.
+
 ## v0.181.168 - recall: the work this router already got right, found again
 
 Item 2 of the "useful without fine-tuning" plan. A hundred thousand captured

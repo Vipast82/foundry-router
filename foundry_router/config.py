@@ -983,6 +983,21 @@ class RecallConfig(BaseModel):
     rebuild_hours: int = Field(default=24, ge=0, le=720)      # 0 = only when asked
 
 
+class LessonsConfig(BaseModel):
+    """Mining the findings for mistakes that recur, and putting the ones the
+    operator approved into the prompt as rules (lessons.py). Uses the semantic
+    cache's embedding endpoint. Off until it is switched on; a persona opts in
+    with `lessons`, and no rule is ever applied without approval."""
+    enabled: bool = False
+    min_seen: int = Field(default=3, ge=2, le=100)        # findings before it is a candidate
+    min_tasks: int = Field(default=2, ge=1, le=100)       # separate pieces of work it bit
+    cluster_similarity: float = Field(default=0.80, ge=0.5, le=0.99)
+    max_findings: int = Field(default=8000, ge=100, le=20000)
+    max_chars: int = Field(default=1500, ge=200, le=20000)   # of prompt the rulebook may take
+    mine_hours: int = Field(default=0, ge=0, le=720)     # 0 = only when asked
+    draft_model: str = ""              # wording suggestions; never a Fable-class model
+
+
 class A2AAgentConfig(BaseModel):
     """A remote A2A agent a persona's helper row may name (a2a.py)."""
     name: str
@@ -1270,6 +1285,7 @@ class AppConfig(BaseModel):
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     code_checks: CodeChecksConfig = Field(default_factory=CodeChecksConfig)
     recall: RecallConfig = Field(default_factory=RecallConfig)
+    lessons: LessonsConfig = Field(default_factory=LessonsConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)

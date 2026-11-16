@@ -587,6 +587,12 @@ class Services:
             except Exception:
                 log.exception("training dataset preparation check failed")
             try:
+                from . import lessons
+                if lessons.due(self):
+                    lessons.start(self)                           # proposes only; never applies
+            except Exception:
+                log.exception("lessons check failed")
+            try:
                 from . import recall
                 if recall.due(self):
                     recall.start(self)                            # its own task on this loop

@@ -388,6 +388,41 @@ CREATE TABLE IF NOT EXISTS recall_entries (
 
 CREATE INDEX IF NOT EXISTS idx_recall_tier ON recall_entries(tier, dim);
 
+-- Lessons: the mistakes that recur, as rules the operator approved (lessons.py) -
+-- lesson_findings is the embedding cache, so mining again only embeds what is new.
+-- `anchor` is the newest finding of the cluster the lesson was mined from, which is
+-- what keeps the operator's decision attached to it across a re-mine.
+
+CREATE TABLE IF NOT EXISTS lesson_findings (
+  finding_id TEXT PRIMARY KEY,      -- source + task + text, hashed
+  ts TEXT,
+  source TEXT,                      -- check | review | human | gate | vision | critique
+  severity TEXT,
+  task_id TEXT,
+  text TEXT,
+  embedding BLOB,
+  dim INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS lessons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  anchor TEXT UNIQUE,               -- the finding the cluster is named after
+  rule TEXT,                        -- the operator's wording; what goes in the prompt
+  draft TEXT,                       -- a model's suggested wording, never used as-is
+  seen INTEGER,                     -- findings in the cluster
+  tasks TEXT,                       -- JSON list of task ids it bit
+  sources TEXT,                     -- JSON list
+  examples TEXT,                    -- JSON list of real finding texts
+  first_seen TEXT,
+  last_seen TEXT,
+  state TEXT,                       -- proposed | active | rejected
+  decided_by TEXT,
+  decided_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lessons_state ON lessons(state, seen);
+
 -- Misc durable key/value state (last poll timestamps, etc.) --------------------
 
 CREATE TABLE IF NOT EXISTS kv (

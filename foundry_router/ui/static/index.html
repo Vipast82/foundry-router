@@ -4314,6 +4314,29 @@ async function tabTraining() {
           <span class="hint" id="rc-msg">${Object.keys(tiers).length ? Object.entries(tiers).map(([k, v]) => `${esc(k)}: ${(+v).toLocaleString()}`).join(" · ") + " · " : ""}${rc.embed_model ? `embedded with ${esc(rc.embed_model)}` : '<span style="color:var(--bad)">no embedding model set — Routing → Semantic cache</span>'}${rr.state === "done" && rr.finished ? ` · last build ${when(rr.finished)}${rr.indexed ? `, ${(+rr.indexed).toLocaleString()} added` : ", nothing new"}` : ""}${rr.note ? " · " + esc(rr.note) : ""}</span></div>`;
       })()}
       ${(() => {
+        const lc = d.lessons || {}, lr = lc.run || {};
+        const state = lr.state === "running" ? `<span class="pill warn">looking${lr.embedded ? ` · ${(+lr.embedded).toLocaleString()} new finding(s) read` : ""}${lr.findings ? ` of ${(+lr.findings).toLocaleString()}` : ""}</span>`
+          : lr.state === "failed" ? `<span class="pill bad" title="${esc(lr.error || "")}">failed</span>`
+          : lc.proposed ? `<span class="pill warn">${lc.proposed} waiting for you</span>`
+          : lc.active ? `<span class="pill ok">${lc.active} rule(s) in use</span>`
+          : '<span class="pill">nothing mined yet</span>';
+        return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b title="The findings this work earned - a check that failed, a reviewer's text, a vision pass asking for changes, somebody rejecting it - grouped by what they MEAN rather than how they were worded. A mistake that happened more than once in more than one piece of work becomes a candidate rule. Nothing is ever applied on its own: you write or accept the wording and approve it, and only then does it go into the prompt of a persona that asks for it.">Lessons</b> ${state}
+          <label title="Off here takes the whole rulebook out of every prompt, whatever the personas say."><input type="checkbox" id="ls-on" ${lc.enabled ? "checked" : ""}> on</label>
+          <label title="How many findings a mistake needs before it is worth a rule.">after <input type="number" id="ls-seen" min="2" max="100" style="width:55px" value="${lc.min_seen ?? 3}"> findings</label>
+          <label title="In how many separate pieces of work. 2 or more keeps one messy task from becoming a rule.">in <input type="number" id="ls-tasks" min="1" max="100" style="width:55px" value="${lc.min_tasks ?? 2}"> tasks</label>
+          <label title="How alike two findings have to be to count as the same mistake. Higher means tighter, more literal groups.">alike at <input type="number" id="ls-sim" min="0.5" max="0.99" step="0.01" style="width:65px" value="${lc.cluster_similarity ?? 0.8}"></label>
+          <label title="The most findings read in one pass, newest first.">read <input type="number" id="ls-max" min="100" max="20000" step="100" style="width:80px" value="${lc.max_findings ?? 8000}"></label>
+          <label title="How much of the prompt the approved rulebook may take, in characters.">at most <input type="number" id="ls-chars" min="200" max="20000" step="100" style="width:80px" value="${lc.max_chars ?? 1500}"> chars</label>
+          <label title="How often a pass runs on its own. A scheduled pass only ever adds candidates to the queue - it can neither approve nor change a rule. 0 = only when you press the button.">look every <input type="number" id="ls-hours" min="0" max="720" style="width:60px" value="${lc.hours ?? 0}"> hours</label>
+          <label title="The model asked to suggest the wording of a rule. Only a suggestion - you decide the words. Never a Fable-class model.">draft with <input type="text" id="ls-model" style="width:150px" placeholder="off" value="${esc(lc.draft_model || "")}"></label>
+          <button class="act" id="ls-save">Save</button>
+          <button class="act" id="ls-mine" ${lr.state === "running" ? "disabled" : ""}>Look for lessons</button>
+          ${lr.state === "running" ? '<button class="act" id="ls-stop">Stop</button>' : ""}
+          <button class="act" id="ls-show">${lc.proposed ? `Review ${lc.proposed} candidate(s)` : "Show the rulebook"}</button>
+          <span class="hint">${(+lc.findings_cached || 0).toLocaleString()} finding(s) read so far${lc.active ? ` · ${lc.active} approved` : ""}${lc.rejected ? ` · ${lc.rejected} rejected` : ""}${lr.state === "done" && lr.finished ? ` · last pass ${when(lr.finished)}: ${(+lr.clusters || 0).toLocaleString()} group(s), ${+lr.new || 0} new` : lr.error ? " · " + esc(lr.error) : ""}</span>
+          <div id="ls-list" style="flex-basis:100%"></div></div>`;
+      })()}
+      ${(() => {
         const sw = c.sweep || {}, l = c.sweep_last || {};
         return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b title="Retention removes old records; the message text only they used is removed by this clean-up, so the store does not grow back.">Clean-up</b>
           ${sw.state === "running" ? `<span class="pill warn">working · ${(+sw.records || 0).toLocaleString()} records checked</span>` : sw.state === "error" ? `<span class="pill bad" title="${esc(sw.error || "")}">failed</span>` : ""}
@@ -4401,6 +4424,26 @@ async function tabTraining() {
     try { await api("training/capture", {method: "POST", body}); toast(msg); render(); }
     catch (e) { toast(e.message, true); }
   };
+  if ($("#ls-save")) $("#ls-save").onclick = async () => {
+    const body = {enabled: $("#ls-on").checked, min_seen: +$("#ls-seen").value || 3,
+                  min_tasks: +$("#ls-tasks").value || 2,
+                  cluster_similarity: +$("#ls-sim").value,
+                  max_findings: +$("#ls-max").value || 8000,
+                  max_chars: +$("#ls-chars").value || 1500,
+                  mine_hours: +$("#ls-hours").value || 0,
+                  draft_model: $("#ls-model").value.trim()};
+    try { await api("config/lessons", {method: "POST", body}); toast("Lessons settings saved"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#ls-mine")) $("#ls-mine").onclick = async () => {
+    try { await api("lessons/mine", {method: "POST", body: {}}); toast("Looking for mistakes that recur"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#ls-stop")) $("#ls-stop").onclick = async () => {
+    try { await api("lessons/mine", {method: "POST", body: {stop: true}}); toast("Stopping"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#ls-show")) $("#ls-show").onclick = () => showLessons();
   if ($("#rc-save")) $("#rc-save").onclick = async () => {
     const body = {enabled: $("#rc-on").checked,
                   tiers: $("#rc-tiers").value.split(",").map(s => s.trim()).filter(Boolean),
@@ -6878,6 +6921,8 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-codechecks" checked>
         <label title="Recall (Logs -> Training -> Recall): when a request looks like work this router already did that passed, the old request and what was done about it go into this persona's prompt as precedent. The user is told when it happens. Off by default.">use past work</label>
         <input type="checkbox" id="pe-recall">
+        <label title="Lessons (Logs -> Training -> Lessons): the rules you approved - mistakes that happened here more than once - go into this persona's prompt. A static block, no lookup and no cost. Off by default.">use the rulebook</label>
+        <input type="checkbox" id="pe-lessons">
         <label>review_model</label>
         <select id="pe-review-model">${reviewOpts}</select>
         <label title="Free pre-filter: the local routing brain screens whether the answer plausibly needs review before the (possibly paid) review model is invoked. Recommended ON — it saves review spend on obviously-fine answers.">review_prefilter</label>
@@ -6959,6 +7004,7 @@ async function tabPersonas() {
     review_enabled: $("#pe-review").checked ? 1 : 0,
     code_checks: $("#pe-codechecks").checked ? 1 : 0,
     recall: $("#pe-recall").checked ? 1 : 0,
+    lessons: $("#pe-lessons").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
     review_prefilter: $("#pe-prefilter").checked ? 1 : 0,
     client_compat: JSON.parse($("#pe-compat").value || "{}"),
@@ -7270,6 +7316,7 @@ window.editPersona = name => {
   $("#pe-review").checked = !!p.review_enabled;
   $("#pe-codechecks").checked = p.code_checks == null ? true : !!p.code_checks;
   $("#pe-recall").checked = !!p.recall;
+  $("#pe-lessons").checked = !!p.lessons;
   // A configured review model may be temporarily unreachable (not in the
   // select's options) — inject it so editing doesn't silently drop it.
   const rm = $("#pe-review-model");
@@ -9233,6 +9280,55 @@ async function tabBench() {
     $("#bench-detail").scrollIntoView({behavior: "smooth", block: "nearest"});
   };
 }
+window.showLessons = async state => {
+  const box = $("#ls-list");
+  if (!box) return;
+  box.innerHTML = '<span class="hint">reading...</span>';
+  let d;
+  try { d = await api("lessons" + (state ? `?state=${encodeURIComponent(state)}` : "")); }
+  catch (e) { box.innerHTML = `<span class="hint" style="color:var(--bad)">${esc(e.message)}</span>`; return; }
+  const rows = d.lessons || [];
+  const tabs = ["", "proposed", "active", "rejected"].map(s =>
+    `<button class="act${s === (state || "") ? " primary" : ""}" onclick="showLessons('${s}')">${s || "all"}</button>`).join(" ");
+  box.dataset.state = state || "";
+  if (!rows.length) {
+    box.innerHTML = `<div class="row" style="gap:6px">${tabs}</div><span class="hint">Nothing here yet. Press "Look for lessons" once the dataset is prepared.</span>`;
+    return;
+  }
+  box.innerHTML = `<div class="row" style="gap:6px;margin:6px 0">${tabs}</div>` + rows.map(r => `
+    <div class="row" style="flex-wrap:wrap;gap:4px 10px;border-top:1px solid var(--line);padding:6px 0" data-lesson="${r.id}">
+      <span class="pill ${r.state === "active" ? "ok" : r.state === "rejected" ? "" : "warn"}">${esc(r.state)}</span>
+      <span class="hint">seen ${+r.seen} time(s) in ${(r.tasks || []).length} task(s)${(r.sources || []).length ? " · " + esc((r.sources || []).join(", ")) : ""}${r.last_seen ? " · last " + esc(String(r.last_seen).slice(0, 10)) : ""}</span>
+      <input type="text" class="ls-rule" style="flex-basis:100%" placeholder="the one line that would have prevented this" value="${esc(r.rule || r.draft || "")}">
+      <button class="act" onclick="lessonDecide(${r.id}, 'active')">Approve</button>
+      <button class="act" onclick="lessonDecide(${r.id}, 'rejected')">Reject</button>
+      ${r.state !== "proposed" ? `<button class="act" onclick="lessonDecide(${r.id}, 'proposed')">Undecide</button>` : ""}
+      <button class="act" onclick="lessonDraft(${r.id})" title="Ask the drafting model to suggest the wording. Only a suggestion.">Draft wording</button>
+      <details style="flex-basis:100%"><summary class="hint">the findings behind it (${(r.examples || []).length})</summary>
+        ${(r.examples || []).map(e => `<div class="hint" style="margin:3px 0">— ${esc(e)}</div>`).join("")}
+        <div class="hint">${esc((r.tasks || []).join(", "))}</div></details>
+    </div>`).join("");
+};
+
+window.lessonDecide = async (id, state) => {
+  const row = document.querySelector(`[data-lesson="${id}"] .ls-rule`);
+  try {
+    await api("lessons/decide", {method: "POST", body: {id, state, rule: row ? row.value.trim() : ""}});
+    toast(state === "active" ? "Rule approved — it is in the prompt now" : `Lesson ${state}`);
+    showLessons($("#ls-list").dataset.state || "");
+  } catch (e) { toast(e.message, true); }
+};
+
+window.lessonDraft = async id => {
+  try {
+    const r = await api("lessons/draft", {method: "POST", body: {id}});
+    if (!r.ok) { toast(r.error, true); return; }
+    const row = document.querySelector(`[data-lesson="${id}"] .ls-rule`);
+    if (row) row.value = r.draft;
+    toast(`${r.model} suggests: ${r.draft.slice(0, 60)}...`);
+  } catch (e) { toast(e.message, true); }
+};
+
 window.showBenchResults = async id => {
   const d = await api(`bench/results?run_id=${id}`);
   const n = v => v == null ? "—" : (+v).toFixed(1);
