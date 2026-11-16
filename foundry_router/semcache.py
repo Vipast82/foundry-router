@@ -263,20 +263,20 @@ class SemanticCache:
     def purge(self) -> int:
         """Drop expired entries, then enforce max_entries (oldest-activity
         first). Called on every store — cheap at these sizes."""
-        removed = self.db.execute(
+        removed = self.db.execute_count(
             "DELETE FROM semantic_cache WHERE "
             "strftime('%s','now') - strftime('%s', ts) > ttl_seconds")
         over = self.db.query_one("SELECT COUNT(*) AS n FROM semantic_cache")
         excess = (over["n"] if over else 0) - int(self.cfg.max_entries)
         if excess > 0:
-            self.db.execute(
+            self.db.execute_count(
                 "DELETE FROM semantic_cache WHERE id IN ("
                 "SELECT id FROM semantic_cache "
                 "ORDER BY COALESCE(last_hit, ts) ASC LIMIT ?)", (excess,))
         return max(0, removed)
 
     def clear(self) -> int:
-        return self.db.execute("DELETE FROM semantic_cache")
+        return self.db.execute_count("DELETE FROM semantic_cache")
 
     def stats(self) -> dict[str, Any]:
         row = self.db.query_one(

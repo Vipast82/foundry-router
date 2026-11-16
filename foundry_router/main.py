@@ -159,6 +159,7 @@ class Services:
                                  self.registry, self.guardrails, self.meridian_usage,
                                  research=self.research)
         self.semcache = SemanticCache(cfg.semantic_cache, self.http, db)
+        self.agent.svc = self            # recall.py needs the index and the embedder
         self.mcp_aggregator = MCPAggregator(self)
         from .media import MediaService
         self.media = MediaService(self)
@@ -585,6 +586,12 @@ class Services:
                     training_prep.start(self)                     # its own process
             except Exception:
                 log.exception("training dataset preparation check failed")
+            try:
+                from . import recall
+                if recall.due(self):
+                    recall.start(self)                            # its own task on this loop
+            except Exception:
+                log.exception("recall index check failed")
             try:
                 from . import training_archive
                 if training_archive.due(self):

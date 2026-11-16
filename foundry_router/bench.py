@@ -99,6 +99,15 @@ def _case_from(example: dict) -> Optional[dict]:
                                          for tc in (ref.get("tool_calls") or [])]}}
 
 
+def too_long(case: dict) -> bool:
+    """A case whose conversation is too big to send. `_tokens` answers
+    (count, how it counted) - comparing the pair itself is what broke the first
+    real suite build (v0.181.168)."""
+    from foundry_training import sessions
+    n, _how = sessions._tokens(json.dumps(case.get("messages") or [], default=str))
+    return int(n) > MAX_PROMPT_TOKENS
+
+
 def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=print) -> dict:
     """Cut a suite out of the prepared store. Newest conversations first, so a
     suite follows what the project is doing now."""
@@ -131,7 +140,7 @@ def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=pri
                 c = _case_from(ex)
                 if not c or c["id"] in seen:
                     continue
-                if sessions._tokens(json.dumps(c["messages"], default=str)) > MAX_PROMPT_TOKENS:
+                if too_long(c):
                     continue
                 seen.add(c["id"])
                 picked.append(c)

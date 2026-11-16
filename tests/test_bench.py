@@ -87,6 +87,13 @@ def test_a_case_is_the_conversation_up_to_what_the_model_did():
     assert bench._case_from({"messages": [{"role": "user", "content": "hi"}]}) is None
 
 
+def test_a_conversation_too_big_to_send_is_left_out():
+    small = {"messages": [{"role": "user", "content": "fix the spin script"}]}
+    huge = {"messages": [{"role": "user", "content": "x" * (bench.MAX_PROMPT_TOKENS * 4)}]}
+    assert bench.too_long(small) is False
+    assert bench.too_long(huge) is True                # and never raises on the pair
+
+
 # -- a run --------------------------------------------------------------------------------
 
 class Pool:

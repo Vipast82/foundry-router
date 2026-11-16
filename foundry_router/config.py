@@ -970,6 +970,19 @@ class CodeChecksConfig(BaseModel):
     rules: list[CodeCheckRuleConfig] = Field(default_factory=list)
 
 
+class RecallConfig(BaseModel):
+    """Finding the work that passed before and putting it in the prompt
+    (recall.py). Uses the semantic cache's embedding endpoint. Off until it is
+    switched on and the index is built; a persona opts in with `recall`."""
+    enabled: bool = False
+    tiers: list[str] = Field(default_factory=lambda: ["verified", "ok"])
+    top_k: int = Field(default=3, ge=1, le=20)           # matches put in the prompt
+    min_similarity: float = Field(default=0.55, ge=0.0, le=1.0)
+    max_chars: int = Field(default=2000, ge=200, le=20000)   # of prompt the matches may take
+    max_entries: int = Field(default=20000, ge=100, le=100000)
+    rebuild_hours: int = Field(default=24, ge=0, le=720)      # 0 = only when asked
+
+
 class A2AAgentConfig(BaseModel):
     """A remote A2A agent a persona's helper row may name (a2a.py)."""
     name: str
@@ -1256,6 +1269,7 @@ class AppConfig(BaseModel):
     training_capture: TrainingCaptureConfig = Field(default_factory=TrainingCaptureConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
     code_checks: CodeChecksConfig = Field(default_factory=CodeChecksConfig)
+    recall: RecallConfig = Field(default_factory=RecallConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)

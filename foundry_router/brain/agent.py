@@ -2168,6 +2168,30 @@ class AgentRunner:
                              # so it cannot already be on the client's screen
                              and not checking)
         said = False                 # answer text already sent to the client
+        # v0.181.168: work this router already did, that passed, for a request like
+        # this one. Precedent in the prompt, not instruction, and the user is told.
+        from .. import recall
+        svc = getattr(self, "svc", None)
+        if svc is not None and recall.on_for(self._app_cfg("recall"), ctx.persona):
+            asked = next((m.get("content") or "" for m in reversed(messages)
+                          if m.get("role") == "user" and (m.get("content") or "").strip()), "")
+            hits = await recall.search(svc, asked) if asked else []
+            if hits:
+                rcfg = self._app_cfg("recall")
+                block = recall.note(hits, int(getattr(rcfg, "max_chars", 2000) or 2000))
+                at = 0
+                for i, m in enumerate(messages):
+                    if m.get("role") == "system":
+                        at = i + 1
+                messages.insert(at, {"role": "system", "content": block})
+                ctx.logger.record_guardrail(
+                    "recall: " + ", ".join(f"{h['case_id']} ({h['similarity']:.0%})"
+                                           for h in hits))
+                sims = ", ".join("{:.0%}".format(h["similarity"]) for h in hits)
+                yield AgentEvent("think", f"Found {len(hits)} piece(s) of work here that "
+                                          f"passed before for a request like this one "
+                                          f"({sims} similar) — given to {worker} as "
+                                          f"precedent.")
         from .. import tool_finder
         step, free_finds = 0, 0
         offer: Optional[list] = specs or None      # the tools offered on the next turn

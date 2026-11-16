@@ -4291,6 +4291,29 @@ async function tabTraining() {
             ${files.length ? ` · on the router at <span class="mono">${esc(p.where || "")}</span>; the archive copies it with "datasets" ticked` : ""}</span></div>`;
       })()}
       ${(() => {
+        const rc = d.recall || {}, rr = rc.run || {}, tiers = rc.by_tier || {};
+        const state = rr.state === "running" ? `<span class="pill warn">indexing${rr.total ? ` · ${(+rr.indexed || 0).toLocaleString()} of ${(+rr.total).toLocaleString()}` : ""}</span>`
+          : rr.state === "failed" ? `<span class="pill bad" title="${esc(rr.error || "")}">failed</span>`
+          : rc.entries ? `<span class="pill ok">${(+rc.entries).toLocaleString()} in the index</span>`
+          : '<span class="pill">not built yet</span>';
+        return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b title="The requests this router answered whose work passed a gate or a review, indexed by what was asked. When a new request looks like one of them, the old request and what was done about it go into the prompt as precedent - no fine-tuning involved. A persona opts in with 'use past work' on its own page; the model is always told where it came from, and the user sees a line saying it was used.">Recall</b> ${state}
+          <label title="Off here turns it off everywhere, whatever the personas say."><input type="checkbox" id="rc-on" ${rc.enabled ? "checked" : ""}> on</label>
+          <label title="Which labels the work must have earned to be indexed. 'verified' passed a gate or a review; 'ok' finished without a complaint. Comma-separated.">index <input type="text" id="rc-tiers" style="width:130px" value="${esc((rc.tiers || []).join(", "))}"></label>
+          <label title="How many past pieces of work go into a prompt at most.">top <input type="number" id="rc-topk" min="1" max="20" style="width:55px" value="${rc.top_k ?? 3}"></label>
+          <label title="How close a past request has to be to count as a match. Higher means fewer, closer matches.">at least <input type="number" id="rc-sim" min="0" max="1" step="0.05" style="width:65px" value="${rc.min_similarity ?? 0.55}"> similar</label>
+          <label title="How much of the prompt the matches may take, in characters.">at most <input type="number" id="rc-chars" min="200" max="20000" step="100" style="width:80px" value="${rc.max_chars ?? 2000}"> chars</label>
+          <label title="The most pieces of work kept in the index; the oldest go first.">keep <input type="number" id="rc-max" min="100" max="100000" step="100" style="width:80px" value="${rc.max_entries ?? 20000}"></label>
+          <label title="How often the index takes in work prepared since the last build. 0 = only when you press Build now.">rebuild every <input type="number" id="rc-hours" min="0" max="720" style="width:60px" value="${rc.hours ?? 24}"> hours</label>
+          <button class="act" id="rc-save">Save</button>
+          <button class="act" id="rc-build" ${rr.state === "running" ? "disabled" : ""}>Build now</button>
+          ${rr.state === "running" ? '<button class="act" id="rc-stop">Stop</button>' : ""}
+          <button class="act" id="rc-clear" ${rc.entries ? "" : "disabled"}>Clear</button>
+          <div class="row" style="flex-basis:100%;gap:6px">
+            <input type="text" id="rc-q" style="flex:1" placeholder="try it: describe a request and see what passed before">
+            <button class="act" id="rc-try">Search</button></div>
+          <span class="hint" id="rc-msg">${Object.keys(tiers).length ? Object.entries(tiers).map(([k, v]) => `${esc(k)}: ${(+v).toLocaleString()}`).join(" · ") + " · " : ""}${rc.embed_model ? `embedded with ${esc(rc.embed_model)}` : '<span style="color:var(--bad)">no embedding model set — Routing → Semantic cache</span>'}${rr.state === "done" && rr.finished ? ` · last build ${when(rr.finished)}${rr.indexed ? `, ${(+rr.indexed).toLocaleString()} added` : ", nothing new"}` : ""}${rr.note ? " · " + esc(rr.note) : ""}</span></div>`;
+      })()}
+      ${(() => {
         const sw = c.sweep || {}, l = c.sweep_last || {};
         return `<div class="row" style="flex-wrap:wrap;gap:6px 12px"><b title="Retention removes old records; the message text only they used is removed by this clean-up, so the store does not grow back.">Clean-up</b>
           ${sw.state === "running" ? `<span class="pill warn">working · ${(+sw.records || 0).toLocaleString()} records checked</span>` : sw.state === "error" ? `<span class="pill bad" title="${esc(sw.error || "")}">failed</span>` : ""}
@@ -4377,6 +4400,40 @@ async function tabTraining() {
   const capSet = async (body, msg) => {
     try { await api("training/capture", {method: "POST", body}); toast(msg); render(); }
     catch (e) { toast(e.message, true); }
+  };
+  if ($("#rc-save")) $("#rc-save").onclick = async () => {
+    const body = {enabled: $("#rc-on").checked,
+                  tiers: $("#rc-tiers").value.split(",").map(s => s.trim()).filter(Boolean),
+                  top_k: +$("#rc-topk").value || 3, min_similarity: +$("#rc-sim").value,
+                  max_chars: +$("#rc-chars").value || 2000,
+                  max_entries: +$("#rc-max").value || 20000,
+                  rebuild_hours: +$("#rc-hours").value || 0};
+    try { await api("config/recall", {method: "POST", body}); toast("Recall settings saved"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#rc-build")) $("#rc-build").onclick = async () => {
+    try { await api("recall/build", {method: "POST", body: {}}); toast("Indexing the work that passed"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#rc-stop")) $("#rc-stop").onclick = async () => {
+    try { await api("recall/build", {method: "POST", body: {stop: true}}); toast("Stopping"); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#rc-clear")) $("#rc-clear").onclick = async () => {
+    if (!confirm("Empty the recall index? The work itself is untouched; the index can be built again.")) return;
+    try { const r = await api("recall/clear", {method: "POST", body: {}}); toast(`${r.removed} removed`); render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  if ($("#rc-try")) $("#rc-try").onclick = async () => {
+    const q = $("#rc-q").value.trim();
+    if (!q) return;
+    $("#rc-msg").textContent = "searching...";
+    try {
+      const r = await api("recall/search", {method: "POST", body: {query: q}});
+      if (!(r.hits || []).length) { $("#rc-msg").textContent = r.note || "nothing similar enough"; return; }
+      $("#rc-msg").innerHTML = r.hits.map(h =>
+        `<div style="margin:4px 0"><b>${(h.similarity * 100).toFixed(0)}%</b> ${esc(h.tier)}${h.task_id ? " · " + esc(h.task_id) : ""}${(h.tools || []).length ? " · tools: " + esc(h.tools.slice(0, 6).join(", ")) : ""}<br><i>${esc(h.request.slice(0, 220))}</i><br>${esc(h.solution.slice(0, 300))}...</div>`).join("");
+    } catch (e) { $("#rc-msg").textContent = e.message; }
   };
   if ($("#prep-save")) $("#prep-save").onclick = () => capSet({
     prep_hours: +$("#prep-hours").value || 0, prep_max_tokens: +$("#prep-max").value || 32768,
@@ -6819,6 +6876,8 @@ async function tabPersonas() {
         <input type="checkbox" id="pe-review">
         <label title="Code checks (Routing and brain -> Code checks) run on this persona's replies. Turn it off for a persona whose code another gate already checks, such as a coding persona whose sprint runs the project's own gate.">check the code it writes</label>
         <input type="checkbox" id="pe-codechecks" checked>
+        <label title="Recall (Logs -> Training -> Recall): when a request looks like work this router already did that passed, the old request and what was done about it go into this persona's prompt as precedent. The user is told when it happens. Off by default.">use past work</label>
+        <input type="checkbox" id="pe-recall">
         <label>review_model</label>
         <select id="pe-review-model">${reviewOpts}</select>
         <label title="Free pre-filter: the local routing brain screens whether the answer plausibly needs review before the (possibly paid) review model is invoked. Recommended ON — it saves review spend on obviously-fine answers.">review_prefilter</label>
@@ -6899,6 +6958,7 @@ async function tabPersonas() {
     selection_weights: JSON.parse($("#pe-weights").value || "{}"),
     review_enabled: $("#pe-review").checked ? 1 : 0,
     code_checks: $("#pe-codechecks").checked ? 1 : 0,
+    recall: $("#pe-recall").checked ? 1 : 0,
     review_model: $("#pe-review-model").value || null,
     review_prefilter: $("#pe-prefilter").checked ? 1 : 0,
     client_compat: JSON.parse($("#pe-compat").value || "{}"),
@@ -7209,6 +7269,7 @@ window.editPersona = name => {
   $("#pe-weights").value = p.selection_weights || "{}";
   $("#pe-review").checked = !!p.review_enabled;
   $("#pe-codechecks").checked = p.code_checks == null ? true : !!p.code_checks;
+  $("#pe-recall").checked = !!p.recall;
   // A configured review model may be temporarily unreachable (not in the
   // select's options) — inject it so editing doesn't silently drop it.
   const rm = $("#pe-review-model");
