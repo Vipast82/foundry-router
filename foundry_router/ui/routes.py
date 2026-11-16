@@ -1340,6 +1340,39 @@ async def training_archive_run(request: Request):
     return {"ok": True, "run": await asyncio.to_thread(training_archive.start, svc)}
 
 
+@router.get("/admin/api/training/events/cursor")
+async def training_events_cursor_admin(request: Request, source: str = "", sender: str = ""):
+    """Where this sender got to (the same as the /v1 route, on the admin API so a
+    machine that already reaches the admin panel needs no separate client key).
+    It is covered by the admin key when one is set."""
+    from .. import training_mirror
+    svc = _svc(request)
+    sender = sender or training_mirror.DEFAULT_SENDER
+    return {"source": source, "sender": sender,
+            "cursor": training_mirror.cursor(svc, source, sender),
+            "waiting": training_mirror.waiting(svc)}
+
+
+@router.post("/admin/api/training/events")
+async def training_events_admin(request: Request):
+    """Normalized training events from another machine, the same as
+    POST /v1/foundry/training/events (training_mirror.py) but on the admin API."""
+    from ..errors import describe_exception
+    from .. import training_mirror
+    svc = _svc(request)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("body must be a JSON object")
+        out = await asyncio.to_thread(
+            training_mirror.accept, svc, str(body.get("source") or ""),
+            body.get("events") or [], str(body.get("cursor") or ""),
+            str(body.get("sender") or training_mirror.DEFAULT_SENDER))
+    except ValueError as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/training/prep")
 async def training_prep_run(request: Request):
     """Prepare the dataset on the router now (training_prep.py), or `{"stop": true}`.
