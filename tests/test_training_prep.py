@@ -218,3 +218,28 @@ def test_routes_and_page():
     assert 'id="prep-stop"' in html and "training/prep/file/" in html
     docker = (Path(routes.__file__).parent.parent.parent / "Dockerfile").read_text()
     assert "COPY foundry_training/ ./foundry_training/" in docker       # the worker needs it in the image
+
+
+def test_the_worker_does_not_redact_a_third_time(tmp_path, monkeypatch):
+    """v0.181.161: capture redacted the records, the export redacts again."""
+    from foundry_training import redact
+    calls = []
+    real = redact.Redactor.obj
+    monkeypatch.setattr(redact.Redactor, "obj", lambda self, o: (calls.append(1), real(self, o))[1])
+    from foundry_training import sessions
+    at_export = []
+    real_export = sessions.export
+
+    def export(*a, **k):
+        at_export.append(len(calls))                      # how often it ran before the export
+        return real_export(*a, **k)
+    monkeypatch.setattr(sessions, "export", export)
+    st = _capture(tmp_path)
+    assert training_prep_worker.main(_args(tmp_path, st)) == 0
+    status = json.loads((tmp_path / "training" / "prep-status.json").read_text())
+    assert status["state"] == "done" and status["records"] == 5
+    assert at_export == [0]                               # reading the records redacted nothing
+    assert len(calls) > 0                                 # the export still redacts
+    payload, kept = training_prep_worker._AlreadyRedacted.obj({"a": 1})
+    assert payload == {"a": 1} and kept.status() == "clean" and kept.kinds() == [] and kept.count == 0
+

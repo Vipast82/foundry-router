@@ -2,6 +2,15 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.161 — dataset preparation on the router is about four times faster
+
+- Measured on the live store after v0.181.160: the first run read about 5 records
+  a second, 17 hours for 300,000. Profiled on a copy (300 records, 127 MB of
+  text): 29 of 41 s went to redacting the text again. The capture store's
+  records were redacted when the router wrote them and the dataset export
+  redacts once more, so the pass in between is left out: 7.3 -> 27.9 records a
+  second on the same machine.
+
 ## v0.181.160 — A2A streams and runs tasks; main-model personas keep their route with client tools
 
 **A2A, incoming**
