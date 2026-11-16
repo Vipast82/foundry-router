@@ -977,7 +977,13 @@ class RecallConfig(BaseModel):
     enabled: bool = False
     tiers: list[str] = Field(default_factory=lambda: ["verified", "ok"])
     top_k: int = Field(default=3, ge=1, le=20)           # matches put in the prompt
-    min_similarity: float = Field(default=0.55, ge=0.0, le=1.0)
+    # An absolute cutoff is the wrong instrument: what counts as similar depends on the
+    # embedding model and on how long the documents are. Measured on this router's own
+    # store with nomic-embed-text, a genuine topical match scores 0.54-0.62, and a 0.55
+    # cutoff threw correct answers away (v0.181.170). So: a low absolute floor for
+    # sanity, and a relative one that keeps only what is nearly as good as the best hit.
+    min_similarity: float = Field(default=0.45, ge=0.0, le=1.0)
+    relative_floor: float = Field(default=0.90, ge=0.0, le=1.0)
     max_chars: int = Field(default=2000, ge=200, le=20000)   # of prompt the matches may take
     max_entries: int = Field(default=20000, ge=100, le=100000)
     rebuild_hours: int = Field(default=24, ge=0, le=720)      # 0 = only when asked

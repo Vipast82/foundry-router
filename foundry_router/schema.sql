@@ -380,13 +380,21 @@ CREATE TABLE IF NOT EXISTS recall_entries (
   tier TEXT,                        -- verified | ok | ... (the label the work earned)
   tags TEXT,                        -- JSON list
   tools TEXT,                       -- JSON list of tool names the work used
-  request TEXT,                     -- what was asked (this is what is embedded)
+  request TEXT,                     -- what was asked, as it was asked
+  gist TEXT,                        -- the same with the corpus boilerplate stripped: embedded
   solution TEXT,                    -- what was done about it
   embedding BLOB,
   dim INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_recall_tier ON recall_entries(tier, dim);
+
+-- The boilerplate the last build found (normalized lines). Kept so a query is
+-- stripped the same way the index was, which is the only way the two compare.
+
+CREATE TABLE IF NOT EXISTS recall_boilerplate (
+  line TEXT PRIMARY KEY
+);
 
 -- Lessons: the mistakes that recur, as rules the operator approved (lessons.py) -
 -- lesson_findings is the embedding cache, so mining again only embeds what is new.

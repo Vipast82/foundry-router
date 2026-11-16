@@ -92,10 +92,27 @@ async def test_the_closest_past_work_comes_back_first(tmp_path):
     await _put(svc, "b", "the door will not open", "fixed the prompt")
     await _put(svc, "c", "no sound on the ui", "wired the sound")
     await _put(svc, "d", "spin wobble", "slowed it down")         # some of the same words
+    svc.config_store.config.recall = RecallConfig(enabled=True, relative_floor=0)
     hits = await recall.search(svc, "spin jitter at the arc again", min_similarity=0.1)
     assert [h["case_id"] for h in hits] == ["a", "d"]              # closest first, the rest out
     assert hits[0]["similarity"] > hits[1]["similarity"]
     assert hits[0]["tags"] == ["luau"] and hits[0]["tools"] == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_a_match_much_weaker_than_the_best_one_is_dropped(tmp_path):
+    """The relative floor, which is what actually separates a match from noise: an
+    absolute cutoff depends on the embedding model, this does not."""
+    svc = _svc(tmp_path, cfg=RecallConfig(enabled=True, relative_floor=0.9))
+    await _put(svc, "best", "spin jitter arc")
+    await _put(svc, "weaker", "spin wobble")                      # same topic, further off
+    hits = await recall.search(svc, "spin jitter arc", min_similarity=0.1)
+    assert [h["case_id"] for h in hits] == ["best"]
+    # with it off, the weaker one comes back too
+    svc.config_store.config.recall = RecallConfig(enabled=True, relative_floor=0)
+    loose = await recall.search(svc, "spin jitter arc", min_similarity=0.1)
+    assert [h["case_id"] for h in loose] == ["best", "weaker"]
+    assert loose[1]["similarity"] < loose[0]["similarity"] * 0.9
 
 
 @pytest.mark.asyncio
@@ -213,3 +230,93 @@ async def test_the_python_path_and_the_sql_path_agree(tmp_path, monkeypatch):
     rows = svc.db.query("SELECT case_id, request FROM recall_entries ORDER BY case_id")
     assert [r["case_id"] for r in rows] == ["a", "b"]
     assert [h["case_id"] for h in plain] == ["a", "b"] or plain[0]["case_id"] == "a"
+
+
+# -- the envelope, and what is left of a request after it -----------------------------------
+
+ENVELOPE = """{kind} session for sprint {task} - {title} (coordinator run {task}-a1-{run}).
+
+TRACK SPRINT (track `assets-local`): no Studio here. The main sprint owns Studio and Rojo.
+Project rules: docs/rules/SESSION_CORE.md is the session core; read it first.
+Read docs/progress/STATE.md header and the last 5 ledger rows, then the plan.
+Tier: C.
+## Goal
+{goal}
+"""
+
+
+def _request(kind, task, title, goal, run="abc123"):
+    return ENVELOPE.format(kind=kind, task=task, title=title, goal=goal, run=run)
+
+
+def _corpus():
+    return [_request("BUILD", "AS-D03", "Enemies: EN-BADGER", "rig and colour the badger"),
+            _request("REPAIR", "AS-D12", "Enemies: EN-RHINO", "the rhino mesh is too dense"),
+            _request("BUILD", "GF-SEC3", "Server movement sanity", "clamp the walk speed"),
+            _request("CLOSE", "AS-A21", "Music: late waves", "generate the two stings"),
+            _request("BUILD", "UI-D1", "HUD tokens", "the ability button must fit a phone")]
+
+
+def test_the_lines_every_request_shares_are_the_envelope():
+    common = recall.common_lines(_corpus())
+    joined = " ".join(common)
+    assert "track sprint" in joined and "session core" in joined and "ledger rows" in joined
+    # what makes one request itself is never boilerplate
+    assert not any("badger" in c or "walk speed" in c for c in common)
+
+
+def test_what_is_left_of_a_request_is_the_task():
+    corpus = _corpus()
+    common = recall.common_lines(corpus)
+    g = recall.gist(corpus[0], common)
+    assert "rig and colour the badger" in g and "EN-BADGER" in g
+    assert "TRACK SPRINT" not in g and "SESSION_CORE" not in g and "ledger rows" not in g
+    assert len(g) < len(corpus[0]) / 2                   # the envelope was most of it
+
+
+def test_stripping_pulls_different_requests_apart():
+    """The point of the whole exercise: two requests about different things must not
+    look alike just because they arrived in the same envelope."""
+    corpus = _corpus()
+    common = recall.common_lines(corpus)
+    badger, speed = corpus[0], corpus[2]
+    shared_before = len(set(badger.split()) & set(speed.split()))
+    shared_after = len(set(recall.gist(badger, common).split())
+                       & set(recall.gist(speed, common).split()))
+    assert shared_after < shared_before / 2
+
+
+def test_a_request_with_no_envelope_is_left_alone():
+    plain = ["the spin script jitters at the top of the arc, please clamp it",
+             "add a settings toggle for the minimap", "the door prompt never shows",
+             "write a check for the evidence log"]
+    common = recall.common_lines(plain)
+    assert common == set()                               # nothing is shared, nothing to strip
+    assert recall.gist(plain[0], common) == plain[0]
+
+
+def test_stripping_never_leaves_a_request_with_nothing_to_match_on():
+    # a request that is ALL boilerplate would otherwise end up empty
+    same = ["Project rules: docs/rules/SESSION_CORE.md is the session core; read it first."] * 6
+    common = recall.common_lines(same)
+    assert common                                        # it is boilerplate by any measure
+    assert recall.gist(same[0], common) == same[0].strip()      # but kept, for want of better
+
+
+def test_ids_and_numbers_do_not_make_two_boilerplate_lines_different():
+    a = "Read docs/progress/STATE.md header and the last 5 ledger rows at 7cf256b926b8."
+    b = "Read docs/progress/STATE.md header and the last 9 ledger rows at 0da5698b25b2."
+    assert recall._norm_line(a) == recall._norm_line(b)
+    assert recall._norm_line("## Goal") == ""            # too short to carry a thought
+
+
+def test_too_few_requests_to_tell_what_is_boilerplate():
+    assert recall.common_lines(["a line that repeats here"] * 3) == set()
+
+
+def test_the_note_shows_the_task_not_the_envelope():
+    hits = [{"case_id": "a", "similarity": 0.8, "tier": "verified", "tools": [],
+             "request": "BUILD session for sprint X\nTRACK SPRINT: no Studio here.\nrig the badger",
+             "gist": "rig the badger", "solution": "rigged it"}]
+    note = recall.note(hits)
+    assert "rig the badger" in note and "TRACK SPRINT" not in note

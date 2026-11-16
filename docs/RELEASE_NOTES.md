@@ -2,6 +2,53 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.170 - recall, corrected by its first real index
+
+The first live index was built and searched, and it did not work. 911 pieces of
+verified work went in, and then "the enemy animation plays at the wrong speed"
+came back with a sprint about **music stings** at 61%, while a plain question
+about the ability button on a phone matched nothing at all. Every score, for
+every query, sat between 61% and 63%.
+
+Two causes, both mine, both now fixed and both measured rather than guessed.
+
+**The envelope was being embedded instead of the request.** A sprint prompt from
+the coordinator is mostly the same every time: the `TRACK SPRINT` block, the
+project rules, read `STATE.md` first, the tier. On the live store that is 40% of
+the text, and with it included every request lands in nearly the same place -
+measured mean similarity between 20 unrelated requests was 0.86.
+
+The fix needs no list of patterns and nothing specific to this project: **a line
+that appears in a large share of the corpus cannot be what any one request is
+about.** Those lines are found at build time (37 of them on the live store),
+dropped before embedding, and kept in `recall_boilerplate` so a query is
+stripped the same way the index was - otherwise the two are not comparable. What
+survives is the title, the goal and the checklist. Mean similarity between those
+same 20 requests falls to 0.75, and the right answers score higher: 0.506 ->
+0.541 and 0.596 -> 0.618 on two real queries. The stripped text is stored
+(`gist`) and is what the UI shows and what goes into the prompt, so 600
+characters of precedent is now 600 characters of task.
+
+**The cutoff was throwing away correct answers.** `min_similarity` defaulted to
+0.55, and on this store with nomic-embed-text a genuine topical match scores
+0.54-0.62. That is why the UI question returned nothing: the right answer was
+below the bar. An absolute cutoff was the wrong instrument in the first place -
+what counts as "similar" depends on the embedding model and on how long the
+documents are, so the number cannot be right for everyone.
+
+So the absolute floor drops to 0.45 and does nothing but keep nonsense out, and
+a **relative floor** does the real work: a match is kept only if it is at least
+90% as similar as the best match found. That travels across embedding models,
+because the best hit sets the bar for the rest. Both are on the card.
+
+An existing index was embedded on the old text and should be rebuilt: Clear,
+then Build.
+
+Tests: `tests/test_recall.py` - the envelope, what survives it, that two
+requests about different things are pulled apart, that a request with no
+envelope is untouched, and that an all-boilerplate request is never left with
+nothing to match on.
+
 ## v0.181.169 - lessons: the mistakes that recur, as rules you approved
 
 Item 3 of the "useful without fine-tuning" plan, and the other half of recall.
