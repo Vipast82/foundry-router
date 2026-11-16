@@ -501,10 +501,14 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
                        parent=t.get("session_id") or "", purpose="review")
         c.store.op_update(key, "calling", {"session_id": sid})
         kw = {"schema": VISION_SCHEMA} if tries else {}
-        raw, meta = P.foundry.chat(persona, [
-            {"role": "system", "content": "You are a read-only, independent vision reviewer. "
-             "Judge only the actual attached frames. Never waive test gates or invent evidence."},
-            {"role": "user", "content": parts}], session_id=sid, max_tokens=5000, **kw)
+        from . import keepalive
+        # 2026-11-16 FIN-3a: a batch call (10 frames) can take minutes and ran with no
+        # heartbeat cover, so the coordinator looked dead mid-review and was restarted
+        with keepalive.busy(f"visual review {tid}", 900):
+            raw, meta = P.foundry.chat(persona, [
+                {"role": "system", "content": "You are a read-only, independent vision reviewer. "
+                 "Judge only the actual attached frames. Never waive test gates or invent evidence."},
+                {"role": "user", "content": parts}], session_id=sid, max_tokens=5000, **kw)
     except FoundryDenied as e:
         delay = max(60, int(e.retry_after or 300))
         c.store.op_update(key, "deferred", {"retry_at": c.clock() + delay,
