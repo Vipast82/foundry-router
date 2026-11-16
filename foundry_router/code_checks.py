@@ -44,6 +44,9 @@ FENCE = re.compile(r"^[ \t]*(?:```|~~~)[ \t]*([A-Za-z0-9_+#.-]*)[ \t]*\r?\n(.*?)
                    re.S | re.M)
 MAX_BLOCK = 400_000           # a block larger than this is not checked
 MAX_OUTPUT = 4000             # characters of a checker's output kept
+# a checker's own log lines: true of the run, not of the code, so the model never
+# sees them (luau-lsp prints which definitions file it loaded, and so on)
+NOISE = re.compile(r"^(\[(INFO|DEBUG|TRACE)\]|WARNING: --platform|\[WARN\] No definitions file)")
 EXT = {"luau": ".luau", "lua": ".lua", "python": ".py", "py": ".py", "json": ".json",
        "jsonc": ".json", "typescript": ".ts", "javascript": ".js", "yaml": ".yaml"}
 
@@ -102,6 +105,12 @@ def task_bound() -> bool:
 
 def _suffix(lang: str) -> str:
     return EXT.get(lang, ".txt")
+
+
+def clean_output(text: str) -> str:
+    """A checker's output with its own log lines taken out."""
+    kept = [ln for ln in (text or "").splitlines() if not NOISE.match(ln.strip())]
+    return "\n".join(kept).strip()
 
 
 def _builtin_python(code: str) -> str:
@@ -164,7 +173,7 @@ async def _command(rule: dict, code: str, lang: str) -> str:
                               f"{rule.get('timeout_seconds') or 20}s") from None
         if p.returncode == 0:
             return ""
-        text = (out or b"").decode("utf-8", "replace").strip().replace(path, "the file")
+        text = clean_output((out or b"").decode("utf-8", "replace").replace(path, "the file"))
         return text[:MAX_OUTPUT] or f"the checker ended with status {p.returncode}"
     finally:
         for p_ in (path,):
@@ -203,7 +212,8 @@ async def _service(rule: dict, code: str, lang: str) -> str:
                           f"{body.get('error') or r.status_code}")
     if int(body.get("status") or 0) == 0:
         return ""
-    return str(body.get("output") or "").strip()[:MAX_OUTPUT] or "the checker reported a problem"
+    return clean_output(str(body.get("output") or ""))[:MAX_OUTPUT] or \
+        "the checker reported a problem"
 
 
 async def run_one(rule: dict, code: str, lang: str) -> str:

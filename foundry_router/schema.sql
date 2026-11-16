@@ -701,3 +701,43 @@ CREATE TABLE IF NOT EXISTS brain_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_brain_calls_ts ON brain_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_brain_calls_rid ON brain_calls(request_id);
+
+-- Your own benchmark (bench.py, v0.181.167): cases cut from work this router
+-- already did, run against one model and scored on what can be measured.
+CREATE TABLE IF NOT EXISTS bench_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  suite TEXT,
+  model TEXT,
+  label TEXT,                       -- what was being tried, in the operator's words
+  cases INTEGER,
+  scored INTEGER,
+  tools_score REAL,                 -- 0-100: the tools it reached for
+  code_score REAL,                  -- 0-100: code that passed this router's checks
+  answer_score REAL,                -- 0-100: answered, at a sensible length
+  score REAL,                       -- 0-100 overall
+  seconds REAL,                     -- per case
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  status TEXT,                      -- running | done | stopped | failed
+  note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS bench_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER REFERENCES bench_runs(id),
+  case_id TEXT,
+  task_id TEXT,
+  tags TEXT,                        -- JSON list
+  tools_expected TEXT,              -- JSON list of tool names
+  tools_called TEXT,
+  tools_score REAL,
+  code_pass INTEGER,                -- NULL when the answer had no code
+  code_detail TEXT,
+  answer_chars INTEGER,
+  score REAL,
+  seconds REAL,
+  error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);
