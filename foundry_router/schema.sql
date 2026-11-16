@@ -368,6 +368,26 @@ CREATE TABLE IF NOT EXISTS semantic_cache (
 
 CREATE INDEX IF NOT EXISTS idx_semcache_persona ON semantic_cache(persona, category);
 
+-- Recall: past work that passed, indexed by what was asked (recall.py) ---------
+-- Same float32 BLOB format and the same embedding endpoint as semantic_cache.
+-- `case_id` identifies the piece of work, so a rebuild adds without duplicating.
+
+CREATE TABLE IF NOT EXISTS recall_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  case_id TEXT UNIQUE,              -- task/session/turn the work came from
+  task_id TEXT,
+  tier TEXT,                        -- verified | ok | ... (the label the work earned)
+  tags TEXT,                        -- JSON list
+  tools TEXT,                       -- JSON list of tool names the work used
+  request TEXT,                     -- what was asked (this is what is embedded)
+  solution TEXT,                    -- what was done about it
+  embedding BLOB,
+  dim INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_tier ON recall_entries(tier, dim);
+
 -- Misc durable key/value state (last poll timestamps, etc.) --------------------
 
 CREATE TABLE IF NOT EXISTS kv (

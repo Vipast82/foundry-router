@@ -844,6 +844,30 @@ def register(eng) -> None:                    # noqa: C901 - the catalog in one 
     async def performance_report(ctx: Ctx, a: dict):
         return await perf_report(eng, float(a.get("hours") or 24))
 
+    # ---- recall: the work that passed before -------------------------------------------
+    @eng._add("find_similar_work", "Search the recall index: requests this router answered "
+              "before whose work passed a gate or a review, found by how close they are to "
+              "`query` (recall.py). Returns what was asked, what was done about it, the tools "
+              "it used and how similar it is. Use it to answer 'have we done this before' and "
+              "'how did we do it last time'. Empty when the index is not built or nothing is "
+              "similar enough.", "read",
+              {"query": {"type": "string", "max": 4000},
+               "top_k": {"type": "number"},
+               "min_similarity": {"type": "number"},
+               "tags": {"type": "array", "max_items": 8}},
+              ("query",))
+    async def find_similar_work(ctx: Ctx, a: dict):
+        from . import recall
+        st = recall.status(ctx.svc)
+        hits = await recall.search(ctx.svc, str(a.get("query") or ""),
+                                   top_k=int(a.get("top_k") or 0),
+                                   min_similarity=a.get("min_similarity"),
+                                   tags=[t for t in (a.get("tags") or []) if t])
+        return {"indexed": st["entries"], "hits": hits,
+                "note": "" if hits else ("the recall index is empty — build it under Logs → "
+                                         "Training → Recall" if not st["entries"] else
+                                         "nothing similar enough in the index")}
+
     # ---- the chat's own backend -------------------------------------------------------
     @eng._add("get_chat_backend", "The operator chat's own model chain (which backend and model "
               "answer this chat; never a persona) and the backends/models it could use.", "read")

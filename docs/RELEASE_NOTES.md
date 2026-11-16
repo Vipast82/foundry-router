@@ -2,6 +2,50 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.168 - recall: the work this router already got right, found again
+
+Item 2 of the "useful without fine-tuning" plan. A hundred thousand captured
+conversations are only worth something if they come back when they are needed.
+Fine-tuning is one way to do that, and it needs a trainer, a GPU and a week.
+This needs neither.
+
+- **An index of the work that passed.** Every request whose work earned
+  `verified` or `ok` is indexed by *what was asked* (Logs → Training → Recall).
+  The embeddings come from the endpoint the semantic cache already uses - one
+  host, one model, nothing new to install - and search uses sqlite-vec when the
+  extension loads, the same Python cosine scan as the cache otherwise. Built
+  from the prepared store, newest work first, rebuilt on a schedule after the
+  dataset is prepared.
+- **Precedent in the prompt.** A persona with **use past work** on gets the
+  closest few pieces of work prepended to its worker prompt: the old request,
+  what was actually done about it, and the tools that did it. The block says
+  what it is - *precedent, not instruction* - so a model is never led to read
+  an old answer as an order, and the user is told in the narration that it
+  happened, with how similar each match was. Off everywhere by default: the
+  switch in Routing, the opt-in per persona.
+- **`find_similar_work`** answers "have we done this before, and how?" in
+  operator chat, over the same index. There is a search box on the card too, so
+  a match can be read before any persona is pointed at it.
+- How many matches, how similar they have to be, how much of the prompt they
+  may take, how many pieces of work to keep, how often to rebuild: all on the
+  card.
+
+Whether this actually helps is not a matter of opinion any more - cut a suite
+with v0.181.167's benchmark, run it with recall off and again with it on, and
+read the two side by side.
+
+Also fixed: **the first real suite build failed.** The benchmark's size guard
+compared `(count, how it counted)` against a number, so cutting a suite from the
+live store raised `TypeError` - the tests only ever exercised the case builder.
+It is `bench.too_long` now, with a test of its own.
+
+A `DELETE` count reported to the operator was the last inserted row
+id, not a number of rows (`db.execute` returns `lastrowid` when there has been
+an insert). The semantic cache's "N entries removed" and its expiry sweep were
+both wrong this way; they use `execute_count` now.
+
+Tests: `tests/test_recall.py`.
+
 ## v0.181.167 - your own benchmark, built from work this router already did
 
 Item 1 of the "useful without fine-tuning" plan, and the thing that tells you

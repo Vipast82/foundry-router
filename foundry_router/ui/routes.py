@@ -1226,7 +1226,7 @@ async def training_view(request: Request, project: str = "", status: str = ""):
         personas = []
     # wait=False: the per-project counts read every record (49 s on the live store), so
     # the page gets the last counts and a recount runs in the background
-    from .. import training_archive, training_prep
+    from .. import recall, training_archive, training_prep
     cap = await asyncio.to_thread(svc.capture.status, False)
     try:
         cap["sweep"] = dict(svc.capture.store.sweep)
@@ -1237,6 +1237,7 @@ async def training_view(request: Request, project: str = "", status: str = ""):
     return {"capture": cap, "pipelines": pipes,
             "prep": await asyncio.to_thread(training_prep.status, svc),
             "archive": await asyncio.to_thread(training_archive.status, svc),
+            "recall": await asyncio.to_thread(recall.status, svc),
             "episodes": eps,
             "options": {"backends": _configured_backends(svc), "personas": personas}}
 
@@ -3547,6 +3548,77 @@ async def host_control(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:                                        # noqa: BLE001
         return JSONResponse({"error": describe_exception(e)}, status_code=502)
+
+
+@router.get("/admin/api/recall")
+async def recall_status(request: Request):
+    """The recall index: how much passed work is in it, and the last build."""
+    from .. import recall
+    return recall.status(_svc(request))
+
+
+@router.post("/admin/api/recall/build")
+async def recall_build(request: Request):
+    """Index the passed work that is not in yet (a background task on the
+    router's own loop). `{"stop": true}` asks the running build to stop."""
+    from .. import recall
+    svc = _svc(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:                                             # noqa: BLE001
+        pass
+    if body.get("stop"):
+        return {"ok": True, **recall.stop()}
+    return {"ok": True, **recall.start(svc)}
+
+
+@router.post("/admin/api/recall/search")
+async def recall_search(request: Request):
+    """Search the index by hand: what was asked before, and what was done."""
+    from .. import recall
+    svc = _svc(request)
+    body = await request.json()
+    hits = await recall.search(svc, str(body.get("query") or ""),
+                               top_k=int(body.get("top_k") or 0),
+                               min_similarity=body.get("min_similarity"),
+                               tags=[t for t in (body.get("tags") or []) if t])
+    return {"ok": True, "hits": hits,
+            "note": "" if hits else "nothing similar enough in the index (is it built, and is "
+                                    "the embedding endpoint up?)"}
+
+
+@router.post("/admin/api/recall/clear")
+async def recall_clear(request: Request):
+    from .. import recall
+    svc = _svc(request)
+    n = recall.clear(svc)
+    svc.db.log_event("info", "recall", f"recall index cleared ({n} entries removed)")
+    return {"ok": True, "removed": n}
+
+
+@router.post("/admin/api/config/recall")
+async def set_recall(request: Request):
+    """Recall settings. Live: recall.py reads the config per request."""
+    from ..config import RecallConfig
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"enabled", "tiers", "top_k", "min_similarity", "max_chars",
+               "max_entries", "rebuild_hours"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    try:
+        RecallConfig(**{**svc.config_store.config.recall.model_dump(), **updates})
+
+        def mutate(raw):
+            raw.setdefault("recall", {}).update(updates)
+        cfg = svc.config_store.save(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.db.log_event("info", "admin",
+                     f"recall changed: {'on' if cfg.recall.enabled else 'off'}, "
+                     f"top {cfg.recall.top_k} at {cfg.recall.min_similarity:.0%} similarity")
+    return {"ok": True, "recall": cfg.recall.model_dump()}
 
 
 @router.post("/admin/api/code-checks")
