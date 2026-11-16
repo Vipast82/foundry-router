@@ -3800,7 +3800,11 @@ class Coordinator:
                     from . import asset_judge
                     rule = asset_judge.rule_for(P, spec, "visual", "after_close")
                     if rule and not self._valid_approval(P, t, spec, rule, t["head_sha"]):
-                        visual_approval.step(self, P, t, spec, rule, t["head_sha"])
+                        # 2026-11-16 FIN-3a: a 2394-frame review hashes and loads frames
+                        # between its batch calls; the whole step runs under heartbeat cover
+                        from . import keepalive
+                        with keepalive.busy(f"visual review step {tid}", 1800):
+                            visual_approval.step(self, P, t, spec, rule, t["head_sha"])
                         t = self.store.task(pid, tid)
                         if t["state"] != S.AWAITING_HUMAN:
                             return
