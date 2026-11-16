@@ -371,7 +371,10 @@ def test_the_container_is_optional_and_pinned():
     docker = (root / "contrib" / "code-checks" / "Dockerfile").read_text(encoding="utf-8")
     for tool in ("LUAU_LSP", "SELENE", "STYLUA"):
         assert f"{tool}_VERSION=" in docker and f"{tool}_SHA256=" in docker
-    assert docker.count("sha256sum -c -") == 3           # every download is checked
+    assert docker.count("sha256sum -c -") == 4           # every download is checked
+    # Roblox's type definitions: without them luau-lsp calls `game` an unknown global
+    assert "GLOBAL_TYPES_SHA256=" in docker and "globalTypes.d.luau" in docker
+    assert "/usr/local/share/luau/globalTypes.d.luau" in docker
     assert "USER checker" in docker
     html = (root / "foundry_router" / "ui" / "static" / "index.html").read_text(encoding="utf-8")
     assert '{key: "url", label: "service address"' in html
