@@ -305,6 +305,40 @@ class OpenAIAdmin:
 
     # -- unified diagnostics -------------------------------------------------------
 
+    async def control(self, backend: str, action: str, force: bool = False) -> dict:
+        """Load or unload the model of a server that offers it over HTTP (v0.181.159):
+        the Strata gateway's POST /unload and POST /load. Any other server is
+        refused: plain llama.cpp and vLLM have no such endpoint. An unload while
+        a request is in flight is refused unless `force`."""
+        if action not in ("load", "unload"):
+            raise ValueError("action must be load or unload")
+        s = self._server(backend)
+        if s is None:
+            raise ValueError(f"unknown backend {backend!r}")
+        root, headers = self._root(s.config.url), self._headers(s.config.api_key)
+        health = await self._probe_health(root, headers)
+        body = health.get("body") if isinstance(health.get("body"), dict) else {}
+        if body.get("service") != "strata":
+            raise ValueError("this server has no load / unload over HTTP (only the Strata gateway does)")
+        if action == "unload" and not force:
+            st = await self._probe_status(root, headers)
+            act = ((st.get("body") or {}).get("activity") or {}) if st.get("ok") else {}
+            if int(act.get("in_flight") or 0) > 0:
+                raise ValueError(f"{act['in_flight']} request(s) are running on it right now; "
+                                 "unloading would cut them off")
+        r = await self.client.post(f"{root}/{action}", headers=headers, content="{}",
+                                   timeout=httpx.Timeout(connect=5.0, read=900.0, write=30.0, pool=5.0))
+        try:
+            out = r.json()
+        except ValueError:
+            out = {}
+        if r.status_code >= 400:
+            err = out.get("error") if isinstance(out, dict) else None
+            raise RuntimeError((err.get("message") if isinstance(err, dict) else err)
+                               or f"HTTP {r.status_code}")
+        self.db.log_event("info", "admin", f"{backend}: model {action} asked from Host Admin")
+        return {"status": (out.get("status") if isinstance(out, dict) else "") or action + "ed"}
+
     async def diagnostics(self, backend: str) -> dict:
         """Probe the endpoints a backend's flavor supports and return a structured
         report. Read-only; per-probe failures are captured, not raised."""

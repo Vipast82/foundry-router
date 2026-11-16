@@ -185,6 +185,25 @@ class OllamaAdmin:
                         "quantization_level": det.get("quantization_level") or ""})
         return out
 
+    async def unload(self, backend: str, model: str) -> dict:
+        """Ask Ollama to drop a loaded model from memory now (keep_alive 0). A chat
+        model takes it on /api/generate; an embedding model only on /api/embed.
+        The next request for the model loads it again. Reports whether /api/ps
+        still lists it afterwards."""
+        url = self._url(backend)
+        r = await self.client.post(f"{url}/api/generate", json={"model": model, "keep_alive": 0},
+                                   timeout=_QUICK_TIMEOUT)
+        if r.status_code >= 400:
+            r2 = await self.client.post(f"{url}/api/embed",
+                                        json={"model": model, "input": "x", "keep_alive": 0},
+                                        timeout=_QUICK_TIMEOUT)
+            if r2.status_code >= 400:
+                raise RuntimeError(f"HTTP {r.status_code}: {(r.text or '')[:200]}")
+        still = model in await self.loaded(backend)
+        self.db.log_event("info", "admin", f"ollama {backend}: unload {model} asked"
+                                           + (" (still listed as loaded)" if still else ""))
+        return {"unloaded": not still}
+
     async def show(self, backend: str, model: str) -> dict:
         r = await self.client.post(f"{self._url(backend)}/api/show",
                                    json={"model": model, "name": model},

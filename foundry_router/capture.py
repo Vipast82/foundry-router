@@ -265,6 +265,10 @@ class CaptureStore:
         self.conn.execute("CREATE TABLE IF NOT EXISTS capture_meta (k TEXT PRIMARY KEY, v TEXT)")
         self.blobs = _blobs.BlobStore(_BlobDB(self), cache_bytes=64 * 1024 * 1024)
         self.compaction: dict = {"state": "idle"}
+        self.sweep: dict = {"state": "idle"}
+        self._pack_lock = threading.RLock()        # one record's packing + insert
+        # records pruned since the last blob clean-up; a restart assumes some were
+        self.pruned_since_sweep = 1
         self._compact_stop = False
         self._compactor: Optional[threading.Thread] = None
         if new:
@@ -287,14 +291,170 @@ class CaptureStore:
         return self.blobs.unpack(json.loads(text or "{}"))
 
     def insert(self, row: dict) -> int:
-        if isinstance(row.get("body"), str) and len(row["body"]) > 400:
-            row = {**row, "body": self.pack_body(row["body"])}     # `bytes` stays the real size
-        cols = list(row)
-        with self._lock:
-            cur = self.conn.execute(
-                f"INSERT OR IGNORE INTO capture_records ({', '.join(cols)}) VALUES "
-                f"({', '.join('?' * len(cols))})", [row[c] for c in cols])
-            return cur.lastrowid
+        # v0.181.159: packing and the insert are one step for the blob clean-up
+        # (sweep_blobs), which must never run between them
+        with self._pack_lock:
+            if isinstance(row.get("body"), str) and len(row["body"]) > 400:
+                row = {**row, "body": self.pack_body(row["body"])}     # `bytes` stays the real size
+            cols = list(row)
+            with self._lock:
+                cur = self.conn.execute(
+                    f"INSERT OR IGNORE INTO capture_records ({', '.join(cols)}) VALUES "
+                    f"({', '.join('?' * len(cols))})", [row[c] for c in cols])
+                return cur.lastrowid
+
+    def sweep_blobs(self, pause: float = 0.05, page: int = 500, step: int = 400) -> dict:
+        """Remove the message text no record uses any more (v0.181.159).
+
+        Retention deletes old records, but the text they pointed at stayed: over
+        time the store grew back. This marks what every remaining record still
+        uses, then deletes the rest a few hundred at a time.
+
+        Safe against records being written meanwhile: every deleting step first
+        marks the records added since the last one, and holds the lock a new
+        record takes for its packing and its insert, so a record never lands
+        between "its text is unused" and the delete. It reads on a connection of
+        its own, in pages, resting between them. Not run while the shrink is."""
+        from foundry_training import blobs as _b
+        st = self.sweep = {"state": "running", "started": time.time(), "records": 0,
+                           "blobs": 0, "kept": 0, "removed": 0, "error": ""}
+        if self._compactor is not None and self._compactor.is_alive():
+            st.update(state="skipped", error="the shrink is running", finished=time.time())
+            return st
+        keep_path = self.path.with_name("blob-sweep.sqlite")
+        for p in (keep_path, Path(str(keep_path) + "-journal")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        keep = sqlite3.connect(str(keep_path), check_same_thread=False)
+        keep.execute("PRAGMA journal_mode=OFF")
+        keep.execute("PRAGMA synchronous=OFF")
+        keep.execute("CREATE TABLE keep (sha TEXT PRIMARY KEY) WITHOUT ROWID")
+        rd = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True,
+                             check_same_thread=False, timeout=30)
+
+        def mark(obj, spans: set, out: set):
+            if _b.is_ref(obj):
+                out.add(obj[_b.KEY])
+            elif _b.is_span(obj):
+                out.add(obj[_b.SPAN_KEY])
+                spans.add(obj[_b.SPAN_KEY])
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    mark(v, spans, out)
+            elif isinstance(obj, list):
+                for v in obj:
+                    mark(v, spans, out)
+
+        def open_spans(spans: set, out: set):
+            todo = [s for s in spans]
+            for i in range(0, len(todo), 200):
+                chunk = todo[i:i + 200]
+                for sha, z in rd.execute(f"SELECT sha, z FROM blobs WHERE sha IN "
+                                         f"({','.join('?' * len(chunk))})", chunk).fetchall():
+                    try:
+                        mark(json.loads(__import__("zlib").decompress(z).decode("utf-8")), set(), out)
+                    except Exception:                             # noqa: BLE001
+                        pass
+
+        def mark_after(last: int, limit: int = 0) -> int:
+            """Mark the records after `last`; returns the last id marked."""
+            while True:
+                rows = rd.execute("SELECT id, body FROM capture_records WHERE id > ? ORDER BY id "
+                                  "LIMIT ?", (last, page)).fetchall()
+                if not rows:
+                    return last
+                out: set = set()
+                spans: set = set()
+                for rid, body in rows:
+                    if body and '"$' in body:
+                        try:
+                            mark(json.loads(body), spans, out)
+                        except ValueError:
+                            pass
+                new_spans = [s for s in spans if not keep.execute(
+                    "SELECT 1 FROM keep WHERE sha=?", (s,)).fetchone()]
+                open_spans(set(new_spans), out)
+                keep.executemany("INSERT OR IGNORE INTO keep (sha) VALUES (?)", [(s,) for s in out])
+                keep.commit()
+                last = rows[-1][0]
+                st["records"] += len(rows)
+                if limit and st["records"] >= limit:
+                    return last
+                if pause and not limit:
+                    time.sleep(pause)
+
+        try:
+            last = mark_after(0)
+            cursor = ""
+            while True:
+                with self._pack_lock:                        # no record is being written now
+                    last = mark_after(last, limit=10 ** 12)  # the ones added since, no resting
+                    self.blobs._known.clear()                # "already stored" is re-checked
+                    shas = [r[0] for r in rd.execute(
+                        "SELECT sha FROM blobs WHERE sha > ? ORDER BY sha LIMIT ?",
+                        (cursor, step)).fetchall()]
+                    if not shas:
+                        break
+                    cursor = shas[-1]
+                    st["blobs"] += len(shas)
+                    used = {r[0] for r in keep.execute(
+                        f"SELECT sha FROM keep WHERE sha IN ({','.join('?' * len(shas))})", shas)}
+                    gone = [s for s in shas if s not in used]
+                    st["kept"] += len(shas) - len(gone)
+                    if gone:
+                        with self._lock:
+                            self.conn.execute("BEGIN IMMEDIATE")
+                            try:
+                                self.conn.executemany("DELETE FROM blobs WHERE sha=?", [(s,) for s in gone])
+                                self.conn.execute("COMMIT")
+                            except BaseException:
+                                self.conn.execute("ROLLBACK")
+                                raise
+                        st["removed"] += len(gone)
+                if pause:
+                    time.sleep(pause)
+            self.blobs._known.clear()
+            self.blobs._cache.clear()
+            self.blobs._cache_n = 0
+            st.update(state="done", finished=time.time())
+            self._meta("blob_sweep", json.dumps({k: st[k] for k in ("finished", "records", "blobs",
+                                                                    "kept", "removed")}))
+        except Exception as e:                                    # noqa: BLE001
+            st.update(state="error", error=f"{type(e).__name__}: {e}"[:300], finished=time.time())
+            log.exception("blob sweep failed")
+        finally:
+            rd.close()
+            keep.close()
+            try:
+                keep_path.unlink()
+            except OSError:
+                pass
+        return st
+
+    def sweep_due(self, days: int, now: Optional[float] = None) -> bool:
+        """A clean-up is due when records were pruned since the last one and the
+        last one is `days` old."""
+        if days <= 0 or getattr(self, "sweep", {}).get("state") == "running":
+            return False
+        try:
+            lastrun = json.loads(self._meta("blob_sweep") or "{}")
+        except ValueError:
+            lastrun = {}
+        fin = float(lastrun.get("finished") or 0)
+        return self.pruned_since_sweep > 0 and (now or time.time()) - fin >= days * 86400
+
+    def sweep_start(self) -> dict:
+        if getattr(self, "sweep", {}).get("state") == "running":
+            return self.sweep
+
+        def run():
+            self.sweep_blobs()
+            self.pruned_since_sweep = 0
+        threading.Thread(target=run, name="foundry-capture-sweep", daemon=True).start()
+        time.sleep(0.05)
+        return self.sweep
 
     def insert_later(self, row: dict, on_error=None) -> None:
         """Hand a record to the writer thread and return at once. v0.181.131: the
@@ -519,6 +679,7 @@ class CaptureStore:
                     "WHERE ts < ? LIMIT 200)", (cut,)).rowcount
             n += d
             if d < 200:
+                self.pruned_since_sweep += n
                 return n
             if off_loop:
                 time.sleep(0.004)
