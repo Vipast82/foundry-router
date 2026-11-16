@@ -320,3 +320,40 @@ def test_the_note_shows_the_task_not_the_envelope():
              "gist": "rig the badger", "solution": "rigged it"}]
     note = recall.note(hits)
     assert "rig the badger" in note and "TRACK SPRINT" not in note
+
+
+def test_the_scaffold_around_a_title_is_boilerplate_too():
+    """A line can be unique as a whole and still be mostly scaffold: the frequency
+    rule has to see the pieces a writer joined, not just whole lines."""
+    corpus = _corpus()
+    common = recall.common_lines(corpus)
+    first = recall.gist(corpus[0], common).splitlines()[0]
+    assert "EN-BADGER" in first                         # the title survives
+    assert "session for sprint" not in first            # the scaffold does not
+    assert "coordinator run" not in first
+
+
+def test_a_sentence_nobody_else_wrote_is_never_dropped():
+    corpus = _corpus()
+    common = recall.common_lines(corpus)
+    g = recall.gist(corpus[2], common)
+    assert "clamp the walk speed" in g                  # unique: kept whatever happens
+
+
+def test_a_line_is_cut_into_the_pieces_a_writer_joined():
+    segs = recall.segments("BUILD session for sprint AS-D03 - Enemies: EN-BADGER "
+                           "(coordinator run AS-D03-a1-77a98b, attempt 3).")
+    assert "BUILD session for sprint AS-D03" in segs
+    assert any("EN-BADGER" in s for s in segs)
+    assert any("coordinator run" in s for s in segs)
+
+
+def test_what_is_not_work_is_left_out_of_the_index():
+    assert recall.looks_like_work("rig the badger and colour it from the palette") is True
+    # a tool's error handed back as the request
+    assert recall.looks_like_work("ERROR: Cannot read image (this model does not "
+                                  "support image input). Inform the user.") is False
+    assert recall.looks_like_work("Traceback (most recent call last): File x line 3") is False
+    # the same line over and over
+    assert recall.looks_like_work("\n".join(["the same long line of text here"] * 4)) is False
+    assert recall.looks_like_work("too short") is False

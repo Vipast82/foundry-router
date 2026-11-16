@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.171 - recall: the scaffold, and what is not work at all
+
+v0.181.170's index was searched on the live store and read honestly. Two of
+three real questions were answered well - a question about a gate evidence
+check script returned the gate tooling sprint at 63%, and a question about the
+ability button on a phone returned the HUD roster sprint where before it
+returned nothing at all. The third, about an animation playing at the wrong
+speed, still came back with an audio sprint. Two defects the output made
+visible, both fixed here.
+
+**The scaffold around a title is boilerplate too.** Dropping whole lines left
+every request still beginning `BUILD session for sprint AS-D03 - Enemies:
+EN-BADGER (coordinator run AS-D03-a1-77a98b, attempt 3)`, because the line as a
+whole is unique even though all of it except the title is scaffold. So the same
+frequency rule now applies to the **pieces a writer joined** - clauses,
+parentheticals, sentences - and not only to whole lines. One mechanism, and it
+catches the prefix, the parenthetical run id and the per-track `TRACK SPRINT
+(track ...)` variants together. On the live text a request falls from 4,000
+characters to 1,506, and a first line that read like the example above now
+reads `Enemies: EN-BADGER, EN-RSCOUT`.
+
+**Some of what was indexed was not work.** One entry's request was
+`ERROR: Cannot read image (this model does not support image input)`, repeated -
+a tool's error handed back as the request. It sat in the index matching anything
+vaguely about pictures. An entry whose request opens with an error or traceback,
+or which is one line repeated, is not a piece of work to learn from and is left
+out (`looks_like_work`), with the count reported on the build.
+
+An existing index should be rebuilt again: Clear, then Build. Whether any of
+this makes a model do better work is still an open question, and the benchmark
+(v0.181.167) is the thing that answers it - not a similarity score.
+
+Tests: `tests/test_recall.py`.
+
 ## v0.181.170 - recall, corrected by its first real index
 
 The first live index was built and searched, and it did not work. 911 pieces of

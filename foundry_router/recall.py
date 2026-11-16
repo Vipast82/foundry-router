@@ -47,7 +47,13 @@ MAX_ENTRIES = 100_000          # a hard ceiling whatever the setting says
 REQUEST_CHARS = 4000           # of a past request kept and shown
 MIN_GIST = 40                  # below this, stripping took the task away too: keep it all
 BOILERPLATE_SHARE = 0.05       # a line in this share of requests is envelope, not task
-_ID = re.compile(r"[0-9a-f]{6,}|\d+")       # run ids, attempt numbers, shas, sizes
+# Any token carrying a digit is an identifier, not a word: a task id (AS-D03), a sha,
+# an attempt number, a size. Counting them as themselves is what stopped "BUILD
+# session for sprint <id>" being recognised as the scaffold it is (v0.181.171).
+_TOKEN = re.compile(r"[\w.-]*\d[\w.-]*")
+# a line is cut into the pieces a writer joined: clauses, parentheticals, sentences
+_SEG = re.compile(r"\s+[\u2014\u2013-]\s+|[()\[\]]|(?<=[.:;])\s+")
+_ERROR = re.compile(r"(?i)^(error\b|traceback\b|exception\b|\[?fatal\b)")
 _state: dict = {"state": "idle"}
 _task: dict = {"t": None}
 
@@ -66,36 +72,76 @@ _task: dict = {"t": None}
 # found are kept (`recall_boilerplate`) so a query is stripped the same way the index was.
 
 def _norm_line(line: str) -> str:
-    """A line as it is counted: ids, numbers and spacing removed, so the same
-    boilerplate carrying a different run id counts as the same line. Lines too
-    short to carry a thought are not counted at all."""
-    s = _ID.sub("#", (line or "").lower())
-    s = re.sub(r"\s+", " ", s).strip(" \t-*#.:")
+    """A piece of text as it is counted: ids, numbers and spacing removed, so the
+    same boilerplate carrying a different run id counts as the same text. Pieces
+    too short to carry a thought are not counted at all."""
+    s = _TOKEN.sub("#", (line or "").lower())     # AS-D03, 7cf256b, a1, 512 -> #
+    s = re.sub(r"#[\s#]*#", "#", s)                # a run of them counts as one
+    s = re.sub(r"\s+", " ", s).strip(" \t-*#.:\u2014")
     return s if len(s) >= 12 else ""
 
 
+def segments(line: str) -> list:
+    """A line in the pieces a writer joined: clauses, parentheticals, sentences.
+    Counting these rather than whole lines is what catches a scaffold wrapped
+    around something unique - "BUILD session for sprint AS-D03 - Enemies:
+    EN-BADGER (coordinator run ...)" is boilerplate, a title, and boilerplate."""
+    return [s.strip() for s in _SEG.split(line or "") if s and s.strip()]
+
+
 def common_lines(texts: list, share: float = BOILERPLATE_SHARE) -> set:
-    """The boilerplate of this corpus: lines in at least `share` of the requests
-    (and in at least two). Too few requests to tell: nothing is boilerplate."""
+    """The boilerplate of this corpus: pieces of text appearing in at least
+    `share` of the requests (and in at least two). Too few requests to tell:
+    nothing is boilerplate."""
     n = len(texts)
     if n < 4:
         return set()
     seen: Counter = Counter()
     for t in texts:
-        seen.update({_norm_line(l) for l in (t or "").splitlines() if _norm_line(l)})
+        here = set()
+        for line in (t or "").splitlines():
+            if _norm_line(line):
+                here.add(_norm_line(line))
+            here.update(_norm_line(s) for s in segments(line) if _norm_line(s))
+        seen.update(here)
     floor = max(2, int(n * share))
     return {s for s, k in seen.items() if k >= floor}
 
 
 def gist(text: str, common: set) -> str:
-    """What this request is about: every line that is not corpus boilerplate.
-    Falls back to the whole request when stripping leaves too little to match on."""
+    """What this request is about: what is left once every piece of corpus
+    boilerplate is taken out. Falls back to the whole request when stripping
+    leaves too little to match on."""
     if not common:
         return (text or "").strip()
-    keep = [l.strip() for l in (text or "").splitlines()
-            if l.strip() and _norm_line(l) not in common]
+    keep = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        if _norm_line(line) in common:
+            continue                              # the whole line is boilerplate
+        rest = [s for s in segments(line) if _norm_line(s) not in common]
+        if rest:
+            keep.append(" ".join(rest) if len(rest) < len(segments(line))
+                        else line.strip())
     out = "\n".join(keep).strip()
     return out if len(out) >= MIN_GIST else (text or "").strip()
+
+
+def looks_like_work(text: str) -> bool:
+    """Whether a request is a piece of work at all. A tool's error handed back as
+    the request, or the same line repeated, is not something to learn from - it
+    was in the first live index (an "ERROR: Cannot read image" entry) and matched
+    anything vaguely about pictures."""
+    t = (text or "").strip()
+    if len(t) < MIN_GIST:
+        return False
+    lines = [l.strip() for l in t.splitlines() if l.strip()]
+    if lines and _ERROR.match(lines[0]):
+        return False
+    if len(lines) > 2 and len({_norm_line(l) for l in lines}) <= 1:
+        return False                              # the same thing over and over
+    return True
 
 
 def boilerplate(db) -> set:
@@ -175,12 +221,18 @@ def _candidates(svc, tiers: tuple, limit: int, have: set, log=print) -> list:
     picked.sort(key=lambda e: e.get("task_id") or "", reverse=True)
     picked = picked[:limit]
     common = common_lines([e["request"] for e in picked])
+    kept, junk = [], 0
     for e in picked:
         e["gist"] = gist(e["request"], common)[:REQUEST_CHARS]
-    saved = sum(len(e["request"]) - len(e["gist"]) for e in picked)
-    log(f"recall: {len(picked)} new piece(s) of work to index; {len(common)} boilerplate "
-        f"line(s) dropped before embedding ({saved:,} characters of envelope)")
-    return picked, common
+        if not looks_like_work(e["gist"]):
+            junk += 1
+            continue
+        kept.append(e)
+    saved = sum(len(e["request"]) - len(e["gist"]) for e in kept)
+    log(f"recall: {len(kept)} new piece(s) of work to index; {len(common)} boilerplate "
+        f"phrase(s) dropped before embedding ({saved:,} characters of envelope)"
+        + (f"; {junk} left out as not work" if junk else ""))
+    return kept, common
 
 
 # -- building the index -------------------------------------------------------------------
