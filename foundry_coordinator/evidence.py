@@ -396,12 +396,38 @@ class EvidenceLedger:
         return r
 
     def records(self, project_id: str, task_id: str, check_id: Optional[str] = None) -> list[dict]:
-        sql, args = "SELECT * FROM ev_records WHERE project_id=? AND task_id=?", [project_id,
-                                                                                 task_id]
+        # 2026-11-16 (POL-7 outage): `deps` is up to ~120 KB a row (1.9 GB of the 2 GB table).
+        # A verify read it for every record of every check on every pass; only _fresh needs
+        # it, and loads it through _deps_of (rows without the key are lazy).
+        sql, args = (f"SELECT {self._lite_cols()} FROM ev_records WHERE project_id=? AND "
+                     "task_id=?"), [project_id, task_id]
         if check_id is not None:
             sql += " AND check_id=?"
             args.append(check_id)
         return [self._out(r) for r in self.store.q(sql + " ORDER BY created_ts, rowid", args)]
+
+    def _lite_cols(self) -> str:
+        """Every ev_records column but `deps`, read once per ledger (its store's schema)."""
+        lite = self.__dict__.get("_lite")
+        if lite is None:
+            cols = [r["name"] for r in self.store.q("PRAGMA table_info(ev_records)")]
+            lite = self.__dict__["_lite"] = ", ".join(c for c in cols if c != "deps")
+        return lite
+
+    def _deps_of(self, r: dict):
+        """The record's cached dependency manifest: from the row when it was read with
+        SELECT *, else one indexed read, memoised per (record_id, deps_fp)."""
+        if "deps" in r:
+            return r.get("deps")
+        key = (r["record_id"], r.get("deps_fp") or "")
+        memo = self.__dict__.setdefault("_deps_memo", {})
+        if key not in memo:
+            if len(memo) > 20000:
+                memo.clear()
+            row = self.store.q("SELECT deps FROM ev_records WHERE record_id=?",
+                               (r["record_id"],))
+            memo[key] = row[0]["deps"] if row else None
+        return memo[key]
 
     def promote(self, record_id: str, tier: str, *, actor: str, ref_kind: str,
                 ref_id: str = "") -> bool:
@@ -818,9 +844,12 @@ class EvidenceLedger:
         if needs_runtime is None:
             needs_runtime = bool(self._req_map(P, spec).get(r["check_id"], {}).get("runtime"))
         res = self._fresh(P, r, revision, spec, needs_runtime)
-        self.store.x("UPDATE ev_records SET freshness=?, stale_reason=?, fresh_at=? "
-                     "WHERE record_id=? AND project_id=?",
-                     (res[0], res[1], revision, r["record_id"], P.id))
+        # 2026-11-16: an UPDATE rewrites the whole row (deps included, up to ~120 KB);
+        # a verify re-decides every record on every pass, so skip the no-op writes
+        if (r.get("freshness"), r.get("stale_reason"), r.get("fresh_at")) != (res[0], res[1], revision):
+            self.store.x("UPDATE ev_records SET freshness=?, stale_reason=?, fresh_at=? "
+                         "WHERE record_id=? AND project_id=?",
+                         (res[0], res[1], revision, r["record_id"], P.id))
         return res
 
     def _fresh(self, P, r: dict, revision: str, spec,
@@ -834,7 +863,7 @@ class EvidenceLedger:
             return "unknown", "the record has no source revision"
         globs = sorted(str(g) for g in globs)
         try:
-            cached = _uj(r.get("deps"), {}) or {}
+            cached = _uj(self._deps_of(r), {}) or {}
             if cached.get("globs") == globs and cached.get("rev") == src \
                     and isinstance(cached.get("files"), dict):
                 m_src = cached["files"]
@@ -993,12 +1022,15 @@ class EvidenceLedger:
         e = {"req": q, "sat": None, "rec": None, "reason": "missing", "detail": "no record",
              "flaky": False}
         fresh, stale, unknown = [], [], []
-        for r in self._cands(P, tid, cid):
-            st, why = self.freshness(P, r, revision, spec, needs_runtime=bool(q.get("runtime")))
-            r.update(freshness=st, stale_reason=why, fresh_at=revision,
-                     phase=self._session_phase(r.get("session_id") or "",
-                                               phases if phases is not None else {}))
-            (fresh if st == "fresh" else stale if st == "stale" else unknown).append(r)
+        from . import keepalive
+        with keepalive.busy(f"evidence verdict {tid} {cid}", 900):
+            for r in self._cands(P, tid, cid):
+                st, why = self.freshness(P, r, revision, spec,
+                                         needs_runtime=bool(q.get("runtime")))
+                r.update(freshness=st, stale_reason=why, fresh_at=revision,
+                         phase=self._session_phase(r.get("session_id") or "",
+                                                   phases if phases is not None else {}))
+                (fresh if st == "fresh" else stale if st == "stale" else unknown).append(r)
         decisive = [r for r in fresh if not r["truncated"] and r["result"] in ("PASS", "FAIL")]
         if decisive:
             newest = decisive[0]

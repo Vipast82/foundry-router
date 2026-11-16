@@ -350,6 +350,33 @@ def test_freshness_relevant_dependency_change_is_stale(store, led, tmp_path):
     assert led.freshness(P, recs["UI_01"], r3, spec())[0] == "stale"
 
 
+def test_verdict_reads_no_deps_and_skips_noop_writes(store, led, tmp_path):
+    """2026-11-16 POL-7 outage: records() leaves the large `deps` column out, the
+    manifest still resolves (lazy read), and a repeated verdict at the same revision
+    writes no ev_records row."""
+    P, ws, r1, recs = _fresh_setup(store, led, tmp_path)
+    assert all("deps" not in r for r in led.records("p", "T1"))
+    assert "deps" in led.get(recs["CORE"]["record_id"])
+    r2 = commit(ws, {"docs/x.md": "changed"})
+    assert set(led.current(P, spec(), r2)) == {"CORE", "UI_01"}
+    writes = []
+    real_x = store.x
+    def spy(sql, args=()):
+        if "UPDATE ev_records" in sql:
+            writes.append(sql)
+        return real_x(sql, args)
+    store.x = spy
+    try:
+        assert set(led.current(P, spec(), r2)) == {"CORE", "UI_01"}
+        assert led.missing(P, spec(), r2) == []
+    finally:
+        store.x = real_x
+    assert writes == []
+    r3 = commit(ws, {"src/core/a.lua": "a3"})             # a real change still lands
+    assert led.freshness(P, recs["CORE"], r3, spec())[0] == "stale"
+    assert led.get(recs["CORE"]["record_id"])["freshness"] == "stale"
+
+
 def test_freshness_unknown_dependency(store, led, tmp_path):
     P, ws, r1, recs = _fresh_setup(store, led, tmp_path)
     st, why = led.freshness(P, recs["ZED"], r1, spec())

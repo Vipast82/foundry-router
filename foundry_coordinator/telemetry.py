@@ -633,8 +633,17 @@ class CoordReader:
         returned oldest first. A bounded read never drops the latest records."""
         if table not in self.LIFECYCLE_TABLES:
             raise ValueError(table)
+        # 2026-11-16 (POL-7 outage): ev_records.deps is up to ~120 KB a row and no view
+        # reads it; SELECT * of 600 rows per task per push was ~0.5 GB/s of reads
+        cols = "*"
+        if table == "ev_records":
+            try:
+                names = [r["name"] for r in self._q("PRAGMA table_info(ev_records)")]
+                cols = ", ".join(n for n in names if n != "deps") or "*"
+            except Exception:                                    # noqa: BLE001
+                cols = "*"
         try:
-            rows = self._q(f"SELECT * FROM {table} WHERE project_id=? AND task_id=?"
+            rows = self._q(f"SELECT {cols} FROM {table} WHERE project_id=? AND task_id=?"
                            f"{(' AND ' + where) if where else ''} ORDER BY rowid DESC LIMIT ?",
                            (project_id, task_id, *args, int(limit)))
         except Exception:                                        # noqa: BLE001
