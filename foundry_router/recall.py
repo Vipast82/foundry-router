@@ -139,7 +139,12 @@ def looks_like_work(text: str) -> bool:
     lines = [l.strip() for l in t.splitlines() if l.strip()]
     if lines and _ERROR.match(lines[0]):
         return False
-    if len(lines) > 2 and len({_norm_line(l) for l in lines}) <= 1:
+    # Only lines that carry a thought count here. A short line normalizes to
+    # nothing, so counting those as "the same line" threw away 892 of 911 real
+    # entries once stripping got good at its job (v0.181.173).
+    said = {_norm_line(l) for l in lines}
+    said.discard("")
+    if len(said) == 1 and len(lines) > 2:
         return False                              # the same thing over and over
     return True
 

@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.173 - what the store keeps is not what a backend reads
+
+v0.181.172's suite was cut properly - 60 cases, 49 of them able to score a tool
+call - and then the run failed: **51 of 60 calls errored** and the 8.1 it
+reported measured nothing at all. The reindex that ran beside it came back with
+**19 entries where the last one had 911**. Two bugs, one in each.
+
+**A case was sent in the format it was stored in.** The prepared store keeps a
+neutral training format: tool calls are flat (`{id, name, arguments}`) with
+their arguments already parsed into a dict, and every turn carries an author.
+A backend adapter reasonably expects the wire format, where arguments are a JSON
+string inside a `function` wrapper - so it called `.startswith` on a dict (48
+cases) or looked for a `function` key that was not there (3 cases). A case is
+now converted before it is sent (`bench.wire`, `bench.wire_tools`).
+
+**Recall threw away 892 of 911 entries, and the better its stripping got the
+more it deleted.** `looks_like_work` rejects a request whose lines all say the
+same thing, which is how an "ERROR: Cannot read image" entry was kept out in
+v0.181.171. But a short line normalizes to nothing, and a well-stripped request
+is mostly short lines - so they all "said the same thing" (nothing) and the
+entry was dropped. Only lines that carry a thought are counted now.
+
+Both of these passed every test in the suite before this release, because the
+fakes used the wire format and the test gists were long enough. The fakes agreed
+with the assumptions instead of with the data. The tests added here use the
+shapes the store actually holds.
+
+Tests: `tests/test_bench.py`, `tests/test_recall.py`.
+
 ## v0.181.172 - the benchmark could not measure anything, and now can
 
 The first suite was cut from the live store and came back with **8 cases out of

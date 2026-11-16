@@ -278,13 +278,64 @@ def combine(tools: Optional[float], code: Optional[float], answer: Optional[floa
 
 # -- running a suite ----------------------------------------------------------------------
 
+def wire(messages: list) -> list:
+    """The stored conversation in the shape a backend expects.
+
+    The prepared store keeps a NEUTRAL training format: tool calls are flat
+    ({id, name, arguments}) with their arguments already parsed into a dict, and
+    every turn carries an author. Handing that straight to a backend is what made
+    48 of the first 60 real cases fail with "'dict' object has no attribute
+    'startswith'" and another 3 with KeyError 'function' (v0.181.173) - the
+    adapter reasonably expects arguments to be the JSON string the wire format
+    uses."""
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content, default=str)
+        w = {"role": m.get("role") or "user", "content": content}
+        if w["role"] == "tool":
+            w["tool_call_id"] = str(m.get("tool_call_id") or "")
+        calls = []
+        for i, tc in enumerate(m.get("tool_calls") or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+            args = fn.get("arguments")
+            if not isinstance(args, str):
+                args = json.dumps(args if args is not None else {}, default=str)
+            calls.append({"id": str(tc.get("id") or f"call_{i}"), "type": "function",
+                          "function": {"name": str(fn.get("name") or ""), "arguments": args}})
+        if calls:
+            w["tool_calls"] = calls
+        out.append(w)
+    return out
+
+
+def wire_tools(tools: list) -> list:
+    """The same for the tool definitions, which the store keeps flat as well."""
+    out = []
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        if not fn.get("name"):
+            continue
+        out.append({"type": "function", "function": {
+            "name": fn["name"], "description": fn.get("description") or "",
+            "parameters": fn.get("parameters") or {"type": "object", "properties": {}}}})
+    return out
+
+
 async def ask(svc, model: str, case: dict, max_tokens: int = 2048) -> dict:
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
     try:
         result, backend = await svc.pool.chat(
-            model, list(case.get("messages") or []),
-            tools=list(case.get("tools") or []) or None, max_tokens=max_tokens)
+            model, wire(case.get("messages") or []),
+            tools=wire_tools(case.get("tools") or []) or None, max_tokens=max_tokens)
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         return {"error": describe_exception(e), "seconds": round(time.monotonic() - t0, 2)}

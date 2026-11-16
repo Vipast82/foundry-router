@@ -357,3 +357,13 @@ def test_what_is_not_work_is_left_out_of_the_index():
     # the same line over and over
     assert recall.looks_like_work("\n".join(["the same long line of text here"] * 4)) is False
     assert recall.looks_like_work("too short") is False
+
+
+def test_a_well_stripped_request_is_not_mistaken_for_a_repeated_line():
+    """Short lines normalize to nothing. Counting those as "the same line" threw
+    away 892 of 911 real entries once stripping got good at its job."""
+    stripped = "Enemies: EN-BADGER\n## Goal\nrig it and colour it from the palette\n## Checklist\n- [x] 1"
+    assert recall.looks_like_work(stripped) is True
+    # and the thing it is meant to catch still is caught
+    repeated = "\n".join(["ERROR: Cannot read image, this model has no image input"] * 4)
+    assert recall.looks_like_work(repeated) is False

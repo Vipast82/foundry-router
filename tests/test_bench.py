@@ -302,3 +302,51 @@ def test_a_conversation_with_nothing_to_answer_for_gives_no_cases():
     assert bench.cases_from({"messages": [{"role": "assistant", "content": "hi"}]}) == []
     assert bench.cases_from({"messages": [{"role": "user", "content": "hi"}]}) == []
     assert bench.cases_from({"messages": []}) == []
+
+
+# -- the stored format is not the wire format ---------------------------------------------
+
+def test_a_stored_conversation_is_converted_for_the_wire():
+    """What the prepared store keeps is a neutral training format. Sending it as-is
+    is what made 48 of the first 60 real cases fail."""
+    stored = [{"role": "system", "content": "be careful", "author": {"kind": "client"}},
+              {"role": "user", "content": "fix the spin script", "author": {"kind": "client"}},
+              {"role": "assistant", "content": "", "author": {"kind": "model"},
+               "tool_calls": [{"id": "1", "name": "read_file",
+                               "arguments": {"path": "a.luau"}}]},      # a dict, not a string
+              {"role": "tool", "tool_call_id": "1", "content": "local x = 1"}]
+    w = bench.wire(stored)
+    call = w[2]["tool_calls"][0]
+    assert call["type"] == "function"                       # the wrapper the wire format has
+    assert call["function"]["name"] == "read_file"
+    assert call["function"]["arguments"] == '{"path": "a.luau"}'   # a JSON STRING
+    assert isinstance(call["function"]["arguments"], str)
+    assert w[3]["tool_call_id"] == "1"
+    assert all("author" not in m for m in w)                # the store's own bookkeeping
+    assert all(isinstance(m["content"], str) for m in w)
+
+
+def test_content_that_is_not_text_still_becomes_text():
+    w = bench.wire([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+    assert isinstance(w[0]["content"], str) and "hi" in w[0]["content"]
+    assert bench.wire([{"role": "user"}])[0]["content"] == ""
+    assert bench.wire([None, "nope", {}]) == [{"role": "user", "content": ""}]
+
+
+def test_a_tool_call_already_in_wire_shape_is_left_alone():
+    w = bench.wire([{"role": "assistant", "content": "", "tool_calls": [
+        {"id": "9", "type": "function",
+         "function": {"name": "write", "arguments": '{"path":"b"}'}}]}])
+    fn = w[0]["tool_calls"][0]["function"]
+    assert fn["name"] == "write" and fn["arguments"] == '{"path":"b"}'
+
+
+def test_tool_definitions_are_converted_too():
+    stored = [{"name": "read_file", "description": "reads", "parameters": {"type": "object"}},
+              {"name": ""},                                  # nameless: not a tool
+              {"type": "function", "function": {"name": "write_to_file"}}]
+    t = bench.wire_tools(stored)
+    assert [x["function"]["name"] for x in t] == ["read_file", "write_to_file"]
+    assert all(x["type"] == "function" for x in t)
+    assert t[1]["function"]["parameters"] == {"type": "object", "properties": {}}
+    assert bench.wire_tools(None) == []
