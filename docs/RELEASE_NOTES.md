@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.164 - the code a model writes is checked before the answer is shown
+
+Item 4 of the "useful without fine-tuning" plan. A model that writes Luau,
+Python or JSON is often almost right: a missing `end`, a member that does not
+exist, a trailing comma. The reader finds it, pastes it, and comes back.
+
+- **Code checks** (Routing and brain -> Code checks; `code_checks.py`). Each rule
+  says which fenced languages it covers and how to check them:
+  `python` compiles the code with Python's own compiler (it is never run),
+  `json` parses it, and `command` runs a program the operator named with the
+  code in a private temporary file, e.g. `luau-lsp analyze {file}`,
+  `selene {file}`, `stylua --check {file}`. Anything other than a silent exit 0
+  is a failure, and the checker's own output is what the model is told.
+- **A failed check goes back to the model** for another try (`tries after a
+  failure`, 1 by default; 0 checks and reports without asking for a fix). The
+  corrected answer is checked again, and the thinking trail says whether the
+  answer that is shown passed, was fixed, or still fails. Nothing is hidden: an
+  answer that cannot be fixed within the allowed tries is shown as it is.
+- **Only the checker runs, never the model's code**, and only a program the
+  operator configured. A checker that is missing, hangs or breaks is reported
+  and never blocks a reply.
+- **Nothing is checked twice.** A persona can be left out in its own editor
+  ("check the code it writes", on by default) - turn it off for a coding persona
+  whose work a project gate already checks. "Leave sprint work to its own gate"
+  leaves out every request a coordinator task owns, wherever it comes from,
+  while chats and unbound work are still checked.
+- Off until rules are configured. While it is on, a main-model persona's answer
+  is shown whole instead of word by word, because it is checked first. "Try it"
+  on the page runs one rule on a snippet.
+- A checker has to be installed in the router's image: `python` and `json` need
+  nothing, `luau-lsp`, `selene` and `stylua` are not in it yet.
+
+Tests: `tests/test_code_checks.py`.
+
 ## v0.181.163 - the record intake is on the admin API too
 
 - `POST /admin/api/training/events` and `GET /admin/api/training/events/cursor`

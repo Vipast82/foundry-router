@@ -3490,6 +3490,42 @@ async def host_control(request: Request):
         return JSONResponse({"error": describe_exception(e)}, status_code=502)
 
 
+@router.post("/admin/api/code-checks")
+async def code_checks_set(request: Request):
+    """Code checks: on/off, how many fixes a model may be asked for, and the rules
+    (code_checks.py). `{"test": {...rule..., "code": "..."}}` runs one rule on a
+    snippet instead, so a rule can be tried before it is saved."""
+    from .. import code_checks
+    from ..config import CodeChecksConfig
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    if isinstance(body, dict) and isinstance(body.get("test"), dict):
+        rule = dict(body["test"])
+        code = str(rule.pop("code", "") or "")
+        lang = str(rule.pop("language", "") or "") or (rule.get("languages") or [""])[0]
+        try:
+            reason = await code_checks.run_one(rule, code, str(lang))
+        except Exception as e:                                    # noqa: BLE001
+            return {"ok": False, "error": describe_exception(e)}
+        return {"ok": True, "passed": not reason, "reason": reason}
+    new = {"enabled": bool(body.get("enabled")),
+           "max_fixes": body.get("max_fixes", 1),
+           "skip_gated_tasks": bool(body.get("skip_gated_tasks")),
+           "rules": [r for r in (body.get("rules") or []) if isinstance(r, dict)]}
+    try:
+        CodeChecksConfig(**new)
+
+        def mutate(raw):
+            raw["code_checks"] = new
+        svc.config_store.save(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    svc.db.log_event("info", "admin", f"code checks changed: {'on' if new['enabled'] else 'off'}, "
+                                      f"{len(new['rules'])} rule(s)")
+    return {"ok": True}
+
+
 @router.post("/admin/api/a2a")
 async def a2a_set(request: Request):
     """A2A settings: serving (on/off, default persona, further personas, public

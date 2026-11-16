@@ -948,6 +948,27 @@ class MediaConfig(BaseModel):
     fallback_poll_seconds: float = 3.0
 
 
+class CodeCheckRuleConfig(BaseModel):
+    """One check on the code a model writes (code_checks.py)."""
+    name: str = ""
+    languages: list[str] = Field(default_factory=list)   # fenced languages, e.g. ["luau", "lua"]
+    kind: str = "command"              # python | json | command
+    command: str = ""                  # for "command": e.g. "luau-lsp analyze {file}"
+    timeout_seconds: int = Field(default=20, ge=1, le=600)
+    enabled: bool = True
+
+
+class CodeChecksConfig(BaseModel):
+    """Checking the code in a reply before it reaches the client. Off until rules
+    are configured; a failing check sends the errors back to the model."""
+    enabled: bool = False
+    max_fixes: int = Field(default=1, ge=0, le=5)        # tries after a failed check
+    # a request a coordinator task owns is checked by that project's gate; leaving
+    # it out here avoids checking the same code twice
+    skip_gated_tasks: bool = False
+    rules: list[CodeCheckRuleConfig] = Field(default_factory=list)
+
+
 class A2AAgentConfig(BaseModel):
     """A remote A2A agent a persona's helper row may name (a2a.py)."""
     name: str
@@ -1233,6 +1254,7 @@ class AppConfig(BaseModel):
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     training_capture: TrainingCaptureConfig = Field(default_factory=TrainingCaptureConfig)
     a2a: A2AConfig = Field(default_factory=A2AConfig)
+    code_checks: CodeChecksConfig = Field(default_factory=CodeChecksConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)

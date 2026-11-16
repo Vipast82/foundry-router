@@ -508,7 +508,8 @@ def test_a_reviewed_persona_and_the_switch_keep_the_answer_whole(tmp_path):
     assert not [e for e in evs if e.kind == "answer_delta"]
     import inspect
     src = inspect.getsource(AgentRunner._worker_tool_loop)
-    assert 'and not (ctx.persona or {}).get("review_enabled"))' in src
+    assert 'and not (ctx.persona or {}).get("review_enabled")' in src
+    assert "and not checking)" in src          # nor when the code in the answer is checked first
     assert "stream_answer = bool(on_fail is not None" in src            # main-model mode only
 
 
