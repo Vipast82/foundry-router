@@ -2,6 +2,25 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.166 - the code-checks image carries Roblox's type definitions
+
+Without them `luau-lsp analyze` does not know `game`, `Player` or any service:
+a perfectly good Roblox module came back as "Unknown global 'game'", which would
+have been handed to the model as a mistake in its code. The definitions luau-lsp
+publishes for its own release are now in the image at
+`/usr/local/share/luau/globalTypes.d.luau`, pinned to the release and its
+checksum like everything else there. Use them in the rule:
+
+    luau-lsp analyze --definitions=/usr/local/share/luau/globalTypes.d.luau {file}
+
+Rebuild the checkers with `docker compose --profile code-checks up -d --build`.
+
+Measured on the live service while setting this up: lint warnings alone (an
+unused local, say) do not fail a check - only syntax and type errors do - so a
+snippet is not sent back for tidying. `stylua --check` reads Luau properly and is
+the gentlest syntax check; `selene` still needs a Luau `selene.toml` of its own
+and is left off.
+
 ## v0.181.165 - the Luau checkers run in a container of their own
 
 The code checks from v0.181.164 needed `luau-lsp`, `selene` and `stylua` in the

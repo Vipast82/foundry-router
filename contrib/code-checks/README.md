@@ -25,11 +25,24 @@ Routing and brain → Code checks → Add a check:
 | code blocks labelled | `luau`, `lua` |
 | how | `service` |
 | service address | `http://code-checks:8099` |
-| command | `luau-lsp analyze {file}` |
+| command | `luau-lsp analyze --definitions=/usr/local/share/luau/globalTypes.d.luau {file}` |
 
-`selene {file}` and `stylua --check {file}` are rules of their own. "Try it"
-on that page runs one against the service with a snippet, so you can see what it
-says before you turn checking on.
+`stylua --check {file}` is a rule of its own, and the most forgiving one: it
+reads Luau properly and only fails on code that does not parse (and on
+formatting, which it will tell the model to fix).
+
+**The definitions matter.** Roblox's own type definitions are in the image at
+`/usr/local/share/luau/globalTypes.d.luau`, pinned to the luau-lsp release and
+its checksum. Without `--definitions`, luau-lsp does not know `game`, `Player`
+or any service, and reports perfectly good Roblox code as broken. With them it
+finds the mistakes worth finding, such as a key that is not in a table.
+
+`selene` needs a Luau standard library of its own (`selene.toml` with
+`std = "luau"`); without one it reads Luau type annotations as syntax errors, so
+leave that rule off until this image carries such a config.
+
+"Try it" on the Code checks page runs one rule against the service with a
+snippet, so you can see what it says before you turn checking on.
 
 ## What it does
 
@@ -53,6 +66,14 @@ no volumes, drops every Linux capability and cannot write outside `/tmp`. If you
 later add a checker that *runs* what it is given — a headless Blender script, a
 test — this is where that belongs: add the program to the image and to `ALLOWED`
 in `server.py`, and it is still the only thing that runs it.
+
+## What each checker is good for
+
+| checker | finds | watch out for |
+|---|---|---|
+| `stylua --check {file}` | code that does not parse | also reports formatting differences |
+| `luau-lsp analyze --definitions=... {file}` | syntax errors and type errors | needs the definitions; lint warnings alone do not fail it |
+| `selene {file}` | lint rules | needs a Luau `selene.toml` first |
 
 ## Versions
 

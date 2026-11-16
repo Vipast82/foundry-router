@@ -14,6 +14,10 @@ ARG SELENE_VERSION=0.32.0
 ARG SELENE_SHA256=d3773393578580074386e69337d35b7acddfbaa9fc38964c07fa3e28436ade9b
 ARG STYLUA_VERSION=2.6.0
 ARG STYLUA_SHA256=a485f72bbfa22e4642e77a84b5edc2611a5cab7477b34e2e709dd8f78e919895
+# Roblox's own type definitions, as luau-lsp ships them for this release. Without
+# them `game`, `Player` and every service are unknown globals and good Roblox code
+# is reported as broken.
+ARG GLOBAL_TYPES_SHA256=2857efa8245485f8c25c19c018ee1ef9b46afab4efd2ea70fc3257cd3faf7080
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl unzip \
@@ -29,6 +33,10 @@ RUN set -eux; \
     echo "${STYLUA_SHA256}  stylua-linux-x86_64.zip" | sha256sum -c -; \
     for z in *.zip; do unzip -o -j "$z" -d /out; done; \
     chmod +x /out/*; \
+    curl -fsSL -o /out/globalTypes.d.luau \
+        "https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/${LUAU_LSP_VERSION}/scripts/globalTypes.d.luau"; \
+    echo "${GLOBAL_TYPES_SHA256}  /out/globalTypes.d.luau" | sha256sum -c -; \
+    chmod 0644 /out/globalTypes.d.luau; \
     ls -l /out
 
 FROM python:3.12-slim
@@ -39,6 +47,7 @@ LABEL org.opencontainers.image.title="foundry-code-checks" \
 
 RUN useradd --create-home --uid 1000 checker
 COPY --from=tools /out/luau-lsp /out/selene /out/stylua /usr/local/bin/
+COPY --from=tools /out/globalTypes.d.luau /usr/local/share/luau/globalTypes.d.luau
 COPY server.py /app/server.py
 
 # No volumes, no credentials, nothing to write but /tmp: what this looks at was
