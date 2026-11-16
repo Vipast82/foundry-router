@@ -952,8 +952,9 @@ class CodeCheckRuleConfig(BaseModel):
     """One check on the code a model writes (code_checks.py)."""
     name: str = ""
     languages: list[str] = Field(default_factory=list)   # fenced languages, e.g. ["luau", "lua"]
-    kind: str = "command"              # python | json | command
-    command: str = ""                  # for "command": e.g. "luau-lsp analyze {file}"
+    kind: str = "command"              # python | json | command | service
+    command: str = ""                  # for "command"/"service": e.g. "luau-lsp analyze {file}"
+    url: str = ""                      # for "service": e.g. http://code-checks:8099
     timeout_seconds: int = Field(default=20, ge=1, le=600)
     enabled: bool = True
 

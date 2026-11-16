@@ -2,6 +2,33 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.165 - the Luau checkers run in a container of their own
+
+The code checks from v0.181.164 needed `luau-lsp`, `selene` and `stylua` in the
+router's image. They are in their own container instead, so the router's image is
+unchanged and the whole thing is optional.
+
+- **`contrib/code-checks`**: a small service with the three tools, started only
+  with its profile and reachable only on the router's own network:
+  `docker compose --profile code-checks up -d --build`. It has no port on the
+  host, no volumes, no credentials, drops every Linux capability and has a
+  read-only filesystem with a `/tmp` of its own - what it looks at was written by
+  a model. Only `luau-lsp`, `selene` and `stylua` are ever run, never a shell,
+  and never the code itself. Every download is pinned to a version and the
+  checksum GitHub publishes for it, so a changed file fails the build.
+- **A rule of kind `service`** points at it (address `http://code-checks:8099`,
+  command e.g. `luau-lsp analyze {file}`). `command` still runs a program inside
+  the router itself for anything already in that image.
+- **A check that cannot run is never sent to the model as if the code were
+  wrong.** A missing program, a service that is down or refuses the command, a
+  checker that hangs: all of it is reported to the operator (the request's
+  guardrail notes and the "Try it" button) and the reply goes through untouched.
+  Before this, "the checker is not installed" would have been handed to the model
+  as the fault in its code.
+
+Tests: `tests/test_code_checks.py` (the service, its allowlist, and the compose
+service's shape).
+
 ## v0.181.164 - the code a model writes is checked before the answer is shown
 
 Item 4 of the "useful without fine-tuning" plan. A model that writes Luau,

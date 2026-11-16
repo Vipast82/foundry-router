@@ -82,7 +82,9 @@ def test_a_configured_command_is_run_on_the_code():
     assert probs[0]["reason"] == "bad member at line 2" and probs[0]["language"] == "luau"
     missing = {"name": "gone", "kind": "command", "languages": ["luau"],
                "command": "definitely-not-installed-xyz {file}"}
-    assert "not installed on the router" in _run_check(_cfg(missing), "```luau\na\n```")[0]["reason"]
+    said = []
+    assert _run_check(_cfg(missing), "```luau\na\n```", log=said.append) == []   # never the code's fault
+    assert any("could not run" in s and "not installed on the router" in s for s in said)
 
 
 def test_the_checker_sees_the_code_in_a_file_and_the_file_is_removed(tmp_path):
@@ -100,8 +102,9 @@ def test_the_checker_sees_the_code_in_a_file_and_the_file_is_removed(tmp_path):
 def test_a_checker_that_hangs_or_breaks_never_blocks_the_answer():
     slow = {"name": "slow", "kind": "command", "languages": ["luau"], "timeout_seconds": 1,
             "command": f'"{sys.executable}" -c "import time; time.sleep(30)" {{file}}'}
-    probs = _run_check(_cfg(slow), "```luau\na\n```")
-    assert "did not finish within 1s" in probs[0]["reason"]
+    said = []
+    assert _run_check(_cfg(slow), "```luau\na\n```", log=said.append) == []
+    assert any("did not finish within 1s" in s for s in said)
     said = []
     broken = {"name": "broken", "kind": "command", "languages": ["luau"], "command": ""}
     assert _run_check(_cfg(broken), "```luau\na\n```") == []        # nothing to run: a pass
@@ -261,4 +264,116 @@ def test_the_persona_switch_is_stored_and_in_the_editor(tmp_path):
     assert 'id="pe-codechecks"' in html and 'code_checks: $("#pe-codechecks").checked ? 1 : 0,' in html
     assert '$("#pe-codechecks").checked = p.code_checks == null ? true : !!p.code_checks;' in html
     assert 'id="cc-skip-gated"' in html and 'skip_gated_tasks: $("#cc-skip-gated").checked,' in html
+
+
+# -- the checkers in a container of their own ---------------------------------------------
+
+def _service_rule(url, command="luau-lsp analyze {file}"):
+    return {"name": "luau", "kind": "service", "languages": ["luau"], "url": url,
+            "command": command, "timeout_seconds": 5}
+
+
+def test_the_service_is_asked_and_its_words_are_what_the_model_is_told(monkeypatch):
+    import httpx
+
+    from foundry_router import code_checks as mod
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        if "bad" in seen["body"]["code"]:
+            return httpx.Response(200, json={"status": 1, "output": "TypeError: unknown member .Foo"})
+        return httpx.Response(200, json={"status": 0, "output": ""})
+
+    _mock_httpx(monkeypatch, handler)
+    rule = _service_rule("http://code-checks:8099/")
+    assert _run_check(_cfg(rule), "```luau\nlocal x = 1\n```") == []
+    assert seen["url"] == "http://code-checks:8099/run"
+    assert seen["body"] == {"command": "luau-lsp analyze {file}", "code": "local x = 1\n",
+                            "suffix": ".luau", "timeout": 5.0}
+    probs = _run_check(_cfg(rule), "```luau\nlocal x = bad\n```")
+    assert probs[0]["reason"] == "TypeError: unknown member .Foo" and probs[0]["rule"] == "luau"
+
+
+def _mock_httpx(monkeypatch, handler):
+    """Every httpx.AsyncClient answers through `handler`, whatever was patched before."""
+    import httpx
+    base = getattr(httpx.AsyncClient, "_foundry_base", httpx.AsyncClient)
+
+    class Client(base):
+        _foundry_base = base
+
+        def __init__(self, *a, **k):
+            k.pop("transport", None)
+            super().__init__(*a, transport=httpx.MockTransport(handler), **k)
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+
+
+def test_a_service_that_is_not_up_never_blames_the_model(monkeypatch):
+    import httpx
+
+    def refused(request):
+        raise httpx.ConnectError("connection refused")
+    _mock_httpx(monkeypatch, refused)
+    said = []
+    assert _run_check(_cfg(_service_rule("http://code-checks:8099")), "```luau\na\n```",
+                      log=said.append) == []
+    assert any("could not be reached" in s and "could not run" in s for s in said)
+
+
+def test_a_service_that_refuses_the_check_is_not_the_models_fault(monkeypatch):
+    import httpx
+
+    def refuses(request):
+        return httpx.Response(400, json={"error": "'rm' is not one of this service's checkers"})
+    _mock_httpx(monkeypatch, refuses)
+    said = []
+    assert _run_check(_cfg(_service_rule("http://x", "rm -rf /")), "```luau\na\n```",
+                      log=said.append) == []
+    assert any("refused this check" in s for s in said)
+
+
+def test_a_service_rule_with_no_address():
+    said = []
+    assert _run_check(_cfg(_service_rule("")), "```luau\na\n```", log=said.append) == []
+    assert any("no service address" in s for s in said)
+
+
+def test_the_service_itself_only_runs_its_own_checkers(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "cc_server", Path(__file__).parent.parent / "contrib" / "code-checks" / "server.py")
+    srv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(srv)
+    assert srv.ALLOWED == {"luau-lsp", "selene", "stylua"}
+    status, body = srv.run({"command": "rm -rf /", "code": "x"})
+    assert status == 400 and "not one of this service's checkers" in body["error"]
+    status, body = srv.run({"command": "sh -c 'echo hi'", "code": "x"})
+    assert status == 400 and "not one of" in body["error"]
+    assert srv.run({"command": "", "code": "x"})[1]["error"] == "command is required"
+    assert srv.run({"command": "selene {file}", "code": ""})[1]["error"] == "code is required"
+    assert "larger than" in srv.run({"command": "selene {file}", "code": "x" * 2_000_000})[1]["error"]
+    srv.shutil.which = lambda name: None                 # as if nothing were installed
+    status, body = srv.run({"command": "selene {file}", "code": "local x = 1"})
+    assert status == 400 and "not installed in this service" in body["error"]
+
+
+def test_the_container_is_optional_and_pinned():
+    import yaml
+    root = Path(__file__).parent.parent
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+    svc = compose["services"]["code-checks"]
+    assert svc["profiles"] == ["code-checks"]            # not started by a plain `up`
+    assert "ports" not in svc                            # no port on the host
+    assert svc["read_only"] is True and svc["cap_drop"] == ["ALL"]
+    assert svc["security_opt"] == ["no-new-privileges:true"]
+    docker = (root / "contrib" / "code-checks" / "Dockerfile").read_text(encoding="utf-8")
+    for tool in ("LUAU_LSP", "SELENE", "STYLUA"):
+        assert f"{tool}_VERSION=" in docker and f"{tool}_SHA256=" in docker
+    assert docker.count("sha256sum -c -") == 3           # every download is checked
+    assert "USER checker" in docker
+    html = (root / "foundry_router" / "ui" / "static" / "index.html").read_text(encoding="utf-8")
+    assert '{key: "url", label: "service address"' in html
+    assert '"service", "command", "python", "json"' in html
 

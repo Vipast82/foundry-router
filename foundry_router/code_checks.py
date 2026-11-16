@@ -13,6 +13,12 @@ A rule says which fenced languages it covers and how to check them:
     command          an operator-configured program is run with the code in a
                      file, e.g. `luau-lsp analyze {file}`, `selene {file}`,
                      `stylua --check {file}`
+    service          the same, asked of the code-checks container over HTTP
+                     (contrib/code-checks), so the router's image needs nothing
+
+A check that cannot run — a missing program, a service that is not up, a broken
+rule — is reported to the operator and the reply goes through untouched. Only
+what a checker actually says about the code is ever sent back to the model.
 
 Only the checker is run, never the model's code, and only a program the operator
 named: the code goes into a private temporary file and the file's path is passed
@@ -40,6 +46,11 @@ MAX_BLOCK = 400_000           # a block larger than this is not checked
 MAX_OUTPUT = 4000             # characters of a checker's output kept
 EXT = {"luau": ".luau", "lua": ".lua", "python": ".py", "py": ".py", "json": ".json",
        "jsonc": ".json", "typescript": ".ts", "javascript": ".js", "yaml": ".yaml"}
+
+
+class Unavailable(RuntimeError):
+    """The check could not be run (a missing program, a service that is down, a
+    rule with nothing to run). Never the code's fault, so never sent to the model."""
 
 
 def blocks(text: str) -> list:
@@ -139,15 +150,18 @@ async def _command(rule: dict, code: str, lang: str) -> str:
                 *argv, cwd=d, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 env=_env())
         except FileNotFoundError:
-            return f"the checker {argv[0]!r} is not installed on the router"
+            raise Unavailable(f"the checker {argv[0]!r} is not installed on the router "
+                              f"(contrib/code-checks runs the Luau ones in a container "
+                              f"of their own)") from None
         except OSError as e:
-            return f"the checker could not be started: {e}"
+            raise Unavailable(f"the checker could not be started: {e}") from None
         try:
             out, _ = await asyncio.wait_for(p.communicate(),
                                             float(rule.get("timeout_seconds") or 20))
         except asyncio.TimeoutError:
             p.kill()
-            return f"the checker did not finish within {rule.get('timeout_seconds') or 20}s"
+            raise Unavailable(f"the checker did not finish within "
+                              f"{rule.get('timeout_seconds') or 20}s") from None
         if p.returncode == 0:
             return ""
         text = (out or b"").decode("utf-8", "replace").strip().replace(path, "the file")
@@ -164,7 +178,37 @@ async def _command(rule: dict, code: str, lang: str) -> str:
             pass
 
 
+async def _service(rule: dict, code: str, lang: str) -> str:
+    """Ask the code-checks container (contrib/code-checks) to run the checker."""
+    import httpx
+    url = str(rule.get("url") or "").rstrip("/")
+    if not url:
+        raise Unavailable("no service address is set for this check")
+    timeout = float(rule.get("timeout_seconds") or 20)
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url + "/run", timeout=timeout + 10, json={
+                "command": rule.get("command") or "", "code": code,
+                "suffix": _suffix(lang), "timeout": timeout})
+    except Exception as e:                                        # noqa: BLE001
+        raise Unavailable(f"the code-checks service at {url} could not be reached "
+                          f"({type(e).__name__})") from None
+    try:
+        body = r.json()
+    except ValueError:
+        raise Unavailable(f"the code-checks service answered with no JSON (HTTP {r.status_code})") \
+            from None
+    if r.status_code >= 400 or body.get("error"):
+        raise Unavailable(f"the code-checks service refused this check: "
+                          f"{body.get('error') or r.status_code}")
+    if int(body.get("status") or 0) == 0:
+        return ""
+    return str(body.get("output") or "").strip()[:MAX_OUTPUT] or "the checker reported a problem"
+
+
 async def run_one(rule: dict, code: str, lang: str) -> str:
+    """The checker's complaint about this code, or "" when it is happy.
+    Unavailable when the check itself could not run."""
     kind = str(rule.get("kind") or "command")
     if len(code) > MAX_BLOCK:
         return ""
@@ -172,6 +216,8 @@ async def run_one(rule: dict, code: str, lang: str) -> str:
         return _builtin_python(code)
     if kind == "json":
         return _builtin_json(code)
+    if kind == "service":
+        return await _service(rule, code, lang)
     return await _command(rule, code, lang)
 
 
@@ -184,6 +230,11 @@ async def check(cfg, text: str, log=None) -> list:
             t0 = time.monotonic()
             try:
                 reason = await run_one(rule, code, lang)
+            except Unavailable as e:
+                reason = ""                   # the operator's problem, not the model's
+                if log:
+                    log(f"code check {rule.get('name')} could not run: {e}")
+                continue
             except Exception as e:                                # noqa: BLE001
                 reason = ""                                       # a broken rule never blocks a reply
                 if log:
