@@ -236,3 +236,69 @@ def test_a_checkers_own_log_lines_are_not_sent_to_the_model():
     assert code_checks.clean_output(chr(10).join(lines)) == lines[-1]
     assert code_checks.clean_output("") == ""
     assert code_checks.clean_output("[INFO] only noise") == ""
+
+
+# -- where a case is cut out of a conversation --------------------------------------------
+
+def _long_example(turns=6, filler=400):
+    """A session like the real ones: a request, then many tool calls, then a summary."""
+    msgs = [{"role": "system", "content": "You are a coder."},
+            {"role": "user", "content": "fix the spin script"}]
+    for i in range(turns):
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": str(i), "function": {"name": f"tool_{i}", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": str(i), "content": "x" * filler})
+    msgs.append({"role": "assistant", "content": "Done, committed as abc123."})
+    return {"messages": msgs, "tools": [{"type": "function",
+                                         "function": {"name": "tool_0"}}],
+            "meta": {"task_id": "UI-7", "tier": "verified", "tags": ["luau"], "session": "s1"}}
+
+
+def test_cases_are_cut_where_the_model_reached_for_a_tool():
+    cases = bench.cases_from(_long_example())
+    assert len(cases) == bench.CASES_PER_CONVERSATION
+    # every one of them can measure a tool call, which is half the score
+    assert all(c["reference"]["tool_calls"] for c in cases)
+    assert [c["reference"]["tool_calls"][0]["name"] for c in cases] == ["tool_5", "tool_4"]
+
+
+def test_the_closing_answer_is_only_used_to_fill_up():
+    one_call = {"messages": [{"role": "user", "content": "fix it"},
+                             {"role": "assistant", "content": "", "tool_calls": [
+                                 {"id": "1", "function": {"name": "read", "arguments": "{}"}}]},
+                             {"role": "tool", "tool_call_id": "1", "content": "ok"},
+                             {"role": "assistant", "content": "Done."}],
+                "tools": [], "meta": {"task_id": "T", "session": "s"}}
+    cases = bench.cases_from(one_call)
+    assert len(cases) == 2
+    assert cases[0]["reference"]["tool_calls"]          # the tool turn comes first
+    assert cases[1]["reference"]["content"] == "Done."  # the summary fills the second slot
+
+
+def test_a_session_far_too_long_to_send_still_yields_a_case():
+    """The sessions here run to hundreds of thousands of tokens. Keeping the NEWEST
+    turns is what lets one become a case at all."""
+    huge = _long_example(turns=30, filler=8000)
+    assert bench.too_long(bench._case_from(huge)) is True     # the old way: rejected
+    cases = bench.cases_from(huge)
+    assert cases and not any(bench.too_long(c) for c in cases)
+    assert len(cases[0]["messages"]) < len(huge["messages"])
+
+
+def test_a_case_never_opens_on_an_orphaned_tool_result():
+    huge = _long_example(turns=30, filler=8000)
+    for c in bench.cases_from(huge):
+        body = [m for m in c["messages"] if m.get("role") != "system"]
+        assert body[0]["role"] in ("user", "assistant")
+        assert not (body[0]["role"] == "assistant" and body[0].get("tool_calls"))
+        # every tool result in the case has its call in the case too
+        calls = {tc["id"] for m in body for tc in (m.get("tool_calls") or [])}
+        for m in body:
+            if m.get("role") == "tool":
+                assert m["tool_call_id"] in calls
+
+
+def test_a_conversation_with_nothing_to_answer_for_gives_no_cases():
+    assert bench.cases_from({"messages": [{"role": "assistant", "content": "hi"}]}) == []
+    assert bench.cases_from({"messages": [{"role": "user", "content": "hi"}]}) == []
+    assert bench.cases_from({"messages": []}) == []
