@@ -346,6 +346,80 @@ def test_memory_only_conflicts_are_merged_keeping_both_sides(tmp_path):
     assert g("status", "--porcelain").stdout.strip() == ""
 
 
+def test_the_regression_index_count_conflict_is_resolved_with_the_real_count(tmp_path):
+    """2026-11-16: every AU lane adds an index row and bumps the one count line in the
+    Lune spec; each merge conflicted there and stopped (ORI-2 x3, FIN-5a1, FIN-3a). The spec
+    hunk is resolved: master's comments and ids, plus the track's, count = real rows. When
+    the index file itself conflicts the merge still stops for a human."""
+    import subprocess
+    from foundry_coordinator.tracks.merge import _resolve_memory_conflicts
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(tmp_path), *a], capture_output=True, text=True)
+
+    def index(rows):
+        body = "".join(f'    {{\n        id = "{r}",\n    }},\n' for r in rows)
+        return "return {\n" + body + "}\n"
+
+    def spec(notes, n, ids):
+        return ("local T = {}\n" + "".join(f"        -- {x}\n" for x in notes) +
+                f"        T.eq(\n            #index.entries,\n            {n},\n"
+                f'            "entry count (' + " + ".join(ids) + ')"\n        )\nreturn T\n')
+    g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (tmp_path / "tests" / "lune" / "specs").mkdir(parents=True)
+    ix = tmp_path / "tests" / "RegressionIndex.lua"
+    sp = tmp_path / "tests" / "lune" / "specs" / "RegressionIndex.spec.luau"
+    ix.write_text(index(["A", "B"]) + "\n\n\n\n-- tail\n")
+    sp.write_text(spec(["B: + B (2)"], 2, ["A", "B"]))
+    g("add", "-A"); g("commit", "-qm", "base")
+    g("checkout", "-qb", "track")
+    ix.write_text(index(["A", "B", "T1"]) + "\n\n\n\n-- tail\n")
+    sp.write_text(spec(["B: + B (2)", "T: + T1 (3)"], 3, ["A", "B", "T1"]))
+    g("commit", "-qam", "track row")
+    g("checkout", "-q", "main")
+    ix.write_text("-- head\n\n\n\n" + index(["A", "B", "M1", "M2"]) + "\n\n\n\n-- tail\n")
+    sp.write_text(spec(["B: + B (2)", "M: + M1 + M2 (4)"], 4, ["A", "B", "M1", "M2"]))
+    g("commit", "-qam", "main rows")
+    g("checkout", "-q", "track")
+    # 1. both sides appended rows at the same place: the index conflicts too -> a human
+    assert g("merge", "--no-edit", "main").returncode != 0
+    assert "tests/RegressionIndex.lua" in g("diff", "--name-only", "--diff-filter=U").stdout
+    assert _resolve_memory_conflicts(str(tmp_path), "merge") is False
+    g("merge", "--abort")
+    # 2. the track's row sits far from master's (git merges the index): only the count
+    many = [f"R{i}" for i in range(12)]
+    g("checkout", "-q", "main")
+    ix.write_text(index(["A", "B"] + many))
+    sp.write_text(spec(["B: + B (2)"], 14, ["A", "B"] + many))
+    g("commit", "-qam", "base 2")
+    g("checkout", "-qb", "track2")
+    ix.write_text(index(["A", "T1", "B"] + many))
+    sp.write_text(spec(["B: + B (2)", "T: + T1 (15)"], 15, ["A", "B", "T1"] + many))
+    g("commit", "-qam", "track2 row")
+    g("checkout", "-q", "main")
+    ix.write_text(index(["A", "B"] + many + ["M1", "M2"]))
+    sp.write_text(spec(["B: + B (2)", "M: + M1 + M2 (16)"], 16, ["A", "B"] + many + ["M1", "M2"]))
+    g("commit", "-qam", "main rows 2")
+    g("checkout", "-q", "track2")
+    assert g("merge", "--no-edit", "main").returncode != 0
+    assert g("diff", "--name-only", "--diff-filter=U").stdout.split() == [
+        "tests/lune/specs/RegressionIndex.spec.luau"]
+    assert _resolve_memory_conflicts(str(tmp_path), "merge") is True
+    assert ix.read_text().count('id = "') == 17
+    text = sp.read_text()
+    assert "<<<<<<<" not in text and "            17," in text
+    assert "-- M: + M1 + M2 (16)" in text and "-- T: + T1 (15)" in text
+    assert "+ M1 + M2 + T1)" in text
+    assert g("status", "--porcelain").stdout.strip() == ""
+
+
+def test_counted_spec_refuses_a_hunk_that_is_not_the_count():
+    from foundry_coordinator.tracks.merge import counted_spec
+    bad = "<<<<<<< HEAD\nlocal a = 1\n=======\nlocal a = 2\n>>>>>>> main\n"
+    with pytest.raises(ValueError):
+        counted_spec(bad, 3)
+
+
 def test_a_stopped_track_whose_sprints_all_finished_can_still_merge(tmp_path):
     """2026-11-03: birds, poi and rt2 were stopped with every sprint COMPLETE; `tracks merge`
     refused them ("already stopped") and their work never reached master."""

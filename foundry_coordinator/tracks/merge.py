@@ -61,9 +61,78 @@ UNION_FILES = ("docs/progress/STATE.md", "docs/progress/state/DECISIONS.md",
                "docs/progress/state/KNOWN_ISSUES.md")
 
 
+# 2026-11-16: every AU lane adds rows to tests/RegressionIndex.lua and bumps the one entry
+# count in its Lune spec, so every lane merge conflicted on that count line (ORI-2 three
+# times, FIN-5a1, FIN-3a) and the decision default stopped the track. The spec's conflict is
+# master's hunk plus the track's comment lines and ids, with the count set to the real
+# number of entries in the merged index. The index file itself is never auto-resolved.
+COUNTED_SPECS = {"tests/lune/specs/RegressionIndex.spec.luau":
+                 ("tests/RegressionIndex.lua", r'^        id = "')}
+
+
 def union_safe(path: str) -> bool:
     p = path.replace("\\", "/")
-    return p.startswith(MEMORY_PREFIX) or p in UNION_FILES
+    return p.startswith(MEMORY_PREFIX) or p in UNION_FILES or p in COUNTED_SPECS
+
+
+def counted_spec(text: str, entries: int) -> str:
+    """A counted-index spec conflict resolved: theirs (master), the track's own `--`
+    comment lines added before T.eq, its new ids added to the description, and the
+    `#index.entries, N,` count set to `entries`. Raises ValueError when a hunk is not
+    that shape (the caller then stops for a human)."""
+    import re
+    nl = "\r\n" if "\r\n" in text else "\n"
+    cnt = re.compile(r"(#index\.entries,\s*\r?\n\s*)(\d+)(,)")
+
+    def ids(t: str) -> list:
+        m = re.search(r'"entry count \((.*)\)"', t)
+        return [x.strip() for x in re.split(r"\s[+-]\s", " " + m.group(1))] if m else []
+
+    def merge(m) -> str:
+        ours, theirs = m.group(1), m.group(2)
+        if not cnt.search(ours) or not cnt.search(theirs):
+            raise ValueError("not an entry-count hunk")
+        have = set(line.strip() for line in theirs.splitlines())
+        notes = [line for line in ours.splitlines() if line.strip().startswith("--")
+                 and line.strip() not in have]
+        out = cnt.sub(lambda c: c.group(1) + str(entries) + c.group(3), theirs, count=1)
+        theirs_ids = set(ids(theirs))
+        new = [i for i in ids(ours) if i and i not in theirs_ids]
+        if new:
+            out, n = re.subn(r'\)"', " + " + " + ".join(new) + ')"', out, count=1)
+            if n != 1:
+                raise ValueError("no description to extend")
+        if notes:
+            k = out.find("T.eq(")
+            k = out.rfind(nl, 0, k) + len(nl) if k > 0 else 0
+            out = out[:k] + nl.join(notes) + nl + out[k:]
+        return out
+    return re.sub(r"<<<<<<< [^\r\n]*\r?\n(.*?)(?:\|\|\|\|\|\|\| [^\r\n]*\r?\n.*?)?=======\r?\n"
+                  r"(.*?)>>>>>>> [^\r\n]*\r?\n", merge, text, flags=re.S)
+
+
+def _resolve_counted_specs(wt: str, files: list) -> list:
+    """Resolve the counted-index specs among `files` in place; the files left to resolve,
+    or None when one can't be (its index conflicts too, or the hunk is not a count)."""
+    import re
+    norm = {f: f.replace("\\", "/") for f in files}
+    specs = [f for f in files if norm[f] in COUNTED_SPECS]
+    for f in specs:
+        idx, rx = COUNTED_SPECS[norm[f]]
+        if idx in norm.values():
+            return None                              # the index itself conflicts: a human
+        try:
+            with open(os.path.join(wt, idx), encoding="utf-8", newline="") as fh:
+                entries = len(re.findall(rx, fh.read(), flags=re.M))
+            p = os.path.join(wt, f)
+            with open(p, encoding="utf-8", newline="") as fh:
+                text = counted_spec(fh.read(), entries)
+        except (OSError, ValueError):
+            return None
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        _git(wt, "add", "--", f, check=False)
+    return [f for f in files if f not in specs]
 
 
 def union_rows(text: str) -> str:
@@ -106,6 +175,9 @@ def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50) -> bool:
         if not files:
             return True
         if not all(union_safe(f) for f in files):
+            return False
+        files = _resolve_counted_specs(wt, files)
+        if files is None:
             return False
         for f in files:
             p = os.path.join(wt, f)
