@@ -3606,8 +3606,8 @@ async def set_recall(request: Request):
     from ..errors import describe_exception
     svc = _svc(request)
     body = await request.json()
-    allowed = {"enabled", "tiers", "top_k", "min_similarity", "max_chars",
-               "max_entries", "rebuild_hours"}
+    allowed = {"enabled", "tiers", "top_k", "min_similarity", "relative_floor",
+               "max_chars", "max_entries", "rebuild_hours"}
     updates = {k: v for k, v in body.items() if k in allowed}
     try:
         RecallConfig(**{**svc.config_store.config.recall.model_dump(), **updates})

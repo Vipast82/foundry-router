@@ -4300,7 +4300,8 @@ async function tabTraining() {
           <label title="Off here turns it off everywhere, whatever the personas say."><input type="checkbox" id="rc-on" ${rc.enabled ? "checked" : ""}> on</label>
           <label title="Which labels the work must have earned to be indexed. 'verified' passed a gate or a review; 'ok' finished without a complaint. Comma-separated.">index <input type="text" id="rc-tiers" style="width:130px" value="${esc((rc.tiers || []).join(", "))}"></label>
           <label title="How many past pieces of work go into a prompt at most.">top <input type="number" id="rc-topk" min="1" max="20" style="width:55px" value="${rc.top_k ?? 3}"></label>
-          <label title="How close a past request has to be to count as a match. Higher means fewer, closer matches.">at least <input type="number" id="rc-sim" min="0" max="1" step="0.05" style="width:65px" value="${rc.min_similarity ?? 0.55}"> similar</label>
+          <label title="A sanity floor only. What counts as 'similar' depends on the embedding model and on how long the requests are, so this is deliberately low - the next setting does the real work.">floor <input type="number" id="rc-sim" min="0" max="1" step="0.05" style="width:65px" value="${rc.min_similarity ?? 0.45}"></label>
+          <label title="A match is kept only if it is at least this fraction as similar as the best match found. This is what separates a real match from noise, and it works whatever scale the embedding model uses. 0 turns it off.">within <input type="number" id="rc-rel" min="0" max="1" step="0.05" style="width:65px" value="${rc.relative_floor ?? 0.9}"> of the best</label>
           <label title="How much of the prompt the matches may take, in characters.">at most <input type="number" id="rc-chars" min="200" max="20000" step="100" style="width:80px" value="${rc.max_chars ?? 2000}"> chars</label>
           <label title="The most pieces of work kept in the index; the oldest go first.">keep <input type="number" id="rc-max" min="100" max="100000" step="100" style="width:80px" value="${rc.max_entries ?? 20000}"></label>
           <label title="How often the index takes in work prepared since the last build. 0 = only when you press Build now.">rebuild every <input type="number" id="rc-hours" min="0" max="720" style="width:60px" value="${rc.hours ?? 24}"> hours</label>
@@ -4311,7 +4312,7 @@ async function tabTraining() {
           <div class="row" style="flex-basis:100%;gap:6px">
             <input type="text" id="rc-q" style="flex:1" placeholder="try it: describe a request and see what passed before">
             <button class="act" id="rc-try">Search</button></div>
-          <span class="hint" id="rc-msg">${Object.keys(tiers).length ? Object.entries(tiers).map(([k, v]) => `${esc(k)}: ${(+v).toLocaleString()}`).join(" · ") + " · " : ""}${rc.embed_model ? `embedded with ${esc(rc.embed_model)}` : '<span style="color:var(--bad)">no embedding model set — Routing → Semantic cache</span>'}${rr.state === "done" && rr.finished ? ` · last build ${when(rr.finished)}${rr.indexed ? `, ${(+rr.indexed).toLocaleString()} added` : ", nothing new"}` : ""}${rr.note ? " · " + esc(rr.note) : ""}</span></div>`;
+          <span class="hint" id="rc-msg">${Object.keys(tiers).length ? Object.entries(tiers).map(([k, v]) => `${esc(k)}: ${(+v).toLocaleString()}`).join(" · ") + " · " : ""}${rc.boilerplate ? `${rc.boilerplate} boilerplate line(s) stripped before embedding · ` : ""}${rc.embed_model ? `embedded with ${esc(rc.embed_model)}` : '<span style="color:var(--bad)">no embedding model set — Routing → Semantic cache</span>'}${rr.state === "done" && rr.finished ? ` · last build ${when(rr.finished)}${rr.indexed ? `, ${(+rr.indexed).toLocaleString()} added` : ", nothing new"}` : ""}${rr.note ? " · " + esc(rr.note) : ""}</span></div>`;
       })()}
       ${(() => {
         const lc = d.lessons || {}, lr = lc.run || {};
@@ -4448,6 +4449,7 @@ async function tabTraining() {
     const body = {enabled: $("#rc-on").checked,
                   tiers: $("#rc-tiers").value.split(",").map(s => s.trim()).filter(Boolean),
                   top_k: +$("#rc-topk").value || 3, min_similarity: +$("#rc-sim").value,
+                  relative_floor: +$("#rc-rel").value,
                   max_chars: +$("#rc-chars").value || 2000,
                   max_entries: +$("#rc-max").value || 20000,
                   rebuild_hours: +$("#rc-hours").value || 0};
@@ -4475,7 +4477,7 @@ async function tabTraining() {
       const r = await api("recall/search", {method: "POST", body: {query: q}});
       if (!(r.hits || []).length) { $("#rc-msg").textContent = r.note || "nothing similar enough"; return; }
       $("#rc-msg").innerHTML = r.hits.map(h =>
-        `<div style="margin:4px 0"><b>${(h.similarity * 100).toFixed(0)}%</b> ${esc(h.tier)}${h.task_id ? " · " + esc(h.task_id) : ""}${(h.tools || []).length ? " · tools: " + esc(h.tools.slice(0, 6).join(", ")) : ""}<br><i>${esc(h.request.slice(0, 220))}</i><br>${esc(h.solution.slice(0, 300))}...</div>`).join("");
+        `<div style="margin:4px 0"><b>${(h.similarity * 100).toFixed(0)}%</b> ${esc(h.tier)}${h.task_id ? " · " + esc(h.task_id) : ""}${(h.tools || []).length ? " · tools: " + esc(h.tools.slice(0, 6).join(", ")) : ""}<br><i>${esc((h.gist || h.request).slice(0, 220))}</i><br>${esc(h.solution.slice(0, 300))}...</div>`).join("");
     } catch (e) { $("#rc-msg").textContent = e.message; }
   };
   if ($("#prep-save")) $("#prep-save").onclick = () => capSet({

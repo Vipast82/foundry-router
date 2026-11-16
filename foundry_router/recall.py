@@ -33,7 +33,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
+from collections import Counter
 from typing import Optional
 
 from .db import utcnow
@@ -42,9 +44,65 @@ from .semcache import _normalize, _pack, _unpack
 log = logging.getLogger(__name__)
 
 MAX_ENTRIES = 100_000          # a hard ceiling whatever the setting says
-REQUEST_CHARS = 4000           # of a past request, embedded and shown
+REQUEST_CHARS = 4000           # of a past request kept and shown
+MIN_GIST = 40                  # below this, stripping took the task away too: keep it all
+BOILERPLATE_SHARE = 0.05       # a line in this share of requests is envelope, not task
+_ID = re.compile(r"[0-9a-f]{6,}|\d+")       # run ids, attempt numbers, shas, sizes
 _state: dict = {"state": "idle"}
 _task: dict = {"t": None}
+
+
+# -- what a request is actually about ----------------------------------------------------
+#
+# A request that reaches this router is mostly envelope. A coordinator sprint prompt
+# carries the same "TRACK SPRINT", "Project rules", "read STATE.md first" blocks every
+# time, and that boilerplate is the bulk of the text: embed it and every request lands in
+# nearly the same place, so a question about an animation matched a sprint about music at
+# 61% simply because they share a preamble. Found on the first live index (v0.181.170),
+# where 911 entries all scored 61-63% against everything.
+#
+# The rule is general and needs no list of patterns: a line appearing in a large share of
+# the corpus cannot be what any one request is about. What is left is the task. The lines
+# found are kept (`recall_boilerplate`) so a query is stripped the same way the index was.
+
+def _norm_line(line: str) -> str:
+    """A line as it is counted: ids, numbers and spacing removed, so the same
+    boilerplate carrying a different run id counts as the same line. Lines too
+    short to carry a thought are not counted at all."""
+    s = _ID.sub("#", (line or "").lower())
+    s = re.sub(r"\s+", " ", s).strip(" \t-*#.:")
+    return s if len(s) >= 12 else ""
+
+
+def common_lines(texts: list, share: float = BOILERPLATE_SHARE) -> set:
+    """The boilerplate of this corpus: lines in at least `share` of the requests
+    (and in at least two). Too few requests to tell: nothing is boilerplate."""
+    n = len(texts)
+    if n < 4:
+        return set()
+    seen: Counter = Counter()
+    for t in texts:
+        seen.update({_norm_line(l) for l in (t or "").splitlines() if _norm_line(l)})
+    floor = max(2, int(n * share))
+    return {s for s, k in seen.items() if k >= floor}
+
+
+def gist(text: str, common: set) -> str:
+    """What this request is about: every line that is not corpus boilerplate.
+    Falls back to the whole request when stripping leaves too little to match on."""
+    if not common:
+        return (text or "").strip()
+    keep = [l.strip() for l in (text or "").splitlines()
+            if l.strip() and _norm_line(l) not in common]
+    out = "\n".join(keep).strip()
+    return out if len(out) >= MIN_GIST else (text or "").strip()
+
+
+def boilerplate(db) -> set:
+    try:
+        return {r["line"] for r in db.query("SELECT line FROM recall_boilerplate")}
+    except Exception:                                             # noqa: BLE001
+        return set()
 
 
 # -- what a past piece of work looks like in the index ------------------------------------
@@ -115,8 +173,14 @@ def _candidates(svc, tiers: tuple, limit: int, have: set, log=print) -> list:
                     continue
                 picked.append(en)
     picked.sort(key=lambda e: e.get("task_id") or "", reverse=True)
-    log(f"recall: {len(picked)} new piece(s) of work to index")
-    return picked[:limit]
+    picked = picked[:limit]
+    common = common_lines([e["request"] for e in picked])
+    for e in picked:
+        e["gist"] = gist(e["request"], common)[:REQUEST_CHARS]
+    saved = sum(len(e["request"]) - len(e["gist"]) for e in picked)
+    log(f"recall: {len(picked)} new piece(s) of work to index; {len(common)} boilerplate "
+        f"line(s) dropped before embedding ({saved:,} characters of envelope)")
+    return picked, common
 
 
 # -- building the index -------------------------------------------------------------------
@@ -129,12 +193,15 @@ def status(svc) -> dict:
     cfg = _cfg(svc)
     row = svc.db.query_one("SELECT COUNT(*) AS n, MAX(ts) AS newest FROM recall_entries") or {}
     tiers = svc.db.query("SELECT tier, COUNT(*) AS n FROM recall_entries GROUP BY tier")
+    bp = svc.db.query_one("SELECT COUNT(*) AS n FROM recall_boilerplate") or {}
     return {"entries": row.get("n") or 0, "newest": row.get("newest") or "",
+            "boilerplate": bp.get("n") or 0,
             "by_tier": {r["tier"] or "unknown": r["n"] for r in tiers},
             "enabled": bool(getattr(cfg, "enabled", False)),
             "tiers": list(getattr(cfg, "tiers", []) or []),
             "top_k": int(getattr(cfg, "top_k", 3) or 3),
-            "min_similarity": float(getattr(cfg, "min_similarity", 0.55) or 0),
+            "min_similarity": float(getattr(cfg, "min_similarity", 0.45) or 0),
+            "relative_floor": float(getattr(cfg, "relative_floor", 0.9) or 0),
             "max_entries": int(getattr(cfg, "max_entries", 20000) or 0),
             "hours": int(getattr(cfg, "rebuild_hours", 24) or 0),
             "embed_model": getattr(svc.config_store.config.semantic_cache, "embed_model", ""),
@@ -174,12 +241,18 @@ async def build(svc, log_fn=None) -> dict:
             _state.update({"state": "done", "finished": time.time(),
                            "note": f"the index is full at {len(have)} (raise the limit to add more)"})
             return dict(_state)
-        found = await asyncio.to_thread(_candidates, svc, tiers, room, have, say)
+        found, common = await asyncio.to_thread(_candidates, svc, tiers, room, have, say)
         _state["total"] = len(found)
+        _state["boilerplate"] = len(common)
+        if common:
+            svc.db.execute_count("DELETE FROM recall_boilerplate")
+            for line in sorted(common):
+                svc.db.execute("INSERT OR IGNORE INTO recall_boilerplate (line) VALUES (?)",
+                               (line,))
         for en in found:
             if _state.get("stop"):
                 break
-            vec = await svc.semcache.embed(en["request"])
+            vec = await svc.semcache.embed(en.get("gist") or en["request"])
             if vec is None:
                 _state["skipped"] += 1
                 if _state["skipped"] > 20 and not _state["indexed"]:
@@ -188,10 +261,11 @@ async def build(svc, log_fn=None) -> dict:
                 continue
             svc.db.execute(
                 "INSERT OR REPLACE INTO recall_entries (ts, case_id, task_id, tier, tags, "
-                "tools, request, solution, embedding, dim) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "tools, request, gist, solution, embedding, dim) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (utcnow(), en["case_id"], en["task_id"], en["tier"],
                  json.dumps(en["tags"]), json.dumps(en["tools"]), en["request"],
-                 en["solution"][:20000], _pack(vec), len(vec)))
+                 en.get("gist") or "", en["solution"][:20000], _pack(vec), len(vec)))
             _state["indexed"] += 1
             if _state["indexed"] % 25 == 0:
                 await asyncio.sleep(0)
@@ -248,7 +322,9 @@ async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float
     if not (query or "").strip():
         return []
     try:
-        vec = await svc.semcache.embed(query[:REQUEST_CHARS])
+        # the same stripping, against the boilerplate this index found, so a pasted
+        # sprint prompt is matched on its task and not on its preamble
+        vec = await svc.semcache.embed(gist(query, boilerplate(svc.db))[:REQUEST_CHARS])
         if vec is None:
             return []
         blob, where, args = _pack(vec), ["dim=?"], [len(vec)]
@@ -259,14 +335,14 @@ async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float
         cond = " AND ".join(where)
         if getattr(svc.semcache, "_vec_loaded", False):
             rows = svc.db.query(
-                f"SELECT case_id, task_id, tier, tags, tools, request, solution, "
+                f"SELECT case_id, task_id, tier, tags, tools, request, gist, solution, "
                 f"1.0 - vec_distance_cosine(embedding, ?) AS sim FROM recall_entries "
                 f"WHERE {cond} ORDER BY sim DESC LIMIT ?", (blob, *args, k * 4))
         else:
             rows = []
             for r in svc.db.query(
-                    f"SELECT case_id, task_id, tier, tags, tools, request, solution, embedding "
-                    f"FROM recall_entries WHERE {cond}", tuple(args)):
+                    f"SELECT case_id, task_id, tier, tags, tools, request, gist, solution, "
+                    f"embedding FROM recall_entries WHERE {cond}", tuple(args)):
                 stored = _unpack(r["embedding"])
                 r["sim"] = sum(a * b for a, b in zip(vec, stored))
                 r.pop("embedding", None)
@@ -287,9 +363,17 @@ async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float
                 continue
             out.append({"case_id": r["case_id"], "task_id": r["task_id"], "tier": r["tier"],
                         "tags": r_tags, "tools": r_tools, "request": r["request"],
-                        "solution": r["solution"], "similarity": round(float(r["sim"]), 4)})
+                        "gist": r.get("gist") or "", "solution": r["solution"],
+                        "similarity": round(float(r["sim"]), 4)})
             if len(out) >= k:
                 break
+        # Keep only what is nearly as good as the best match. This is what separates a
+        # real match from the noise, and unlike an absolute cutoff it travels across
+        # embedding models: the best hit sets the bar for the rest.
+        rel = float(getattr(cfg, "relative_floor", 0.9) or 0)
+        if out and rel:
+            bar = out[0]["similarity"] * rel
+            out = [h for h in out if h["similarity"] >= bar]
         return out
     except Exception as e:                                        # noqa: BLE001
         log.info("recall search unavailable (%s)", e)
@@ -318,6 +402,8 @@ def note(hits: list, max_chars: int = 2000) -> str:
         if len(h["solution"]) > each:
             sol += " ..."
         tools = f" (tools used: {', '.join(h['tools'][:6])})" if h.get("tools") else ""
+        # the gist, not the raw request: the envelope would be most of the 600 characters
+        asked = h.get("gist") or h["request"]
         parts.append(f"\n--- {i}. asked ({h['similarity']:.0%} similar){tools}:\n"
-                     f"{h['request'][:600]}\n--- what was done:\n{sol}")
+                     f"{asked[:600]}\n--- what was done:\n{sol}")
     return "\n".join(parts)
