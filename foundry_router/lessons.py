@@ -45,6 +45,9 @@ from .semcache import _normalize, _pack, _unpack
 log = logging.getLogger(__name__)
 
 MAX_FINDINGS = 20_000          # newest first; a hard ceiling whatever the setting says
+# A "mistake" that covers a third of every finding ever written is not a rule anyone
+# can follow, it is a category. Such a cluster is reported and left out (v0.181.176).
+MAX_CLUSTER_SHARE = 0.15
 MIN_CHARS = 40                 # shorter than this says nothing a rule could prevent
 TEXT_CHARS = 1200              # of one finding kept and embedded
 _state: dict = {"state": "idle"}
@@ -187,24 +190,30 @@ def _cos(a: list, b: list) -> float:
 
 
 def cluster(rows: list, floor: float) -> list:
-    """Greedy clustering on L2-normalized vectors: each finding joins the closest
-    cluster it is at least `floor` close to, or starts its own. Newest first on
-    the way in, so an old finding joining later never renames a cluster."""
+    """Leader clustering on L2-normalized vectors: a finding joins the cluster whose
+    ANCHOR it is closest to, if it is at least `floor` close to it, else it starts
+    its own. Newest first on the way in, so a cluster is named after its newest
+    finding.
+
+    The anchor never moves, and that is the whole point. Averaging the members into
+    a centre and comparing against that lets a cluster walk across the space - each
+    addition tugs the centre a little further - until it absorbs everything nearby.
+    On the first real run that put 3,577 of 8,000 findings in one "mistake" and
+    7,606 of them in twelve, which is not a rulebook, it is a shrug (v0.181.176).
+    Against a fixed anchor, "within 0.80" means the same thing for the first member
+    and the thousandth."""
     out: list = []
     for r in rows:
         vec = r["vec"]
         best, best_sim = None, floor
         for c in out:
-            sim = _cos(vec, c["centre"])
+            sim = _cos(vec, c["anchor_vec"])
             if sim >= best_sim:
                 best, best_sim = c, sim
         if best is None:
-            out.append({"anchor": r["id"], "centre": list(vec), "members": [r]})
-            continue
-        n = len(best["members"])
-        best["centre"] = _normalize([(c * n + v) / (n + 1)
-                                     for c, v in zip(best["centre"], vec)]) or best["centre"]
-        best["members"].append(r)
+            out.append({"anchor": r["id"], "anchor_vec": list(vec), "members": [r]})
+        else:
+            best["members"].append(r)
     return out
 
 
@@ -297,16 +306,26 @@ async def mine(svc, log_fn=None) -> dict:
     try:
         rows = await asyncio.to_thread(collect, svc, limit, say)
         _state["findings"] = len(rows)
+        # A finding carries an envelope of its own: every vision finding opens with
+        # the model and persona that wrote it and the path of the frame it looked at.
+        # Embedding that makes thousands of unrelated findings look alike - the same
+        # mistake recall made (v0.181.176), so the same machinery fixes it.
+        from .recall import common_lines, gist
+        common = common_lines([r["text"] for r in rows])
+        for r in rows:
+            r["gist"] = gist(r["text"], common)
+        _state["boilerplate"] = len(common)
+        say(f"lessons: {len(common)} boilerplate phrase(s) dropped before embedding")
         have = {r["finding_id"]: r for r in svc.db.query(
-            "SELECT finding_id, embedding FROM lesson_findings")}
+            "SELECT finding_id, embedding, gist FROM lesson_findings")}
         for r in rows:
             if _state.get("stop"):
                 break
             hit = have.get(r["id"])
-            if hit:
+            if hit and (hit.get("gist") or "") == r["gist"]:
                 r["vec"] = _unpack(hit["embedding"])
-                continue
-            vec = await svc.semcache.embed(r["text"])
+                continue            # same text, same stripping: the vector still stands
+            vec = await svc.semcache.embed(r["gist"])
             if vec is None:
                 if not _state["embedded"]:
                     raise RuntimeError("the embedding endpoint is not answering - set it up "
@@ -315,25 +334,31 @@ async def mine(svc, log_fn=None) -> dict:
             r["vec"] = vec
             svc.db.execute(
                 "INSERT OR REPLACE INTO lesson_findings (finding_id, ts, source, severity, "
-                "task_id, text, embedding, dim) VALUES (?,?,?,?,?,?,?,?)",
+                "task_id, text, gist, embedding, dim) VALUES (?,?,?,?,?,?,?,?,?)",
                 (r["id"], _iso(r["ts"]), r["source"], r["severity"], r["task_id"], r["text"],
-                 _pack(vec), len(vec)))
+                 r["gist"], _pack(vec), len(vec)))
             _state["embedded"] += 1
             if _state["embedded"] % 25 == 0:
                 await asyncio.sleep(0)
         rows = [r for r in rows if r.get("vec")]
         clusters = await asyncio.to_thread(cluster, rows, floor)
         _state["clusters"] = len(clusters)
-        new = 0
+        new, huge = 0, 0
+        ceiling = max(min_seen, int(len(rows) * MAX_CLUSTER_SHARE))
         for c in clusters:
             tasks = {m["task_id"] for m in c["members"] if m["task_id"]}
             if len(c["members"]) < min_seen or len(tasks) < min_tasks:
                 continue
+            if len(c["members"]) > ceiling:
+                huge += 1
+                continue            # a category, not a mistake: no rule could cover it
             if _upsert(svc.db, c) == "new":
                 new += 1
+        _state["too_broad"] = huge
         _state.update({"state": "done", "finished": time.time(), "new": new, "stop": False})
         say(f"lessons: {len(clusters)} cluster(s) from {len(rows)} finding(s), "
-            f"{new} new candidate(s) waiting for you")
+            f"{new} new candidate(s) waiting for you"
+            + (f"; {huge} group(s) too broad to be a rule were left out" if huge else ""))
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         _state.update({"state": "failed", "finished": time.time(),

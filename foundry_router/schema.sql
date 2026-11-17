@@ -408,6 +408,7 @@ CREATE TABLE IF NOT EXISTS lesson_findings (
   severity TEXT,
   task_id TEXT,
   text TEXT,
+  gist TEXT,                        -- the finding with the corpus boilerplate stripped
   embedding BLOB,
   dim INTEGER
 );
