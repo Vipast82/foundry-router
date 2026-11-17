@@ -473,3 +473,19 @@ def test_every_benchmark_call_pins_the_sampling(tmp_path):
     assert seen.get("temperature") == 0.0
     assert seen.get("seed") == bench.SAMPLING["seed"]
     assert seen.get("top_p") == 1.0 and seen.get("top_k") == 1
+
+
+def test_a_run_the_restart_cut_off_is_not_left_saying_running(tmp_path):
+    """Nothing was alive to write the end of it, so the row would read as a result
+    that is still coming. A rebuild mid-run left exactly that."""
+    svc = _svc(tmp_path, Pool(lambda n: ChatResult(content="ok")))
+    svc.db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status) "
+                   "VALUES (datetime('now'), 's', 'm', 'cut off', 60, 0, 'running')")
+    svc.db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status) "
+                   "VALUES (datetime('now'), 's', 'm', 'finished', 60, 60, 'done')")
+    assert bench.reconcile(svc.db) == 1
+    rows = {r["label"]: r for r in bench.runs(svc.db)}
+    assert rows["cut off"]["status"] == "interrupted"
+    assert "restarted" in rows["cut off"]["note"]
+    assert rows["finished"]["status"] == "done"          # a real result is untouched
+    assert bench.reconcile(svc.db) == 0                  # nothing left to reconcile

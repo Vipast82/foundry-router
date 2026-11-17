@@ -2,6 +2,26 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.177 - a run the restart cut off is not still running
+
+A benchmark run is a thread inside the router, so rebuilding the container in the
+middle of one kills it. That is inherent and fine. What was not fine is what it
+left behind: a row in `bench_runs` that says `running` for ever, because nothing
+was alive to write the end of it. A row like that is worse than no row - it reads
+as a result that is still coming, and it sits at the top of the list where a real
+score belongs.
+
+Any run still marked running is reconciled to `interrupted` at startup, with a
+note saying why (`bench.reconcile`, called from `main`), the same way the dataset
+worker already reports a run it did not finish.
+
+Worth knowing while a comparison is in progress: **do not rebuild during a
+benchmark series.** Pressing Stop first is clean - the run finishes the case it
+is on and writes itself up as `stopped` - but a rebuild simply takes it, and
+those cases have to be run again.
+
+Tests: `tests/test_bench.py`.
+
 ## v0.181.176 - lessons, after its first real run put 3,577 findings in one "mistake"
 
 Lessons was mined on the live store for the first time: 8,000 findings read and
