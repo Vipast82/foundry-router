@@ -2,6 +2,40 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.176 - lessons, after its first real run put 3,577 findings in one "mistake"
+
+Lessons was mined on the live store for the first time: 8,000 findings read and
+embedded, 116 groups, 32 candidates. Mechanically it worked. The output was
+useless. **7,606 of the 8,000 findings landed in twelve groups**, the largest
+holding 3,577 of them across 42 tasks - and a mistake that covers 45% of every
+finding ever written is a category, not something a rule can fix.
+
+**A cluster was walking across the space.** Members were averaged into a centre
+and each new one tugged it a little further, so a group could drift until it had
+absorbed its neighbours' neighbours and theirs. Clustering now compares a
+finding against its cluster's **anchor**, which never moves, so "within 0.80"
+means the same thing for the first member and the thousandth. The test builds a
+chain of forty findings, each four degrees from the last: with a drifting centre
+it collapses into one group, against an anchor it cannot.
+
+**A finding has an envelope of its own, and it was being embedded.** Every
+vision finding opens with the model and persona that wrote it and the path of
+the frame it looked at - `model:Foundry-Kilo-Visual-Review/claude-sonnet-5-5:
+docs/evidence/<path>:` - which makes thousands of unrelated findings look alike.
+This is the same mistake recall made two releases ago, so it now uses the same
+machinery (`recall.common_lines` / `recall.gist`) rather than a second copy of
+the idea. The stripped text is stored beside the vector, so changing the
+stripping re-embeds what changed instead of needing the cache cleared by hand.
+
+**A group larger than 15% of the corpus is reported and left out** instead of
+being offered as a rule.
+
+Nothing had been approved, so nothing reached a prompt - the review queue is the
+reason this was caught by reading candidates rather than by a model following a
+nonsense rule.
+
+Tests: `tests/test_lessons.py`.
+
 ## v0.181.175 - a benchmark that cannot repeat itself cannot measure anything
 
 The recall question was finally asked, and the answer was that the instrument is

@@ -323,3 +323,56 @@ def test_a_scheduled_pass_is_only_due_when_it_is_switched_on(tmp_path):
     assert lessons.due(svc) is True
     lessons._state["finished"] = __import__("time").time()
     assert lessons.due(svc) is False                 # just looked
+
+
+# -- a cluster must not walk across the space ---------------------------------------------
+
+def test_a_chain_of_near_neighbours_does_not_become_one_cluster():
+    """Averaging members into a moving centre lets a cluster drift: each addition tugs
+    it a little further until it has absorbed everything. On the first real run that
+    put 3,577 of 8,000 findings into one "mistake". Against a fixed anchor it cannot
+    happen: the last link of a chain is nowhere near the first."""
+    import math
+    rows = []
+    for i in range(40):                       # a chain, each 4 degrees from the last
+        a = math.radians(4 * i)
+        rows.append(_row(i, _vec(math.cos(a), math.sin(a), 0.0), task=f"T{i}", ts=float(i)))
+    groups = lessons.cluster(rows, 0.9)       # 0.9 ~ 26 degrees
+    biggest = max(len(c["members"]) for c in groups)
+    assert biggest < len(rows) / 2            # not one bucket holding everything
+    assert len(groups) > 3
+    # and every member really is within the bar of its own anchor
+    for c in groups:
+        for m in c["members"]:
+            assert lessons._cos(m["vec"], c["anchor_vec"]) >= 0.9 or m["id"] == c["anchor"]
+
+
+def test_the_anchor_never_moves():
+    rows = [_row(1, _vec(1, 0, 0), ts=1.0), _row(2, _vec(0.95, 0.31, 0), ts=2.0)]
+    groups = lessons.cluster(rows, 0.9)
+    assert len(groups) == 1
+    assert groups[0]["anchor_vec"] == rows[0]["vec"]      # still the first one in
+
+
+@pytest.mark.asyncio
+async def test_a_group_too_broad_to_be_a_rule_is_left_out(tmp_path, monkeypatch):
+    """A mistake covering a third of every finding ever written is a category, not
+    something a rule can fix."""
+    svc = _svc(tmp_path, cfg=LessonsConfig(min_seen=2, min_tasks=2))
+
+    async def embed(text):
+        from foundry_router.semcache import _normalize
+        return _normalize([1.0, 0.0] if "same" in text else [0.0, 1.0])
+    svc.semcache.embed = embed
+    rows = [{"id": f"f{i}", "text": f"the same kind of finding as all the others {i}",
+             "source": "review", "severity": "", "task_id": f"T{i}", "ts": float(i)}
+            for i in range(20)]
+    rows += [{"id": "odd1", "text": "a different sort of problem entirely here",
+              "source": "gate", "severity": "", "task_id": "X1", "ts": 99.0},
+             {"id": "odd2", "text": "a different sort of problem entirely there",
+              "source": "gate", "severity": "", "task_id": "X2", "ts": 98.0}]
+    monkeypatch.setattr(lessons, "collect", lambda svc, limit, log_fn: list(rows))
+    out = await lessons.mine(svc, log_fn=lambda m: None)
+    assert out["too_broad"] == 1                  # the 20-member group is a category
+    assert out["new"] == 1                        # only the pair becomes a candidate
+    assert lessons.status(svc)["proposed"] == 1
