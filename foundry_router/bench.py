@@ -513,6 +513,20 @@ def status(svc) -> dict:
     return {"run": dict(_state), "suites": suites(svc)}
 
 
+def reconcile(db) -> int:
+    """A run whose thread is gone says "running" for ever, because nothing was
+    left alive to write the end of it. A restart in the middle of a run (a
+    rebuild, a kill) leaves exactly that, and a row like it is worse than no row
+    - it reads as a result that is still coming. Called at startup."""
+    n = db.execute_count(
+        "UPDATE bench_runs SET status='interrupted', "
+        "note=COALESCE(NULLIF(note,''), 'the router restarted while this run was going') "
+        "WHERE status='running'")
+    if n:
+        db.log_event("info", "bench", f"{n} benchmark run(s) were interrupted by a restart")
+    return n
+
+
 def runs(db, limit: int = 30) -> list:
     return db.query("SELECT * FROM bench_runs ORDER BY id DESC LIMIT ?", (max(1, min(200, limit)),))
 
