@@ -455,3 +455,21 @@ def test_a_run_records_whether_past_work_was_used(tmp_path, monkeypatch):
     plain = bench.start(svc, name, "qwen", label="without")
     _wait(svc)
     assert bench.runs(svc.db)[0]["recall"] == 0
+
+
+def test_every_benchmark_call_pins_the_sampling(tmp_path):
+    """A benchmark that cannot repeat itself cannot measure anything: two runs of the
+    same suite against the same model came back 65.5 and 75.0 before this."""
+    seen = {}
+
+    class Recording(Pool):
+        async def chat(self, model, messages, tools=None, max_tokens=4096, options=None, **kw):
+            seen.update(options or {})
+            return await super().chat(model, messages, tools=tools, max_tokens=max_tokens)
+    svc = _svc(tmp_path, Recording(lambda n: ChatResult(content="a sensible answer here")))
+    name = _suite(svc, n=1)
+    bench.start(svc, name, "qwen")
+    _wait(svc)
+    assert seen.get("temperature") == 0.0
+    assert seen.get("seed") == bench.SAMPLING["seed"]
+    assert seen.get("top_p") == 1.0 and seen.get("top_k") == 1
