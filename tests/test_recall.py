@@ -367,3 +367,121 @@ def test_a_well_stripped_request_is_not_mistaken_for_a_repeated_line():
     # and the thing it is meant to catch still is caught
     repeated = "\n".join(["ERROR: Cannot read image, this model has no image input"] * 4)
     assert recall.looks_like_work(repeated) is False
+
+
+# -- searching the words as well as the meaning -------------------------------------------
+
+def test_a_request_becomes_a_safe_word_query():
+    """Everything a coordinator writes is an FTS5 operator: quotes, parentheses, a
+    bare AND, a trailing *. A search must never fail on the punctuation of the thing
+    being searched for."""
+    q = recall.match_query('fix the "spin" script (AND the arc*) -- NEAR/2 ???')
+    assert '"spin"' in q and '"script"' in q and " OR " in q
+    for bad in ("(", ")", "*", "--", "/"):
+        assert bad not in q
+    assert recall.match_query("a of to") == ""          # nothing long enough to match on
+    assert recall.match_query("") == ""
+
+
+def test_the_word_query_drops_duplicates_and_has_a_ceiling():
+    q = recall.match_query("badger badger badger wolf", most=40)
+    assert q.count('"badger"') == 1
+    assert len(recall.match_query(" ".join(f"word{i}" for i in range(100)), most=5).split(" OR ")) == 5
+
+
+def test_rank_fusion_prefers_what_is_near_the_top_of_either_list():
+    a = ["x", "y", "z"]          # x first here
+    b = ["z", "y", "x"]          # z first there
+    f = recall.rrf(a, b)
+    assert f["y"] < f["x"] and f["y"] < f["z"]   # middling in both loses to top of one
+    assert round(f["x"], 9) == round(f["z"], 9)  # symmetric
+    assert recall.rrf([]) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_words_find_what_the_embedding_missed(tmp_path):
+    """An identifier is exactly what an embedding blurs and a word match nails."""
+    svc = _svc(tmp_path)
+    await _put(svc, "ident", "regenerate mesh_report.json for EL-RHINO after the rebuild",
+               "regenerated it")
+    await _put(svc, "other", "the door will not open", "fixed the prompt")
+    for cid, text in (("ident", "regenerate mesh_report.json for EL-RHINO after the rebuild"),
+                      ("other", "the door will not open")):
+        recall.index_words(svc.db, cid, text)
+    # the stand-in embedder knows none of these words, so every vector is identical:
+    # only the word channel can tell them apart
+    hits = await recall.search(svc, "mesh_report.json EL-RHINO", min_similarity=0.0)
+    assert hits and hits[0]["case_id"] == "ident"
+    assert hits[0]["found_by"] in ("words", "both")
+
+
+@pytest.mark.asyncio
+async def test_a_word_match_is_not_thrown_away_by_the_relative_floor(tmp_path):
+    """The floor exists for single-channel search. Applying it to a fused list would
+    discard exactly the rescues fusion is for."""
+    svc = _svc(tmp_path, cfg=RecallConfig(enabled=True, relative_floor=0.9, top_k=3))
+    await _put(svc, "close", "spin jitter arc")                   # the embedder likes this
+    await _put(svc, "worded", "a totally different matter entirely")
+    recall.index_words(svc.db, "worded", "spin jitter arc mesh_report.json EL-RHINO")
+    recall.index_words(svc.db, "close", "spin jitter arc")
+    hits = await recall.search(svc, "spin jitter arc EL-RHINO", min_similarity=0.0)
+    assert {h["case_id"] for h in hits} == {"close", "worded"}
+
+
+@pytest.mark.asyncio
+async def test_hybrid_can_be_turned_off(tmp_path):
+    svc = _svc(tmp_path, cfg=RecallConfig(enabled=True, hybrid=False, relative_floor=0))
+    await _put(svc, "a", "the door will not open")
+    recall.index_words(svc.db, "a", "mesh_report.json EL-RHINO")
+    hits = await recall.search(svc, "mesh_report.json EL-RHINO", min_similarity=0.95)
+    assert hits == []                                 # words ignored; the embedding says no
+
+
+@pytest.mark.asyncio
+async def test_clearing_and_pruning_take_the_word_index_with_them(tmp_path):
+    svc = _svc(tmp_path)
+    for i in range(5):
+        await _put(svc, f"c{i}", f"work number {i} on the badger")
+        recall.index_words(svc.db, f"c{i}", f"work number {i} on the badger")
+    assert svc.db.query_one("SELECT COUNT(*) AS n FROM recall_fts")["n"] == 5
+    recall.prune(svc, 3)
+    assert svc.db.query_one("SELECT COUNT(*) AS n FROM recall_fts")["n"] == 3
+    recall.clear(svc)
+    assert svc.db.query_one("SELECT COUNT(*) AS n FROM recall_fts")["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_broken_word_index_never_fails_a_search(tmp_path):
+    svc = _svc(tmp_path)
+    await _put(svc, "a", "spin jitter arc")
+    svc.db.execute("DROP TABLE recall_fts")
+    hits = await recall.search(svc, "spin jitter arc", min_similarity=0.1)
+    assert hits and hits[0]["case_id"] == "a"         # degrades to the embedding alone
+
+
+@pytest.mark.asyncio
+async def test_an_index_built_before_the_word_channel_catches_itself_up(tmp_path):
+    """The words were in the database the whole time; nobody should have to
+    re-embed 863 entries for fifteen minutes to get at them."""
+    svc = _svc(tmp_path)
+    await _put(svc, "a", "regenerate mesh_report.json for EL-RHINO")
+    await _put(svc, "b", "the door will not open")
+    svc.db.execute_count("DELETE FROM recall_fts")          # as an older index would be
+    assert recall.catch_up_words(svc.db) == 2
+    assert recall.catch_up_words(svc.db) == 0               # a no-op once they agree
+    hits = await recall.search(svc, "mesh_report.json EL-RHINO", min_similarity=0.0)
+    assert hits[0]["case_id"] == "a"
+
+
+def test_the_word_index_keeps_its_own_tables_out_of_the_data_tools(tmp_path):
+    """FTS5 is one name in the schema and several tables on disk. They have no
+    rowid to order by, so exporting them raised; pruning them would corrupt the
+    index."""
+    from foundry_router import datatools
+    svc = _svc(tmp_path)
+    names = datatools.tables(svc.db)
+    assert "recall_entries" in names                      # the real table is still offered
+    assert not any(n.startswith("recall_fts") for n in names)
+    # and the export path that used to raise now works for everything it offers
+    for t in names[:8]:
+        datatools.export(svc.db, t, "jsonl", limit=1)

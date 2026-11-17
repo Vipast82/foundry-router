@@ -396,6 +396,12 @@ CREATE TABLE IF NOT EXISTS recall_boilerplate (
   line TEXT PRIMARY KEY
 );
 
+-- The same entries, searchable by their WORDS. An embedding blurs an identifier
+-- like EN-BADGER or mesh_report.json into "asset-ish"; a word match nails it, and
+-- the two channels miss different things, so both run and the rankings are fused.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS recall_fts USING fts5(entry_id UNINDEXED, body);
+
 -- Lessons: the mistakes that recur, as rules the operator approved (lessons.py) -
 -- lesson_findings is the embedding cache, so mining again only embeds what is new.
 -- `anchor` is the newest finding of the cluster the lesson was mined from, which is

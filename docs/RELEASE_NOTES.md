@@ -2,6 +2,59 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.179 - recall searches the words as well as the meaning
+
+Recall was measured as worth +6 points (v0.181.174's design, five runs a side,
+95% CI [1.4, 11.1]). This is the first attempt to make it better, and the useful
+part is how little of what looked promising survived being measured.
+
+A retrieval test with free ground truth: a stored request's first line is its
+sprint title, a title is a realistic short query, and it is different text from
+the body, so "does the right entry come back for its own title" can be scored
+over 61 real entries without labelling anything.
+
+| | recall@1 | recall@3 | MRR | against today, paired |
+|---|---|---|---|---|
+| the embedding alone (what ran before) | 44.3% | 63.9% | 0.569 | - |
+| plus nomic's `search_document:` / `search_query:` prefixes | 36.1% | 62.3% | 0.518 | 12 better, 17 worse, **p = 0.46** |
+| word search (BM25) alone | 49.2% | 72.1% | 0.627 | 21 better, 17 worse, **p = 0.63** |
+| **both, rank-fused** | 44.3% | **75.4%** | 0.619 | **24 better, 10 worse, p = 0.024** |
+
+Read the aggregates and you would switch to BM25: five points of recall@1, eight
+of recall@3. Read the paired comparison and that win is a coin toss - it beats
+the embedding on 21 queries and loses on 17. The embedding model's own
+documented prefixes are likewise a wash, not the free win they look like.
+**Fusing the two rankings is the only change here with evidence behind it**, and
+it makes sense: an identifier like `EN-BADGER` or `mesh_report.json` is exactly
+what an embedding blurs into "asset-ish" and a word match nails, while a request
+phrased in nobody's vocabulary is the reverse. They fail on different queries.
+
+- Entries are now also indexed by their words (SQLite's own FTS5 and `bm25()` -
+  no new service, no new model, no new dependency), and the two rankings are
+  combined by reciprocal rank fusion. `recall.hybrid`, on by default.
+- A hit says which channel found it (`found_by`: meaning / words / both).
+- **The relative floor no longer applies when the word channel contributed.**
+  That floor is what separates a real match from noise when there is one score
+  to go on; against a fused ranking it would discard precisely the word-matched
+  rescues the fusion exists to find.
+- An index built before any of this existed **catches itself up at startup** from
+  the text already stored, rather than needing a fifteen-minute re-embed to get
+  at words that were in the database the whole time.
+- A word query is built by taking the words out and quoting them, never by
+  escaping: `fix the "spin" script (AND the arc*)` is four FTS5 operators, and a
+  search must not fail on the punctuation of the thing being searched for.
+- A missing or broken word index degrades to the embedding alone, never to an
+  error.
+
+Also: adding a full-text index broke the data tools. An FTS5 table is one name
+in the schema and several tables on disk (`_config`, `_data`, `_docsize`,
+`_idx`); they have no `rowid` to order by, so exporting raised, and pruning them
+would have corrupted the index. Virtual tables and their private tables are now
+found from the schema rather than from a list of suffixes, so the next one needs
+no edit there.
+
+Tests: `tests/test_recall.py`.
+
 ## v0.181.178 - a review queue you can actually read
 
 v0.181.176's clustering was re-run on the same 8,000 findings and it worked: the

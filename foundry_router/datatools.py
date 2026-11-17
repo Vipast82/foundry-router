@@ -34,9 +34,30 @@ _TS_COLS = ("ts", "created_at", "started_at", "updated_at", "last_updated")
 FORMATS = ("jsonl", "csv", "json")
 
 
+def _shadow(db: Database) -> set:
+    """A virtual table and the tables it keeps for itself.
+
+    A full-text index (recall_fts) is one name in the schema and several tables
+    on disk - `_config`, `_data`, `_docsize`, `_idx` - which are its private
+    business: they have no rowid to order by, their contents mean nothing on
+    their own, and exporting or pruning them would corrupt the index. They are
+    found from the schema rather than from a list of suffixes, so the next
+    virtual table needs no edit here (v0.181.179)."""
+    names = [r["name"] for r in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table'")]
+    virtual = [r["name"] for r in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND sql LIKE 'CREATE VIRTUAL TABLE%'")]
+    out = set(virtual)
+    for v in virtual:
+        out.update(n for n in names if n.startswith(v + "_"))
+    return out
+
+
 def tables(db: Database) -> list[str]:
     rows = db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    return [r["name"] for r in rows if r["name"] not in PRIVATE_TABLES
+    hidden = _shadow(db) | PRIVATE_TABLES
+    return [r["name"] for r in rows if r["name"] not in hidden
             and not r["name"].startswith("sqlite_")]
 
 

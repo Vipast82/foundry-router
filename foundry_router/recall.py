@@ -149,6 +149,59 @@ def looks_like_work(text: str) -> bool:
     return True
 
 
+RRF_K = 60                     # the usual constant; the ranking is insensitive to it
+_WORD = re.compile(r"[A-Za-z0-9_]+")
+
+
+def match_query(text: str, most: int = 40) -> str:
+    """A request as an FTS5 MATCH expression. Everything a person or a coordinator
+    writes - quotes, parentheses, `AND`, a bare `*` - is an operator to FTS5, so the
+    words are taken out and quoted rather than escaped: a search must never fail on
+    the punctuation of the thing being searched for."""
+    seen, out = set(), []
+    for w in _WORD.findall(text or ""):
+        lw = w.lower()
+        if len(lw) < 3 or lw in seen:
+            continue
+        seen.add(lw)
+        out.append('"' + lw + '"')
+        if len(out) >= most:
+            break
+    return " OR ".join(out)
+
+
+def lexical(db, text: str, limit: int) -> list:
+    """The ids of entries whose WORDS match, best first (SQLite's own BM25).
+
+    Dense search and word search miss different things, and on this store neither
+    is reliably better than the other: measured over 61 requests, BM25 alone beat
+    the embedding on some queries and lost on as many (p = 0.63). What did win was
+    using both - 24 queries better against 10 worse, p = 0.024, recall@3 from 64%
+    to 75% (v0.181.179). An identifier like EN-BADGER or mesh_report.json is
+    exactly what an embedding blurs and a word match nails."""
+    q = match_query(text)
+    if not q:
+        return []
+    try:
+        return [r["entry_id"] for r in db.query(
+            "SELECT entry_id FROM recall_fts WHERE recall_fts MATCH ? "
+            "ORDER BY bm25(recall_fts) LIMIT ?", (q, limit))]
+    except Exception as e:                                        # noqa: BLE001
+        log.info("recall: word search unavailable (%s)", e)
+        return []
+
+
+def rrf(*rankings) -> dict:
+    """Reciprocal rank fusion: each list votes 1/(K + position). A document near
+    the top of either list beats one that is middling in both, which is the point -
+    the two channels fail on different queries."""
+    out: dict = {}
+    for ranking in rankings:
+        for pos, key in enumerate(ranking):
+            out[key] = out.get(key, 0.0) + 1.0 / (RRF_K + pos + 1)
+    return out
+
+
 def boilerplate(db) -> set:
     try:
         return {r["line"] for r in db.query("SELECT line FROM recall_boilerplate")}
@@ -323,6 +376,7 @@ async def build(svc, log_fn=None) -> dict:
                 (utcnow(), en["case_id"], en["task_id"], en["tier"],
                  json.dumps(en["tags"]), json.dumps(en["tools"]), en["request"],
                  en.get("gist") or "", en["solution"][:20000], _pack(vec), len(vec)))
+            index_words(svc.db, en["case_id"], en.get("gist") or en["request"])
             _state["indexed"] += 1
             if _state["indexed"] % 25 == 0:
                 await asyncio.sleep(0)
@@ -357,12 +411,60 @@ def prune(svc, cap: int) -> int:
     excess = (over["n"] if over else 0) - cap
     if excess <= 0:
         return 0
+    going = [r["case_id"] for r in svc.db.query(
+        "SELECT case_id FROM recall_entries ORDER BY ts ASC LIMIT ?", (excess,))]
+    forget_words(svc.db, going)
     return svc.db.execute_count("DELETE FROM recall_entries WHERE id IN ("
                                 "SELECT id FROM recall_entries ORDER BY ts ASC LIMIT ?)",
                                 (excess,))
 
 
+def index_words(db, case_id: str, text: str) -> None:
+    """The same entry in the word index. Its own table rather than an external-content
+    one, so a rebuild cannot leave the two disagreeing about what exists."""
+    try:
+        db.execute("DELETE FROM recall_fts WHERE entry_id=?", (case_id,))
+        db.execute("INSERT INTO recall_fts (entry_id, body) VALUES (?,?)",
+                   (case_id, text or ""))
+    except Exception as e:                                        # noqa: BLE001
+        log.info("recall: word index unavailable (%s)", e)
+
+
+def catch_up_words(db) -> int:
+    """Put every entry that has no word-index row into it, from the text already
+    stored. An index built before the word channel existed would otherwise sit
+    there searching on one channel until somebody noticed and spent fifteen
+    minutes re-embedding it for nothing: the words were in the database the whole
+    time (v0.181.179). Cheap and a no-op once the two agree."""
+    try:
+        rows = db.query("SELECT case_id, gist, request FROM recall_entries WHERE case_id "
+                        "NOT IN (SELECT entry_id FROM recall_fts)")
+    except Exception as e:                                        # noqa: BLE001
+        log.info("recall: word index unavailable (%s)", e)
+        return 0
+    for r in rows:
+        index_words(db, r["case_id"], r.get("gist") or r.get("request") or "")
+    if rows:
+        db.log_event("info", "recall",
+                     f"{len(rows)} entry(s) added to the word index from text already stored")
+    return len(rows)
+
+
+def forget_words(db, case_ids=None) -> None:
+    try:
+        if case_ids is None:
+            db.execute_count("DELETE FROM recall_fts")
+        else:
+            for i in range(0, len(case_ids), 200):
+                chunk = case_ids[i:i + 200]
+                db.execute_count("DELETE FROM recall_fts WHERE entry_id IN (%s)"
+                                 % ",".join("?" * len(chunk)), tuple(chunk))
+    except Exception as e:                                        # noqa: BLE001
+        log.info("recall: word index unavailable (%s)", e)
+
+
 def clear(svc) -> int:
+    forget_words(svc.db)
     return svc.db.execute_count("DELETE FROM recall_entries")
 
 
@@ -371,17 +473,21 @@ def clear(svc) -> int:
 async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float] = None,
                  tiers=(), tags=()) -> list:
     """The most similar pieces of passed work, best first. [] on any failure -
-    an outage here must never fail a request."""
+    an outage here must never fail a request.
+
+    Two channels: the embedding, and the words. Neither is reliably better than
+    the other on this store, so both run and their rankings are fused (`rrf`)."""
     cfg = _cfg(svc)
     k = max(1, min(int(top_k or getattr(cfg, "top_k", 3) or 3), 20))
-    floor = (float(getattr(cfg, "min_similarity", 0.55) or 0)
+    floor = (float(getattr(cfg, "min_similarity", 0.45) or 0)
              if min_similarity is None else float(min_similarity))
     if not (query or "").strip():
         return []
     try:
         # the same stripping, against the boilerplate this index found, so a pasted
         # sprint prompt is matched on its task and not on its preamble
-        vec = await svc.semcache.embed(gist(query, boilerplate(svc.db))[:REQUEST_CHARS])
+        asked = gist(query, boilerplate(svc.db))[:REQUEST_CHARS]
+        vec = await svc.semcache.embed(asked)
         if vec is None:
             return []
         blob, where, args = _pack(vec), ["dim=?"], [len(vec)]
@@ -390,27 +496,49 @@ async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float
             where.append("tier IN (%s)" % ",".join("?" * len(want_tiers)))
             args += want_tiers
         cond = " AND ".join(where)
+        pool = max(k * 4, 12)
+        cols = ("case_id, task_id, tier, tags, tools, request, gist, solution")
         if getattr(svc.semcache, "_vec_loaded", False):
             rows = svc.db.query(
-                f"SELECT case_id, task_id, tier, tags, tools, request, gist, solution, "
-                f"1.0 - vec_distance_cosine(embedding, ?) AS sim FROM recall_entries "
-                f"WHERE {cond} ORDER BY sim DESC LIMIT ?", (blob, *args, k * 4))
+                f"SELECT {cols}, 1.0 - vec_distance_cosine(embedding, ?) AS sim "
+                f"FROM recall_entries WHERE {cond} ORDER BY sim DESC LIMIT ?",
+                (blob, *args, pool))
         else:
             rows = []
-            for r in svc.db.query(
-                    f"SELECT case_id, task_id, tier, tags, tools, request, gist, solution, "
-                    f"embedding FROM recall_entries WHERE {cond}", tuple(args)):
+            for r in svc.db.query(f"SELECT {cols}, embedding FROM recall_entries "
+                                  f"WHERE {cond}", tuple(args)):
                 stored = _unpack(r["embedding"])
                 r["sim"] = sum(a * b for a, b in zip(vec, stored))
                 r.pop("embedding", None)
                 rows.append(r)
             rows.sort(key=lambda r: -r["sim"])
-            rows = rows[:k * 4]
+            rows = rows[:pool]
+        dense_order = [r["case_id"] for r in rows]
+
+        # the word channel, and the entries only it found
+        lex_order: list = []
+        if bool(getattr(cfg, "hybrid", True)):
+            lex_order = lexical(svc.db, asked, pool)
+            missing = [c for c in lex_order if c not in set(dense_order)]
+            for i in range(0, len(missing), 200):
+                chunk = missing[i:i + 200]
+                marks = ",".join("?" * len(chunk))
+                for r in svc.db.query(
+                        f"SELECT {cols}, embedding FROM recall_entries "
+                        f"WHERE case_id IN ({marks}) AND {cond}", (*chunk, *args)):
+                    stored = _unpack(r.pop("embedding"))
+                    r["sim"] = sum(a * b for a, b in zip(vec, stored))
+                    rows.append(r)
+
+        if lex_order:
+            fused = rrf(dense_order, lex_order)
+            rows.sort(key=lambda r: -fused.get(r["case_id"], 0.0))
+
         want_tags = {t for t in tags if t}
         out = []
         for r in rows:
             if r["sim"] < floor:
-                break                          # sorted - nothing further clears the bar
+                continue        # fused order is not similarity order: filter, never break
             try:
                 r_tags = json.loads(r.get("tags") or "[]")
                 r_tools = json.loads(r.get("tools") or "[]")
@@ -421,14 +549,20 @@ async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float
             out.append({"case_id": r["case_id"], "task_id": r["task_id"], "tier": r["tier"],
                         "tags": r_tags, "tools": r_tools, "request": r["request"],
                         "gist": r.get("gist") or "", "solution": r["solution"],
-                        "similarity": round(float(r["sim"]), 4)})
+                        "similarity": round(float(r["sim"]), 4),
+                        "found_by": ("both" if r["case_id"] in set(lex_order)
+                                     and r["case_id"] in set(dense_order)
+                                     else "words" if r["case_id"] in set(lex_order)
+                                     else "meaning")})
             if len(out) >= k:
                 break
-        # Keep only what is nearly as good as the best match. This is what separates a
-        # real match from the noise, and unlike an absolute cutoff it travels across
-        # embedding models: the best hit sets the bar for the rest.
+        # With one channel, a relative floor is what separates a real match from
+        # noise: the best hit sets the bar, which travels across embedding models
+        # where an absolute cutoff does not. With two, the fused rank already says
+        # a hit was near the top of SOMETHING, and keeping the floor here would
+        # throw away exactly the word-matched rescues fusion exists to find.
         rel = float(getattr(cfg, "relative_floor", 0.9) or 0)
-        if out and rel:
+        if out and rel and not lex_order:
             bar = out[0]["similarity"] * rel
             out = [h for h in out if h["similarity"] >= bar]
         return out

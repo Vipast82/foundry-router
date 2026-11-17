@@ -160,8 +160,9 @@ class Services:
                                  research=self.research)
         self.semcache = SemanticCache(cfg.semantic_cache, self.http, db)
         self.agent.svc = self            # recall.py needs the index and the embedder
-        from . import bench
+        from . import bench, recall as _recall
         bench.reconcile(db)              # a run the last restart cut off is not 'running'
+        _recall.catch_up_words(db)       # an index built before the word channel existed
         self.mcp_aggregator = MCPAggregator(self)
         from .media import MediaService
         self.media = MediaService(self)
