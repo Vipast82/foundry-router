@@ -974,6 +974,46 @@ def test_review_packet_leaves_out_files_only_other_sprints_changed(env):
     assert all(not s.startswith("UI-SKIN2:") for _, s in commits) and len(commits) == 2
 
 
+def test_review_patch_of_a_shared_file_holds_only_this_sprints_commits(env):
+    """2026-11-17: POL-7 (1.19 MB), LOB-1b and FIN-5a1 were refused as over budget: a file
+    both they and other sprints changed (tests/RegressionIndex.lua, 357 KB) went in with
+    every sprint's edits. Such a file is reviewed as this sprint's own commits only."""
+    e = env([GREEN])
+    e.c.approve("game", "T1", [], "victor")
+    drive(e, lambda t: t["state"] == S.COMPLETE)
+    P = e.c.projects["game"]
+    base = P.ws.head()
+    idx = e.repo / "index.lua"
+    idx.write_text("a\n" * 5)
+    git(e.repo, "add", "index.lua")
+    git(e.repo, "commit", "-q", "-m", "T1: index base row")
+    idx.write_text("a\n" * 5 + "THEIRS-ROW\n" * 40)
+    git(e.repo, "commit", "-q", "-am", "UI-SKIN2: forty rows of theirs")
+    idx.write_text("a\n" * 5 + "THEIRS-ROW\n" * 40 + "MINE-ROW\n")
+    git(e.repo, "commit", "-q", "-am", "T1: my row")
+    head = P.ws.head()
+    mixed = e.c._review_mixed_files(P, "T1", base, head)
+    assert list(mixed) == ["index.lua"] and len(mixed["index.lua"]) == 2
+    patch = e.c._review_patch(P, mixed, base, head, "index.lua")
+    assert "MINE-ROW" in patch and "THEIRS-ROW" not in patch.replace(" THEIRS-ROW", "")
+    whole = P.ws.file_diff(base, head, "index.lua")
+    assert whole.count("+THEIRS-ROW") == 40 and patch.count("+THEIRS-ROW") == 0
+    # a file only this sprint changed keeps its whole range diff
+    assert e.c._review_patch(P, mixed, base, head, "other.txt") == \
+        P.ws.file_diff(base, head, "other.txt")
+
+
+def test_a_watched_guard_in_the_plan_is_not_a_required_suite():
+    """2026-11-17 ORI-2: four decisions retired AS_P7 as a base-red watched guard and the
+    seeder re-listed it from the plan each time."""
+    from foundry_coordinator.projects.animaluprising.adapter import _watched_guards
+    assert _watched_guards("- Watched guard AS_P7 (14): red at the base head "
+                           "(docs/x.md:28, BASELINE.md:15: A10, A11, A12)") == {"AS_P7"}
+    assert _watched_guards("watched guards AS_P5, AS_P7: base red") == {"AS_P5", "AS_P7"}
+    assert _watched_guards("Suites: AS_P7, FIX_3 must PASS") == set()
+    assert _watched_guards("the watched-guard rule applies") == set()
+
+
 def test_scope_never_blames_a_sprint_for_a_prep_queue_landing():
     """2026-10-29 MV2-0: the operator's TIER-C prep (tools/guard/done_check.py) was
     cherry-picked into its range; scope blamed MV2-0 and it ran out of attempts."""

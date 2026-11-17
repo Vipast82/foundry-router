@@ -2843,6 +2843,12 @@ class Coordinator:
                 and self.tracks.merge_gate_owns_item(e))]
             dnotes.append(TRACK_REVIEW_NOTE)
         rv_commits, rv_files, rv_left = self._review_own_changes(P, tid, dbase, head)
+        rv_mixed = self._review_mixed_files(P, tid, dbase, head)
+        if rv_mixed:
+            dnotes.append(f"{len(rv_mixed)} file(s) also changed by other sprints in this range "
+                          f"show only this sprint's own commits' changes: "
+                          + ", ".join(sorted(rv_mixed)[:20])
+                          + (" ..." if len(rv_mixed) > 20 else ""))
         if rv_left:
             dnotes.append(f"{len(rv_left)} file(s) changed only by other sprints' commits in "
                           f"this range are not this sprint's work and are left out: "
@@ -2850,7 +2856,7 @@ class Coordinator:
         packet, info = R.build_packet(
             project_id=pid, task_id=tid, title=spec.title, spec=spec.spec, scope=spec.scope,
             base=dbase, head=head, commits=rv_commits, verification=ver,
-            files=rv_files, patch=lambda rel: P.ws.file_diff(dbase, head, rel),
+            files=rv_files, patch=lambda rel: self._review_patch(P, rv_mixed, dbase, head, rel),
             priority=priority, evidence=evidence, contract=contract,
             provenance={"spec_from": spec_from, "notes": list(spec_notes or []) + dnotes},
             budget=budget,
@@ -3121,6 +3127,47 @@ class Coordinator:
         kept = [f for f in files if str(f.get("path") or "").replace("\\", "/") in mine]
         left = sorted(str(f.get("path") or "") for f in files if f not in kept)
         return [c for c in commits if c[0] not in others], kept, left
+
+    def _review_mixed_files(self, P: Project, tid: str, base: str, head: str) -> dict:
+        """{path: [own commit sha, oldest first]} for every file that this sprint's own
+        commits AND other sprints' commits changed in base..head. 2026-11-16: POL-7 (1.19 MB),
+        LOB-1b and FIN-5a1 were refused as over budget because a shared file such as
+        tests/RegressionIndex.lua (357 KB) went in with every sprint's edits since the base.
+        Such a file is reviewed as this sprint's own commits' patches only. Merge commits
+        carry no files of their own here (git log --name-only), so they are never "own"."""
+        try:
+            from . import bookkeeping as BK
+            commits = P.ws.commits(base, head)
+            others = {sha for sha, subj in commits if BK.other_sprint(subj, tid)}
+            if not others:
+                return {}
+            per = P.ws.commit_files(base, head)
+        except Exception:                                         # noqa: BLE001
+            return {}
+        own: dict = {}
+        theirs: set = set()
+        for sha, fs in reversed(per):                             # oldest first
+            for f in fs:
+                p = f.replace("\\", "/")
+                if sha in others:
+                    theirs.add(p)
+                else:
+                    own.setdefault(p, []).append(sha)
+        return {p: shas for p, shas in own.items() if p in theirs}
+
+    def _review_patch(self, P: Project, mixed: dict, base: str, head: str, rel: str) -> str:
+        """The review patch for one file: base..head, or for a file other sprints also
+        changed, the patches of this sprint's own commits only (oldest first)."""
+        shas = (mixed or {}).get(rel.replace("\\", "/"))
+        if not shas:
+            return P.ws.file_diff(base, head, rel)
+        parts = []
+        for sha in shas:
+            try:
+                parts.append(P.ws.file_diff(f"{sha}^", sha, rel))
+            except Exception:                                     # noqa: BLE001
+                return P.ws.file_diff(base, head, rel)
+        return "".join(parts)
 
     def _review_evidence_delta(self, P: Project, evidence: list, dbase: str, head: str,
                                last: dict) -> tuple[list, int]:

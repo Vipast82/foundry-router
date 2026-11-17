@@ -598,10 +598,26 @@ class Obligations:
         fn = getattr(P.adapter, "_is_suite", None)
         if not callable(fn):
             return
+        # 2026-11-17 ORI-2: a suite the plan names a watched guard (red at the base head,
+        # compared with its base line) is not owed; the open row was re-required after four
+        # retire decisions because nothing closed it
+        guards: set = set()
+        wg = getattr(P.adapter, "watched_guards", None)
+        if callable(wg):
+            try:
+                guards = set(wg(spec) or ())
+            except Exception:                                     # noqa: BLE001
+                guards = set()
         for ob in self.all(P.id, spec.task_id):
             oid = str(ob.get("obligation_id") or "")
             if not oid.startswith("build.suite.") or ob.get("status") != "open" or \
                     not str(ob.get("source") or "").startswith("plan:"):
+                continue
+            if oid[len("build.suite."):] in guards:
+                self.store.x("UPDATE obligations SET status='superseded', next_action=?, "
+                             "updated_ts=? WHERE project_id=? AND task_id=? AND obligation_id=?",
+                             ("a watched guard in the plan (compared with its base line); "
+                              "no PASS owed", self.clock(), P.id, spec.task_id, oid))
                 continue
             try:
                 real = fn(oid[len("build.suite."):], spec)

@@ -100,6 +100,19 @@ def deps_in_field(text: str) -> list:
     return re.findall(r"\b([A-Z]{1,5}[0-9]?-?[A-Za-z0-9.-]*[0-9][A-Za-z0-9]*)\b", field)
 
 
+
+def _watched_guards(text: str) -> set:
+    """Suite ids on a plan line that names them a watched guard, e.g. "- Watched guard AS_P7
+    (14): red at the base head ..." or "watched guards AS_P5, AS_P7: ...". Only the ids
+    right after the words, never the rest of the line."""
+    out: set = set()
+    for m in re.finditer(r"\b(?i:watched[ -]guards?)\b[\s:]*"
+                         r"((?:[A-Z][A-Z0-9]*_[A-Z0-9_]+(?:\s*\(\d+\))?"
+                         r"(?:\s*(?:,|and|\+|/)\s*)?)+)", text):
+        out.update(re.findall(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b", m.group(1)))
+    return out
+
+
 class AnimalUprisingAdapter(GenericAdapter):
     # the BUILD / repair / CLOSE prompts carry the track notice themselves (2026-10-27):
     # the engine does not append its generic TRACK_BRIEF
@@ -2349,6 +2362,11 @@ Change no code or test file in this session; if one needs changing, stop and rep
         # a suite is required by list / table structure or a run / verdict verb, never by a
         # bare mention in prose (_required_suites has the rule)
         suites = [s for s in _required_suites(wanted) if s != own and self._is_suite(s, spec)]
+        # 2026-11-17 ORI-2: a suite the plan names a "watched guard" (red at the base head,
+        # compared with its base line) is not owed as PASS; four decisions retired AS_P7 and
+        # the seeder re-listed it from the plan every time
+        guards = _watched_guards(body)
+        suites = [s for s in suites if s not in guards]
         if (re.search(r"\b%s\b" % re.escape(own), wanted)
                 or any(s.startswith(f"tests/{own}_check.") for s in spec.scope)):
             suites.insert(0, own)
@@ -2357,6 +2375,10 @@ Change no code or test file in this session; if one needs changing, stop and rep
         return {"suites": suites, "gate": tier in ("A", "B"), "captures": captures,
                 "acceptance": _accept_section(body), "plan": plan,
                 "lune": bool(re.search(r"\bLUNE\b|\blune\b", wanted))}
+
+    def watched_guards(self, spec: TaskSpec, ws=None) -> set:
+        """Suite ids the plan names as watched guards (not owed as a PASS)."""
+        return _watched_guards(_drop_next(self._plan_text(spec, ws) or ""))
 
     def _is_suite(self, sid: str, spec: TaskSpec) -> bool:
         """2026-10-31 AS-D19: a plan line "suites S1-S4" (labels of merge-owed Studio checks)
