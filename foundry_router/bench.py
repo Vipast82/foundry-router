@@ -35,6 +35,11 @@ from typing import Optional
 MAX_CASES = 500
 MAX_PROMPT_TOKENS = 24_000
 CASES_PER_CONVERSATION = 2     # one long session must not become the whole suite
+# A benchmark that cannot repeat itself cannot measure anything. Two runs of the same
+# suite against the same model, with nothing changed, came back 65.5 and 75.0 - a spread
+# of 9.5 points, nearly twice the 5.2 that turning recall on appeared to be worth. The
+# cause was simply that nothing pinned the sampling down (v0.181.175).
+SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 7, "repeat_penalty": 1.0}
 MIN_CONTEXT = 1                # one user turn is context enough: ask, then act
 _state: dict = {"state": "idle"}
 _lock = threading.Lock()
@@ -368,7 +373,8 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048) -> dict:
     try:
         result, backend = await svc.pool.chat(
             model, wire(case.get("messages") or []),
-            tools=wire_tools(case.get("tools") or []) or None, max_tokens=max_tokens)
+            tools=wire_tools(case.get("tools") or []) or None, max_tokens=max_tokens,
+            options=dict(SAMPLING))
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         return {"error": describe_exception(e), "seconds": round(time.monotonic() - t0, 2)}

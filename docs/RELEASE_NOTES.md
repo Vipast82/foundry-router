@@ -2,6 +2,39 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.175 - a benchmark that cannot repeat itself cannot measure anything
+
+The recall question was finally asked, and the answer was that the instrument is
+not good enough to ask it with. Three runs of the same suite against the same
+model:
+
+    run 2   recall off   65.5
+    run 3   recall ON    70.7      <- "+5.2, recall works"
+    run 4   recall off   75.0      <- nothing changed since run 2
+
+**Two runs with nothing changed between them differ by 9.5 points** - nearly
+twice what turning recall on appeared to be worth. 15 of 60 cases moved on their
+own. So the +5.2 means nothing, and the 65.5 was never a baseline; both numbers
+should be thrown away.
+
+The cause was an omission, not anything deep: `bench.ask` passed **no sampling
+options at all**, so every call ran at whatever the backend's defaults are, and
+tool scoring is nearly binary per case (the right tool first, or not), which
+turns a little sampling freedom into whole points of score. Every benchmark call
+now pins it: temperature 0, top_p 1, top_k 1, a fixed seed, no repeat penalty
+(`bench.SAMPLING`), with a test that asserts they ride along on every call.
+
+What this does not fix: a model served over an OpenAI-compatible endpoint may
+ignore `seed` and `top_k`, in which case determinism rests on temperature alone.
+That is usually enough, and it is a thing to verify rather than assume - the
+first job on the next run is two recall-off runs back to back, which must now
+score **identically**. Only then is a comparison worth reading.
+
+This is the benchmark earning its keep by refusing to confirm a feature its
+author wanted to work.
+
+Tests: `tests/test_bench.py`.
+
 ## v0.181.174 - the benchmark can now answer whether recall helps
 
 v0.181.173's run finally worked: 60 cases, no errors, 65.5 for the local Qwen
