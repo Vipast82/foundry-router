@@ -2,6 +2,35 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.174 - the benchmark can now answer whether recall helps
+
+v0.181.173's run finally worked: 60 cases, no errors, 65.5 for the local Qwen
+(tools 68.1; the answer part is 0.0 because on the eleven cases whose reference
+was a closing prose summary it reached for `bash` instead, every time). And then
+the obvious question could not be asked, because **`bench.ask` calls the pool
+directly** - it never goes through the persona path where recall puts past work
+into a prompt, so a recall-on run would have come back byte-identical.
+
+So the benchmark does the retrieval itself: tick **with past work** on a run and
+every case gets the work recall finds in front of it, the way a persona with
+"use past work" would. Run the suite once without and once with, and compare.
+
+**The hold-out matters more than the feature.** Recall is built from the same
+store a suite is cut from, so a case would otherwise retrieve the very sprint it
+was cut from - including the turn being scored - and the model would copy the
+answer out of its own prompt. That is not recall helping, it is the test marking
+its own homework, and it would have shown up as a large and convincing
+improvement. A case's own `task_id` is held out, and six hits are fetched so
+that filtering happens before the top three are taken, rather than quietly
+leaving a case with less context than the other run.
+
+Each run records whether past work was used and how many cases found any, every
+case records which past work it was given (`bench_results.recalled`), and the
+runs table badges it, so two runs can never be mistaken for each other.
+
+Tests: `tests/test_bench.py` - that a case never retrieves its own sprint and
+that the answer being scored never reaches the prompt.
+
 ## v0.181.173 - what the store keeps is not what a backend reads
 
 v0.181.172's suite was cut properly - 60 cases, 49 of them able to score a tool

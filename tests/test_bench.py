@@ -350,3 +350,108 @@ def test_tool_definitions_are_converted_too():
     assert all(x["type"] == "function" for x in t)
     assert t[1]["function"]["parameters"] == {"type": "object", "properties": {}}
     assert bench.wire_tools(None) == []
+
+
+# -- putting past work in front of a case -------------------------------------------------
+
+def _recall_svc(tmp_path, pool=None, hits=None):
+    svc = _svc(tmp_path, pool or Pool(lambda n: ChatResult(content="ok, a sensible answer")))
+    from foundry_router.config import RecallConfig
+    svc.config_store.config.recall = RecallConfig(enabled=True, top_k=3)
+
+    async def search(s, query, top_k=0, min_similarity=None, tiers=(), tags=()):
+        return list(hits if hits is not None else [])
+    import foundry_router.recall as recall_mod
+    svc._search = search
+    return svc, recall_mod, search
+
+
+@pytest.mark.asyncio
+async def test_a_case_never_retrieves_its_own_sprint(tmp_path, monkeypatch):
+    """Recall is built from the same store the suite is cut from. Without holding the
+    case's own task out, a case retrieves the very turn being scored and the model
+    copies the answer — an improvement that measures nothing but contamination."""
+    svc, recall_mod, _ = _recall_svc(tmp_path)
+    own = {"case_id": "UI-7-s1-4", "task_id": "UI-7", "similarity": 0.99, "tier": "verified",
+           "tools": [], "request": "the very same request", "gist": "the very same request",
+           "solution": "THE ANSWER BEING SCORED"}
+    other = {"case_id": "GF-1-s2-2", "task_id": "GF-1", "similarity": 0.70, "tier": "verified",
+             "tools": ["bash"], "request": "a different sprint", "gist": "a different sprint",
+             "solution": "something else that passed"}
+
+    async def search(s, query, top_k=0, min_similarity=None, tiers=(), tags=()):
+        return [own, other]
+    monkeypatch.setattr(recall_mod, "search", search)
+    case = bench._case_from(_example())
+    out, used = await bench.with_recall(svc, case)
+    assert [h["case_id"] for h in used] == ["GF-1-s2-2"]          # its own task held out
+    text = json.dumps(out["messages"])
+    assert "THE ANSWER BEING SCORED" not in text
+    assert "something else that passed" in text
+
+
+@pytest.mark.asyncio
+async def test_past_work_goes_in_as_a_system_turn_after_the_system_prompt(tmp_path, monkeypatch):
+    svc, recall_mod, _ = _recall_svc(tmp_path)
+
+    async def search(s, query, top_k=0, min_similarity=None, tiers=(), tags=()):
+        return [{"case_id": "GF-1-s2-2", "task_id": "GF-1", "similarity": 0.8,
+                 "tier": "verified", "tools": ["bash"], "request": "a past request",
+                 "gist": "a past request", "solution": "what was done then"}]
+    monkeypatch.setattr(recall_mod, "search", search)
+    case = bench._case_from(_example())
+    out, used = await bench.with_recall(svc, case)
+    roles = [m["role"] for m in out["messages"]]
+    assert roles[0] == "system" and roles[1] == "system"          # ours comes after theirs
+    assert "what was done then" in out["messages"][1]["content"]
+    assert len(out["messages"]) == len(case["messages"]) + 1
+    assert case["messages"] == bench._case_from(_example())["messages"]   # case untouched
+
+
+@pytest.mark.asyncio
+async def test_nothing_found_means_the_case_is_sent_as_it_was(tmp_path, monkeypatch):
+    svc, recall_mod, _ = _recall_svc(tmp_path)
+
+    async def nothing(s, query, top_k=0, min_similarity=None, tiers=(), tags=()):
+        return []
+    monkeypatch.setattr(recall_mod, "search", nothing)
+    case = bench._case_from(_example())
+    out, used = await bench.with_recall(svc, case)
+    assert used == [] and out["messages"] == case["messages"]
+
+
+@pytest.mark.asyncio
+async def test_a_case_with_no_request_asks_recall_nothing(tmp_path, monkeypatch):
+    svc, recall_mod, _ = _recall_svc(tmp_path)
+    asked = []
+
+    async def search(s, query, top_k=0, min_similarity=None, tiers=(), tags=()):
+        asked.append(query)
+        return []
+    monkeypatch.setattr(recall_mod, "search", search)
+    out, used = await bench.with_recall(svc, {"messages": [{"role": "system", "content": "x"}]})
+    assert used == [] and asked == []
+
+
+def test_a_run_records_whether_past_work_was_used(tmp_path, monkeypatch):
+    svc = _svc(tmp_path, Pool(lambda n: ChatResult(content="a sensible answer about the script")))
+    from foundry_router.config import RecallConfig
+    svc.config_store.config.recall = RecallConfig(enabled=True)
+    import foundry_router.recall as recall_mod
+
+    async def search(s, query, top_k=0, min_similarity=None, tiers=(), tags=()):
+        return [{"case_id": "GF-1-s2-2", "task_id": "GF-1", "similarity": 0.8,
+                 "tier": "verified", "tools": [], "request": "r", "gist": "r",
+                 "solution": "what was done"}]
+    monkeypatch.setattr(recall_mod, "search", search)
+    name = _suite(svc, n=2)
+    bench.start(svc, name, "qwen", label="with past work", use_recall=True)
+    _wait(svc)
+    row = bench.runs(svc.db)[0]
+    assert row["recall"] == 1
+    assert "past work found for 2" in (row["note"] or "")
+    hit = bench.results(svc.db, row["id"])[0]
+    assert json.loads(hit["recalled"]) == ["GF-1-s2-2"]
+    plain = bench.start(svc, name, "qwen", label="without")
+    _wait(svc)
+    assert bench.runs(svc.db)[0]["recall"] == 0

@@ -664,6 +664,8 @@ class Database:
             ("personas", "code_checks", "INTEGER DEFAULT 1"),
             ("personas", "recall", "INTEGER DEFAULT 0"),
             ("recall_entries", "gist", "TEXT DEFAULT ''"),
+            ("bench_runs", "recall", "INTEGER DEFAULT 0"),
+            ("bench_results", "recalled", "TEXT DEFAULT ''"),
             ("personas", "lessons", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
