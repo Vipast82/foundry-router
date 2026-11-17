@@ -783,6 +783,7 @@ CREATE TABLE IF NOT EXISTS bench_runs (
   prompt_tokens INTEGER,
   completion_tokens INTEGER,
   status TEXT,                      -- running | done | stopped | failed
+  recall INTEGER DEFAULT 0,         -- the work recall found was put in front of every case
   note TEXT
 );
 
@@ -800,7 +801,8 @@ CREATE TABLE IF NOT EXISTS bench_results (
   answer_chars INTEGER,
   score REAL,
   seconds REAL,
-  error TEXT
+  error TEXT,
+  recalled TEXT                     -- JSON list: the past work put in front of this case
 );
 
 CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);

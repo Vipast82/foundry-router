@@ -9193,7 +9193,7 @@ async function tabBench() {
     <td class="mono nw">${esc((x.ts || "").slice(0, 16))}</td>
     <td class="nw">${esc(x.model)}</td>
     <td class="nw">${esc(x.suite)} <span class="hint">${x.scored}/${x.cases}</span></td>
-    <td>${esc(x.label || "")}</td>
+    <td>${esc(x.label || "")}${x.recall ? ' <span class="pill" title="The work recall found was put in front of every case, with the case\'s own task held out.">past work</span>' : ""}</td>
     <td class="nw">${bar(x.score)}</td>
     <td class="nw">${n(x.tools_score)}</td>
     <td class="nw">${x.code_score == null ? "—" : n(x.code_score)}</td>
@@ -9231,6 +9231,7 @@ async function tabBench() {
         <label>model</label><select id="br-model">${modelOpts}</select>
         <label title="What you are trying, in your own words. It is shown next to the score.">what is this trying?</label>
         <input id="br-label" size="26" placeholder="e.g. after the route change">
+        <label title="Put the work recall finds in front of every case, the way a persona with 'use past work' would get it. The case's own task is held out, so a case can never retrieve the sprint it was cut from. Run the suite once without this and once with it, then compare the two."><input type="checkbox" id="br-recall"> with past work</label>
         <button class="act primary" id="br-go" ${running ? "disabled" : ""}>Run</button>
         ${running ? '<button class="act" id="br-stop">Stop</button>' : ""}
         <span class="hint" id="br-msg">${r.state === "failed" ? esc(r.error || "failed") : ""}</span></div>
@@ -9258,7 +9259,9 @@ async function tabBench() {
   $("#br-go").onclick = async () => {
     try {
       const out = await api("bench/run", {method: "POST", body: {
-        suite: $("#br-suite").value, model: $("#br-model").value, label: $("#br-label").value.trim()}});
+        suite: $("#br-suite").value, model: $("#br-model").value,
+        label: $("#br-label").value.trim(),
+        recall: $("#br-recall") ? $("#br-recall").checked : false}});
       if (out.error) { toast(out.error, true); return; }
       toast("Running"); render();
     } catch (e) { toast(e.message, true); }

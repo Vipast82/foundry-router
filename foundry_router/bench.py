@@ -329,6 +329,39 @@ def wire_tools(tools: list) -> list:
     return out
 
 
+async def with_recall(svc, case: dict) -> tuple:
+    """The case with the work recall would have found put in front of it, and the
+    hits it used. ([] when recall is off, empty or unreachable.)
+
+    **The case's own task is held out.** Recall is built from the same store the
+    suite is cut from, so without this a case retrieves the very sprint it was cut
+    from - including the turn being scored - and the model copies the answer. That
+    is not recall helping, it is the test marking its own homework, and it would
+    show up as a large improvement.
+    """
+    from . import recall
+    msgs = list(case.get("messages") or [])
+    asked = next((m.get("content") or "" for m in reversed(msgs)
+                  if m.get("role") == "user" and (m.get("content") or "").strip()), "")
+    if not asked:
+        return case, []
+    mine = str(case.get("task_id") or "")
+    hits = [h for h in await recall.search(svc, asked, top_k=6)
+            if not (mine and h.get("task_id") == mine)]
+    cfg = getattr(svc.config_store.config, "recall", None)
+    k = max(1, int(getattr(cfg, "top_k", 3) or 3))
+    hits = hits[:k]
+    if not hits:
+        return case, []
+    note = recall.note(hits, int(getattr(cfg, "max_chars", 2000) or 2000))
+    at = 0
+    for i, m in enumerate(msgs):
+        if m.get("role") == "system":
+            at = i + 1
+    msgs.insert(at, {"role": "system", "content": note})
+    return {**case, "messages": msgs}, hits
+
+
 async def ask(svc, model: str, case: dict, max_tokens: int = 2048) -> dict:
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
@@ -366,34 +399,42 @@ def _row(db, sql, args=()):
     db.execute(sql, args)
 
 
-async def _run(svc, suite: str, model: str, label: str, limit: int) -> dict:
+async def _run(svc, suite: str, model: str, label: str, limit: int,
+               use_recall: bool = False) -> dict:
     db = svc.db
     items = cases(svc, suite, limit)
     if not items:
         raise ValueError(f"the suite {suite!r} has no cases")
-    db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status) "
-               "VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running')",
-               (suite, model, label, len(items)))
+    db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, recall) "
+               "VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?)",
+               (suite, model, label, len(items), 1 if use_recall else 0))
     run_id = db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]
     _state.update({"state": "running", "run_id": run_id, "suite": suite, "model": model,
-                   "cases": len(items), "done": 0, "started": time.time(), "score": None})
+                   "cases": len(items), "done": 0, "started": time.time(), "score": None,
+                   "recall": bool(use_recall), "recalled": 0})
     totals = {"score": 0.0, "tools": 0.0, "code": 0.0, "answer": 0.0, "seconds": 0.0,
               "prompt": 0, "completion": 0, "code_n": 0, "answer_n": 0, "errors": 0}
     for i, case in enumerate(items, start=1):
         if _state.get("stop"):
             break
+        hits: list = []
+        if use_recall:
+            case, hits = await with_recall(svc, case)
+            if hits:
+                _state["recalled"] += 1
         got = await ask(svc, model, case)
         s = await score_one(svc, case, got)
         db.execute(
             "INSERT INTO bench_results (run_id, case_id, task_id, tags, tools_expected, "
             "tools_called, tools_score, code_pass, code_detail, answer_chars, score, seconds, "
-            "error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "error, recalled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, case.get("id") or "", case.get("task_id") or "",
              json.dumps(case.get("tags") or []),
              json.dumps([t.get("name") for t in (case.get("reference") or {}).get("tool_calls") or []]),
              json.dumps([t.get("name") for t in got.get("tool_calls") or []]),
              s["tools"], None if s["code"] is None else int(s["code"] >= 1), s["code_detail"],
-             len(got.get("content") or ""), s["score"], got.get("seconds") or 0, s["error"]))
+             len(got.get("content") or ""), s["score"], got.get("seconds") or 0, s["error"],
+             json.dumps([h["case_id"] for h in hits])))
         totals["score"] += s["score"]
         totals["tools"] += s["tools"]
         if s["code"] is not None:
@@ -414,30 +455,37 @@ async def _run(svc, suite: str, model: str, label: str, limit: int) -> dict:
            "code": round(100 * totals["code"] / totals["code_n"], 1) if totals["code_n"] else None,
            "answer": round(100 * totals["answer"] / totals["answer_n"], 1) if totals["answer_n"] else None,
            "seconds": round(totals["seconds"] / n, 2), "prompt_tokens": totals["prompt"],
-           "completion_tokens": totals["completion"], "errors": totals["errors"]}
+           "completion_tokens": totals["completion"], "errors": totals["errors"],
+           "recall": bool(use_recall), "recalled": _state.get("recalled", 0)}
     db.execute("UPDATE bench_runs SET scored=?, tools_score=?, code_score=?, answer_score=?, "
                "score=?, seconds=?, prompt_tokens=?, completion_tokens=?, status=?, note=? "
                "WHERE id=?",
                (out["scored"], out["tools"], out["code"], out["answer"], out["score"],
                 out["seconds"], out["prompt_tokens"], out["completion_tokens"],
                 "stopped" if _state.get("stop") else "done",
-                f"{out['errors']} call(s) failed" if out["errors"] else "", run_id))
+                "; ".join(x for x in (
+                    f"{out['errors']} call(s) failed" if out["errors"] else "",
+                    f"past work found for {out['recalled']} of {out['scored']} case(s)"
+                    if use_recall else "") if x), run_id))
     _state.update({"state": "done", "finished": time.time(), **out})
     return out
 
 
-def start(svc, suite: str, model: str, label: str = "", limit: int = 0) -> dict:
-    """Run a suite in the background. One at a time."""
+def start(svc, suite: str, model: str, label: str = "", limit: int = 0,
+          use_recall: bool = False) -> dict:
+    """Run a suite in the background. One at a time. `use_recall` puts the work
+    recall finds in front of every case, so two runs answer whether it helps."""
     if _state.get("state") == "running":
         return dict(_state)
     if not _lock.acquire(blocking=False):
         return dict(_state)
     _state.clear()
-    _state.update({"state": "running", "suite": suite, "model": model, "done": 0})
+    _state.update({"state": "running", "suite": suite, "model": model, "done": 0,
+                   "recall": bool(use_recall)})
 
     def go():
         try:
-            asyncio.run(_run(svc, suite, model, label, limit))
+            asyncio.run(_run(svc, suite, model, label, limit, use_recall))
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             _state.update({"state": "failed", "error": describe_exception(e),
