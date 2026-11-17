@@ -2,6 +2,34 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.178 - a review queue you can actually read
+
+v0.181.176's clustering was re-run on the same 8,000 findings and it worked: the
+largest group fell from **3,577 findings to 73**, the median is 14, and nothing
+had to be rejected for being too broad. The candidates read like lessons now -
+"tail reads small in this view, no silhouette" across thirteen tasks, "no open-V
+black leather vest visible" across four. Things a rule can be written from.
+
+Two problems the run exposed, both about the queue rather than the clustering.
+
+**A candidate from an older pass outlived its own grouping.** Clustering changed,
+so twenty-five candidates from the previous run described groupings that no
+longer existed - including that 3,577-finding "mistake", which sat at the top of
+the queue above every real candidate, because the list is ordered by how often
+something happened. A pass now drops the candidates it did not produce again.
+What the operator **decided** is never touched: an approved rule stays approved
+and keeps applying, a rejected one stays rejected and is not offered back. Only
+the ones still waiting.
+
+**393 candidates is a second corpus, not a review queue.** `min_tasks` defaulted
+to 2, and a mistake that bit two separate pieces of work may be one messy
+afternoon rather than a pattern; three is the better default. The mine now
+reports how many groups fell below the bar, so the thresholds can be tuned
+against a number instead of a guess.
+
+Tests: `tests/test_lessons.py` - that a stale candidate is dropped while an
+approved or rejected one is left exactly as it was.
+
 ## v0.181.177 - a run the restart cut off is not still running
 
 A benchmark run is a thread inside the router, so rebuilding the container in the

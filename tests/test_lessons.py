@@ -376,3 +376,55 @@ async def test_a_group_too_broad_to_be_a_rule_is_left_out(tmp_path, monkeypatch)
     assert out["too_broad"] == 1                  # the 20-member group is a category
     assert out["new"] == 1                        # only the pair becomes a candidate
     assert lessons.status(svc)["proposed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_this_pass_did_not_produce_is_dropped(tmp_path, monkeypatch):
+    """Clustering changes, and a candidate from an older pass then describes a grouping
+    that no longer exists. The first fixed run left a stale 3,577-finding "mistake" at
+    the top of the queue, above every real candidate."""
+    svc = _svc(tmp_path, cfg=LessonsConfig(min_seen=2, min_tasks=2))
+
+    async def embed(text):
+        from foundry_router.semcache import _normalize
+        return _normalize([1.0, 0.0] if "touch" in text else [0.0, 1.0])
+    svc.semcache.embed = embed
+    # a candidate the operator already decided about, and one still waiting
+    approved = _candidate(svc, anchor="old-approved")
+    lessons.decide(svc, approved, "active", "Keep key badges out of the touch frames.")
+    rejected = _candidate(svc, anchor="old-rejected")
+    lessons.decide(svc, rejected, "rejected")
+    waiting = _candidate(svc, anchor="old-waiting")
+
+    rows = [{"id": "f1", "text": "key badges at the touch sizes, no keyboard there",
+             "source": "review", "severity": "", "task_id": "UI-7", "ts": 10.0},
+            {"id": "f2", "text": "settings shows key bindings at the touch sizes too",
+             "source": "review", "severity": "", "task_id": "UI-8", "ts": 20.0}]
+    monkeypatch.setattr(lessons, "collect", lambda svc, limit, log_fn: list(rows))
+    out = await lessons.mine(svc, log_fn=lambda m: None)
+
+    assert out["gone"] == 1                       # only the one still waiting
+    left = {r["anchor"]: r["state"] for r in lessons.lessons(svc.db)}
+    assert "old-waiting" not in left              # dropped
+    assert left["old-approved"] == "active"       # what the operator decided is kept
+    assert left["old-rejected"] == "rejected"
+    assert lessons.block(svc.db)                  # and the approved rule still applies
+
+
+@pytest.mark.asyncio
+async def test_the_mine_says_how_much_fell_below_the_bar(tmp_path, monkeypatch):
+    svc = _svc(tmp_path, cfg=LessonsConfig(min_seen=3, min_tasks=3))
+
+    async def embed(text):
+        from foundry_router.semcache import _normalize
+        v = [0.0] * 4
+        v[int(text.split()[-1]) % 4] = 1.0
+        return _normalize(v)
+    svc.semcache.embed = embed
+    rows = [{"id": f"f{i}", "text": f"a finding long enough to matter here {i}",
+             "source": "review", "severity": "", "task_id": f"T{i}", "ts": float(i)}
+            for i in range(8)]
+    monkeypatch.setattr(lessons, "collect", lambda svc, limit, log_fn: list(rows))
+    out = await lessons.mine(svc, log_fn=lambda m: None)
+    assert out["below_bar"] == 4                  # four groups of two: none bit three tasks
+    assert out["new"] == 0 and lessons.status(svc)["proposed"] == 0

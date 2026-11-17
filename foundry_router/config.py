@@ -996,7 +996,10 @@ class LessonsConfig(BaseModel):
     with `lessons`, and no rule is ever applied without approval."""
     enabled: bool = False
     min_seen: int = Field(default=3, ge=2, le=100)        # findings before it is a candidate
-    min_tasks: int = Field(default=2, ge=1, le=100)       # separate pieces of work it bit
+    # 2 produced 393 candidates on the live store, which is a second corpus rather than
+    # a review queue. A mistake that bit three separate pieces of work is a pattern;
+    # one that bit two may be one messy afternoon (v0.181.178).
+    min_tasks: int = Field(default=3, ge=1, le=100)       # separate pieces of work it bit
     cluster_similarity: float = Field(default=0.80, ge=0.5, le=0.99)
     max_findings: int = Field(default=8000, ge=100, le=20000)
     max_chars: int = Field(default=1500, ge=200, le=20000)   # of prompt the rulebook may take
