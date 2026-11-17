@@ -243,6 +243,26 @@ def _upsert(db, c: dict) -> str:
     return "new"
 
 
+def _forget_stale(db, anchors: list) -> int:
+    """Candidates this pass did not produce again are dropped.
+
+    Clustering changes - a threshold, better stripping, more findings - and a
+    candidate from an older pass then describes a grouping that no longer exists.
+    Leaving it costs more than it saves: the first fixed run left a stale
+    3,577-finding "mistake" sitting at the top of the queue, above every real
+    candidate, because the list is ordered by how often something happened
+    (v0.181.178). What the operator DECIDED is never touched - an approved rule
+    stays approved and a rejected one stays rejected - only the ones still waiting.
+    """
+    rows = db.query("SELECT id, anchor FROM lessons WHERE state='proposed'")
+    stale = [r["id"] for r in rows if r["anchor"] not in set(anchors)]
+    for i in range(0, len(stale), 400):
+        chunk = stale[i:i + 400]
+        db.execute_count("DELETE FROM lessons WHERE id IN (%s)" % ",".join("?" * len(chunk)),
+                         tuple(chunk))
+    return len(stale)
+
+
 def status(svc) -> dict:
     cfg = _cfg(svc)
     by = {r["state"]: r["n"] for r in svc.db.query(
@@ -257,6 +277,7 @@ def status(svc) -> dict:
             "max_findings": int(getattr(cfg, "max_findings", 8000) or 0),
             "max_chars": int(getattr(cfg, "max_chars", 1500) or 0),
             "hours": int(getattr(cfg, "mine_hours", 0) or 0),
+            "below_bar": int(_state.get("below_bar") or 0),
             "draft_model": getattr(cfg, "draft_model", "") or "",
             "run": dict(_state)}
 
@@ -343,22 +364,28 @@ async def mine(svc, log_fn=None) -> dict:
         rows = [r for r in rows if r.get("vec")]
         clusters = await asyncio.to_thread(cluster, rows, floor)
         _state["clusters"] = len(clusters)
-        new, huge = 0, 0
+        new, huge, thin, kept = 0, 0, 0, []
         ceiling = max(min_seen, int(len(rows) * MAX_CLUSTER_SHARE))
         for c in clusters:
             tasks = {m["task_id"] for m in c["members"] if m["task_id"]}
             if len(c["members"]) < min_seen or len(tasks) < min_tasks:
+                thin += 1
                 continue
             if len(c["members"]) > ceiling:
                 huge += 1
                 continue            # a category, not a mistake: no rule could cover it
+            kept.append(c["anchor"])
             if _upsert(svc.db, c) == "new":
                 new += 1
         _state["too_broad"] = huge
+        _state["below_bar"] = thin
+        _state["gone"] = _forget_stale(svc.db, kept)
         _state.update({"state": "done", "finished": time.time(), "new": new, "stop": False})
         say(f"lessons: {len(clusters)} cluster(s) from {len(rows)} finding(s), "
             f"{new} new candidate(s) waiting for you"
-            + (f"; {huge} group(s) too broad to be a rule were left out" if huge else ""))
+            + (f"; {thin} below the bar" if thin else "")
+            + (f"; {huge} too broad to be a rule" if huge else "")
+            + (f"; {_state['gone']} stale candidate(s) dropped" if _state.get("gone") else ""))
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         _state.update({"state": "failed", "finished": time.time(),
