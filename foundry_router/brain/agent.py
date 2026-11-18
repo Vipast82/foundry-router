@@ -2170,43 +2170,15 @@ class AgentRunner:
         said = False                 # answer text already sent to the client
         # v0.181.168: work this router already did, that passed, for a request like
         # this one. Precedent in the prompt, not instruction, and the user is told.
-        from .. import lessons, recall
+        # v0.181.184: both blocks are assembled by precedent.py, which the facade's
+        # direct dispatch calls too. They were written here, and this is the one
+        # path a strict persona in passthrough routing mode never takes - so the
+        # prompt additions existed and never reached a real request.
+        from .. import precedent
         svc = getattr(self, "svc", None)
-        # v0.181.169: rules mined from mistakes that recurred here, each one approved
-        # by the operator. A static block: no lookup, no call, no cost.
-        if svc is not None and lessons.on_for(self._app_cfg("lessons"), ctx.persona):
-            lcfg = self._app_cfg("lessons")
-            rules = lessons.block(svc.db, int(getattr(lcfg, "max_chars", 1500) or 1500))
-            if rules:
-                at = 0
-                for i, m in enumerate(messages):
-                    if m.get("role") == "system":
-                        at = i + 1
-                messages.insert(at, {"role": "system", "content": rules})
-                n = rules.count("\n")
-                ctx.logger.record_guardrail(f"lessons: {n} approved rule(s) in the prompt")
-                yield AgentEvent("think", f"{n} rule(s) this project learned the hard way "
-                                          f"are in {worker}'s prompt.")
-        if svc is not None and recall.on_for(self._app_cfg("recall"), ctx.persona):
-            asked = next((m.get("content") or "" for m in reversed(messages)
-                          if m.get("role") == "user" and (m.get("content") or "").strip()), "")
-            hits = await recall.search(svc, asked) if asked else []
-            if hits:
-                rcfg = self._app_cfg("recall")
-                block = recall.note(hits, int(getattr(rcfg, "max_chars", 2000) or 2000))
-                at = 0
-                for i, m in enumerate(messages):
-                    if m.get("role") == "system":
-                        at = i + 1
-                messages.insert(at, {"role": "system", "content": block})
-                ctx.logger.record_guardrail(
-                    "recall: " + ", ".join(f"{h['case_id']} ({h['similarity']:.0%})"
-                                           for h in hits))
-                sims = ", ".join("{:.0%}".format(h["similarity"]) for h in hits)
-                yield AgentEvent("think", f"Found {len(hits)} piece(s) of work here that "
-                                          f"passed before for a request like this one "
-                                          f"({sims} similar) — given to {worker} as "
-                                          f"precedent.")
+        for _note in await precedent.inject(svc, ctx.persona, messages,
+                                            self._app_cfg, ctx.logger):
+            yield AgentEvent("think", f"{_note} (to {worker})")
         from .. import tool_finder
         step, free_finds = 0, 0
         offer: Optional[list] = specs or None      # the tools offered on the next turn

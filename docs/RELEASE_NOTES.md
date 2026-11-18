@@ -1,3 +1,42 @@
+## v0.181.184 - the rules and the precedent never reached a prompt
+
+Lessons were switched on for a coding persona, the way recall was the day before,
+and the check for whether it had actually arrived said it had not. Both blocks -
+the rules an operator approves from repeated mistakes, and the earlier work
+retrieved for this request - were assembled inside the brain's worker tool loop.
+A strict persona never involves the brain, and in passthrough routing mode
+nothing does, so every real request here is answered by the facade's direct
+dispatch, which builds its own prompt and never ran that code.
+
+So the whole of both features was unreachable in production. The switch could be
+on, a persona's toggle could be set, three rules could be approved, and the
+prompt was byte for byte what it had been. A request to the persona recall had
+been "live" on since yesterday was measured at a 63-token prompt, where the
+retrieved block alone would have been several hundred, and the router logged the
+request's mode as `direct`.
+
+Nothing failed, which is why nothing looked wrong. Every test of lessons and
+recall passed throughout, because they all called the feature's own functions
+and none of them asked what a model is actually sent. The benchmark that
+measured recall as +6.10 points per case inserted the block itself, so it
+measured the idea and never the wiring; that number stands as evidence for the
+idea and is not evidence that production did it. This is the same fault as
+v0.181.183's eval harness, found the same way and one day apart: code that works
+when a test calls it and is never reached by the path a request takes.
+
+Both blocks now come from `precedent.py`, which the agent's tool loop and the
+facade's direct dispatch both call, so neither builds a prompt addition of its
+own. On the direct path they go in after the copy of the client's own history is
+taken - what the client holds is not changed by what the router adds - and before
+the context guard, because a block added after the trim is a block that can push
+the prompt past the window. The tests added here go through `/api/chat` to a
+strict, direct, one-model persona and assert what the model was sent; four of
+them fail against yesterday's code.
+
+Nothing about the rules or the retrieval itself changed. The three rules approved
+today, and recall on its one persona, take effect on this build for the first
+time.
+
 # Release and migration notes
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).

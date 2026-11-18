@@ -2479,7 +2479,17 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if _n_mixed:
             log.debug("restored %d mixed tool round(s) for %s", _n_mixed,
                       persona["virtual_name"])
-    client_convo = base_convo            # what the client holds (before any trim)
+    client_convo = list(base_convo)      # what the client holds (before any trim)
+    # v0.181.184: the rules the operator approved and the precedent for this
+    # request (precedent.py, shared with the brain's tool loop). Before the
+    # context guard below, because a block added after the trim is a block that
+    # can push the prompt past the window; after client_convo, because what the
+    # client holds is not changed by what we add to the prompt.
+    from .. import precedent
+    for _pnote in await precedent.inject(
+            svc, persona, base_convo,
+            lambda name: getattr(svc.config_store.config, name, None), logger):
+        route_notes.append(_pnote)
     out_cap = _output_cap(svc, persona)
     # Never send more than the model's window (Cline's auto-compact can lag).
     base_convo, _guard_note = _apply_context_guard(svc, persona, model_id, base_convo,
