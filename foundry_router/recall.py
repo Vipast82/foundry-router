@@ -556,14 +556,21 @@ async def search(svc, query: str, top_k: int = 0, min_similarity: Optional[float
                                      else "meaning")})
             if len(out) >= k:
                 break
-        # With one channel, a relative floor is what separates a real match from
-        # noise: the best hit sets the bar, which travels across embedding models
-        # where an absolute cutoff does not. With two, the fused rank already says
-        # a hit was near the top of SOMETHING, and keeping the floor here would
-        # throw away exactly the word-matched rescues fusion exists to find.
+        # The relative floor applies to a fused list too, and dropping it was a
+        # mistake worth recording. The argument for dropping it was that it would
+        # discard the word-matched rescues fusion exists to find; the argument was
+        # plausible and the measurement says otherwise. Against the same suite and
+        # model, five runs a side: retrieval WITH the floor gone was better by
+        # every retrieval measure (recall@3 64% -> 75%) and the work came out no
+        # better than having no recall at all (-0.4 points, p = 0.38), while the
+        # same index with three hits filtered by the floor was +6.1 (p = 0.027).
+        # Removing a quality filter and replacing it with nothing let weak hits
+        # into the prompt, and a weak hit costs more than a missing one
+        # (v0.181.180). The bar is taken from the best hit by similarity, not the
+        # first in fused order, since fused order is not similarity order.
         rel = float(getattr(cfg, "relative_floor", 0.9) or 0)
-        if out and rel and not lex_order:
-            bar = out[0]["similarity"] * rel
+        if out and rel:
+            bar = max(h["similarity"] for h in out) * rel
             out = [h for h in out if h["similarity"] >= bar]
         return out
     except Exception as e:                                        # noqa: BLE001

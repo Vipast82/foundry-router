@@ -401,7 +401,7 @@ def test_rank_fusion_prefers_what_is_near_the_top_of_either_list():
 @pytest.mark.asyncio
 async def test_the_words_find_what_the_embedding_missed(tmp_path):
     """An identifier is exactly what an embedding blurs and a word match nails."""
-    svc = _svc(tmp_path)
+    svc = _svc(tmp_path, cfg=RecallConfig(enabled=True, hybrid=True, relative_floor=0))
     await _put(svc, "ident", "regenerate mesh_report.json for EL-RHINO after the rebuild",
                "regenerated it")
     await _put(svc, "other", "the door will not open", "fixed the prompt")
@@ -416,16 +416,29 @@ async def test_the_words_find_what_the_embedding_missed(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_word_match_is_not_thrown_away_by_the_relative_floor(tmp_path):
-    """The floor exists for single-channel search. Applying it to a fused list would
-    discard exactly the rescues fusion is for."""
-    svc = _svc(tmp_path, cfg=RecallConfig(enabled=True, relative_floor=0.9, top_k=3))
+async def test_the_floor_applies_to_a_fused_list_too(tmp_path):
+    """This test used to assert the opposite, on the argument that the floor would
+    discard the rescues fusion exists to find. The argument was plausible and the
+    measurement killed it: with the floor gone, retrieval improved on every measure
+    and the WORK came out no better than having no recall at all (-0.4 points,
+    p = 0.38), against +6.1 (p = 0.027) for the same index with the floor. A weak
+    hit in the prompt costs more than a missing one."""
+    svc = _svc(tmp_path, cfg=RecallConfig(enabled=True, hybrid=True,
+                                          relative_floor=0.9, top_k=3))
     await _put(svc, "close", "spin jitter arc")                   # the embedder likes this
-    await _put(svc, "worded", "a totally different matter entirely")
+    await _put(svc, "worded", "no sound on the ui")               # it does not
     recall.index_words(svc.db, "worded", "spin jitter arc mesh_report.json EL-RHINO")
     recall.index_words(svc.db, "close", "spin jitter arc")
     hits = await recall.search(svc, "spin jitter arc EL-RHINO", min_similarity=0.0)
-    assert {h["case_id"] for h in hits} == {"close", "worded"}
+    assert [h["case_id"] for h in hits] == ["close"]
+    # the bar comes from the best hit BY SIMILARITY, not from whatever fusion put first
+    assert hits[0]["similarity"] == max(h["similarity"] for h in hits)
+
+
+def test_the_word_channel_is_off_until_it_is_measured_as_safe():
+    """Shipped on in v0.181.179 and measured as a regression. It stays off until a
+    run says the two channels together beat the embedding alone."""
+    assert RecallConfig().hybrid is False
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,48 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.180 - better retrieval, worse work: the floor goes back
+
+v0.181.179 shipped hybrid retrieval on the strength of a retrieval measurement:
+the word channel and the embedding fused beat the embedding alone on 24 requests
+against 10, p = 0.024, recall@3 from 64% to 75%. Then the benchmark was run on
+it. Twenty runs, five a side, same suite and model throughout:
+
+| | mean | vs no recall (paired, per case) |
+|---|---|---|
+| no recall at all | 69.9 | - |
+| the embedding alone, 3 hits | **76.0** | **+6.10, p = 0.027, CI [+1.40, +11.05]** |
+| **hybrid, 3 hits (what .179 shipped)** | **69.5** | **-0.44, p = 0.38, CI [-5.16, +3.74]** |
+| hybrid, 1 hit | 74.8 | +4.81, p = 0.041 |
+
+**The release improved retrieval by every measure and threw away the entire
+benefit of recall.** Hybrid at three hits is indistinguishable from having no
+memory at all.
+
+The cause was not fusion. It was a decision made with it and argued for in a
+code comment: **the relative floor was switched off whenever the word channel
+contributed**, on the reasoning that it would otherwise discard the word-matched
+rescues fusion exists to find. The reasoning was plausible. What it did was
+remove a quality filter and replace it with nothing, so weak hits reached the
+prompt - and at one hit, where only the best survives, most of the loss goes
+away. **A weak hit in a prompt costs more than a missing one.** Retrieval
+metrics reward finding more; the model is harmed by being shown worse; those
+pull in opposite directions, which is how a change can be right on one and
+wrong on the other.
+
+- The relative floor applies to a fused list too, with the bar taken from the
+  best hit **by similarity** rather than whatever fusion ranked first.
+- `recall.hybrid` defaults **off**. The machinery stays, and it goes back on
+  when a run says the two channels together beat the embedding alone - not when
+  a retrieval score says so.
+- Production returns to the measured best: the embedding, three hits, +6.1.
+
+One test now asserts the opposite of what it did a day ago, with the measurement
+written into it, so the next person to find the argument convincing finds the
+refutation attached to it.
+
+Tests: `tests/test_recall.py`.
+
 ## v0.181.179 - recall searches the words as well as the meaning
 
 Recall was measured as worth +6 points (v0.181.174's design, five runs a side,
