@@ -62,6 +62,32 @@ def _looks_like_refusal(text: str) -> bool:
     return f(text)
 
 
+def _answer_text(resp) -> tuple:
+    """(answer, why it is empty) from whatever the facade handed back. The
+    non-streaming Ollama shape is {"message": {"content": ...}}; an error is a
+    JSON body with "error" and a status code, and either way the operator needs
+    the reason rather than a silence."""
+    body = getattr(resp, "body", None)
+    if body is None:
+        return "", f"the facade returned {type(resp).__name__}, which carries no body"
+    try:
+        data = json.loads(bytes(body).decode("utf-8", "replace") or "{}")
+    except (ValueError, TypeError) as e:
+        return "", f"unreadable answer: {e}"
+    if isinstance(data, dict) and data.get("error"):
+        code = getattr(resp, "status_code", "")
+        return "", f"{code} {data['error']}".strip()
+    text = ""
+    if isinstance(data, dict):
+        msg = data.get("message")
+        if isinstance(msg, dict):
+            text = msg.get("content") or ""
+        if not text:
+            text = data.get("response") or ""
+    text = (text or "").strip()
+    return text, "" if text else "the answer came back empty"
+
+
 def run_shape_checks(checks: list[str], response: str) -> tuple[bool, str]:
     """(all_passed, human-readable per-check detail). Unknown check names are
     reported and skipped rather than failing the prompt — an editable check
@@ -184,37 +210,29 @@ class EvalHarness:
         if self._answer_fn is not None:
             got = await self._answer_fn(persona, prompt)
             return (got, "") if isinstance(got, str) else got
-        from .brain.agent import RequestContext
-        from .facade.ollama_api import _run_events
-        from .guardrails import RequestGuardState
-        from .usage import RequestLogger
-        em = persona.get("execution_mode") or ""
-        mode = em if em in ("pipeline", "main") else "agent"
-        ctx = RequestContext(
-            persona=persona,
-            messages=[{"role": "user", "content": prompt}],
-            guard=RequestGuardState(),
-            logger=RequestLogger(self.db, persona["virtual_name"],
-                                 f"eval:{persona['virtual_name']}", mode, prompt))
-        answers = []
-        deltas = []                 # a main-model persona streams its answer in pieces
-        problems = []
+        # Through the same door a client uses.
+        #
+        # This used to pick an event source directly (`_run_events`), which only
+        # knows the brain-mediated paths. A STRICT persona never involves the
+        # brain, and in passthrough routing mode nothing does - so the eval got
+        # `brain_down: routing mode is passthrough`, scored the silence 0.0, and
+        # reported a pass rate that read as a verdict on the persona. The same
+        # persona answered a real request perfectly well the whole time, because
+        # the facade decides between the brain and direct dispatch BEFORE picking
+        # an event source, and the harness had skipped that decision (v0.181.183).
+        #
+        # `_chat_dispatch` is that decision, in process, no HTTP and no key. An
+        # eval that does not go the way production goes is measuring something
+        # else.
+        from .facade.ollama_api import _chat_dispatch
+        body = {"model": persona["virtual_name"], "stream": False,
+                "messages": [{"role": "user", "content": prompt}]}
         try:
-            async for ev in _run_events(self.svc, ctx):
-                if ev.kind == "answer_delta":
-                    deltas.append(ev.text)
-                elif ev.kind in ("answer", "ask_user"):
-                    answers.append(ev.text)
-                elif ev.kind in ("error", "brain_down"):
-                    answers.append("")
-                    if (ev.text or "").strip():
-                        problems.append(f"{ev.kind}: {ev.text.strip()}")
-        finally:
-            ctx.logger.finish("ok")
-        text = "\n\n".join(a for a in ["".join(deltas)] + answers if a).strip()
-        why = "" if text else ("; ".join(problems)[:600] or
-                               "the routing path produced no answer and said nothing")
-        return text, why
+            resp = await _chat_dispatch(self.svc, body)
+        except Exception as e:                                    # noqa: BLE001
+            from .errors import describe_exception
+            return "", describe_exception(e)
+        return _answer_text(resp)
 
     async def _judge(self, judge_model: str, prompt: str,
                      response: str) -> tuple[Optional[float], str]:

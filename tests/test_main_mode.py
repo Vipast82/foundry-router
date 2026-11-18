@@ -521,7 +521,15 @@ def test_the_chat_stream_carries_the_pieces():
     src = inspect.getsource(ollama_api._agent_events_to_chat_chunks)
     assert 'elif ev.kind == "answer_delta":\n                deltas.append(ev.text)\n                yield tr.chat_chunk(model_name, ev.text)' in src
     assert 'answers.insert(0, "".join(deltas))' in src                  # the route footer and the cache see it
-    assert 'if ev.kind == "answer_delta":' in inspect.getsource(evalharness.EvalHarness._answer_for)
+    # The eval harness used to assemble the pieces itself, and this asserted that it
+    # did. It no longer sees pieces at all: it asks the facade with stream=False and
+    # the facade returns the whole answer, which is both simpler and the reason the
+    # harness now works for a strict or passthrough persona, where it used to score
+    # every answer 0.0 (v0.181.183). What matters is still that a streamed answer
+    # reaches an eval whole, so that is what is asserted.
+    eval_src = inspect.getsource(evalharness.EvalHarness._answer_for)
+    assert '"stream": False' in eval_src and "_chat_dispatch" in eval_src
+    assert "_run_events(" not in eval_src        # the call, not the comment explaining it
     assert AgentBrainConfig().stream_answers is True
     from pathlib import Path
     html = (Path(persona_setup.__file__).parent / "ui" / "static" / "index.html").read_text(encoding="utf-8")

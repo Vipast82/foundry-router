@@ -2,6 +2,37 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.183 - the evals never took the road production takes
+
+v0.181.182 made a failed eval say why, and the first run said it:
+
+    brain_down: brain skipped: routing mode is passthrough
+
+The harness chose an event source directly (`_run_events`), which only knows
+the brain-mediated paths. A **strict** persona never involves the brain, and in
+**passthrough** routing mode nothing does. The facade decides between the brain
+and direct dispatch BEFORE it picks an event source, and the harness had skipped
+that decision - so it asked for an event stream that could not exist, got
+nothing, scored the silence 0.0 and reported it as a pass rate.
+
+**This affected every strict persona, and every persona at all while routing
+mode is passthrough** - which is how this router runs. The convention of running
+a persona's evals after changing it has therefore been returning a number about
+the harness, not the persona, for as long as either has been true. The same
+personas answer real requests perfectly well, which is why nothing looked wrong.
+
+An eval now goes through `_chat_dispatch`, the same in-process entry the facade
+uses, so it takes the road production takes, including that decision. An eval
+that does not go where production goes is measuring something else.
+
+One test asserted this by inspecting the harness's source for the lines that
+assembled streamed answer pieces. The harness no longer sees pieces - it asks
+with `stream: False` and the facade returns the answer whole - so the test now
+asserts the new mechanism, with the reason recorded in it, rather than being
+deleted for being inconvenient.
+
+Tests: `tests/test_recall.py`, `tests/test_main_mode.py`.
+
 ## v0.181.182 - an eval that fails has to say why
 
 Turning recall on for one persona and running its evals, per the convention that

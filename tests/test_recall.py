@@ -562,3 +562,22 @@ async def test_a_real_answer_records_no_error(tmp_path):
     assert (res[0]["error"] or "") == "" and res[0]["shape_pass"] == 1
     assert "got no answer" not in (db.query_one(
         "SELECT note FROM eval_runs WHERE id=?", (run_id,))["note"] or "")
+
+
+def test_the_eval_reads_whatever_the_facade_hands_back():
+    """The non-streaming Ollama shape, an error body, and the things that are
+    neither. An eval that cannot read the answer reports a silence."""
+    from types import SimpleNamespace
+    from foundry_router.evalharness import _answer_text
+    import json as _j
+
+    def resp(obj, code=200):
+        return SimpleNamespace(body=_j.dumps(obj).encode(), status_code=code)
+
+    assert _answer_text(resp({"message": {"content": "hello"}})) == ("hello", "")
+    assert _answer_text(resp({"response": "legacy shape"}))[0] == "legacy shape"
+    text, why = _answer_text(resp({"error": "persona is disabled"}, 400))
+    assert text == "" and "persona is disabled" in why and "400" in why
+    assert _answer_text(resp({"message": {"content": "   "}}))[1] == "the answer came back empty"
+    assert "carries no body" in _answer_text(SimpleNamespace())[1]
+    assert "unreadable" in _answer_text(SimpleNamespace(body=b"not json", status_code=200))[1]
