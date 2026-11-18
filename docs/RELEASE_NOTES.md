@@ -1,3 +1,30 @@
+## v0.181.187 - two approved rules were not in the prompt and nothing said so
+
+Four rules were approved, bringing the rulebook to seven. The prompt grew by 153
+tokens where three rules had cost 284, which is the wrong direction, and the
+reason was that `lessons.block()` stopped at the first rule it had no room for
+instead of skipping it. Seven rules needed 1834 characters against a budget of
+1500, so the two with the fewest findings - the eye rule and the face-detail
+rule - left the prompt entirely. The GUI said seven rules were active. The
+request got five. Nothing anywhere reported the difference.
+
+A rule that does not fit is now skipped rather than treated as the end of the
+list, so one long rule no longer hides every smaller rule behind it, and the
+numbering stays contiguous. Two things now say when it happens: the note that
+goes with the block names the rules that did not fit and says which setting to
+raise, and `status()` carries a `dropped` count, so the operator sees it in the
+GUI without reading a request's route notes.
+
+This is the fourth silent failure of the same shape in two days: the eval
+harness that threw its errors away (v0.181.182), three persona switches that
+were never switches (v0.181.181), two prompt blocks that never reached a request
+(v0.181.184), and a recall block twice the size it was set to (v0.181.186). Each
+one worked when a test called it. None of them said anything when it did not
+work in production. The test added here fails against the `break`.
+
+Nothing is wrong with the rules themselves. The seven approved ones all reach
+the prompt at a 2000-character budget, measured at 1862.
+
 ## v0.181.186 - the recall block was twice the size it was set to
 
 Verifying that recall had finally reached a prompt gave the number to check it

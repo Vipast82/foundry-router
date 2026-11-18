@@ -276,6 +276,9 @@ def status(svc) -> dict:
             "cluster_similarity": float(getattr(cfg, "cluster_similarity", 0.8) or 0),
             "max_findings": int(getattr(cfg, "max_findings", 8000) or 0),
             "max_chars": int(getattr(cfg, "max_chars", 1500) or 0),
+            # approved and not in the prompt, because the budget ran out: the one
+            # number that said nothing when two rules silently fell off the end
+            "dropped": len(rulebook(svc.db, int(getattr(cfg, "max_chars", 1500) or 1500))[1]),
             "hours": int(getattr(cfg, "mine_hours", 0) or 0),
             "below_bar": int(_state.get("below_bar") or 0),
             "draft_model": getattr(cfg, "draft_model", "") or "",
@@ -476,19 +479,36 @@ def on_for(cfg, persona: Optional[dict]) -> bool:
     return bool((persona or {}).get("lessons", 0))
 
 
-def block(db, max_chars: int = 1500) -> str:
-    """The approved rulebook, most-seen first, as it goes into the prompt."""
-    rows = db.query("SELECT rule, seen FROM lessons WHERE state='active' AND rule<>'' "
+def rulebook(db, max_chars: int = 1500) -> tuple[str, list[int]]:
+    """The approved rulebook, most-seen first, as it goes into the prompt, and the
+    ids of any rules there was no room for.
+
+    A rule that does not fit is skipped, not treated as the end of the list. It
+    used to stop the loop, so one long rule hid every rule after it however
+    small - which is what happened the first time seven rules were approved
+    against a 1500-character budget needing 1834: the two with the fewest
+    findings vanished, the GUI still said seven were active, and nothing
+    anywhere said otherwise. The operator is told now, by the note that goes
+    with the block and by the count in status() (v0.181.187).
+    """
+    rows = db.query("SELECT id, rule, seen FROM lessons WHERE state='active' AND rule<>'' "
                     "ORDER BY seen DESC, id ASC")
     if not rows:
-        return ""
+        return "", []
     head = ("Rules this project learned the hard way. Each one is a mistake that was made "
             "here more than once and was approved as a rule by the operator - follow them.")
-    parts, used = [head], len(head)
-    for i, r in enumerate(rows, 1):
-        line = f"{i}. {r['rule']}"
+    parts, used, dropped, n = [head], len(head), [], 0
+    for r in rows:
+        line = f"{n + 1}. {r['rule']}"            # the numbering stays contiguous
         if used + len(line) + 1 > max_chars:
-            break
+            dropped.append(int(r["id"]))
+            continue
+        n += 1
         parts.append(line)
         used += len(line) + 1
-    return "\n".join(parts)
+    return "\n".join(parts), dropped
+
+
+def block(db, max_chars: int = 1500) -> str:
+    """The rulebook text alone, for callers that have nowhere to report a drop."""
+    return rulebook(db, max_chars)[0]

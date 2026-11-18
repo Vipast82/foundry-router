@@ -61,12 +61,17 @@ async def inject(svc: Any, persona: Optional[dict], messages: list,
 
     lcfg = cfg_for("lessons")
     if lessons.on_for(lcfg, persona):
-        rules = lessons.block(svc.db, int(getattr(lcfg, "max_chars", 1500) or 1500))
+        rules, dropped = lessons.rulebook(
+            svc.db, int(getattr(lcfg, "max_chars", 1500) or 1500))
         if rules:
             insert_system(messages, rules)
             # the block numbers its rules, so count those rather than its lines
             n = len(re.findall(r"(?m)^\s*\d+\.", rules)) or rules.count("\n")
-            notes.append(f"lessons: {n} approved rule(s) in the prompt")
+            note = f"lessons: {n} approved rule(s) in the prompt"
+            if dropped:
+                note += (f", {len(dropped)} did not fit (raise lessons.max_chars): "
+                         + ", ".join(str(i) for i in dropped[:8]))
+            notes.append(note)
 
     rcfg = cfg_for("recall")
     if recall.on_for(rcfg, persona):

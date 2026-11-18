@@ -239,8 +239,39 @@ def test_the_rulebook_never_takes_more_prompt_than_it_may(tmp_path):
         lid = _candidate(svc, anchor=f"a{i}")
         lessons.decide(svc, lid, "active", f"Rule number {i} " + "x" * 120)
     short = lessons.block(svc.db, max_chars=400)
-    assert len(short) < 600 and short.count("\n") < 5
+    assert len(short) <= 400 and short.count("\n") < 5
     assert len(lessons.block(svc.db, max_chars=4000)) > len(short)
+
+
+def test_a_rule_with_no_room_is_skipped_and_the_smaller_ones_after_it_still_fit(tmp_path):
+    """One long rule used to end the list: `break`, not `continue`. The first
+    time seven rules were approved against a 1500-character budget that needed
+    1834, the two with the fewest findings silently left the prompt while the
+    GUI still said seven were active (v0.181.187)."""
+    svc = _svc(tmp_path)
+    big = _candidate(svc, anchor="big", seen=99)
+    lessons.decide(svc, big, "active", "B" * 290)              # most seen, goes first
+    small = _candidate(svc, anchor="small", seen=1)
+    lessons.decide(svc, small, "active", "keep me")            # fewest, goes last
+    text, dropped = lessons.rulebook(svc.db, max_chars=600)
+    assert "keep me" in text, text                             # the small one still fits
+    assert dropped == []
+    # a budget with room for the header and the small rule only
+    text, dropped = lessons.rulebook(svc.db, max_chars=200)
+    assert dropped == [big], dropped                           # named, not silently gone
+    assert "keep me" in text and "1. keep me" in text          # numbering stays contiguous
+    assert len(text) <= 200
+
+
+def test_status_counts_the_rules_that_do_not_reach_the_prompt(tmp_path):
+    svc = _svc(tmp_path)
+    for i in range(8):
+        lid = _candidate(svc, anchor=f"r{i}", seen=10 - i)
+        lessons.decide(svc, lid, "active", f"Rule {i} " + "y" * 250)
+    svc.config_store.config.lessons.max_chars = 600
+    st = lessons.status(svc)
+    assert st["active"] == 8
+    assert st["dropped"] > 0 and st["dropped"] < 8             # some fit, some did not
 
 
 def test_a_persona_opts_in():
