@@ -2,6 +2,32 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.181 - three persona switches that were never switches
+
+Going to turn recall on for one persona produced this:
+
+    {"error": "recall must be text"}
+
+A persona setting needs three things and each of these had two: a column in the
+database, a control in the GUI, and its name in the validator's list of fields
+that are flags rather than text. Without the third, an unlisted field is treated
+as text, a `1` is refused, and the checkbox silently does nothing.
+
+**`code_checks`, `recall` and `lessons` were all in that state.** `code_checks`
+since v0.181.164 - which is the whole of the time its per-persona opt-out has
+been documented as available, including in the release notes that introduced it
+and in the tooltip on the checkbox. Turning off code checks for a persona whose
+work another gate already checks has not been possible through the GUI or the
+API at any point.
+
+Every test of these features passed throughout, because they all called
+`on_for(cfg, persona)` with a dictionary written by the test. Nothing went
+through the path a person uses. The test added here is structural rather than a
+list of the three names, so the next switch added with a column and a checkbox
+and no validator entry is caught here instead of by somebody trying to use it.
+
+Tests: `tests/test_recall.py`.
+
 ## v0.181.180 - better retrieval, worse work: the floor goes back
 
 v0.181.179 shipped hybrid retrieval on the strength of a retrieval measurement:

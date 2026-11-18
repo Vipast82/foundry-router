@@ -498,3 +498,18 @@ def test_the_word_index_keeps_its_own_tables_out_of_the_data_tools(tmp_path):
     # and the export path that used to raise now works for everything it offers
     for t in names[:8]:
         datatools.export(svc.db, t, "jsonl", limit=1)
+
+
+def test_every_persona_toggle_can_actually_be_set():
+    """A column and a checkbox are not a setting. Each of these was added with both
+    and none could be set: an unlisted field is text, so the API answered
+    "code_checks must be text" — for the whole time its per-persona opt-out was
+    documented as available. A structural test, so the next one added is caught
+    here and not by somebody trying to use it."""
+    from foundry_router import persona_rules
+    from foundry_router.personas import PERSONA_FIELDS
+
+    toggles = {"code_checks", "recall", "lessons", "review_enabled"}
+    assert toggles <= set(persona_rules.BOOL_FIELDS)
+    # and every one of them is a field the store will actually write
+    assert toggles <= set(PERSONA_FIELDS)

@@ -58,7 +58,14 @@ BOOL_FIELDS = ("enabled", "force_reasoning_effort", "mcp_tools_in_direct", "quie
                "media_attachments", "divert_when_busy", "pin_conversation",
                "brain_handles_tools", "pipeline_check_enabled", "prefer_permissive",
                "prefer_loaded", "escalate_when_local_busy", "expose_tool_trail",
-               "review_enabled", "review_prefilter", "route_footer")
+               "review_enabled", "review_prefilter", "route_footer",
+               # A column and a checkbox are not a setting. These three were each
+               # added with both and neither could be set through the UI or the API,
+               # because nothing listed them here and an unlisted field is text:
+               # "code_checks must be text". code_checks had been unsettable since
+               # v0.181.164, which is the whole of the time its per-persona opt-out
+               # was documented as available (v0.181.181).
+               "code_checks", "recall", "lessons")
 STR_LIST_FIELDS = ("pinned_models", "model_allowlist", "required_tags", "escalation_triggers",
                    "capabilities")
 DICT_FIELDS = ("guardrail_overrides", "selection_weights", "client_compat",
