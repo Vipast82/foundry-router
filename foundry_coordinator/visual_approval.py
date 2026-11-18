@@ -63,13 +63,16 @@ def _required(P, spec, rule, arts: dict) -> tuple[list[tuple[str, str, bytes]], 
         else:
             named_set.add(p)
     if not named_set:
-        # the plan lists its whole evidence folder (docs/evidence/<id>/**): every image the
-        # rule covers there is required (2026-11-04: polish captures were never reviewed)
+        # the sprint's own evidence folder (docs/evidence/<id>/): every image the rule covers
+        # there is required, whether the plan lists the folder (2026-11-04: polish captures
+        # were never reviewed) or not. 2026-11-17 FIN-5a1: a plan written before its sprint
+        # was split listed docs/evidence/FIN-5a/** while the coordinator granted the frames
+        # in docs/evidence/FIN-5a1/ as the sprint's own evidence; the review then found "no
+        # required visual frames" for 187 captures and sent the closed sprint back until its
+        # attempts ran out.
         folder = f"docs/evidence/{spec.task_id}"
-        if any(s.replace("\\", "/").rstrip("/") in (folder, folder + "/**", folder + "/*")
-               for s in spec.scope):
-            named_set.update(a for a in arts if a.lower().endswith(img)
-                             and a.startswith(folder + "/"))
+        named_set.update(a for a in arts if a.lower().endswith(img)
+                         and a.startswith(folder + "/"))
     named = sorted(named_set)
     if not named:
         return [], "the plan names no required visual frames"

@@ -416,7 +416,32 @@ def test_a_whole_evidence_folder_in_scope_requires_every_image_in_it(tmp_path):
     frames, problem = _required(project, spec, rule, arts)
     assert not problem and sorted(f[0] for f in frames) == sorted(rels)
     spec.scope = ["src/client/**"]
-    assert "names no required" in _required(project, spec, rule, arts)[1]
+    assert "names no required" not in _required(project, spec, rule, arts)[1]
+
+
+def test_the_sprints_own_evidence_frames_are_required_when_the_plan_names_another_folder(
+        tmp_path):
+    """2026-11-17 FIN-5a1: the plan, written before the split, listed docs/evidence/FIN-5a/**;
+    the 187 frames sat in docs/evidence/FIN-5a1/ (granted as the sprint's own evidence) and the
+    review said "the plan names no required visual frames" until the attempts ran out. The
+    sprint's own folder is required; another sprint's frames never are."""
+    rels = ["docs/evidence/FIN-5a1/after_gate_s2_1920x1080.png",
+            "docs/evidence/FIN-5a1/sheets/hall.png"]
+    other = "docs/evidence/FIN-5a/before_gate.png"
+    arts = {}
+    for i, rel in enumerate(rels + [other]):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(PNG + bytes([i]))
+        arts[rel] = hashlib.sha256(PNG + bytes([i])).hexdigest()
+    project = SimpleNamespace(profile=SimpleNamespace(workspace=str(tmp_path),
+                                                      in_workspace=lambda p: True))
+    spec = SimpleNamespace(task_id="FIN-5a1", scope=["docs/evidence/FIN-5a/**", "src/**"])
+    rule = SimpleNamespace(artifacts=["docs/evidence/{task}/**/*.png"])
+    frames, problem = _required(project, spec, rule, arts)
+    assert not problem and sorted(f[0] for f in frames) == sorted(rels)
+    only_other = {other: arts[other]}
+    assert "names no required" in _required(project, spec, rule, only_other)[1]
 
 
 def _judge_env(rounds, cfg, rulings):
