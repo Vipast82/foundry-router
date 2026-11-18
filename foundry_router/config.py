@@ -992,7 +992,10 @@ class RecallConfig(BaseModel):
     # quality filter removed. The filter is back; this stays OFF until a run says
     # the two together beat the embedding alone (v0.181.180).
     hybrid: bool = False
-    max_chars: int = Field(default=2000, ge=200, le=20000)   # of prompt the matches may take
+    # v0.181.186: the whole block, not one hit's solution. 4000 is what a
+    # 2000 here used to produce in practice, so the default keeps the behaviour
+    # the +6.10 benchmark was measured on while the number stops lying.
+    max_chars: int = Field(default=4000, ge=200, le=20000)   # of prompt the matches may take
     max_entries: int = Field(default=20000, ge=100, le=100000)
     rebuild_hours: int = Field(default=24, ge=0, le=720)      # 0 = only when asked
 

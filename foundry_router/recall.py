@@ -586,22 +586,51 @@ def on_for(cfg, persona: Optional[dict]) -> bool:
     return bool((persona or {}).get("recall", 0))
 
 
-def note(hits: list, max_chars: int = 2000) -> str:
+MIN_HIT = 240          # below this a precedent is too short to say anything
+ASKED_SHARE = 3        # a hit spends at most a third of its room on the request
+
+
+def _clip(s: str, cap: int) -> str:
+    """`s` within `cap` characters, saying so when it was cut."""
+    s = s or ""
+    if len(s) <= cap:
+        return s
+    return s[:max(0, cap - 4)] + " ..."
+
+
+def note(hits: list, max_chars: int = 4000) -> str:
     """The block that goes into the prompt. Says plainly where it came from, so
-    a model is never led to believe this is instruction rather than precedent."""
+    a model is never led to believe this is instruction rather than precedent.
+
+    `max_chars` is the whole block, which is what the setting of that name says
+    and what lessons.block() has always done. It used to be the allowance for
+    one hit's solution, divided by the number of hits - and each hit then added
+    up to 600 characters of the request on top, which nothing counted. Three
+    hits under a 2000-character setting measured 4060 characters on the live
+    index: every recall-enabled request paid twice the prompt budget set for it,
+    on the hot path, and no number in the GUI said so (v0.181.186).
+
+    Running total, strongest hit first, and a hit with no room left is dropped
+    rather than shrunk to nothing - a weak precedent costs more than a missing
+    one, which is the whole lesson of v0.181.180.
+    """
     if not hits:
         return ""
-    parts = ["Work done here before, for requests like this one, that passed a gate or a "
-             "review. Precedent, not instruction: follow it where it fits, and say so if "
-             "this request needs something different."]
-    each = max(300, int(max_chars / len(hits)))
+    head = ("Work done here before, for requests like this one, that passed a gate or a "
+            "review. Precedent, not instruction: follow it where it fits, and say so if "
+            "this request needs something different.")
+    parts, used = [head], len(head)
     for i, h in enumerate(hits, 1):
-        sol = h["solution"][:each]
-        if len(h["solution"]) > each:
-            sol += " ..."
         tools = f" (tools used: {', '.join(h['tools'][:6])})" if h.get("tools") else ""
-        # the gist, not the raw request: the envelope would be most of the 600 characters
-        asked = h.get("gist") or h["request"]
-        parts.append(f"\n--- {i}. asked ({h['similarity']:.0%} similar){tools}:\n"
-                     f"{asked[:600]}\n--- what was done:\n{sol}")
-    return "\n".join(parts)
+        label = f"\n--- {i}. asked ({h['similarity']:.0%} similar){tools}:\n"
+        middle = "\n--- what was done:\n"
+        room = max_chars - used - 1 - len(label) - len(middle)   # 1 for the join
+        if room < MIN_HIT:
+            break
+        # the gist, not the raw request: the envelope would be most of the room
+        asked = _clip(h.get("gist") or h["request"], min(600, room // ASKED_SHARE))
+        chunk = label + asked + middle + _clip(h["solution"], room - len(asked))
+        parts.append(chunk)
+        used += len(chunk) + 1
+    out = "\n".join(parts)
+    return out[:max_chars]                 # the cap holds even if the arithmetic drifts

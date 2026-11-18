@@ -172,11 +172,30 @@ def test_the_prompt_block_says_where_it_came_from():
     assert recall.note([]) == ""
 
 
-def test_long_past_work_is_trimmed_to_its_share_of_the_prompt():
-    hits = [{"case_id": str(i), "similarity": 0.8, "request": "r", "solution": "x" * 5000,
-             "tools": [], "tier": "ok"} for i in range(3)]
+def test_the_block_is_never_bigger_than_the_setting_says():
+    """This asserted `len(note) < 2400` for a 1500-character setting, which was
+    the overrun written down and tolerated. On the live index a 2000 setting
+    produced 4060 characters: the budget was being spent per hit on the solution
+    alone, and each hit then added up to 600 characters of the request that
+    nothing counted at all (v0.181.186)."""
+    hits = [{"case_id": str(i), "similarity": 0.8, "request": "r" * 900,
+             "solution": "x" * 5000, "tools": [], "tier": "ok"} for i in range(3)]
+    for cap in (400, 800, 1500, 2000, 4000):
+        note = recall.note(hits, max_chars=cap)
+        assert len(note) <= cap, (cap, len(note))
     note = recall.note(hits, max_chars=1500)
-    assert note.count("...") == 3 and len(note) < 2400
+    assert "Precedent, not instruction" in note                   # the header always fits
+    assert "..." in note                                          # and the rest was cut
+
+
+def test_a_hit_with_no_room_left_is_dropped_rather_than_shrunk():
+    """A weak precedent costs more than a missing one (v0.181.180), so the tail
+    of the list goes rather than every hit becoming a stub."""
+    hits = [{"case_id": str(i), "similarity": 0.9 - i / 100, "request": "r",
+             "solution": "x" * 2000, "tools": [], "tier": "ok"} for i in range(6)]
+    note = recall.note(hits, max_chars=900)
+    assert len(note) <= 900
+    assert "1. asked" in note and "6. asked" not in note          # strongest kept, tail cut
 
 
 def test_a_persona_opts_in():

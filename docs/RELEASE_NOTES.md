@@ -1,3 +1,33 @@
+## v0.181.186 - the recall block was twice the size it was set to
+
+Verifying that recall had finally reached a prompt gave the number to check it
+against, and it was wrong. A setting of 2000 characters produced 4060 on the
+live index: `max_chars` was being spent per hit on the solution text alone,
+divided by the number of hits, and each hit then added up to 600 characters of
+the request that nothing counted at all. Three hits therefore carried 1800
+characters no setting governed. Every request on a recall-enabled persona paid
+about twice the prompt budget set for it, on the hot path, and no number in the
+GUI said so. `lessons.block()` has kept a correct running total since the day it
+was written; `recall.note()` was the odd one out.
+
+It now spends one budget for the whole block, strongest hit first, and drops a
+hit it has no room for rather than shrinking every hit to a stub - a weak
+precedent costs more than a missing one, which is the lesson of v0.181.180. On
+the live index the same three hits measure 1867 characters at a 2000 setting and
+exactly 4000 at 4000.
+
+The default moves from 2000 to 4000, because 4000 is what 2000 produced in
+practice and the +6.10 per case the benchmark measured was measured on blocks
+that size. The number stops lying without the behaviour moving underneath it.
+A config that names 2000 explicitly will now get 2000, which is half of what it
+has been getting - worth knowing before the next benchmark is compared with the
+last one.
+
+The test that covered this asserted `len(note) < 2400` for a 1500-character
+setting: the overrun written down and tolerated. It now asserts the cap holds at
+400, 800, 1500, 2000 and 4000, and that the tail of the hit list is dropped
+rather than stubbed.
+
 ## v0.181.185 - a flake that left only its name (tests only, no rebuild needed)
 
 `test_generate_saves_into_project_with_sidecar` failed once in a full parallel
