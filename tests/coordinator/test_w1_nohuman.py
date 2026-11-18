@@ -426,7 +426,10 @@ def test_after_close_missing_frame_is_carried_when_a_prior_approval_still_matche
     t = {"task_id": "UI-02", "run_id": "r", "session_id": "p", "attempt": 1}
     VA.step(c, P, t, spec, rule, "rev2")
     assert not calls["reject"] and approvals[-1]["revision"] == "rev2"
-    assert "carried from the visual approval" in approvals[-1]["note"]
+    # 2026-11-18 (17da1ba): the sprint's own evidence frames are required even when the plan
+    # names none; they were approved at these bytes, so the approval moves on, no model call
+    assert ("carried from the visual approval" in approvals[-1]["note"]
+            or "accepted at these bytes earlier" in approvals[-1]["note"])
     assert S.check(S.AWAITING_HUMAN, S.BLOCKED, {"blocker": "x"}) is None
 
 
@@ -490,6 +493,36 @@ def test_revert_and_merge_commits_are_exempt_and_pushed_commits_stay_advisory(tm
     rows = c._generic_checks_uncached(P, c.store.task("game", "T1"), spec, head, "verify")
     cm = next(r for r in rows if r.check == "coordinator.commit_messages")
     assert cm.result == "PASS" and cm.required is False and "already pushed" in cm.detail
+
+
+def test_merge_commits_are_found_in_batches_not_one_git_call_per_commit(tmp_path, monkeypatch):
+    """2026-11-18 POL-7: one `rev-list --parents` per commit over a 10,573-commit range kept
+    the verify checks past the heartbeat limit, and the supervisor restarted the coordinator
+    every 6.5 minutes. Merges are still exempt; the lookup is batched."""
+    root, _ = make_repo(tmp_path, "game", [T1], extra_files={"src/a.txt": "x\n"})
+    prof = write_profile(tmp_path, "game", root)
+    c = coordinator(tmp_path, [prof], {"game": lambda ctx: {"final": ""}})
+    P = c.projects["game"]
+    base = P.ws.head()
+    for i in range(2):
+        git(root, "checkout", "-qb", f"side{i}", base)
+        (root / "src" / f"s{i}.txt").write_text(f"{i}\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", f"side work {i}")
+        git(root, "checkout", "-q", "main")
+        git(root, "merge", "-q", "--no-ff", "-m", f"merge side{i}", f"side{i}")
+    (root / "src" / "a.txt").write_text("plain\n")
+    git(root, "commit", "-qam", "plain message")
+    head = P.ws.head()
+    calls = []
+    real = P.ws.run
+    monkeypatch.setattr(P.ws, "run", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
+    monkeypatch.setattr(CM, "MERGE_BATCH", 2)
+    bad, exempt = CM.unprefixed(P, P.ws.commits(base, head), CM.prefix_of(P, "T1"))
+    assert sorted(m for _, m in exempt) == ["merge side0", "merge side1"]
+    assert sorted(m for _, m in bad) == ["plain message", "side work 0", "side work 1"]
+    lookups = [a for a in calls if a[0] == "rev-list"]
+    assert len(lookups) == 3                     # 5 candidates in batches of 2, not 5 calls
 
 
 def test_reword_rebuilds_the_range_above_the_oldest_bad_commit_and_remaps_coord_commits(tmp_path):
@@ -803,7 +836,7 @@ def test_another_sprints_commits_are_never_reworded(monkeypatch):
     exempt; an unprefixed one is still this sprint's to reword."""
     from types import SimpleNamespace
     from foundry_coordinator import commits as CM
-    monkeypatch.setattr(CM, "_is_merge", lambda P, sha: False)
+    monkeypatch.setattr(CM, "_merges", lambda P, shas: set())
     P = SimpleNamespace()
     bad, exempt = CM.unprefixed(P, [("a", "AS-P5: R-B frame re-shot"), ("b", "fix the ring"),
                                     ("c", "UI-SKIN2: hero captures")], "UI-SKIN2: ")

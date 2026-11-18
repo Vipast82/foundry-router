@@ -47,16 +47,44 @@ def unprefixed(P, commits: list, prefix: str) -> tuple[list, list]:
     from .bookkeeping import other_sprint
     own = str(prefix or "").strip().rstrip(":").strip()
     bad, exempt = [], []
+    left = []
     for sha, subject in commits:
         if _subject_ok(subject, prefix):
             continue
         # 2026-10-29: UI-SKIN2's verification reworded AS-P5's commits (shared checkout) to
         # "UI-SKIN2: AS-P5: ..."; another sprint's commit is that sprint's, never reworded
-        if EXEMPT.match(subject or "") or _is_merge(P, sha) or other_sprint(subject, own):
+        if EXEMPT.match(subject or "") or other_sprint(subject, own):
             exempt.append((sha, subject))
         else:
-            bad.append((sha, subject))
+            left.append((sha, subject))
+    # 2026-11-18 POL-7: one `rev-list --parents` per commit over a 10,573-commit range
+    # outlasted the heartbeat; the merges are looked up in batches instead
+    merges = _merges(P, [sha for sha, _ in left])
+    for sha, subject in left:
+        (exempt if sha in merges else bad).append((sha, subject))
     return bad, exempt
+
+
+MERGE_BATCH = 200
+
+
+def _merges(P, shas: list) -> set:
+    """The merge commits among `shas` (a few git calls, MERGE_BATCH shas each)."""
+    out: set = set()
+    for i in range(0, len(shas), MERGE_BATCH):
+        part = shas[i:i + MERGE_BATCH]
+        try:
+            text = P.ws.run("rev-list", "--no-walk=unsorted", "--parents", *part)
+        except GitError:
+            for sha in part:                      # a bad sha in the batch: one by one
+                if _is_merge(P, sha):
+                    out.add(sha)
+            continue
+        for line in text.splitlines():
+            ids = line.split()
+            if len(ids) > 2:
+                out.add(ids[0])
+    return out
 
 
 def _is_merge(P, sha: str) -> bool:

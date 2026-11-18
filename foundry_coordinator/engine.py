@@ -2386,14 +2386,20 @@ class Coordinator:
         GENERIC_CACHE_SECONDS); any change recomputes."""
         from .automation import get as auto_get
         if not auto_get(P, "generic_checks_cache"):
-            return self._generic_checks_uncached(P, t, spec, head, phase, intermediate)
+            from . import keepalive
+            with keepalive.busy(f"generic checks {t['task_id']} {phase}", 1800):
+                return self._generic_checks_uncached(P, t, spec, head, phase, intermediate)
         key = self._generic_key(P, t, spec, head, phase, intermediate)
         cache = self.__dict__.setdefault("_generic_cache", {})
         hit = cache.get((P.id, t["task_id"]))
         now = self.clock()
         if key and hit and hit[0] == key and now - hit[1] < self.GENERIC_CACHE_SECONDS:
             return list(hit[2])
-        out = self._generic_checks_uncached(P, t, spec, head, phase, intermediate)
+        # 2026-11-18 POL-7: a 10,573-commit base..head range kept these checks running past
+        # the heartbeat limit; the supervisor restarted the coordinator every 6.5 minutes
+        from . import keepalive
+        with keepalive.busy(f"generic checks {t['task_id']} {phase}", 1800):
+            out = self._generic_checks_uncached(P, t, spec, head, phase, intermediate)
         if key:
             cache[(P.id, t["task_id"])] = (key, now, list(out))
         return out
