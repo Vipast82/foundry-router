@@ -1,3 +1,26 @@
+## v0.181.188 - the benchmark can run with the rulebook in front of it
+
+Seven approved rules now go into every prompt of a persona that opted in, and
+that persona runs code sprints as well as asset sprints. Whether 575 tokens of
+animal anatomy costs anything on a Luau task has been asserted - by me - and
+never measured. `bench.start` takes `use_lessons` the way it already took
+`use_recall`, so two runs answer it instead of an opinion.
+
+No task is held out, unlike recall's arm. A rule carries no file, no call and no
+number from the sprint it was mined from, so a case cannot copy its own answer
+out of one. What a rule mined from `VQ` findings can still do is help a `VQ` case
+for reasons that do not generalise, so a pair of runs is to be read per task
+family rather than as one average: the code-family cases are the clean test of
+whether the rules cost anything, and the art-family cases are a separate and
+weaker signal about whether they help.
+
+The count in the run note is the number of rules that actually fit the budget,
+taken from the block rather than from the table, so it cannot repeat the lie the
+GUI told before v0.181.187.
+
+Also here: a `lessons` column on `bench_runs` beside `recall`, so a later
+comparison cannot mistake one arm for the other.
+
 ## v0.181.187 - two approved rules were not in the prompt and nothing said so
 
 Four rules were approved, bringing the rulebook to seven. The prompt grew by 153

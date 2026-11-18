@@ -367,6 +367,32 @@ async def with_recall(svc, case: dict) -> tuple:
     return {**case, "messages": msgs}, hits
 
 
+def with_lessons(svc, case: dict) -> tuple:
+    """The case with the approved rulebook in front of it, and how many rules
+    went in. (The case unchanged and 0 when lessons are off or none are active.)
+
+    No task is held out, because a rule is not an answer: it carries no file,
+    no call and no number from the sprint it was mined from, so a case cannot
+    copy its own result out of one the way it can out of a retrieved sprint.
+    What a rule mined from VQ findings *can* do is help a VQ case for reasons
+    that would not generalise, so a run is read per task family rather than as
+    one average - which is the whole question being asked of it (v0.181.188).
+    """
+    from . import lessons
+    cfg = getattr(svc.config_store.config, "lessons", None)
+    rules, _dropped = lessons.rulebook(svc.db, int(getattr(cfg, "max_chars", 1500) or 1500))
+    if not rules:
+        return case, 0
+    msgs = list(case.get("messages") or [])
+    at = 0
+    for i, m in enumerate(msgs):
+        if m.get("role") == "system":
+            at = i + 1
+    msgs.insert(at, {"role": "system", "content": rules})
+    import re as _re
+    return {**case, "messages": msgs}, len(_re.findall(r"(?m)^\s*\d+\.", rules))
+
+
 async def ask(svc, model: str, case: dict, max_tokens: int = 2048) -> dict:
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
@@ -406,18 +432,20 @@ def _row(db, sql, args=()):
 
 
 async def _run(svc, suite: str, model: str, label: str, limit: int,
-               use_recall: bool = False) -> dict:
+               use_recall: bool = False, use_lessons: bool = False) -> dict:
     db = svc.db
     items = cases(svc, suite, limit)
     if not items:
         raise ValueError(f"the suite {suite!r} has no cases")
-    db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, recall) "
-               "VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?)",
-               (suite, model, label, len(items), 1 if use_recall else 0))
+    db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, "
+               "recall, lessons) VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?, ?)",
+               (suite, model, label, len(items), 1 if use_recall else 0,
+                1 if use_lessons else 0))
     run_id = db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]
     _state.update({"state": "running", "run_id": run_id, "suite": suite, "model": model,
                    "cases": len(items), "done": 0, "started": time.time(), "score": None,
-                   "recall": bool(use_recall), "recalled": 0})
+                   "recall": bool(use_recall), "recalled": 0,
+                   "lessons": bool(use_lessons), "ruled": 0})
     totals = {"score": 0.0, "tools": 0.0, "code": 0.0, "answer": 0.0, "seconds": 0.0,
               "prompt": 0, "completion": 0, "code_n": 0, "answer_n": 0, "errors": 0}
     for i, case in enumerate(items, start=1):
@@ -428,6 +456,10 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
             case, hits = await with_recall(svc, case)
             if hits:
                 _state["recalled"] += 1
+        if use_lessons:
+            case, _nrules = with_lessons(svc, case)
+            if _nrules:
+                _state["ruled"] = _nrules
         got = await ask(svc, model, case)
         s = await score_one(svc, case, got)
         db.execute(
@@ -462,7 +494,8 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
            "answer": round(100 * totals["answer"] / totals["answer_n"], 1) if totals["answer_n"] else None,
            "seconds": round(totals["seconds"] / n, 2), "prompt_tokens": totals["prompt"],
            "completion_tokens": totals["completion"], "errors": totals["errors"],
-           "recall": bool(use_recall), "recalled": _state.get("recalled", 0)}
+           "recall": bool(use_recall), "recalled": _state.get("recalled", 0),
+           "lessons": bool(use_lessons), "ruled": _state.get("ruled", 0)}
     db.execute("UPDATE bench_runs SET scored=?, tools_score=?, code_score=?, answer_score=?, "
                "score=?, seconds=?, prompt_tokens=?, completion_tokens=?, status=?, note=? "
                "WHERE id=?",
@@ -472,26 +505,29 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
                 "; ".join(x for x in (
                     f"{out['errors']} call(s) failed" if out["errors"] else "",
                     f"past work found for {out['recalled']} of {out['scored']} case(s)"
-                    if use_recall else "") if x), run_id))
+                    if use_recall else "",
+                    f"{out['ruled']} approved rule(s) in every prompt"
+                    if use_lessons else "") if x), run_id))
     _state.update({"state": "done", "finished": time.time(), **out})
     return out
 
 
 def start(svc, suite: str, model: str, label: str = "", limit: int = 0,
-          use_recall: bool = False) -> dict:
+          use_recall: bool = False, use_lessons: bool = False) -> dict:
     """Run a suite in the background. One at a time. `use_recall` puts the work
-    recall finds in front of every case, so two runs answer whether it helps."""
+    recall finds in front of every case, and `use_lessons` the approved rulebook,
+    so two runs answer whether either helps."""
     if _state.get("state") == "running":
         return dict(_state)
     if not _lock.acquire(blocking=False):
         return dict(_state)
     _state.clear()
     _state.update({"state": "running", "suite": suite, "model": model, "done": 0,
-                   "recall": bool(use_recall)})
+                   "recall": bool(use_recall), "lessons": bool(use_lessons)})
 
     def go():
         try:
-            asyncio.run(_run(svc, suite, model, label, limit, use_recall))
+            asyncio.run(_run(svc, suite, model, label, limit, use_recall, use_lessons))
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             _state.update({"state": "failed", "error": describe_exception(e),

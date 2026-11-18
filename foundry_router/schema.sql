@@ -792,6 +792,7 @@ CREATE TABLE IF NOT EXISTS bench_runs (
   completion_tokens INTEGER,
   status TEXT,                      -- running | done | stopped | failed
   recall INTEGER DEFAULT 0,         -- the work recall found was put in front of every case
+  lessons INTEGER DEFAULT 0,        -- the approved rulebook was put in front of every case
   note TEXT
 );
 

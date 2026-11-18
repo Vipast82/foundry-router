@@ -2983,7 +2983,8 @@ async def bench_run(request: Request):
         return JSONResponse({"error": "pick a suite and a model"}, status_code=400)
     return {"ok": True, "run": await asyncio.to_thread(
         bench.start, svc, suite, model, str(body.get("label") or ""),
-        int(body.get("limit") or 0), bool(body.get("recall")))}
+        int(body.get("limit") or 0), bool(body.get("recall")),
+        bool(body.get("lessons")))}
 
 
 @router.get("/admin/api/bench/results")

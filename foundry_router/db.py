@@ -668,6 +668,7 @@ class Database:
             ("lesson_findings", "gist", "TEXT DEFAULT ''"),
             ("eval_results", "error", "TEXT DEFAULT ''"),
             ("bench_results", "recalled", "TEXT DEFAULT ''"),
+            ("bench_runs", "lessons", "INTEGER DEFAULT 0"),
             ("personas", "lessons", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
