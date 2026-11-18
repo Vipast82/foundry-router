@@ -2,6 +2,33 @@
 
 Newest first. Each version is tagged `vX.Y.Z` (docs/CONVENTIONS.md).
 
+## v0.181.182 - an eval that fails has to say why
+
+Turning recall on for one persona and running its evals, per the convention that
+a persona change is followed by a run, gave this:
+
+    run 3 | prompts 2 | shape pass rate 0.0
+      FAIL  chars=0
+      FAIL  chars=0
+
+Zero characters, twice. The same persona answers a request sent through its real
+routing path perfectly well, and the evals fail identically with recall switched
+off, so it is neither the persona nor recall - and the harness could not say
+which, because **it throws its own errors away**: a timeout becomes an empty
+string, and an `error` or `brain_down` event has its text discarded before
+anybody sees it. What reaches the operator is `0.0`, which reads as a verdict on
+the persona rather than a report that nothing was asked of it.
+
+- Each result records why it got no answer (`eval_results.error`).
+- A run that answered nothing says so where the score goes: *"N of M prompt(s)
+  got no answer - the score is not about the persona"*.
+- A timed-out prompt logs an event instead of vanishing.
+
+This does not fix the underlying fault. It makes the next run name it, which is
+the necessary first step and was not available before.
+
+Tests: `tests/test_recall.py`.
+
 ## v0.181.181 - three persona switches that were never switches
 
 Going to turn recall on for one persona produced this:

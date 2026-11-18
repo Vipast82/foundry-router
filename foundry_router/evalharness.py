@@ -177,9 +177,13 @@ class EvalHarness:
         self.db: Database = services.db
         self._answer_fn = answer_fn
 
-    async def _answer_for(self, persona: dict, prompt: str) -> str:
+    async def _answer_for(self, persona: dict, prompt: str) -> tuple:
+        """(answer, why it is empty). An eval that fails has to say why: scoring a
+        silence 0 and reporting a pass rate of 0.0 sends the operator to look at
+        the persona, when the run never reached a model at all (v0.181.182)."""
         if self._answer_fn is not None:
-            return await self._answer_fn(persona, prompt)
+            got = await self._answer_fn(persona, prompt)
+            return (got, "") if isinstance(got, str) else got
         from .brain.agent import RequestContext
         from .facade.ollama_api import _run_events
         from .guardrails import RequestGuardState
@@ -194,6 +198,7 @@ class EvalHarness:
                                  f"eval:{persona['virtual_name']}", mode, prompt))
         answers = []
         deltas = []                 # a main-model persona streams its answer in pieces
+        problems = []
         try:
             async for ev in _run_events(self.svc, ctx):
                 if ev.kind == "answer_delta":
@@ -202,9 +207,14 @@ class EvalHarness:
                     answers.append(ev.text)
                 elif ev.kind in ("error", "brain_down"):
                     answers.append("")
+                    if (ev.text or "").strip():
+                        problems.append(f"{ev.kind}: {ev.text.strip()}")
         finally:
             ctx.logger.finish("ok")
-        return "\n\n".join(a for a in ["".join(deltas)] + answers if a).strip()
+        text = "\n\n".join(a for a in ["".join(deltas)] + answers if a).strip()
+        why = "" if text else ("; ".join(problems)[:600] or
+                               "the routing path produced no answer and said nothing")
+        return text, why
 
     async def _judge(self, judge_model: str, prompt: str,
                      response: str) -> tuple[Optional[float], str]:
@@ -256,17 +266,27 @@ class EvalHarness:
             shape_passes, judge_scores = 0, []
             for p in prompts:
                 t0 = time.monotonic()
+                why = ""
                 try:
-                    response = await asyncio.wait_for(
+                    response, why = await asyncio.wait_for(
                         self._answer_for(persona, p["prompt"]),
                         timeout=PER_PROMPT_TIMEOUT)
                 except asyncio.TimeoutError:
                     response = ""
+                    why = f"no answer within {PER_PROMPT_TIMEOUT}s"
+                    self.db.log_event("warning", "eval",
+                                      f"prompt {p['id']} timed out after "
+                                      f"{PER_PROMPT_TIMEOUT}s")
                 except Exception as e:
+                    from .errors import describe_exception
                     log.exception("eval prompt failed")
                     response = ""
+                    why = describe_exception(e)
                     self.db.log_event("warning", "eval",
                                       f"prompt {p['id']} errored", str(e))
+                if why:
+                    self.db.log_event("warning", "eval",
+                                      f"prompt {p['id']} answered nothing", why)
                 try:
                     checks = json.loads(p["checks"] or "[]")
                 except (json.JSONDecodeError, TypeError):
@@ -282,16 +302,23 @@ class EvalHarness:
                 self.db.execute(
                     "INSERT INTO eval_results (run_id, prompt_id, prompt, "
                     "response_chars, shape_pass, shape_detail, judge_score, "
-                    "judge_notes, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "judge_notes, duration_ms, error) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (run_id, p["id"], p["prompt"][:300], len(response),
                      int(passed), detail[:800], score, notes,
-                     int((time.monotonic() - t0) * 1000)))
+                     int((time.monotonic() - t0) * 1000), why[:600]))
+            silent = self.db.query_one(
+                "SELECT COUNT(*) AS n FROM eval_results WHERE run_id=? AND "
+                "COALESCE(error,'')<>''", (run_id,))
+            note = f"categories: {', '.join(cats)}"
+            if silent and silent["n"]:
+                note += (f"; {silent['n']} of {len(prompts)} prompt(s) got no answer "
+                         f"- the score is not about the persona")
             self.db.execute(
                 "UPDATE eval_runs SET status='done', shape_pass_rate=?, "
-                "avg_judge_score=? WHERE id=?",
+                "avg_judge_score=?, note=? WHERE id=?",
                 (shape_passes / len(prompts) if prompts else None,
                  (sum(judge_scores) / len(judge_scores)) if judge_scores else None,
-                 run_id))
+                 note, run_id))
         except Exception as e:
             log.exception("eval run failed")
             self.db.execute(

@@ -513,3 +513,52 @@ def test_every_persona_toggle_can_actually_be_set():
     assert toggles <= set(persona_rules.BOOL_FIELDS)
     # and every one of them is a field the store will actually write
     assert toggles <= set(PERSONA_FIELDS)
+
+
+# -- an eval that fails has to say why ----------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_an_eval_that_gets_no_answer_records_why(tmp_path):
+    """Scoring a silence 0.0 and reporting it as a pass rate sends the operator to
+    look at the persona, when the run may never have reached a model at all."""
+    from foundry_router.db import Database
+    from foundry_router.evalharness import EvalHarness
+    from types import SimpleNamespace
+    db = Database(tmp_path / "e.sqlite")
+    db.execute("INSERT INTO eval_prompts (category, prompt, checks, enabled) "
+               "VALUES ('coding','write a function','[\"code_block\"]',1)")
+    personas = SimpleNamespace(get=lambda n: {"virtual_name": n, "benchmark_category": "coding"})
+    svc = SimpleNamespace(db=db, personas=personas)
+    h = EvalHarness(svc, db)
+
+    async def nothing(persona, prompt):
+        return "", "brain_down: the brain is not answering"
+    h._answer_fn = nothing
+    run_id = await h.run("P", "", ["coding"])
+    row = db.query_one("SELECT * FROM eval_runs WHERE id=?", (run_id,))
+    res = db.query("SELECT * FROM eval_results WHERE run_id=?", (run_id,))
+    assert "the brain is not answering" in (res[0]["error"] or "")
+    assert "got no answer" in (row["note"] or "")
+    assert "not about the persona" in (row["note"] or "")
+
+
+@pytest.mark.asyncio
+async def test_a_real_answer_records_no_error(tmp_path):
+    from foundry_router.db import Database
+    from foundry_router.evalharness import EvalHarness
+    from types import SimpleNamespace
+    db = Database(tmp_path / "e2.sqlite")
+    db.execute("INSERT INTO eval_prompts (category, prompt, checks, enabled) "
+               "VALUES ('coding','write a function','[\"code_block\"]',1)")
+    svc = SimpleNamespace(db=db, personas=SimpleNamespace(
+        get=lambda n: {"virtual_name": n, "benchmark_category": "coding"}))
+    h = EvalHarness(svc, db)
+
+    async def good(persona, prompt):
+        return "here you go\n```python\nx = 1\n```", ""
+    h._answer_fn = good
+    run_id = await h.run("P", "", ["coding"])
+    res = db.query("SELECT * FROM eval_results WHERE run_id=?", (run_id,))
+    assert (res[0]["error"] or "") == "" and res[0]["shape_pass"] == 1
+    assert "got no answer" not in (db.query_one(
+        "SELECT note FROM eval_runs WHERE id=?", (run_id,))["note"] or "")

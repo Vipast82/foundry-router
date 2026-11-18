@@ -666,6 +666,7 @@ class Database:
             ("recall_entries", "gist", "TEXT DEFAULT ''"),
             ("bench_runs", "recall", "INTEGER DEFAULT 0"),
             ("lesson_findings", "gist", "TEXT DEFAULT ''"),
+            ("eval_results", "error", "TEXT DEFAULT ''"),
             ("bench_results", "recalled", "TEXT DEFAULT ''"),
             ("personas", "lessons", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result

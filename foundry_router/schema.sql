@@ -341,6 +341,7 @@ CREATE TABLE IF NOT EXISTS eval_results (
   shape_pass INTEGER,
   shape_detail TEXT,                -- per-check outcomes, human-readable
   judge_score REAL,
+  error TEXT,                       -- why this prompt got no answer, when it got none
   judge_notes TEXT,
   duration_ms INTEGER
 );
