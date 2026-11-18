@@ -1,3 +1,24 @@
+## v0.181.185 - a flake that left only its name (tests only, no rebuild needed)
+
+`test_generate_saves_into_project_with_sidecar` failed once in a full parallel
+run and passed in five further full runs and every isolated one. It could not be
+diagnosed, because the run that caught it had been piped through `tail`, so the
+only evidence of the only failure was its name.
+
+Two mechanisms were checked and neither explains it. The module-level `HITS` and
+`STATE` that the media tests share are cleared by the `media` fixture at setup,
+so a previous test in the same worker cannot carry into it. Media jobs do run as
+background tasks with a two-second sleep before a retry, which would be a real
+leak between tests, but `app` and `client` are per-test, so the event loop ends
+with each test and a pending retry cannot fire inside the next one - which is
+what the suite's unraisable-exception warnings are.
+
+So nothing is fixed here. What changes is that the next occurrence will be
+evidence instead of a name: the test's compound final assertion is now two
+assertions, each reporting the value it actually saw. The run that found it
+asserted `already_saved is True and len(HITS) == 1`, and a bare `and` over two
+conditions cannot say which half gave way.
+
 ## v0.181.184 - the rules and the precedent never reached a prompt
 
 Lessons were switched on for a coding persona, the way recall was the day before,

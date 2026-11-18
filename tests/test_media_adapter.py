@@ -61,7 +61,11 @@ def test_generate_saves_into_project_with_sidecar(adapter):
     assert "b64" not in json.dumps(res)            # paths only, no image data
     # status for the same job does not download twice or submit again
     again = _payload(mod.call_tool(cfg, "image_job_status", {"job_id": out["job_id"]}))
-    assert again["saved"][0]["already_saved"] is True and len(HITS) == 1
+    # one assertion each, and both say what they saw: this test failed once in a
+    # full parallel run on 2026-11-18 and could not be reproduced in five more,
+    # and a bare `and` over two conditions left nothing to work from
+    assert again["saved"][0]["already_saved"] is True, again
+    assert len(HITS) == 1, HITS
 
 
 def test_save_as_is_confined_to_authorised_folders(adapter):
