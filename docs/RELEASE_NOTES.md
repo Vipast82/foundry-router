@@ -1,3 +1,33 @@
+## v0.181.192 - half of the last release never reached the database
+
+v0.181.191 corrected four of the nine older eval prompts and wrote a migration
+for the fourteen newer ones. The older four were seeded weeks ago under a flag
+that was already set, so correcting them in the source reached only a database
+created afterwards: on the live router the prompt that asks for a summary "in
+exactly three sentences" still carried `["no_refusal", "max_length:2000"]`, the
+moon-landing prompt still accepted `{"mission": "", "year": 0}`, and the SQLite
+year was still unchecked. That is the same fault v0.181.190 had and that the
+migration exists to fix, repeated one release later in the half of the work I had
+not written a migration for.
+
+It was found by verifying against the router rather than by trusting the release.
+The check reads the live prompt table back and asserts each corrected check is
+in it, which is worth more than the tests here: the tests were green on all of
+it, because what they covered was the source.
+
+So there is one repair over one table covering both prompt sets, rather than two
+that can fall out of step, and `_corrected` looks through every prompt the router
+ships with instead of the tier set alone - which is exactly how four corrections
+went into the source and never into a database.
+
+One more thing the same run exposed. Against a router already on v0.181.191 the
+repair logged "left 13 alone because they had been edited", of thirteen prompts
+it had corrected itself one release earlier: it compared each row against the
+checks that shipped and treated anything else as the operator's work. A row that
+already holds the corrected checks is now counted as current and reported apart
+from an edited one. Both are left alone, which was right either way, but the
+number in the event log was not.
+
 ## v0.181.191 - the benchmark was wrong about the models
 
 The first board said 0 of 12 on honesty for both local personas, and I reported

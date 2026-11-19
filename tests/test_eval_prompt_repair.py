@@ -89,7 +89,8 @@ def test_the_repair_runs_once(tmp_path):
     db = _seeded(tmp_path)
     first = E.repair_tier_prompts(db)
     assert first["fixed"] > 0
-    assert E.repair_tier_prompts(db) == {"fixed": 0, "edited": 0, "missing": 0}
+    assert E.repair_tier_prompts(db) == {"fixed": 0, "edited": 0, "missing": 0,
+                                         "current": 0}
 
 
 def test_a_database_that_never_saw_the_old_set_is_untouched(tmp_path):
@@ -143,3 +144,98 @@ async def test_a_router_failure_is_recorded_as_an_error_not_a_wrong_answer(tmp_p
 
 async def _said(text):
     return text
+
+# -- the half of v0.181.191 that had no migration (v0.181.192) ---------------------
+
+V1_SHIPPED = [
+    ("chat", "Summarize the plot of Romeo and Juliet in exactly three sentences.",
+     ["no_refusal", "max_length:2000"]),
+    ("chat", "Reply with ONLY a valid JSON object of the form "
+             '{"mission": string, "year": number} describing the first '
+             "crewed Moon landing.",
+     ["valid_json", "no_refusal"]),
+    ("research", "What is the current stable version of Python? Cite the "
+                 "source URL you used.",
+     ["cites_source", "no_refusal"]),
+    ("research", "In what year was SQLite first released? Answer with the "
+                 "year and a source URL.",
+     ["cites_source", "no_refusal"]),
+]
+
+
+def _live_191(tmp_path):
+    """A database as the live router held it after v0.181.191: the tier prompts
+    corrected and flagged v2, the four older ones still as they were seeded
+    weeks before, because correcting the source reached only a fresh database."""
+    db = Database(tmp_path / "live191.sqlite")
+    for cat, prompt, checks in V1_SHIPPED:
+        db.execute("INSERT INTO eval_prompts (category, prompt, checks, enabled, "
+                   "created_at) VALUES (?,?,?,1,'t')",
+                   (cat, prompt, json.dumps(checks)))
+    for cat, prompt, checks in E.TIER_PROMPTS:
+        db.execute("INSERT INTO eval_prompts (category, prompt, checks, enabled, "
+                   "created_at) VALUES (?,?,?,1,'t')",
+                   (cat, prompt, json.dumps(list(checks))))
+    db.kv_set("eval_prompts_seed_v1", "t")
+    db.kv_set("eval_prompts_tiers_v1", "t")
+    db.kv_set("eval_prompts_tiers_v2", "t")       # .191 ran and stopped here
+    return db
+
+
+def test_the_older_prompts_are_repaired_on_a_router_already_on_191(tmp_path):
+    """The v2 flag was set, so the repair returned early and the four older
+    prompts kept checks that cannot fail a wrong answer. Verified against the
+    live router, not inferred: it still read ["no_refusal", "max_length:2000"]
+    for the prompt asking for exactly three sentences."""
+    db = _live_191(tmp_path)
+    out = E.repair_tier_prompts(db)
+    assert out["fixed"] == 4, out                 # the four older ones only
+    # and the fourteen the previous release corrected are reported as already
+    # current, not as the operator's edits - the first version of this said
+    # "left 13 alone because they had been edited", of prompts it had corrected
+    # itself one release earlier
+    assert out["current"] == 14, out
+    assert out["edited"] == 0, out
+    _p, checks = _checks(db, "exactly three sentences")
+    assert "sentences:3" in checks, checks
+    _p, checks = _checks(db, "crewed Moon landing")
+    assert any("1969" in c for c in checks), checks
+    _p, checks = _checks(db, "SQLite first released")
+    assert "mentions:2000" in checks, checks
+    _p, checks = _checks(db, "current stable version of Python")
+    assert any("3\\." in c for c in checks), checks
+
+
+def test_the_repair_covers_both_sets_from_the_old_state(tmp_path):
+    """From a v0.181.190 database the whole table is repaired in one pass, so
+    the two halves of the correction cannot fall out of step again."""
+    db = _seeded(tmp_path, "both190.sqlite")
+    for cat, prompt, checks in V1_SHIPPED:
+        db.execute("INSERT INTO eval_prompts (category, prompt, checks, enabled, "
+                   "created_at) VALUES (?,?,?,1,'t')",
+                   (cat, prompt, json.dumps(checks)))
+    out = E.repair_tier_prompts(db)
+    assert out["fixed"] >= 7, out
+    assert out["edited"] == 0, out
+    _p, checks = _checks(db, "exactly three sentences")
+    assert "sentences:3" in checks
+    prompt, _c = _checks(db, "FTS5")
+    assert "_config" in prompt
+
+
+def test_an_edited_older_prompt_is_still_left_alone(tmp_path):
+    db = _live_191(tmp_path)
+    db.execute("UPDATE eval_prompts SET checks=? WHERE prompt LIKE "
+               "'%exactly three sentences%'", (json.dumps(["no_refusal"]),))
+    out = E.repair_tier_prompts(db)
+    assert out["edited"] == 1, out
+    _p, checks = _checks(db, "exactly three sentences")
+    assert checks == ["no_refusal"]
+
+
+def test_every_repair_fragment_names_exactly_one_shipped_prompt():
+    """A fragment that matched two prompts would rewrite whichever came first."""
+    for fragment, _shipped in E._TIER_REPAIRS:
+        n = sum(1 for _c, prompt, _ch in E.SEED_PROMPTS if fragment in prompt)
+        assert n == 1, (fragment, n)
+        assert E._corrected(fragment) is not None, fragment

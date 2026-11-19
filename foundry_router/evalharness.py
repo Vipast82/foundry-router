@@ -505,12 +505,27 @@ _TIER_REPAIRS = [
     ('v0.144.2 release notes', ['admits_uncertainty']),
     ('CanvasTexture', ['admits_uncertainty']),
     ('How many sprints has the AnimalUprising', ['admits_uncertainty']),
+
+    # The four older prompts corrected in the same release. They were seeded
+    # under eval_prompts_seed_v1 weeks ago, so correcting the source reached
+    # only a database created afterwards - which is the fault v0.181.190 had and
+    # this table exists to fix, missed here for the other half of the same
+    # release (v0.181.192).
+    ('Romeo and Juliet in exactly three sentences',
+     ['no_refusal', 'max_length:2000']),
+    ('crewed Moon landing', ['valid_json', 'no_refusal']),
+    ('current stable version of Python', ['cites_source', 'no_refusal']),
+    ('SQLite first released', ['cites_source', 'no_refusal']),
 ]
 
 
 def _corrected(fragment: str):
-    """The current wording and checks for the question a fragment names."""
-    for category, prompt, checks in TIER_PROMPTS:
+    """The current wording and checks for the question a fragment names.
+
+    Over every prompt this ships with, not only the tier set: the repair covers
+    both, and looking in one of them was how the older four were corrected in
+    the source and left alone in the database (v0.181.192)."""
+    for category, prompt, checks in SEED_PROMPTS:
         if fragment in prompt:
             return category, prompt, checks
     return None
@@ -525,13 +540,13 @@ def repair_tier_prompts(db: Database) -> dict:
     checks had failed them for phrasing. So these are corrected rather than left
     for the operator to notice.
     """
-    out = {"fixed": 0, "edited": 0, "missing": 0}
-    if db.kv_get("eval_prompts_tiers_v2"):
+    out = {"fixed": 0, "edited": 0, "missing": 0, "current": 0}
+    if db.kv_get("eval_prompts_tiers_v3"):
         return out
     for fragment, shipped in _TIER_REPAIRS:
         row = db.query_one(
-            "SELECT id, checks FROM eval_prompts WHERE prompt LIKE ? LIMIT 1",
-            (f"%{fragment}%",))
+            "SELECT id, prompt, checks FROM eval_prompts WHERE prompt LIKE ? "
+            "LIMIT 1", (f"%{fragment}%",))
         if not row:
             out["missing"] += 1
             continue
@@ -539,23 +554,27 @@ def repair_tier_prompts(db: Database) -> dict:
             have = json.loads(row["checks"] or "[]")
         except (ValueError, TypeError):
             have = []
-        if list(have) != list(shipped):
-            out["edited"] += 1            # the operator's, not ours to overwrite
-            continue
         fix = _corrected(fragment)
         if fix is None:
             out["missing"] += 1
             continue
         category, prompt, checks = fix
+        if list(have) == list(checks) and prompt == (row["prompt"] or prompt):
+            out["current"] += 1           # an earlier release already fixed it
+            continue
+        if list(have) != list(shipped):
+            out["edited"] += 1            # the operator's, not ours to overwrite
+            continue
         db.execute("UPDATE eval_prompts SET category=?, prompt=?, checks=? WHERE id=?",
                    (category, prompt, json.dumps(checks), row["id"]))
         out["fixed"] += 1
     db.kv_set("eval_prompts_tiers_v2", utcnow())
+    db.kv_set("eval_prompts_tiers_v3", utcnow())
     if out["fixed"] or out["edited"]:
-        db.log_event(
+        db.log_event(  # noqa: E501
             "warning", "eval",
-            f"corrected {out['fixed']} tier prompt(s) whose checks or answer key "
-            f"were wrong (v0.181.191)"
+            f"corrected {out['fixed']} eval prompt(s) whose checks or answer key "
+            f"were wrong (v0.181.192)"
             + (f"; left {out['edited']} alone because they had been edited"
                if out["edited"] else ""))
     return out
