@@ -9273,6 +9273,12 @@ async function tabBench() {
                 the model chooses is recorded and never executed. Half the marks for a search
                 that surfaced the right tool, half for then choosing it."
         >Build the finder suite</button>
+        <button class="act" id="bench-codereason" title="Build the code-reasoning suite:
+                what does this snippet do. The expected value is computed by running each
+                snippet when the suite is built, so an answer key cannot be wrong — and
+                nothing a model writes is ever run. Code checks only compile Python, which
+                every model passes, so they cannot score this."
+        >Build the code suite</button>
         <span class="hint" id="bench-cmp-msg"></span></div>`
       : '<p class="hint">No runs yet.</p>'}
     <div id="bench-detail"></div>`;
@@ -9326,6 +9332,14 @@ async function tabBench() {
   };
   if ($("#br-stop")) $("#br-stop").onclick = async () => {
     await api("bench/run", {method: "POST", body: {stop: true}}); toast("Stopping"); render();
+  };
+  if ($("#bench-codereason")) $("#bench-codereason").onclick = async () => {
+    try {
+      const out = await api("bench/codereason", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} cases` +
+            ((out.refused || []).length ? `, ${out.refused.length} refused` : ""));
+      render();
+    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };
   if ($("#bench-toolflow")) $("#bench-toolflow").onclick = async () => {
     try {

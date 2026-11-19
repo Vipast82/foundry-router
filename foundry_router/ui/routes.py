@@ -2987,6 +2987,26 @@ async def bench_run(request: Request):
         bool(body.get("lessons")))}
 
 
+@router.post("/admin/api/bench/codereason")
+async def bench_codereason(request: Request):
+    """Build the code-reasoning suite: {name?, limit?}.
+
+    Asks what a snippet does. Every expected value is computed by running the
+    snippet when the suite is built — this module's own fixed table, never a
+    model's code — so an answer key here cannot be wrong."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_codereason, svc, str(body.get("name") or "codereason"),
+            int(body.get("limit") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/toolflow")
 async def bench_toolflow(request: Request):
     """Build the finder suite: {name?, limit?}.

@@ -1,3 +1,37 @@
+## v0.181.204 - a local code suite that can be failed, and values compared as values
+
+Asked for a local alternative to HumanEval, scored by `code_checks`. It cannot
+be: `builtin:python` **compiles** the code and never runs it - the module's own
+docstring says only the checker runs, never the model's code - so it answers
+"does this parse", which every model passes. `code_score` came back 100.0 for
+both personas in run 40. A check everything passes measures nothing.
+
+Running a model's code would answer the real question, and that is a separate
+decision with a sandbox behind it, which is the operator's to make rather than
+mine to assume.
+
+What is measured instead is whether a model can say what code **does**: 28
+cases over the things that are misremembered rather than unknown - aliasing
+against slicing, `7 // 2`, `-7 % 3`, late-binding closures, the shared mutable
+default, sort stability, `('x')` not being a tuple, `'a,,b'.split(',')`, and
+the exception eight different mistakes raise.
+
+Every expected value is computed by **executing the snippet when the suite is
+built**, from a fixed table in this module. So an answer key here cannot be
+wrong the way the FTS5 one was, and a snippet that stops raising - a Python
+upgrade changing one - is refused at build time rather than shipped as a
+question nobody can answer. Nothing a model writes is ever run, and scoring
+executes nothing at all: the answer is parsed with `ast.literal_eval`, which is
+asserted from the parsed source rather than from its text.
+
+**Values are compared as values.** The first build scored three correct answers
+zero: `[2,2,2]` without spaces, `ababab` without quotes, `[('a',3),('b',2)]`.
+All three are the right value written differently, and failing a model for its
+formatting is exactly what made the honesty category read 0 of 12 this morning.
+The answer is parsed and compared - the whole reply if it parses, else the
+longest bracketed or quoted run in it, else the bare text for a string answer -
+and `1` is still not `True`, though Python says they are equal.
+
 ## v0.181.203 - objective prompts that can be failed, and `answer:` is containment
 
 `objective` scored 30 of 30 for both local personas in campaign 2 - six prompts

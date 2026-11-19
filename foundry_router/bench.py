@@ -372,6 +372,69 @@ def _contains(body: str, want: str) -> bool:
     return want in body
 
 
+def _literals_in(text: str) -> list:
+    """Candidate Python literals inside an answer, longest first.
+
+    A model may reply with the value alone or wrap it in a sentence; both are
+    correct answers to "reply with the value"."""
+    t = (text or "").strip()
+    out = [t]
+    # fenced or inline code first: a model often puts the value in backticks
+    import re as _re
+    for m in _re.finditer(r"`+([^`]+)`+", t):
+        out.append(m.group(1).strip())
+    # the longest balanced bracket run, and any quoted run
+    for opener, closer in (("[", "]"), ("(", ")"), ("{", "}")):
+        i, j = t.find(opener), t.rfind(closer)
+        if 0 <= i < j:
+            out.append(t[i:j + 1])
+    for m in _re.finditer(r"('[^']*'|\"[^\"]*\")", t):
+        out.append(m.group(1))
+    # a bare trailing token ("the value is 4.")
+    tail = t.rstrip(".").split()
+    if tail:
+        out.append(tail[-1].strip(".,;:"))
+    seen, uniq = set(), []
+    for c in out:
+        if c and c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    return sorted(uniq, key=len, reverse=True)
+
+
+def value_score(text: str, want_repr: str) -> Optional[float]:
+    """1.0 when the answer IS the expected Python value, however it is written.
+
+    `[2,2,2]` and `[2, 2, 2]` are the same answer; so are `ababab` and
+    `'ababab'` for a string. Comparing the repr by substring failed all three
+    (v0.181.204)."""
+    import ast
+    if not want_repr:
+        return None
+    try:
+        want = ast.literal_eval(want_repr)
+    except (ValueError, SyntaxError):
+        return None
+    if not (text or "").strip():
+        return 0.0
+    for cand in _literals_in(text):
+        try:
+            got = ast.literal_eval(cand)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            continue
+        if type(got) is type(want) and got == want:
+            return 1.0
+        # True == 1 in Python; a benchmark must not accept one for the other
+        if got == want and isinstance(got, bool) == isinstance(want, bool):
+            return 1.0
+    # a string answer may reasonably be written without its quotes
+    if isinstance(want, str):
+        body = _norm(text)
+        if body == _norm(want) or _contains(body, _norm(want)):
+            return 1.0
+    return 0.0
+
+
 def combine(tools: Optional[float], code: Optional[float], answer: Optional[float],
             exact: Optional[float] = None) -> float:
     """0-100 for one case.
@@ -796,6 +859,154 @@ def tool_finder_match(got: str, want: str) -> bool:
     return g.rsplit("__", 1)[-1] == w.rsplit("__", 1)[-1] and bool(g.rsplit("__", 1)[-1])
 
 
+# -- the code-reasoning suite --------------------------------------------------------
+#
+# What does this code DO. Exactly scoreable, and nothing a model writes is ever
+# run: the expected value is computed by executing the snippet when the suite is
+# BUILT, which is this module's own code (v0.181.204).
+
+_CODE_SNIPPETS = [
+    # (name, source, the expression whose value is the answer)
+    ("aliasing",
+     "a = [1, 2, 3]\nb = a\nb.append(4)\nresult = len(a)", "result"),
+    ("copy_vs_alias",
+     "a = [1, 2, 3]\nb = a[:]\nb.append(4)\nresult = len(a)", "result"),
+    ("int_division",
+     "result = 7 // 2", "result"),
+    ("float_division",
+     "result = 7 / 2", "result"),
+    ("modulo_negative",
+     "result = -7 % 3", "result"),
+    ("empty_is_falsy",
+     "xs = []\nresult = bool(xs or [0])", "result"),
+    ("late_binding",
+     "fns = [lambda: i for i in range(3)]\nresult = [f() for f in fns]", "result"),
+    ("default_arg_shared",
+     "def f(x, acc=[]):\n    acc.append(x)\n    return acc\nf(1)\nresult = f(2)",
+     "result"),
+    ("sort_stability",
+     "rows = [('b', 1), ('a', 1), ('c', 0)]\n"
+     "result = [n for n, k in sorted(rows, key=lambda r: r[1])]", "result"),
+    ("string_multiply",
+     "result = 'ab' * 3", "result"),
+    ("slice_past_end",
+     "result = [1, 2, 3][1:99]", "result"),
+    ("negative_slice",
+     "result = [1, 2, 3, 4][-2:]", "result"),
+    ("dict_update_order",
+     "d = {'a': 1}\nd.update({'b': 2, 'a': 3})\nresult = list(d.items())", "result"),
+    ("set_dedup_order",
+     "result = sorted({3, 1, 2, 1})", "result"),
+    ("is_vs_equals",
+     "a = [1]\nb = [1]\nresult = (a == b, a is b)", "result"),
+    ("chained_comparison",
+     "result = (1 < 2 < 3, 1 < 2 > 3)", "result"),
+    ("tuple_single",
+     "result = type(('x')).__name__", "result"),
+    ("str_split_empty",
+     "result = 'a,,b'.split(',')", "result"),
+    ("zip_shortest",
+     "result = list(zip([1, 2, 3], 'ab'))", "result"),
+    ("range_step",
+     "result = list(range(10, 0, -3))", "result"),
+]
+
+_CODE_EXC = [
+    ("dict_mutation",
+     "d = {'a': 1, 'b': 2}\nfor k in d:\n    del d[k]"),
+    ("index_error",
+     "xs = [1, 2]\nxs[5]"),
+    ("key_error",
+     "d = {'a': 1}\nd['b']"),
+    ("zero_division",
+     "1 / 0"),
+    ("type_error_concat",
+     "'a' + 1"),
+    ("attribute_error",
+     "None.strip()"),
+    ("value_error_int",
+     "int('12a')"),
+    ("unbound_local",
+     "def f():\n    x += 1\n    return x\nf()"),
+]
+
+_VALUE_Q = ("What is the value of `result` after this runs?\n\n```python\n{src}\n```"
+            "\n\nReply with the value only, in Python notation.")
+_EXC_Q = ("What exception does this raise?\n\n```python\n{src}\n```\n\n"
+          "Reply with the exception's name only.")
+
+
+def _run_snippet(src: str, expr: str):
+    """The snippet's real value, computed when the suite is built.
+
+    This is this module's own code, not a model's: the suite is a fixed table
+    above, and nothing from a request ever reaches here (v0.181.204)."""
+    ns: dict = {}
+    exec(compile(src, "<bench-snippet>", "exec"), {"__builtins__": __builtins__}, ns)
+    return eval(expr, {"__builtins__": __builtins__}, ns)       # noqa: S307
+
+
+def _raised_by(src: str) -> str:
+    try:
+        exec(compile(src, "<bench-snippet>", "exec"),
+             {"__builtins__": __builtins__}, {})
+    except Exception as e:                                        # noqa: BLE001
+        return type(e).__name__
+    return ""
+
+
+def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
+    """A suite that asks what code does, with every answer computed by running
+    the snippet here rather than recalled."""
+    out, refused = [], []
+    for key, src, expr in _CODE_SNIPPETS:
+        try:
+            value = _run_snippet(src, expr)
+        except Exception as e:                                    # noqa: BLE001
+            refused.append(f"{key}: {type(e).__name__}")
+            continue
+        out.append({
+            "id": f"CODE-{key}",
+            "task_id": key,
+            "tags": ["codereason", "python", "code"],
+            "messages": [
+                {"role": "system", "content": "You reason about code precisely."},
+                {"role": "user", "content": _VALUE_Q.format(src=src)},
+            ],
+            # compared as a VALUE: [2,2,2] and [2, 2, 2] are the same answer
+            "reference": {"content": repr(value), "py_value": repr(value)},
+        })
+    for key, src in _CODE_EXC:
+        got = _raised_by(src)
+        if not got:
+            refused.append(f"{key}: raised nothing")
+            continue
+        out.append({
+            "id": f"CODE-{key}",
+            "task_id": key,
+            "tags": ["codereason", "python", "exception", "code"],
+            "messages": [
+                {"role": "system", "content": "You reason about code precisely."},
+                {"role": "user", "content": _EXC_Q.format(src=src)},
+            ],
+            "reference": {"content": got, "must_include": [got]},
+        })
+    if limit:
+        out = out[:int(limit)]
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench",
+                         f"built the {name} suite: {len(out)} case(s), every answer "
+                         f"computed by running the snippet"
+                         + (f"; {len(refused)} refused" if refused else ""))
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f), "refused": refused}
+
+
 # -- running a suite ----------------------------------------------------------------------
 
 def wire(messages: list) -> list:
@@ -1021,7 +1232,9 @@ async def score_one(svc, case: dict, got: dict) -> dict:
     code, detail = await code_score(svc, got.get("content") or "")
     answer = (answer_score(got.get("content") or "", ref.get("content") or "")
               if not (ref.get("tool_calls") or []) else None)
-    exact = exact_score(got.get("content") or "", ref.get("must_include"))
+    exact = value_score(got.get("content") or "", str(ref.get("py_value") or "")) \
+        if ref.get("py_value") else \
+        exact_score(got.get("content") or "", ref.get("must_include"))
     return {"score": combine(tools, code, answer, exact), "tools": tools, "code": code,
             "answer": answer, "exact": exact, "code_detail": detail, "error": ""}
 
