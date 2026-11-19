@@ -1375,6 +1375,19 @@ def test_carry_never_carries_a_failed_suite(tmp_path, monkeypatch):
     assert g.carry_plan("S45,S46", "docs/progress/UI-T0_gate.json")["suites"] == ["S46"]
 
 
+def test_changed_since_diffs_only_the_paths_carry_reads(tmp_path):
+    """2026-11-18 POL-7: a whole-tree diff over ~1,200 commits of evidence frames took ~6 s per
+    stored verdict and kept the gate in "starting" past the no-progress stop. The diff is
+    limited to code, tests, the harness and docs/progress."""
+    seen = []
+    g = _carry_gate(tmp_path, ["src/a.lua"], [])
+    real = g.run_cmd
+    g.run_cmd = lambda argv, cwd, timeout: (seen.append(argv), real(argv, cwd, timeout))[1]
+    assert g._changed_since({"head": "a" * 40}, "b" * 40, {}) == ["src/a.lua"]
+    diff = next(a for a in seen if "diff" in a)
+    assert diff[diff.index("--") + 1:] == ["src", "tests", "default.project.json", "docs/progress"]
+
+
 def test_absent_at_lists_files_deleted_at_head(tmp_path):
     import subprocess as sp
     r = str(tmp_path)

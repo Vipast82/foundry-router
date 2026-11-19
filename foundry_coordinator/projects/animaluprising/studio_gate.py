@@ -2447,6 +2447,9 @@ class Gate:
     # story input changed. Harness changes (index, runner, TestLib, project file, gate file)
     # carry nothing. Carried checks stay in the verdict, marked CARRIED with their commit.
     CARRY_INVALIDATORS = ("tests/RegressionIndex.lua", "tests/GateRunner.lua", "default.project.json")
+    # what _changed_since lists: the only paths its callers read (src/, tests/, the harness
+    # files above, docs/progress/<ID>_gate.json)
+    CHANGED_PATHS = ("src", "tests", "default.project.json", "docs/progress")
 
     # B2 (2026-10-21): the gate directory is a content-addressed result store. Every earlier
     # verdict of this sprint (sprint runs and the automatic baseline) is a set of check
@@ -2493,7 +2496,11 @@ class Gate:
             else:
                 rc, _ = self.run_cmd(["git", "merge-base", "--is-ancestor", prev, head], self.repo, 30)
                 if rc == 0:
-                    rc, txt = self.run_cmd(["git", "diff", "--name-only", prev, head], self.repo, 60)
+                    # 2026-11-18 POL-7: a whole-tree diff over ~1,200 commits of evidence frames
+                    # took ~6 s; with 134 stored verdicts the gate sat in "starting" past the
+                    # 20-minute no-progress stop three times. Limited to CHANGED_PATHS: 0.1 s.
+                    rc, txt = self.run_cmd(["git", "diff", "--name-only", prev, head, "--"]
+                                           + list(self.CHANGED_PATHS), self.repo, 60)
                     if rc == 0:
                         res = [f.strip() for f in txt.splitlines() if f.strip()]
         memo[prev] = res
