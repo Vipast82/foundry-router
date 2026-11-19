@@ -156,6 +156,15 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
     for persona, rs in by.items():
         ids = [r["id"] for r in rs]
         q = ",".join("?" * len(ids))
+        # which category each unanswered prompt fell in, so the note can say
+        # when the drops bunch into one (v0.181.193)
+        dropped_by_cat: dict = {}
+        for d in db.query(
+                f"SELECT COALESCE(p.category,'?') AS cat, COUNT(*) AS n "
+                f"FROM eval_results r LEFT JOIN eval_prompts p ON p.id = r.prompt_id "
+                f"WHERE r.run_id IN ({q}) AND COALESCE(r.error,'') <> '' "
+                f"GROUP BY COALESCE(p.category,'?')", ids):
+            dropped_by_cat[str(d["cat"])] = int(d["n"] or 0)
         agg = db.query_one(
             f"SELECT COUNT(*) AS n, "
             f"SUM(COALESCE(shape_pass,0)) AS passed, "
@@ -167,7 +176,13 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
             f"FROM eval_results WHERE run_id IN ({q})", ids) or {}
         n = int(agg.get("n") or 0)
         passed = int(agg.get("passed") or 0)
+        dropped = int(agg.get("silent") or 0)
+        answered = n - dropped
         lo, hi = wilson(passed, n)
+        # the same count over the prompts that came back with something in them.
+        # Neither rate is the true one: this one asks how good the answers were,
+        # the other asks how often a usable answer arrived at all.
+        alo, ahi = wilson(passed, answered) if answered else (0.0, 0.0)
         rep = repeatability(db, ids)
         rows.append({
             "persona": persona, "runs": len(ids), "scored": n,
@@ -175,7 +190,14 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
             "score": round(100.0 * passed / n, 1) if n else 0.0,
             "lo": lo, "hi": hi,
             "interval": round(100.0 * (hi - lo), 1),
-            "silent": int(agg.get("silent") or 0),
+            # over prompts that got an answer (v0.181.193)
+            "answered": answered,
+            "dropped": dropped,
+            "score_answered": (round(100.0 * passed / answered, 1)
+                               if answered else None),
+            "lo_answered": alo, "hi_answered": ahi,
+            "dropped_by_category": dropped_by_cat,
+            "silent": dropped,
             "judge": round(float(agg["judge"]), 2) if agg.get("judge") is not None else None,
             "seconds": round(float(agg.get("ms") or 0) / 1000.0, 1),
             "tokens": int(agg.get("ptok") or 0) + int(agg.get("ctok") or 0),
@@ -200,6 +222,27 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
         notes.append(f"the widest interval is {widest:.0f} points wide - "
                      f"models inside one tier are not separated by this evidence, "
                      f"and more prompts, not a finer ranking, is what narrows it")
+    total_dropped = sum(r.get("dropped", 0) for r in rows)
+    if total_dropped:
+        bits = []
+        for r in rows:
+            if r.get("dropped"):
+                bits.append(f"{r['persona']} {r['dropped']} of {r['scored']} "
+                            f"({r['score']} over all, {r['score_answered']} over "
+                            f"the ones answered)")
+        notes.append("an unanswered prompt counts as a wrong answer in the first "
+                     "rate and is left out of the second: " + "; ".join(bits))
+        # the two rates mean different things, rather than differing by a
+        # rounding, when the drops are not spread across the categories
+        worst_cat = None
+        for r in rows:
+            by = r.get("dropped_by_category") or {}
+            if by and r["dropped"] and max(by.values()) == r["dropped"] and len(by) == 1:
+                worst_cat = next(iter(by))
+        if worst_cat:
+            notes.append(f"every unanswered prompt was in '{worst_cat}' - the two "
+                         f"rates are not the same measurement when the drops sit "
+                         f"in one category, since that category's weight falls")
     if worst is not None and worst < 1.0:
         flipped = max((r["flipped"] for r in rows), default=0)
         notes.append(f"verdicts repeated {worst:.0%} of the time - up to {flipped} "

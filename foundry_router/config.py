@@ -1018,6 +1018,19 @@ class LessonsConfig(BaseModel):
     draft_model: str = ""              # wording suggestions; never a Fable-class model
 
 
+class EvalsConfig(BaseModel):
+    """The eval harness and the scoreboard (evalharness.py, evalboard.py).
+
+    `per_prompt_timeout` was a module constant of 420 seconds, which was fine
+    until the local personas were given tools: a persona that searches before it
+    answers takes longer, and in campaign 2 twelve prompts timed out, all twelve
+    of them honesty prompts - the category where searching and finding nothing is
+    the correct answer. A prompt that times out counts against the first of the
+    board's two rates and is left out of the second, so this number decides how
+    much of the hardest category gets scored (v0.181.193)."""
+    per_prompt_timeout: int = Field(default=420, ge=30, le=3600)
+
+
 class A2AAgentConfig(BaseModel):
     """A remote A2A agent a persona's helper row may name (a2a.py)."""
     name: str
@@ -1306,6 +1319,7 @@ class AppConfig(BaseModel):
     code_checks: CodeChecksConfig = Field(default_factory=CodeChecksConfig)
     recall: RecallConfig = Field(default_factory=RecallConfig)
     lessons: LessonsConfig = Field(default_factory=LessonsConfig)
+    evals: EvalsConfig = Field(default_factory=EvalsConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)

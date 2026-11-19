@@ -9421,7 +9421,16 @@ async function tabEvals() {
                style="position:absolute;left:${lo}%;width:${Math.max(1, hi - lo)}%;
                       top:5px;height:6px;background:var(--fg);opacity:.45"></div>
         </div></td>
-      <td class="nw mono">${r.score.toFixed(1)}%</td>
+      <td class="nw mono">${r.score.toFixed(1)}%${
+        r.dropped && r.score_answered != null
+          ? `<div class="hint" style="font-size:11px"
+                  title="Over the prompts that came back with something in them.
+                         The rate on the left counts an unanswered prompt as a wrong
+                         answer; this one leaves it out. Neither is the true one -
+                         the first asks how often a usable answer arrived, the
+                         second how good the answers were.">${
+               r.score_answered.toFixed(1)}% answered</div>`
+          : ""}</td>
       <td class="nw hint">±${(r.interval / 2).toFixed(0)}</td>
       <td class="nw">${r.judge == null ? "—" : r.judge.toFixed(1) + "/10"}</td>
       <td class="nw">${r.repeat_verdict == null ? "—"
@@ -9434,8 +9443,14 @@ async function tabEvals() {
              ${Math.round(r.repeat_verdict * 100)}%</span>`}</td>
       <td class="nw mono">${(r.tokens || 0).toLocaleString()}</td>
       <td class="nw mono">${(r.seconds || 0).toFixed(1)} s</td>
-      <td class="nw">${r.runs} × ${r.scored}${r.silent
-        ? ` <span class="pill bad" title="prompts that got no answer at all">${r.silent} silent</span>` : ""}</td>
+      <td class="nw">${r.runs} × ${r.scored}${r.dropped
+        ? ` <span class="pill bad" title="Prompts that got no answer at all${
+              Object.keys(r.dropped_by_category || {}).length
+                ? ` — by category: ` + Object.entries(r.dropped_by_category)
+                    .map(([c, n]) => `${c} ${n}`).join(", ")
+                : ""}. They count against the first rate and are left out of the
+              second, so where they fall changes what the two numbers mean.">${
+            r.dropped} unanswered</span>` : ""}</td>
     </tr>`;
   }).join("");
   const campOpts = ['<option value="">— every run —</option>'].concat(
@@ -9448,6 +9463,18 @@ async function tabEvals() {
 
   $("#main").innerHTML = `
     <h2>Scoreboard — every persona on the same prompts, ranked into tiers</h2>
+    <div class="row tight" style="margin:4px 0 10px">
+      <label title="How long one prompt may take before it is recorded as
+                    unanswered. A persona with tools searches before it answers,
+                    which takes longer: at 420s twelve honesty prompts of the
+                    first five-repeat campaign timed out, and an unanswered
+                    prompt counts against the first of the two rates above.">
+        a prompt may take at most
+        <input type="number" id="ev-timeout" min="30" max="3600" step="30"
+               style="width:80px" value="${(bd.evals || {}).per_prompt_timeout ?? 420}"> s
+      </label>
+      <button class="act" id="ev-timeout-save">Save</button>
+    </div>
     <p class="hint">A tier is <b>"not separated from the best of its group by this
       evidence"</b>: a persona drops a tier only when its whole 95% interval sits below
       the tier above. Two personas three points apart on a handful of prompts are one
@@ -9522,6 +9549,14 @@ async function tabEvals() {
       <div class="row"><button class="act primary" id="ep-save">Save prompt</button></div>
     </div>`;
   window._evalPrompts = Object.fromEntries(ed.prompts.map(p => [p.id, p]));
+  $("#ev-timeout-save").onclick = async () => {
+    const v = +$("#ev-timeout").value || 420;
+    try {
+      await api("config/evals", {method: "POST",
+                                body: {per_prompt_timeout: v}});
+      toast(`a prompt may now take ${v}s`);
+    } catch (e) { toast("could not save: " + e.message, true); }
+  };
   $("#ev-board-refresh").onclick = async () => {
     const id = $("#ev-camp").value;
     const bd2 = await api("eval/scoreboard" + (id ? `?campaign_id=${id}` : ""));

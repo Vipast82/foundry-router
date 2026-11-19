@@ -3105,6 +3105,8 @@ async def eval_scoreboard(request: Request, campaign_id: int = 0, hours: float =
     return {**await asyncio.to_thread(evalboard.scoreboard, svc.db,
                                       campaign_id or None, hours),
             "campaigns": await asyncio.to_thread(evalboard.campaigns, svc.db, 20),
+            # so the panel's timeout control shows the value in force
+            "evals": svc.config_store.config.evals.model_dump(),
             "run": evalboard.status()}
 
 
@@ -3717,6 +3719,27 @@ async def lessons_decide(request: Request):
                               None if body.get("scope") is None else str(body["scope"]))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/admin/api/config/evals")
+async def set_evals(request: Request):
+    """Eval settings. Live: the harness reads the timeout once per run."""
+    from ..config import EvalsConfig
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"per_prompt_timeout"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    try:
+        EvalsConfig(**{**svc.config_store.config.evals.model_dump(), **updates})
+
+        def mutate(raw):
+            raw.setdefault("evals", {}).update(updates)
+
+        svc.config_store.mutate(mutate)
+    except Exception as e:
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, "evals": svc.config_store.config.evals.model_dump()}
 
 
 @router.post("/admin/api/config/lessons")

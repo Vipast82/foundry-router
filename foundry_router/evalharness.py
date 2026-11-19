@@ -31,7 +31,17 @@ from .db import Database, utcnow
 
 log = logging.getLogger(__name__)
 
-PER_PROMPT_TIMEOUT = 420  # seconds — cold loads + multi-step routing are slow
+PER_PROMPT_TIMEOUT = 420  # seconds — the default; evals.per_prompt_timeout wins
+
+
+def per_prompt_timeout(svc) -> int:
+    """How long one prompt may take, from the config, falling back to the
+    constant when there is no config to read (tests build a bare service)."""
+    try:
+        v = int(getattr(svc.config_store.config.evals, "per_prompt_timeout", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return PER_PROMPT_TIMEOUT
+    return v if v > 0 else PER_PROMPT_TIMEOUT
 
 # Persona benchmark_category -> default eval-prompt category. RAG personas
 # share benchmark_category general_chat, so name wins over category for them;
@@ -725,19 +735,21 @@ class EvalHarness:
              "running", f"categories: {', '.join(cats)}", campaign_id))
         try:
             shape_passes, judge_scores = 0, []
+            # read once per run, so a change mid-run cannot make two prompts of
+            # the same run answer to different limits (v0.181.193)
+            limit = per_prompt_timeout(self.svc)
             for p in prompts:
                 t0 = time.monotonic()
                 why = ""
                 try:
                     response, why = await asyncio.wait_for(
-                        self._answer_for(persona, p["prompt"]),
-                        timeout=PER_PROMPT_TIMEOUT)
+                        self._answer_for(persona, p["prompt"]), timeout=limit)
                 except asyncio.TimeoutError:
                     response = ""
-                    why = f"no answer within {PER_PROMPT_TIMEOUT}s"
+                    why = f"no answer within {limit}s"
                     self.db.log_event("warning", "eval",
                                       f"prompt {p['id']} timed out after "
-                                      f"{PER_PROMPT_TIMEOUT}s")
+                                      f"{limit}s")
                 except Exception as e:
                     from .errors import describe_exception
                     log.exception("eval prompt failed")

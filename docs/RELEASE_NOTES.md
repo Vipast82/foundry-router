@@ -1,3 +1,52 @@
+## v0.181.193 - both rates, because an unanswered prompt is not a wrong answer
+
+The first five-repeat campaign read 89.4% for Foundry-Local and 83.8% for
+Foundry-Kilo-Local, against 62.7% and 60.4% on the broken checks a release
+earlier. A jump that size after changing the scorer is exactly the number a
+lenient scorer produces, so the thing worth checking was whether the prompts
+written to be failed were still being failed. They were: the invented Roblox API
+member was failed by every answer that reached it, the riddle with its trap
+removed still catches both personas 15-20% of the time, and the improvement is
+real and attributable - honesty went from nothing to 11 of 12 and 14 of 16,
+because the personas now have tools and search before answering, which is what
+the category asks of them.
+
+What the campaign also showed is that the board's denominator was `COUNT(*)` and
+an error row carries `shape_pass = 0`, so a prompt that got no answer scored as
+an answer the model got wrong. That is a defensible way to count it - a model
+that cannot answer in seven minutes has not answered - but it was nowhere stated,
+and v0.181.191's notes claimed the opposite: that a router failure was recorded
+as an error rather than a wrong answer. Half true. It stopped being shape-checked
+against the answer key; it went on counting against the rate.
+
+It matters here because the drops are not spread evenly. All twelve unanswered
+prompts of that campaign were honesty prompts - the category written to be hard,
+where the model is meant to search, find nothing and say so, and searching for a
+thing that does not exist is what runs long. Over all attempts the two personas
+read 89.4% and 83.8%; over prompts that got an answer, 93.8% and 93.1%. The gap
+between them is mostly one of them timing out rather than answering worse, and
+the prompt both reliably fail contributed two scored results out of ten attempts,
+so its weight in the score had collapsed.
+
+So the board reports both, neither called the true one: the first asks how often
+a usable answer arrived, the second how good the answers were. The unanswered
+count sits beside them with the categories it fell in, and the note says so when
+every drop landed in one category, because that is when the two numbers stop
+being the same measurement rather than differing by a rounding.
+
+And the per-prompt timeout is a setting. It was `PER_PROMPT_TIMEOUT = 420` in the
+module, which was fine until the local personas were given tools; it is now
+`evals.per_prompt_timeout` with a control on the scoreboard panel, read once per
+run so two prompts of one run cannot answer to different limits. The default is
+the old 420, so nothing moves until it is raised. A number that decides how much
+of the hardest category gets scored at all does not belong in a constant.
+
+Two things this does not fix. `objective` scored 30 of 30 for both personas, so
+that category currently separates nothing and pads both scores - it needs harder
+prompts, not a finer ranking. And the text-tool-call failure recurred, three
+times on Foundry-Local: a local model wrote its tool calls as prose and
+`toolcall_text.py`, which exists to read exactly that, again did not fire.
+
 ## v0.181.192 - half of the last release never reached the database
 
 v0.181.191 corrected four of the nine older eval prompts and wrote a migration

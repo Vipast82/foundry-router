@@ -283,3 +283,67 @@ def test_the_verdict_holds_while_the_wording_moves(tmp_path):
     assert out["verdict"] == 1.0, out
     assert out["answers"] == 0.0, out
     assert out["flipped"] == 0, out
+
+# -- both rates, because an unanswered prompt is not an answer (v0.181.193) --------
+
+def test_an_unanswered_prompt_counts_against_one_rate_and_not_the_other(tmp_path):
+    """The board's denominator was COUNT(*) and an error row carries shape_pass
+    0, so a prompt that got no answer scored as an answer the model got wrong -
+    defensible, but v0.181.191's notes claimed the opposite. Both are reported
+    now and neither is called the true one."""
+    db = Database(tmp_path / "drops.sqlite")
+    r = _run(db, "P")
+    for i in range(1, 9):
+        _result(db, r, i, True, f"right {i}")
+    _result(db, r, 9, False, "wrong")
+    _result(db, r, 10, False, "", err="no answer within 420s")
+    board = B.scoreboard(db)
+    row = board["rows"][0]
+    assert row["scored"] == 10 and row["dropped"] == 1 and row["answered"] == 9
+    assert row["score"] == 80.0            # 8 of 10 attempts
+    assert row["score_answered"] == 88.9   # 8 of 9 answers
+    assert row["lo"] < row["lo_answered"]  # the answered interval sits higher
+
+
+def test_the_note_says_where_the_unanswered_prompts_fell(tmp_path):
+    """When every drop is in one category the two rates stop being the same
+    measurement, because that category's weight in the score falls. In the first
+    five-repeat campaign all twelve were honesty prompts."""
+    db = Database(tmp_path / "cat.sqlite")
+    db.execute("INSERT INTO eval_prompts (id, category, prompt, checks, enabled) "
+               "VALUES (1,'honesty','q1','[]',1)")
+    db.execute("INSERT INTO eval_prompts (id, category, prompt, checks, enabled) "
+               "VALUES (2,'objective','q2','[]',1)")
+    r = _run(db, "P")
+    for i in range(4):
+        _result(db, r, 2, True, f"fine {i}")
+    for i in range(2):
+        _result(db, r, 1, False, "", err="no answer within 420s")
+    board = B.scoreboard(db)
+    row = board["rows"][0]
+    assert row["dropped_by_category"] == {"honesty": 2}, row["dropped_by_category"]
+    assert "every unanswered prompt was in 'honesty'" in board["note"], board["note"]
+    assert "counts as a wrong answer in the first rate" in board["note"]
+
+
+def test_a_board_with_no_drops_says_nothing_about_them(tmp_path):
+    db = Database(tmp_path / "clean.sqlite")
+    r = _run(db, "P")
+    for i in range(1, 7):
+        _result(db, r, i, True, f"right {i}")
+    board = B.scoreboard(db)
+    assert board["rows"][0]["dropped"] == 0
+    assert board["rows"][0]["score_answered"] == board["rows"][0]["score"]
+    assert "unanswered" not in board["note"]
+
+
+def test_every_prompt_unanswered_leaves_the_answered_rate_undefined(tmp_path):
+    """Not 0%, which would read as "answered them all wrong"."""
+    db = Database(tmp_path / "none.sqlite")
+    r = _run(db, "P")
+    for i in range(1, 4):
+        _result(db, r, i, False, "", err="no answer within 420s")
+    row = B.scoreboard(db)["rows"][0]
+    assert row["answered"] == 0
+    assert row["score_answered"] is None
+    assert row["score"] == 0.0
