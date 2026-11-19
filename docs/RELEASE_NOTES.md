@@ -1,3 +1,41 @@
+## v0.181.203 - objective prompts that can be failed, and `answer:` is containment
+
+`objective` scored 30 of 30 for both local personas in campaign 2 - six prompts
+neither model ever got wrong, padding both scores and separating nothing. Seven
+more, of the kind that are misremembered rather than unknown: SQLite type
+affinity, NULL in a UNIQUE column, `'a' || NULL`, integer division, a mutable
+default argument, `int('010')`, and `gather(return_exceptions=True)`.
+
+Every answer was **executed** before it became a prompt - sqlite3 and CPython,
+eleven claims, all eleven run - because the FTS5 prompt shipped wrong this
+morning for exactly the opposite reason: I wrote down what I believed.
+
+And writing them turned up a defect class in the prompts that were already
+there. **`answer:` is containment, not equality**: it tests
+`_norm_answer(arg) in _norm_answer(response)`. So
+
+* `answer:408` passes "Not 408"
+* `answer:RuntimeError` passes "Not a RuntimeError - it raises KeyError"
+
+Both keys are right - the dict-mutation RuntimeError was confirmed by running
+it - but neither check could fail an answer that names the value in order to
+deny it. Both carry a negation guard now. A negation guard rather than an anchor
+on purpose: anchoring would also fail "It raises a RuntimeError", which is a
+correct answer to a question that says name it exactly.
+
+The same hole was in the new NULL prompt twice before it was right.
+`regex:\bnull\b` passed "it returns 'a', since NULL is treated as empty"
+because that sentence contains the word; swapping it for `answer:NULL` passed
+the same sentence for the same reason. The whole answer has to BE the value, so
+it is anchored at both ends with a short cap. Caught by the two-sided test, not
+by reading.
+
+Which is the point of the tests here: every prompt is asserted to accept the
+right answer AND to reject a plausible wrong one, where plausible includes an
+answer that names the correct value in order to reject it. A check that cannot
+fail a wrong answer is the most common defect this benchmark has had - five
+separate instances this week.
+
 ## v0.181.202 - the tag count took two minutes, and I put it in a render path
 
 Found by using the thing rather than by a test: opening Labs - Benchmark fired

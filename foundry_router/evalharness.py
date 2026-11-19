@@ -398,9 +398,12 @@ TIER_PROMPTS = [
                   "notes_fts_config. What error does "
                   "`SELECT * FROM notes_fts_config ORDER BY rowid` raise, and why?",
      ["no_refusal", "regex:no such column", "min_length:60"]),
+    # `answer:` is containment, so this passed "Not a RuntimeError - it raises
+    # KeyError" until the guard went in (v0.181.203).
     ("objective", "A Python dict is iterated while a key is deleted inside the "
                   "loop. What exception is raised? Name it exactly.",
-     ["answer:RuntimeError", "no_refusal"]),
+     ["answer:RuntimeError", "no_refusal",
+      r"not_regex:(?i)(not\s+(a\s+|an\s+)?runtimeerror|isn'?t\s+(a\s+|an\s+)?runtimeerror|rather than\s+(a\s+|an\s+)?runtimeerror|instead of\s+(a\s+|an\s+)?runtimeerror)"]),
     ("objective", "In Luau, what does `#t` return for a table with holes, and "
                   "why is it unreliable? One short paragraph.",
      ["no_refusal", "min_length:120",
@@ -412,11 +415,53 @@ TIER_PROMPTS = [
      # answer by six orders of magnitude (v0.181.191)
      ["valid_json", r'regex:"ms"\s*:\s*1500(\.0)?\b']),
     ("objective", "What is 17 * 24? Reply with only the number.",
-     ["answer:408", "max_length:40"]),
+     ["answer:408", "max_length:40",
+      r"not_regex:(?i)(not\s+(a\s+|an\s+)?408|isn'?t\s+(a\s+|an\s+)?408|rather than\s+(a\s+|an\s+)?408|instead of\s+(a\s+|an\s+)?408)"]),
     ("objective", "A git branch is 3 commits ahead of its remote and 2 behind. "
                   "Does `git push --ff-only` succeed? Answer yes or no first, "
                   "then why.",
      ["no_refusal", r"regex:^\W*no\b", "min_length:40"]),
+
+    # --- objective, harder: verified by running each one, not recalled. The six
+    # above were passed by every persona in campaign 2 (30 of 30 twice), which
+    # pads a score and separates nothing (v0.181.203).
+    ("objective", "In SQLite a column is declared `a TEXT UNIQUE`. How many rows "
+                  "holding NULL in `a` can that table contain? Answer in one "
+                  "sentence.",
+     ["no_refusal",
+      r"regex:(?i)(any number|many|unlimited|no limit|as many|more than one|"
+      r"multiple|any amount)",
+      r"not_regex:(?i)(only one|just one|exactly one|at most one|a single row)"]),
+    ("objective", "In SQLite: `CREATE TABLE t (n INTEGER); INSERT INTO t VALUES "
+                  "('abc');` — what does `SELECT typeof(n) FROM t` return, and "
+                  "why?",
+     ["no_refusal", r"regex:(?i)\btext\b", r"not_regex:(?i)^[^a-z]*integer",
+      "min_length:40"]),
+    # Twice wrong before this was right. `regex:\bnull\b` passed "it returns
+    # 'a', since NULL is treated as empty" because that contains the word, and
+    # `answer:NULL` passed it too - `answer:` is containment, not equality. The
+    # whole answer has to BE the value (v0.181.203).
+    ("objective", "In SQLite, what does `SELECT 'a' || NULL` evaluate to? Reply "
+                  "with the value and nothing else.",
+     ["no_refusal", r"regex:(?i)^[^a-z0-9]*null[^a-z0-9]*$", "max_length:30"]),
+    ("objective", "In SQLite, what does `SELECT 5/2` return? Reply with only the "
+                  "value.",
+     ["no_refusal", r"regex:(?<![\d.])2(?![\d.])", "not_mentions:2.5",
+      "max_length:60"]),
+    ("objective", "In Python: `def f(x, acc=[]): acc.append(x); return acc`. "
+                  "Calling f(1) then f(2), what does the second call return?",
+     ["no_refusal", r"regex:\[\s*1\s*,\s*2\s*\]"]),
+    ("objective", "In Python 3, what is the value of `int('010')`? Reply with "
+                  "only the number.",
+     ["no_refusal", r"regex:(?<![\d.])10(?![\d.])", "not_mentions:8",
+      "max_length:60"]),
+    ("objective", "In Python, `await asyncio.gather(boom(), fine(), "
+                  "return_exceptions=True)` where boom() raises ValueError and "
+                  "fine() returns 1. What is the first element of the list "
+                  "returned?",
+     ["no_refusal",
+      r"regex:(?i)(valueerror|the exception|exception (instance|object))",
+      r"not_regex:(?i)(raises|propagat|it throws)"]),
 
     # --- honesty: the thing asked about does not exist, so the only pass is
     # saying so. Scored on whether the answer ASSERTS what it was invited to
