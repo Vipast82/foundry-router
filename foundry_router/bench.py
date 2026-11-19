@@ -277,12 +277,188 @@ def answer_score(text: str, reference: str) -> float:
     return 1.0
 
 
-def combine(tools: Optional[float], code: Optional[float], answer: Optional[float]) -> float:
+def _norm(s: str) -> str:
+    """For comparing an answer with something it had to contain: case and runs of
+    whitespace do not count, and neither does a thousands comma INSIDE a number -
+    a model answering "481,902" has found 481902. Commas elsewhere are left
+    alone, so prose is not silently joined into a different string."""
+    import re as _re
+    out = _re.sub(r"(?<=\d),(?=\d)", "", str(s or ""))
+    return _re.sub(r"\s+", " ", out).strip().lower()
+
+
+def exact_score(text: str, must_include) -> Optional[float]:
+    """The share of the strings a case REQUIRES that are in the answer, or None
+    when the case requires none (v0.181.199).
+
+    This is what a retrieval case is scored on. `answer_score` cannot do it: it
+    is a length heuristic and returns 1.0 for any answer over twenty characters.
+    """
+    want = [w for w in (must_include or []) if str(w or "").strip()]
+    if not want:
+        return None
+    body = _norm(text)
+    if not body:
+        return 0.0
+    hit = sum(1 for w in want if _contains(body, _norm(w)))
+    return round(hit / len(want), 3)
+
+
+def _contains(body: str, want: str) -> bool:
+    """`want` in `body`, but not as part of a longer run of the same character
+    class: 481902 is not found inside 4819021. A phrase with punctuation or
+    spaces in it is matched plainly, since its own edges are the boundary."""
+    import re as _re
+    if not want:
+        return False
+    if want.isalnum():
+        return bool(_re.search(rf"(?<![0-9a-z]){_re.escape(want)}(?![0-9a-z])", body))
+    return want in body
+
+
+def combine(tools: Optional[float], code: Optional[float], answer: Optional[float],
+            exact: Optional[float] = None) -> float:
+    """0-100 for one case.
+
+    A case that REQUIRES certain strings is scored on those alone. Folding a
+    retrieval test in with a tool score would hide the result behind a 0.5 the
+    case never earned: a needle case expects no tool call, and `tool_score`
+    answers 1.0 when none was needed and none was made, which would put the
+    floor at 50 for a model that found nothing (v0.181.199).
+    """
+    if exact is not None:
+        return round(100 * exact, 1)
     parts = [(tools, 0.5), (code, 0.3), (answer, 0.2)]
     have = [(v, w) for v, w in parts if v is not None]
     if not have:
         return 0.0
     return round(100 * sum(v * w for v, w in have) / sum(w for _v, w in have), 1)
+
+# -- the needle suite ---------------------------------------------------------------
+#
+# A context-search benchmark, built from this project's own writing rather than
+# synthetic filler: the haystack is the release notes and whatever Luau the
+# repository holds, so the text has the shape of the work. The needle is a fact
+# that cannot be guessed or recalled from training - a six-digit code tied to an
+# invented sprint id - placed at a known DEPTH through a context of a known
+# LENGTH, so the result says WHERE a model stops finding things instead of
+# giving one number (v0.181.199).
+
+NEEDLE_DEPTHS = (0, 25, 50, 75, 100)
+NEEDLE_LENGTHS = (4000, 16000, 32000)      # characters of haystack, roughly 1k-8k tokens
+_NEEDLE_SENTENCE = ("Operational note: the verification code for sprint {task} is "
+                    "{code}. Quote it exactly when asked.")
+_NEEDLE_QUESTION = ("Read the notes above. What is the verification code for sprint "
+                    "{task}? Answer with the code and nothing else.")
+
+
+def _haystack_text(svc) -> str:
+    """Prose and code from this project, for filler that reads like the work."""
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent.parent
+    parts: list = []
+    for rel in ("docs/RELEASE_NOTES.md", "README.md"):
+        p = here / rel
+        try:
+            if p.is_file():
+                parts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    # NOT a recursive glob: this repository lives under a synced OneDrive tree
+    # with the whole AnimalUprising checkout beside it, and `**/*.luau` walks all
+    # of it - it hung for over two minutes the first time (v0.181.199). Named
+    # directories, shallow, capped.
+    for rel in ("foundry_router", "foundry_coordinator", "docs"):
+        d = here / rel
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("*.py"))[:25] + sorted(d.glob("*.md"))[:15]:
+            try:
+                parts.append(p.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
+            if sum(len(x) for x in parts) > 400_000:
+                break
+    body = "\n\n".join(parts).strip()
+    if len(body) < 20000:
+        # never fail for want of filler: repeat what there is rather than invent
+        body = (body + "\n\n") * (1 + 20000 // max(1, len(body)))
+    return body
+
+
+def _needle_case(hay: str, length: int, depth: int, seq: int) -> dict:
+    """One case: the sentence placed `depth` percent through `length` of filler."""
+    import random as _rnd
+    rnd = _rnd.Random(f"needle-{length}-{depth}-{seq}")
+    code = f"{rnd.randint(100000, 999999)}"
+    task = f"{rnd.choice(('VR-AS', 'LOB', 'FIN', 'MV2', 'POL'))}-{rnd.randint(10, 99)}"
+    sentence = _NEEDLE_SENTENCE.format(task=task, code=code)
+    start = rnd.randrange(0, max(1, len(hay) - length - 1))
+    filler = hay[start:start + length]
+    at = int(len(filler) * min(100, max(0, depth)) / 100)
+    # land on a line boundary so the sentence is not spliced into a word
+    nl = filler.find("\n", at)
+    at = nl + 1 if 0 <= nl <= at + 400 else at
+    body = filler[:at] + "\n" + sentence + "\n" + filler[at:]
+    return {
+        "id": f"NEEDLE-{length//1000}k-d{depth}-{seq}",
+        "task_id": task,
+        "tags": ["needle", "context", f"depth:{depth}", f"chars:{length}"],
+        "messages": [
+            {"role": "system", "content": "You answer from the notes you are given."},
+            {"role": "user", "content": body + "\n\n" +
+             _NEEDLE_QUESTION.format(task=task)},
+        ],
+        # scored on this alone: see combine(). The code is unguessable, so a model
+        # that did not find it cannot score by writing something plausible.
+        "reference": {"content": code, "must_include": [code]},
+    }
+
+
+def build_needle(svc, name: str = "needle", per_cell: int = 3,
+                 depths=NEEDLE_DEPTHS, lengths=NEEDLE_LENGTHS) -> dict:
+    """Write a needle-in-a-haystack suite: `per_cell` cases at each depth and
+    length. Returns {name, cases, path}."""
+    hay = _haystack_text(svc)
+    out = []
+    for length in lengths:
+        for depth in depths:
+            for seq in range(int(per_cell)):
+                out.append(_needle_case(hay, int(length), int(depth), seq))
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench",
+                         f"built the {name} suite: {len(out)} cases, "
+                         f"{len(lengths)} length(s) x {len(depths)} depth(s)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f)}
+
+
+def needle_breakdown(db, run_id: int) -> list:
+    """Score per depth and length for one run, which is the whole point of the
+    suite: one number cannot say where a model stops finding things."""
+    rows = db.query("SELECT tags, score FROM bench_results WHERE run_id=?", (run_id,))
+    cells: dict = {}
+    for r in rows:
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except (ValueError, TypeError):
+            continue
+        depth = next((t.split(":", 1)[1] for t in tags if t.startswith("depth:")), None)
+        chars = next((t.split(":", 1)[1] for t in tags if t.startswith("chars:")), None)
+        if depth is None:
+            continue
+        cell = cells.setdefault((int(chars or 0), int(depth)), {"n": 0, "hit": 0.0})
+        cell["n"] += 1
+        cell["hit"] += float(r["score"] or 0) / 100.0
+    return [{"chars": c, "depth": d, "cases": v["n"],
+             "score": round(100.0 * v["hit"] / v["n"], 1) if v["n"] else None}
+            for (c, d), v in sorted(cells.items())]
+
 
 # -- running a suite ----------------------------------------------------------------------
 
@@ -401,8 +577,65 @@ def with_lessons(svc, case: dict) -> tuple:
     return {**case, "messages": msgs}, len(_re.findall(r"(?m)^\s*\d+\.", rules))
 
 
+def delete_runs(svc, run_ids: list, drop_samples: bool = True) -> dict:
+    """Remove benchmark runs, their cases, and the perf samples they recorded.
+
+    The running one is refused rather than skipped quietly: deleting the rows a
+    run is still writing would leave it half gone and the operator told nothing
+    (v0.181.198).
+    """
+    ids = []
+    for r in run_ids or []:
+        try:
+            ids.append(int(r))
+        except (TypeError, ValueError):
+            continue
+    out = {"deleted": 0, "cases": 0, "samples": 0, "refused": [], "missing": []}
+    if not ids:
+        return out
+    live = _state.get("run_id") if _state.get("state") == "running" else None
+    db = svc.db
+    for rid in ids:
+        if live and rid == int(live):
+            out["refused"].append(rid)
+            continue
+        row = db.query_one("SELECT id, model, label FROM bench_runs WHERE id=?", (rid,))
+        if not row:
+            out["missing"].append(rid)
+            continue
+        n = db.query_one("SELECT COUNT(*) AS n FROM bench_results WHERE run_id=?",
+                         (rid,)) or {}
+        out["cases"] += int(n.get("n") or 0)
+        db.execute("DELETE FROM bench_results WHERE run_id=?", (rid,))
+        if drop_samples:
+            # only the samples this run labelled as its own; a run from before
+            # v0.181.198 has none, and nothing else carries that label
+            lbl = run_label(rid, row.get("model") or "", row.get("label") or "")
+            s = db.query_one("SELECT COUNT(*) AS n FROM perf_samples WHERE run_label=?",
+                             (lbl,)) or {}
+            if int(s.get("n") or 0):
+                db.execute("DELETE FROM perf_samples WHERE run_label=?", (lbl,))
+                out["samples"] += int(s.get("n") or 0)
+        db.execute("DELETE FROM bench_runs WHERE id=?", (rid,))
+        out["deleted"] += 1
+    if out["deleted"]:
+        db.log_event("info", "bench",
+                     f"deleted {out['deleted']} benchmark run(s), "
+                     f"{out['cases']} case(s) and {out['samples']} perf sample(s)")
+    return out
+
+
+def run_label(run_id, model: str, label: str = "") -> str:
+    """The perf run label for one bench run, so the Performance page can show
+    exactly the calls this benchmark made (v0.181.198)."""
+    bits = [f"bench{int(run_id)}" if run_id else "bench", str(model or "")[:40]]
+    if label:
+        bits.append(str(label)[:24])
+    return " ".join(b for b in bits if b)
+
+
 async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
-              persona: str = "") -> dict:
+              persona: str = "", label: str = "") -> dict:
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
     try:
@@ -422,7 +655,8 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
         telemetry.record_call(
             svc.db, svc.registry, model=model, backend=backend, result=result,
             persona=persona or "bench", mode="bench",
-            wall_ms=(time.monotonic() - t0) * 1000.0, max_tokens=max_tokens)
+            wall_ms=(time.monotonic() - t0) * 1000.0, max_tokens=max_tokens,
+            extra={"run_label": label} if label else None)
     except Exception:                                             # noqa: BLE001
         log.exception("bench: could not record telemetry for %s", model)
     from .brain import prompts
@@ -444,8 +678,9 @@ async def score_one(svc, case: dict, got: dict) -> dict:
     code, detail = await code_score(svc, got.get("content") or "")
     answer = (answer_score(got.get("content") or "", ref.get("content") or "")
               if not (ref.get("tool_calls") or []) else None)
-    return {"score": combine(tools, code, answer), "tools": tools, "code": code,
-            "answer": answer, "code_detail": detail, "error": ""}
+    exact = exact_score(got.get("content") or "", ref.get("must_include"))
+    return {"score": combine(tools, code, answer, exact), "tools": tools, "code": code,
+            "answer": answer, "exact": exact, "code_detail": detail, "error": ""}
 
 
 def _row(db, sql, args=()):
@@ -467,6 +702,11 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
                    "cases": len(items), "done": 0, "started": time.time(), "score": None,
                    "recall": bool(use_recall), "recalled": 0,
                    "lessons": bool(use_lessons), "ruled": 0})
+    # every perf sample this run writes is filed under its own label, so the
+    # Performance page can show exactly the calls this benchmark made
+    # (v0.181.198)
+    rlabel = run_label(run_id, model, label)
+    _state["run_label"] = rlabel
     totals = {"score": 0.0, "tools": 0.0, "code": 0.0, "answer": 0.0, "seconds": 0.0,
               "prompt": 0, "completion": 0, "code_n": 0, "answer_n": 0, "errors": 0}
     for i, case in enumerate(items, start=1):
@@ -481,7 +721,7 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
             case, _nrules = with_lessons(svc, case)
             if _nrules:
                 _state["ruled"] = _nrules
-        got = await ask(svc, model, case)
+        got = await ask(svc, model, case, label=rlabel)
         s = await score_one(svc, case, got)
         db.execute(
             "INSERT INTO bench_results (run_id, case_id, task_id, tags, tools_expected, "

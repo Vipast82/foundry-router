@@ -9210,7 +9210,11 @@ async function tabBench() {
     <td class="nw">${x.seconds == null ? "—" : (+x.seconds).toFixed(1) + " s"}</td>
     <td><span class="pill ${x.status === "done" ? "ok" : x.status === "failed" ? "bad" : "warn"}">${esc(x.status)}</span>${x.note ? ` <span class="hint">${esc(x.note)}</span>` : ""}</td>
     <td class="nw"><button class="act" onclick="showBenchResults(${x.id})">cases</button>
-      <label class="hint"><input type="checkbox" class="bench-cmp" value="${x.id}"> compare</label></td>
+      <label class="hint"><input type="checkbox" class="bench-cmp" value="${x.id}"> compare</label>
+      <label class="hint" title="Tick to delete this run. Its cases go with it, and the
+             performance samples it recorded under its own run label."><input type="checkbox"
+             class="bench-del" value="${x.id}" data-what="${esc(x.model)} ${esc(x.suite)}${
+               x.label ? " / " + esc(x.label) : ""}"> remove</label></td>
     </tr>`).join("");
   $("#main").innerHTML = `
     <h2>Benchmark — does a model do <i>your</i> work?</h2>
@@ -9251,6 +9255,12 @@ async function tabBench() {
       <th title="Did it reach for the same tools?">tools</th><th title="Code that passed this router's checks">code</th>
       <th>per case</th><th>state</th><th></th></tr>${runRows}</table>
       <div class="row tight" style="margin-top:8px"><button class="act" id="bench-compare">Compare the two ticked</button>
+        <button class="act bad" id="bench-delete">Delete the ticked runs</button>
+        <button class="act" id="bench-needle" title="Build a needle-in-a-haystack suite
+                from this project's own writing: an unguessable code placed at 0, 25, 50,
+                75 and 100% through contexts of 4k, 16k and 32k characters. It measures
+                where a model stops finding things, which one number cannot say."
+        >Build the needle suite</button>
         <span class="hint" id="bench-cmp-msg"></span></div>`
       : '<p class="hint">No runs yet.</p>'}
     <div id="bench-detail"></div>`;
@@ -9278,6 +9288,28 @@ async function tabBench() {
   };
   if ($("#br-stop")) $("#br-stop").onclick = async () => {
     await api("bench/run", {method: "POST", body: {stop: true}}); toast("Stopping"); render();
+  };
+  if ($("#bench-needle")) $("#bench-needle").onclick = async () => {
+    try {
+      const out = await api("bench/needle", {method: "POST", body: {per_cell: 3}});
+      toast(`built "${out.name}": ${out.cases} cases`);
+      render();
+    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+  };
+  if ($("#bench-delete")) $("#bench-delete").onclick = async () => {
+    const ticked = [...document.querySelectorAll(".bench-del:checked")];
+    if (!ticked.length) { $("#bench-cmp-msg").textContent = "tick the runs to remove"; return; }
+    const ids = ticked.map(x => +x.value);
+    // name them: "delete 3 runs?" cannot tell a baseline from a smoke test
+    const what = ticked.map(x => `#${x.value} ${x.dataset.what}`).join("\n");
+    if (!confirm(`Delete ${ids.length} benchmark run(s)? This cannot be undone.\n\n${what}`))
+      return;
+    try {
+      const out = await api("bench/delete", {method: "POST", body: {run_ids: ids}});
+      toast(`deleted ${out.deleted} run(s), ${out.cases} case(s)` +
+            (out.samples ? `, ${out.samples} perf sample(s)` : ""));
+      render();
+    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };
   if ($("#bench-compare")) $("#bench-compare").onclick = async () => {
     const ticked = [...document.querySelectorAll(".bench-cmp:checked")].map(x => +x.value);
@@ -9359,7 +9391,33 @@ window.lessonDraft = async id => {
 window.showBenchResults = async id => {
   const d = await api(`bench/results?run_id=${id}`);
   const n = v => v == null ? "—" : (+v).toFixed(1);
-  $("#bench-detail").innerHTML = `<div class="card"><div class="card-h">Run ${id} — every case</div>
+  // A context-search run is read as a grid: one number cannot say WHERE a model
+  // stops finding things (v0.181.199).
+  let grid = "";
+  try {
+    const nb = await api(`bench/needle-breakdown?run_id=${id}`);
+    const cells = nb.cells || [];
+    if (cells.length) {
+      const lens = [...new Set(cells.map(c => c.chars))].sort((a, b) => a - b);
+      const deps = [...new Set(cells.map(c => c.depth))].sort((a, b) => a - b);
+      const at = (L, D) => cells.find(c => c.chars === L && c.depth === D);
+      const hue = v => v == null ? "" : v >= 99 ? "ok" : v >= 60 ? "warn" : "bad";
+      grid = `<div class="card"><div class="card-h">Run ${id} — found the needle,
+          by how far through the context it sat</div>
+        <table><tr><th>context</th>${deps.map(d => `<th>${d}%</th>`).join("")}</tr>
+        ${lens.map(L => `<tr><td class="nw mono">${(L / 1000).toFixed(0)}k chars</td>
+          ${deps.map(D => { const c = at(L, D);
+            return `<td class="nw">${c == null ? "—"
+              : `<span class="pill ${hue(c.score)}">${c.score}%</span>
+                 <span class="hint">${c.cases}</span>`}</td>`; }).join("")}</tr>`).join("")}
+        </table>
+        <div class="hint" style="margin-top:6px">The needle is an unguessable code,
+          so a model that did not find it cannot score by writing something plausible.
+          The small number is how many cases that cell holds.</div></div>`;
+    }
+  } catch (e) { /* not a needle run, or an older run: no grid */ }
+  $("#bench-detail").innerHTML = grid +
+    `<div class="card"><div class="card-h">Run ${id} — every case</div>
     <table><tr><th>case</th><th>task</th><th>score</th><th>tools wanted</th><th>tools called</th>
       <th>code</th><th>chars</th><th>took</th><th>problem</th></tr>
     ${(d.results || []).map(r => `<tr><td class="mono">${esc(r.case_id)}</td><td class="nw">${esc(r.task_id || "")}</td>

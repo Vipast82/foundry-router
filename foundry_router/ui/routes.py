@@ -2987,6 +2987,57 @@ async def bench_run(request: Request):
         bool(body.get("lessons")))}
 
 
+@router.post("/admin/api/bench/needle")
+async def bench_needle(request: Request):
+    """Build a needle-in-a-haystack suite: {name?, per_cell?, depths?, lengths?}.
+
+    The haystack is this project's own writing, so the filler reads like the
+    work; the needle is an unguessable code at a known depth."""
+    from .. import bench
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_needle, svc,
+            str(body.get("name") or "needle"),
+            max(1, min(10, int(body.get("per_cell") or 3))),
+            [int(d) for d in (body.get("depths") or bench.NEEDLE_DEPTHS)],
+            [int(n) for n in (body.get("lengths") or bench.NEEDLE_LENGTHS)])
+    except Exception as e:                                        # noqa: BLE001
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.get("/admin/api/bench/needle-breakdown")
+async def bench_needle_breakdown(request: Request, run_id: int):
+    """Score per depth and length for one run: one number cannot say where a
+    model stops finding things."""
+    from .. import bench
+    svc = _svc(request)
+    return {"run_id": run_id,
+            "cells": await asyncio.to_thread(bench.needle_breakdown, svc.db, int(run_id))}
+
+
+@router.post("/admin/api/bench/delete")
+async def bench_delete(request: Request):
+    """Remove benchmark runs: {run_ids: [...], samples?: true}. Their cases go
+    too, and the perf samples they recorded unless samples=false."""
+    from .. import bench
+    svc = _svc(request)
+    body = await request.json()
+    ids = body.get("run_ids") or ([body["run_id"]] if body.get("run_id") else [])
+    if not ids:
+        return JSONResponse({"error": "name the run(s) to delete"}, status_code=400)
+    out = await asyncio.to_thread(bench.delete_runs, svc, list(ids),
+                                  bool(body.get("samples", True)))
+    if out["refused"]:
+        return JSONResponse(
+            {"error": f"run {out['refused'][0]} is still running — stop it first",
+             **out}, status_code=409)
+    return {"ok": True, **out}
+
+
 @router.get("/admin/api/bench/results")
 async def bench_results(request: Request, run_id: int, limit: int = 500):
     from .. import bench

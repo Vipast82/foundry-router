@@ -1,3 +1,52 @@
+## v0.181.198/199 - removing runs, per-run performance, and a needle in the haystack
+
+Three things asked for while looking at the Performance page: a way to remove old
+benchmark runs, performance recorded during a benchmark, and more benchmarks -
+context search, and work that matches what is actually done here.
+
+**Removing runs.** Thirty had accumulated with no way to drop one, and a run kept
+by accident is also a run that turns up in a comparison. A `remove` tick beside
+the `compare` tick, one Delete button, and the confirmation names each run:
+"delete 3 runs?" cannot tell a baseline from a smoke test. It takes the run's
+cases and the perf samples that run recorded, refuses the running benchmark
+rather than half-deleting it, and does nothing at all without explicit ids, so
+there is no shape of this call that empties the table.
+
+**Performance during a benchmark.** v0.181.196 made the benchmark record
+telemetry at all; this makes it findable. Each run stamps its own perf run label
+(`bench40 Qwen3.6-35B-A3B-UD-IQ3_XXS`), so the Run dropdown on the Performance
+page filters the charts to exactly that benchmark's calls. Deliberately not the
+global label, which would file every other request the router served meanwhile -
+a sprint running beside it included - under the benchmark. One fix underneath:
+`telemetry.record_call` was dropping `run_label` from its `extra` whitelist,
+though `record_sample` has always taken one.
+
+**The needle suite.** An unguessable six-digit code, tied to an invented sprint
+id, placed at 0, 25, 50, 75 and 100 per cent through contexts of 4k, 16k and 32k
+characters - three cases a cell, fifteen cells. The haystack is this project's
+own release notes and source, so the filler reads like the work rather than like
+lorem ipsum, and the result is shown as a grid, because the question a context
+benchmark answers is WHERE a model stops finding things and one number cannot say
+that.
+
+The scoring for it is new, and the reason is the fault this week kept turning up.
+A needle case expects no tool call, so `tool_score` answers 1.0 - nothing was
+needed and nothing was called - and `answer_score` is a length heuristic that
+returns 1.0 for any answer over twenty characters. **A model that found nothing
+scored 100.** A case carrying `reference.must_include` is now scored on those
+strings and on nothing else, matched on their own boundaries so that 481,902
+counts and 4819021 does not, and the old behaviour is pinned as a test so it
+cannot come back.
+
+Two smaller things found while building it. The first haystack used
+`**/*.luau` and hung for over two minutes: this repository sits in a synced
+OneDrive tree beside the whole AnimalUprising checkout, so it walked all of it.
+It reads named directories now, and the test asserts that from the parsed source
+rather than its text - the first version of that test matched the comment
+explaining the rule. And a UI assertion that read a fixed byte window after a
+button broke when another button went in between, while the confirmation it
+checks for had not moved; it is anchored on the handler now.
+
 ## v0.181.197 - a test that was really asserting how busy the machine was
 
 Tests only; nothing in the router changes, so this needs no rebuild.

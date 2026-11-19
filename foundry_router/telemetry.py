@@ -76,6 +76,10 @@ def record_call(db: Any, registry: Any, *, model: str, backend: str, result: Any
         start_ms=getattr(r, "start_ms", 0) or 0,
         tcp_retrans=getattr(r, "tcp_retrans", None),
         tcp_rwnd_ms=getattr(r, "tcp_rwnd_ms", None),
+        # run_label: an explicit one beats the global setting, so a benchmark can
+        # file its own calls under its own run without relabelling every other
+        # request the router serves meanwhile (v0.181.198)
         **{k: v for k, v in (extra or {}).items()
            if k in ("client_gap_ms", "client_tool", "router_ms", "arrived_at", "sent_at",
-                    "first_token_at", "prev_reply_at", "clock_diff_ms", "queue_ms")})
+                    "first_token_at", "prev_reply_at", "clock_diff_ms", "queue_ms",
+                    "run_label")})
