@@ -1,3 +1,30 @@
+## v0.181.197 - a test that was really asserting how busy the machine was
+
+Tests only; nothing in the router changes, so this needs no rebuild.
+
+`test_the_slow_admin_reads_run_off_the_event_loop` ended with
+
+    assert s["slow_db"] == [] and s["stalls"] == []
+
+and failed during a `-n auto` run on a loaded workstation, having recorded one
+entry: a database lock held 1.3 s on MainThread. The four assertions above it are
+the test's actual subject - that the slow admin reads go through
+`asyncio.to_thread` - and that last line asserts the stall watchdog saw nothing
+at all, which is a fact about machine load rather than about the code under test.
+
+An empty watchdog is not the invariant. A stalled event loop is a real defect and
+is still asserted on its own; a slow database read under test parallelism is not,
+so it is allowed but bounded at 5 seconds, and either way the entries go into the
+failure message. The compound form reported only that one of two lists was
+non-empty, which is how a flake leaves nothing behind to diagnose - the same
+shape as the media_adapter flake whose traceback was lost to `tail -8`.
+
+For the record, the other failure in that run was mine and not the suite's: it
+was in flight while `__version__` and the release notes were being written, so
+the version-parity test compared a file from before the bump with one from after.
+Editing a `.py` file while pytest runs also makes `inspect.getsource` return the
+wrong function, which cost a full run earlier the same day.
+
 ## v0.181.196 - the brain lane was invisible, in three ways
 
 Asked whether the brain lane's performance is monitored like the rest, the answer
