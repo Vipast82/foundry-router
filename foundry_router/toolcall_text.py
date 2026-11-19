@@ -138,6 +138,47 @@ def _named(written: str, args: dict, schemas: dict) -> Optional[dict]:
     return None
 
 
+def why_unread(content: str, tools: Optional[list]) -> str:
+    """Why `extract` read no calls out of text that looks like calls.
+
+    For the log, when a model's whole answer is tool-call markup the router could
+    not use. Three answers of campaign 2 ended that way and nothing recorded
+    which of these it was, so the fault could not be diagnosed afterwards
+    (v0.181.194)."""
+    if not content:
+        return "empty"
+    if not tools:
+        return ("no tools were offered on this turn, so nothing could be "
+                "resolved - the model called a tool it was not given")
+    if not has_marker(content):
+        return "no <tool_call> or <function= marker"
+    schemas = _schemas(tools)
+    if not schemas:
+        return f"{len(tools)} tool(s) offered but none had a usable name"
+    wrapped = "<tool_call>" in content
+    bodies = _BLOCK.findall(content) if wrapped else _BARE.findall(content)
+    if not bodies:
+        return "a marker, but no block the reader could delimit"
+    bad = []
+    for i, b in enumerate(bodies):
+        if _one(b, schemas) is None:
+            head = b.strip()[:80].replace("\n", " ")
+            if head.startswith("{"):
+                try:
+                    json.loads(b.strip())
+                    reason = "no name, or arguments that are not an object"
+                except (ValueError, TypeError) as e:
+                    reason = f"the JSON does not parse ({e})"
+            elif _FUNC.match(head):
+                reason = "text between the tags that is not a parameter"
+            else:
+                reason = "the block starts with neither { nor <function="
+            bad.append(f"block {i + 1}: {reason} | {head!r}")
+    if not bad:
+        return "every block read, so something after this rejected them"
+    return f"{len(bad)} of {len(bodies)} block(s) rejected - " + "; ".join(bad[:3])
+
+
 UNRUN_NOTE = "(My reply here was a request to use a tool. It did not run, so it gave no result.)"
 
 

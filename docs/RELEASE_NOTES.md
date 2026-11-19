@@ -1,3 +1,51 @@
+## v0.181.194 - the next unreadable tool call will say what happened
+
+Three answers of the last campaign came back as "<worker> wrote tool calls that
+could not be read", and the text that could not be read was kept nowhere, so
+afterwards there was nothing to diagnose. Two explanations were tested and both
+were wrong, which is worth recording because either would have been reported as a
+finding.
+
+The first was that find-on-demand causes it: a persona in that mode is offered
+only `foundry_find_tools` and `foundry_call_tool`, so a model that looks a tool up
+and then writes a call to what it found - by that tool's own name - should fail to
+resolve against the two it was given. It does not. `toolcall_text._named` already
+wraps an unresolved name in `foundry_call_tool`, its docstring describes that
+exact case, and all five shapes of such a call parse. A test now pins that
+behaviour, because the finder breaks for every text-mode model if it regresses.
+
+The second was that `precedent.inject` does nothing on the brain's tool loop,
+since it returns early when `svc` is None and `AgentRunner.__init__` never sets
+`self.svc`. `main.py` sets it from outside - `self.agent.svc = self` - so the
+rules and the recall block do reach that path. They are also not added twice for
+a persona that takes it: the facade injects only inside `_direct_dispatch_chat`,
+and the brain path calls the same `precedent.inject` separately. One injection
+per path.
+
+What chasing that did turn up is that `brain/agent.py` is not dead code. It is
+dead for the Kilo personas, every one of which is `routing: strict` with
+`execution_mode: direct`, and it runs for Foundry-Local, Foundry-Chat and
+Foundry-Max, which are `execution_mode: main`. That is why a message only
+reachable from that file appeared in an eval of Foundry-Local at all, and it is
+worth stating because v0.181.184's notes called that path "the one path a strict
+persona in passthrough routing mode never takes" and left the impression it was
+never taken by anything.
+
+So the remaining causes cannot be told apart without the text, and the text is
+kept now. `toolcall_text.why_unread` says which branch rejected it - no tools
+offered on that turn, JSON that does not parse, prose between the tags, a block
+with no name, or every block reading fine and something after it dropping them -
+and the brain path logs that with the first 600 characters of what the model
+wrote. Eleven tests keep those reasons distinct, since a diagnostic that says the
+same thing whatever happened is no better than none.
+
+Not raising the per-prompt timeout, which was the obvious thing to do and would
+have been wrong. The honesty prompts that did get answered took a median of 135
+seconds and at most 353, so not one came within a minute of the 420-second limit:
+the failures are not slow, they are stuck, and eight of the twelve are on the one
+prompt. Raising the limit would have cost another two and a half hours of campaign
+time to recover nothing.
+
 ## v0.181.193 - both rates, because an unanswered prompt is not a wrong answer
 
 The first five-repeat campaign read 89.4% for Foundry-Local and 83.8% for

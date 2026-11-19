@@ -2284,6 +2284,18 @@ class AgentRunner:
                 if toolcall_text.only_calls(clean.strip()):
                     # v0.181.130: the "answer" is nothing but tool-call markup the router
                     # could not read as calls. That is never shown to the user as an answer.
+                    # v0.181.194: and the text is kept, with which branch rejected it,
+                    # because three of these in one campaign left nothing to diagnose.
+                    try:
+                        _why = toolcall_text.why_unread(clean.strip(), offer)
+                        # main.py sets .svc on the runner; the facade's own path
+                        # has its own svc, this one is the services object
+                        self.svc.db.log_event(
+                            "warning", "tools",
+                            f"{worker} wrote tool calls that could not be read",
+                            f"{_why}\n--- the text ---\n{clean.strip()[:600]}")
+                    except Exception:               # never fail the turn to log it
+                        log.exception("could not record an unreadable tool call")
                     self.model_registry.record_tool_call(worker, ok=False)
                     async for ev in hand_to_brain(f"{worker} wrote tool calls that could not "
                                                   f"be read"):
