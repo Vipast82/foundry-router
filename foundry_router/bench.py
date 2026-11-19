@@ -606,6 +606,178 @@ def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
             "description_chars": desc_cap, "prompt_chars": len(catalogue)}
 
 
+# -- the finder suite: the ecosystem as it is actually run ---------------------------
+
+TOOLFLOW_ROUNDS = 8            # searches + the call, before a case is given up on
+_FLOW_SYSTEM = ("You are an assistant with tools. You cannot see the tools directly: "
+                "use foundry_find_tools to search for what you need, then "
+                "foundry_call_tool to use it. Do the task you are given.")
+
+
+def _task_from(name: str, desc: str) -> str:
+    """The tool's description as something a person would ask for."""
+    d = (desc or "").strip().rstrip(".")
+    if d.startswith("[") and "]" in d:
+        d = d.split("]", 1)[1].strip()
+    if not d:
+        return ""
+    d = d[0].lower() + d[1:]
+    for head in ("use this to ", "used to ", "this tool ", "tool to "):
+        if d.startswith(head):
+            d = d[len(head):]
+    return d[:200]
+
+
+def build_toolflow(svc, name: str = "toolflow", limit: int = 40,
+                   persona: Optional[dict] = None) -> dict:
+    """A suite of tasks to be done THROUGH the finder, built from the live registry."""
+    tools = _granted_tools(svc, persona)
+    if len(tools) < 5:
+        raise ValueError("the tool registry has too few tools to build a suite "
+                         "(is the router connected to its MCP servers?)")
+    import random as _rnd
+    rnd = _rnd.Random("toolflow-v1")
+    order = sorted(tools, key=lambda t: t.name)
+    rnd.shuffle(order)
+    out, skipped = [], 0
+    for t in order:
+        if len(out) >= max(1, int(limit)):
+            break
+        task = _task_from(t.name, getattr(t, "description", ""))
+        if not task:
+            skipped += 1
+            continue
+        out.append({
+            "id": f"FLOW-{len(out) + 1:03d}",
+            "task_id": t.name,
+            "tags": ["toolflow", "finder", "tool_use", f"server:{t.server or '?'}"],
+            "messages": [
+                {"role": "system", "content": _FLOW_SYSTEM},
+                {"role": "user", "content": f"Please {task}."},
+            ],
+            # the finder is the test; the target tool is never run
+            "reference": {"finder_tool": t.name, "content": t.name,
+                          "tool_calls": [{"name": "foundry_call_tool"}]},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench",
+                         f"built the {name} suite: {len(out)} task(s) to be done "
+                         f"through the finder over {len(tools)} granted tools")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f),
+            "granted": len(tools), "skipped": skipped}
+
+
+def _granted_tools(svc, persona: Optional[dict] = None) -> list:
+    """The tool objects a persona may reach, as the finder itself sees them."""
+    p = persona or {"virtual_name": "bench", "preferred_mcp_tools": '["*"]',
+                    "mcp_tool_mode": "finder"}
+    try:
+        return [t for t in (svc.tool_registry.mcp_tools_for_persona(p) or [])]
+    except Exception:                                             # noqa: BLE001
+        return []
+
+
+async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048,
+                             label: str = "", persona: Optional[dict] = None) -> dict:
+    """One task, done the way a finder persona does it.
+
+    Searches really run; the chosen tool is recorded and never executed."""
+    from . import tool_finder
+    tools = _granted_tools(svc, persona)
+    want = str((case.get("reference") or {}).get("finder_tool") or "")
+    specs = [{"type": "function",
+              "function": {"name": td.name, "description": td.description,
+                           "parameters": td.parameters}}
+             for td in tool_finder.tooldefs()]
+    convo = wire(case.get("messages") or [])
+    t0 = time.monotonic()
+    searched, found, picked, calls = 0, False, "", []
+    prompt_tokens = completion_tokens = 0
+    backend = ""
+    for _round in range(TOOLFLOW_ROUNDS):
+        try:
+            result, backend = await svc.pool.chat(
+                model, convo, tools=specs, max_tokens=max_tokens,
+                options=dict(SAMPLING))
+        except Exception as e:                                    # noqa: BLE001
+            from .errors import describe_exception
+            return {"error": describe_exception(e),
+                    "seconds": round(time.monotonic() - t0, 2)}
+        prompt_tokens += result.prompt_tokens or 0
+        completion_tokens += result.completion_tokens or 0
+        tcs = result.tool_calls or []
+        if not tcs:
+            break                                    # it answered in prose; done
+        convo = convo + [{"role": "assistant", "content": result.content or "",
+                          "tool_calls": [{"id": tc.get("id") or f"c{i}",
+                                          "type": "function",
+                                          "function": {
+                                              "name": tc.get("name"),
+                                              "arguments": json.dumps(
+                                                  tc.get("arguments") or {})}}
+                                         for i, tc in enumerate(tcs)]}]
+        for i, tc in enumerate(tcs):
+            tname = str(tc.get("name") or "")
+            args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
+            calls.append(tname)
+            if tname == tool_finder.FIND_TOOL:
+                searched += 1
+                hits = tool_finder.search(
+                    tools, str(args.get("query") or ""),
+                    tool_finder.DEFAULT_LIMIT)
+                if want and any(h.name == want for h in hits):
+                    found = True
+                text = tool_finder.find_text(tools, args)
+            elif tname == tool_finder.CALL_TOOL:
+                picked = str(args.get("name") or "")
+                # recorded, never run: a benchmark must not generate a video
+                text = ("[bench] the call was recorded and not executed.")
+            else:
+                text = f"[bench] {tname} is not a tool you can use."
+            convo.append({"role": "tool", "tool_call_id": tc.get("id") or f"c{i}",
+                          "name": tname, "content": text})
+        if picked:
+            break
+    return {"content": picked or (result.content or ""), "backend": backend,
+            "tool_calls": [{"name": n, "arguments": {}} for n in calls],
+            "finder": {"searched": searched, "found": found, "picked": picked,
+                       "want": want, "rounds": len(calls)},
+            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "seconds": round(time.monotonic() - t0, 2)}
+
+
+def finder_score(got: dict, want: str) -> dict:
+    """found / picked / the case score.
+
+    Half the marks for a search that surfaced the right tool and half for then
+    choosing it, because a model that searches well and picks wrongly has failed
+    differently from one that never found it, and one number hides which."""
+    f = (got or {}).get("finder") or {}
+    found = 1.0 if f.get("found") else 0.0
+    picked = 1.0 if want and tool_finder_match(f.get("picked") or "", want) else 0.0
+    return {"found": found, "picked": picked,
+            "score": round(100 * (0.5 * found + 0.5 * picked), 1),
+            "searched": int(f.get("searched") or 0)}
+
+
+def tool_finder_match(got: str, want: str) -> bool:
+    """The chosen name is the wanted tool. Exact, or the same tool written
+    without its server prefix - foundry_call_tool resolves that too, so marking
+    it wrong here would score the harness rather than the model."""
+    g, w = str(got or "").strip(), str(want or "").strip()
+    if not g or not w:
+        return False
+    if g == w:
+        return True
+    return g.rsplit("__", 1)[-1] == w.rsplit("__", 1)[-1] and bool(g.rsplit("__", 1)[-1])
+
+
 # -- running a suite ----------------------------------------------------------------------
 
 def wire(messages: list) -> list:
@@ -820,6 +992,13 @@ async def score_one(svc, case: dict, got: dict) -> dict:
     if got.get("error"):
         return {"score": 0.0, "tools": 0.0, "code": None, "answer": 0.0,
                 "code_detail": "", "error": got["error"]}
+    if ref.get("finder_tool"):
+        fs = finder_score(got, str(ref.get("finder_tool")))
+        return {"score": fs["score"], "tools": fs["picked"], "code": None,
+                "answer": fs["found"], "exact": None, "code_detail":
+                    f"found={bool(fs['found'])} picked={(got.get('finder') or {}).get('picked') or '-'} "
+                    f"searches={fs['searched']}",
+                "error": ""}
     tools = tool_score(ref.get("tool_calls") or [], got.get("tool_calls") or [])
     code, detail = await code_score(svc, got.get("content") or "")
     answer = (answer_score(got.get("content") or "", ref.get("content") or "")
@@ -867,8 +1046,14 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
             case, _nrules = with_lessons(svc, case)
             if _nrules:
                 _state["ruled"] = _nrules
-        got = await ask(svc, model, case, label=rlabel)
-        s = await score_one(svc, case, got)
+        # a case that names a finder_tool is run THROUGH the finder: the search
+        # really happens, the chosen tool is recorded and never executed
+        if (case.get("reference") or {}).get("finder_tool"):
+            got = await ask_through_finder(svc, model, case, label=rlabel)
+            s = await score_one(svc, case, got)
+        else:
+            got = await ask(svc, model, case, label=rlabel)
+            s = await score_one(svc, case, got)
         db.execute(
             "INSERT INTO bench_results (run_id, case_id, task_id, tags, tools_expected, "
             "tools_called, tools_score, code_pass, code_detail, answer_chars, score, seconds, "

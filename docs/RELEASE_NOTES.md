@@ -1,3 +1,43 @@
+## v0.181.201 - the finder benchmark: the ecosystem as it is actually run
+
+v0.181.200 put all 132 tools in the prompt and asked which one fits. That is the
+opposite of how these personas run. With `mcp_tool_mode: finder` a model is
+offered two tools and about 400 tokens and has to SEARCH for what it needs, and
+a model can be perfect at picking from a list in front of it and useless at
+finding anything. It is the second that decides whether it can run this
+ecosystem, so that is what this measures.
+
+A case is a task - "please generate an image from a text prompt" - and the run
+is the real loop. The model is offered `foundry_find_tools` and
+`foundry_call_tool` and nothing else. When it searches, the search really runs
+against the live registry and the real result text goes back to it. When it
+calls, the name is recorded and **nothing is executed**: a benchmark must not
+generate a video, and the finder path has no route to a tool runner at all,
+which is asserted from the source rather than hoped for.
+
+Scored in halves, because "did it get there" hides which part failed:
+
+* **found** - the right tool came back from a search the model wrote, which is
+  the quality of its query
+* **picked** - it then called `foundry_call_tool` with that tool's name
+* and the number of searches it took, with six free before the step cap bites
+
+A model that finds the tool and then calls the wrong one scores 50 and has
+failed differently from one that never found it, which scores 0. A model that
+answers in prose without searching scores 0 - which is the whole point, since a
+model that will not use the finder cannot run any of this.
+
+The cases come from the live registry, so the benchmark grows with the tool
+list rather than being a frozen copy of it: 159 tools now where there were 132
+this morning. A task never contains its tool's name, so it has to be found
+rather than copied, and a name written without its server prefix still counts,
+because `foundry_call_tool` resolves that too and marking it wrong would score
+the harness rather than the model.
+
+The tool-picking suite from v0.181.200 stays. Picking from a full catalogue and
+finding through the finder are different abilities, and this router can be run
+either way.
+
 ## v0.181.200 - picking the right tool out of all of them, and finding the tags
 
 **The tool-picking suite.** This router offers 132 tools behind the finder, and

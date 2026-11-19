@@ -2987,6 +2987,27 @@ async def bench_run(request: Request):
         bool(body.get("lessons")))}
 
 
+@router.post("/admin/api/bench/toolflow")
+async def bench_toolflow(request: Request):
+    """Build the finder suite: {name?, limit?}.
+
+    Tasks to be done THROUGH foundry_find_tools / foundry_call_tool, built from
+    the live registry, so the benchmark grows with the tool list. The searches
+    really run when the suite is run; the chosen tool is recorded and never
+    executed."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_toolflow, svc, str(body.get("name") or "toolflow"),
+            max(1, min(200, int(body.get("limit") or 40))))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/toolpick")
 async def bench_toolpick(request: Request):
     """Build a tool-picking suite: {name?, limit?}.

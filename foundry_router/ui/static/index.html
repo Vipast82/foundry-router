@@ -9267,6 +9267,12 @@ async function tabBench() {
                 meets a stated need. Picking the right tool out of all of them is what a
                 model has to do before it can do anything else."
         >Build the tool-picking suite</button>
+        <button class="act primary" id="bench-toolflow" title="Build the finder suite: tasks
+                done THROUGH foundry_find_tools and foundry_call_tool, the way these personas
+                actually run. The searches really happen against the live registry; the tool
+                the model chooses is recorded and never executed. Half the marks for a search
+                that surfaced the right tool, half for then choosing it."
+        >Build the finder suite</button>
         <span class="hint" id="bench-cmp-msg"></span></div>`
       : '<p class="hint">No runs yet.</p>'}
     <div id="bench-detail"></div>`;
@@ -9301,6 +9307,13 @@ async function tabBench() {
   };
   if ($("#br-stop")) $("#br-stop").onclick = async () => {
     await api("bench/run", {method: "POST", body: {stop: true}}); toast("Stopping"); render();
+  };
+  if ($("#bench-toolflow")) $("#bench-toolflow").onclick = async () => {
+    try {
+      const out = await api("bench/toolflow", {method: "POST", body: {limit: 40}});
+      toast(`built "${out.name}": ${out.cases} task(s) over ${out.granted} granted tools`);
+      render();
+    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };
   if ($("#bench-toolpick")) $("#bench-toolpick").onclick = async () => {
     try {
