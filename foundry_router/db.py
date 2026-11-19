@@ -682,6 +682,10 @@ class Database:
             # answer_head is 200 characters, which would rank openings.
             ("eval_results", "answer_full", "TEXT DEFAULT ''"),
             ("personas", "lessons", "INTEGER DEFAULT 0"),
+            # v0.181.206: what an agent task produced, so two runs' answers
+            # to one task can be compared. A deliverable has no answer key and
+            # is never scored; answer_chars alone cannot be compared.
+            ("bench_results", "deliverable", "TEXT DEFAULT ''"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

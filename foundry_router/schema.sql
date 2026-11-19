@@ -848,7 +848,8 @@ CREATE TABLE IF NOT EXISTS bench_results (
   score REAL,
   seconds REAL,
   error TEXT,
-  recalled TEXT                     -- JSON list: the past work put in front of this case
+  recalled TEXT,                    -- JSON list: the past work put in front of this case
+  deliverable TEXT                  -- an agent task's answer, kept for pairwise comparison
 );
 
 CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);

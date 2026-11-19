@@ -2517,7 +2517,8 @@ function pairwiseView(d) {
       ${esc(t.notes || "")}</p>`;
   }
   const rows = (d.pairs || []).map(p => `<tr>
-    <td>${esc((p.prompt || "").slice(0, 90))}</td>
+    <td>${esc((p.task_id || p.prompt || "").slice(0, 90))}${p.criteria
+      ? ` <span class="hint" title="judged against the task's stated requirements">(${p.criteria} req)</span>` : ""}</td>
     <td class="nw">${p.winner === "tie" ? "tie"
       : p.winner ? esc(p.winner) : "—"}${p.flip
       ? ' <span class="pill bad" title="the two orders disagreed, so this pair is a tie">flip</span>' : ""}</td>
@@ -9318,6 +9319,13 @@ async function tabBench() {
                 nothing a model writes is ever run. Code checks only compile Python, which
                 every model passes, so they cannot score this."
         >Build the code suite</button>
+        <button class="act" id="bench-agent" title="Build the agent-task suite: deliverables
+                from the work this ecosystem does — Luau and Roblox server code, Blender
+                scripting, this router's own asyncio and SQLite, and operating the sprint
+                system. These are NOT scored: a deliverable has no answer key, and the
+                length heuristic would hand every one of them a confident 100. Run two
+                models on it, then compare the runs under Evals → Pairwise."
+        >Build the agent tasks</button>
         <span class="hint" id="bench-cmp-msg"></span></div>`
       : '<p class="hint">No runs yet.</p>'}
     <div id="bench-detail"></div>`;
@@ -9371,6 +9379,14 @@ async function tabBench() {
   };
   if ($("#br-stop")) $("#br-stop").onclick = async () => {
     await api("bench/run", {method: "POST", body: {stop: true}}); toast("Stopping"); render();
+  };
+  if ($("#bench-agent")) $("#bench-agent").onclick = async () => {
+    try {
+      const out = await api("bench/agent", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} deliverable task(s) — not scored, ` +
+            `run two models and compare them`);
+      render();
+    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };
   if ($("#bench-codereason")) $("#bench-codereason").onclick = async () => {
     try {
@@ -9717,6 +9733,25 @@ async function tabEvals() {
         <button class="act primary" id="pw-run">Compare</button>
       </div>
       <div id="pw-out"></div>
+      <h2>Deliverables — two benchmark runs of the agent tasks</h2>
+      <p class="hint">The agent tasks have no answer key, so they are never
+        given a score and this is the only thing that can be said about them.
+        Same protocol — both orders, blind, no model judging itself — but the
+        judge is also shown <b>each task's acceptance criteria</b>, taken from
+        the suite the runs were built with. That is the difference between a
+        comparison and a preference poll: a judge asked "which is better"
+        answers with its taste, and a judge asked "which meets these" answers
+        about the work.</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px 12px">
+        <label>run</label><input type="number" id="pw-lrun" style="width:80px"
+          placeholder="id">
+        <label>against run</label><input type="number" id="pw-rrun"
+          style="width:80px" placeholder="id">
+        <label>judge</label><select id="pw-rjudge">${judgeOpts}</select>
+        <button class="act primary" id="pw-runs">Compare runs</button>
+        <span class="hint">run ids are in the Benchmark tab</span>
+      </div>
+      <div id="pw-runs-out"></div>
     </div>
     <h2>Eval harness — score a persona's real routing output</h2>
     <p class="hint">Runs the category's test prompts through the persona's actual routing path.
@@ -9781,6 +9816,18 @@ async function tabEvals() {
         {campaign_id: +camp, judge_model: judge, left, right}});
       $("#pw-out").innerHTML = pairwiseView(d);
     } catch (e) { $("#pw-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
+  };
+  $("#pw-runs").onclick = async () => {
+    const l = +$("#pw-lrun").value, r = +$("#pw-rrun").value;
+    const judge = $("#pw-rjudge").value;
+    if (!l || !r) { toast("give both run ids", true); return; }
+    if (!judge) { toast("a deliverable comparison needs a judge model", true); return; }
+    $("#pw-runs-out").innerHTML = '<p class="hint">judging each task twice…</p>';
+    try {
+      const d = await api("eval/pairwise-runs", {method: "POST", body:
+        {left_run: l, right_run: r, judge_model: judge}});
+      $("#pw-runs-out").innerHTML = pairwiseView(d);
+    } catch (e) { $("#pw-runs-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
   };
   $("#ev-board-refresh").onclick = async () => {
     const id = $("#ev-camp").value;

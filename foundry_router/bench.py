@@ -1218,6 +1218,14 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
 
 async def score_one(svc, case: dict, got: dict) -> dict:
     ref = case.get("reference") or {}
+    if ref.get("deliverable"):
+        # No answer key, so no score - and that is the refusal, not a gap.
+        # answer_score is a length heuristic and code_score only compiles, so
+        # both would fire here and hand a deliverable a confident 100 (the
+        # needle fault of v0.181.199, which scored a model that found nothing).
+        return {"score": None, "tools": 0.0, "code": None, "answer": None,
+                "exact": None, "code_detail": "deliverable: not scored",
+                "error": got.get("error") or ""}
     if got.get("error"):
         return {"score": 0.0, "tools": 0.0, "code": None, "answer": 0.0,
                 "code_detail": "", "error": got["error"]}
@@ -1264,7 +1272,11 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
     rlabel = run_label(run_id, model, label)
     _state["run_label"] = rlabel
     totals = {"score": 0.0, "tools": 0.0, "code": 0.0, "answer": 0.0, "seconds": 0.0,
-              "prompt": 0, "completion": 0, "code_n": 0, "answer_n": 0, "errors": 0}
+              "prompt": 0, "completion": 0, "code_n": 0, "answer_n": 0, "errors": 0,
+              # cases that HAVE a score. The average divided by cases done,
+              # which would quietly lower a run holding unscorable cases, and
+              # for a suite with no deliverable in it this is the same number
+              "score_n": 0, "delivered": 0}
     for i, case in enumerate(items, start=1):
         if _state.get("stop"):
             break
@@ -1288,15 +1300,21 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         db.execute(
             "INSERT INTO bench_results (run_id, case_id, task_id, tags, tools_expected, "
             "tools_called, tools_score, code_pass, code_detail, answer_chars, score, seconds, "
-            "error, recalled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "error, recalled, deliverable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, case.get("id") or "", case.get("task_id") or "",
              json.dumps(case.get("tags") or []),
              json.dumps([t.get("name") for t in (case.get("reference") or {}).get("tool_calls") or []]),
              json.dumps([t.get("name") for t in got.get("tool_calls") or []]),
              s["tools"], None if s["code"] is None else int(s["code"] >= 1), s["code_detail"],
              len(got.get("content") or ""), s["score"], got.get("seconds") or 0, s["error"],
-             json.dumps([h["case_id"] for h in hits])))
-        totals["score"] += s["score"]
+             json.dumps([h["case_id"] for h in hits]),
+             (got.get("content") or "")
+             if (case.get("reference") or {}).get("deliverable") else ""))
+        if s["score"] is None:
+            totals["delivered"] += 1
+        else:
+            totals["score"] += s["score"]
+            totals["score_n"] += 1
         totals["tools"] += s["tools"]
         if s["code"] is not None:
             totals["code"] += s["code"]
@@ -1309,10 +1327,14 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         totals["completion"] += got.get("completion_tokens") or 0
         totals["errors"] += 1 if s["error"] else 0
         _state["done"] = i
-        _state["score"] = round(totals["score"] / i, 1)
+        _state["score"] = (round(totals["score"] / totals["score_n"], 1)
+                           if totals["score_n"] else None)
     n = max(1, _state["done"])
-    out = {"run_id": run_id, "suite": suite, "model": model, "cases": len(items), "scored": _state["done"],
-           "score": round(totals["score"] / n, 1), "tools": round(100 * totals["tools"] / n, 1),
+    sn = totals["score_n"]
+    out = {"run_id": run_id, "suite": suite, "model": model, "cases": len(items),
+           "scored": _state["done"], "delivered": totals["delivered"],
+           "score": round(totals["score"] / sn, 1) if sn else None,
+           "tools": round(100 * totals["tools"] / n, 1),
            "code": round(100 * totals["code"] / totals["code_n"], 1) if totals["code_n"] else None,
            "answer": round(100 * totals["answer"] / totals["answer_n"], 1) if totals["answer_n"] else None,
            "seconds": round(totals["seconds"] / n, 2), "prompt_tokens": totals["prompt"],
@@ -1330,7 +1352,10 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
                     f"past work found for {out['recalled']} of {out['scored']} case(s)"
                     if use_recall else "",
                     f"{out['ruled']} approved rule(s) in every prompt"
-                    if use_lessons else "") if x), run_id))
+                    if use_lessons else "",
+                    f"{out['delivered']} deliverable task(s) are not scored - "
+                    f"compare this run with another one"
+                    if out["delivered"] else "") if x), run_id))
     _state.update({"state": "done", "finished": time.time(), **out})
     return out
 

@@ -3015,6 +3015,45 @@ async def eval_pairs(request: Request, campaign_id: int = 0, limit: int = 200):
     return {"pairs": judgeproto.pair_history(_svc(request).db, campaign_id, limit)}
 
 
+@router.post("/admin/api/bench/agent")
+async def bench_agent(request: Request):
+    """Build the agent-task suite: {name?, limit?}.
+
+    Deliverable tasks from the work this ecosystem does. They are NOT scored -
+    a deliverable has no answer key - so run two models on the suite and
+    compare the runs with /admin/api/eval/pairwise-runs."""
+    from .. import agenttasks
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            agenttasks.build, svc, str(body.get("name") or "agent"),
+            int(body.get("limit") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.post("/admin/api/eval/pairwise-runs")
+async def eval_pairwise_runs(request: Request):
+    """Eval tier 4: compare two benchmark runs' deliverables.
+
+    {left_run, right_run, judge_model}. Both orders, blind, against each
+    task's own acceptance criteria as the suite carries them."""
+    from .. import judgeproto
+    from ..errors import describe_exception
+    svc = _svc(request)
+    b = await request.json()
+    try:
+        out = await judgeproto.pairwise_runs(
+            svc, int(b.get("left_run") or 0), int(b.get("right_run") or 0),
+            str(b.get("judge_model") or ""))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/codereason")
 async def bench_codereason(request: Request):
     """Build the code-reasoning suite: {name?, limit?}.

@@ -193,6 +193,29 @@ ANSWER A:
 ANSWER B:
 {b}"""
 
+# The same protocol over a whole deliverable, against the task's own acceptance
+# criteria (eval tier 4). The criteria are the difference between a comparison
+# and a preference poll: a judge asked "which is better" answers with its
+# taste, and a judge asked "which meets these" answers about the work. They
+# come from the suite the run was built with, not from today's source.
+PAIRWISE_CRITERIA_PROMPT = """Two deliverables for the same task are below, A and B. Say which better meets the stated requirements.
+
+Go through the requirements one at a time and prefer the deliverable that meets more of them. A requirement met plainly beats the same requirement described at length. Do NOT reward length, headings, bullet lists or confidence, and do not add requirements of your own. If both meet the same requirements, choose "tie".
+
+Reply ONLY with JSON: {{"winner": "A" | "B" | "tie", "why": "<one sentence>"}}
+
+TASK:
+{prompt}
+
+REQUIREMENTS:
+{criteria}
+
+DELIVERABLE A:
+{a}
+
+DELIVERABLE B:
+{b}"""
+
 _WINNERS = {"a": "A", "b": "B", "tie": "tie", "neither": "tie", "both": "tie"}
 
 
@@ -229,9 +252,18 @@ class Pairwise:
         self._ask = ask
 
     async def _judge_once(self, judge_model: str, prompt: str,
-                          a: str, b: str) -> tuple[Optional[str], str]:
-        body = PAIRWISE_PROMPT.format(prompt=(prompt or "")[:2000],
-                                      a=(a or "")[:8000], b=(b or "")[:8000])
+                          a: str, b: str,
+                          criteria=()) -> tuple[Optional[str], str]:
+        if criteria:
+            body = PAIRWISE_CRITERIA_PROMPT.format(
+                prompt=(prompt or "")[:4000],
+                criteria="\n".join(f"{i}. {c}" for i, c
+                                   in enumerate(criteria, start=1)),
+                a=(a or "")[:16000], b=(b or "")[:16000])
+        else:
+            body = PAIRWISE_PROMPT.format(prompt=(prompt or "")[:2000],
+                                          a=(a or "")[:8000],
+                                          b=(b or "")[:8000])
         if self._ask is not None:
             try:
                 content = await self._ask(judge_model, body)
@@ -256,7 +288,7 @@ class Pairwise:
         return got, "" if got else "judge returned no parseable verdict"
 
     async def compare(self, judge_model: str, prompt: str,
-                      left: dict, right: dict) -> dict:
+                      left: dict, right: dict, criteria=()) -> dict:
         """One pair, judged both ways round.
 
         `left`/`right` are {"model": id, "text": answer}. The result names the
@@ -282,7 +314,8 @@ class Pairwise:
         seen = []
         for order in ORDERS:
             a, b = (lt, rt) if order == "ab" else (rt, lt)
-            got, note = await self._judge_once(judge_model, prompt, a, b)
+            got, note = await self._judge_once(judge_model, prompt, a, b,
+                                               criteria=criteria)
             if got in ("A", "B"):
                 # back from the side the judge saw to the model that wrote it
                 picked = (lm if got == "A" else rm) if order == "ab" \
@@ -478,6 +511,118 @@ async def pairwise_campaign(svc, campaign_id: int, judge_model: str,
                         f"{len(out['skipped'])} prompt(s) had no answer from "
                         "one side and were left out"] if x)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Eval tier 4: two benchmark runs of the agent-task suite                     #
+# --------------------------------------------------------------------------- #
+
+async def pairwise_runs(svc, left_run: int, right_run: int, judge_model: str,
+                        ask=None) -> dict:
+    """Compare what two models produced for the same deliverable tasks.
+
+    Deliverables are never scored - there is no key - so this is the only thing
+    that can be said about them, and it is said with the criteria the suite
+    carries rather than a judge's taste."""
+    from .agenttasks import criteria_for, deliverables, missing_reason
+    from .db import utcnow
+    db = svc.db
+    out = {"left_run": int(left_run), "right_run": int(right_run),
+           "judge_model": judge_model, "left": "", "right": "",
+           "pairs": [], "skipped": [], "tally": {}, "note": ""}
+    if int(left_run) == int(right_run):
+        out["note"] = "a run compared with itself is not a comparison"
+        return out
+    rows = {}
+    for side, rid in (("left", left_run), ("right", right_run)):
+        run = db.query_one("SELECT id, suite, model, label FROM bench_runs "
+                           "WHERE id=?", (int(rid),))
+        if run is None:
+            out["note"] = f"there is no run {rid}"
+            return out
+        out[side] = run["model"] or f"run {rid}"
+        out[side + "_suite"] = run["suite"]
+        rows[side] = (run, deliverables(db, int(rid)))
+        bad = missing_reason(rows[side][1])
+        if bad:
+            out["note"] = f"run {rid}: {bad}"
+            return out
+    lrun, lrows = rows["left"]
+    rrun, rrows = rows["right"]
+    if lrun["suite"] != rrun["suite"]:
+        out["note"] = (f"those runs are different suites ({lrun['suite']} and "
+                       f"{rrun['suite']}): the tasks would not line up")
+        return out
+    # the two models may be the same one twice, which is a real thing to measure
+    # (its own spread) but not a thing to judge, since the judge would be
+    # comparing a model with itself and self-preference cannot be cancelled
+    why = judge_refusal(judge_model, out["left"], out["right"])
+    if why:
+        out["note"] = why
+        return out
+
+    by_task = {r["task_id"]: r for r in rrows}
+    pw = Pairwise(svc, ask=ask)
+    for lr in lrows:
+        tid = lr["task_id"]
+        rr = by_task.get(tid)
+        if rr is None:
+            out["skipped"].append({"task_id": tid,
+                                   "why": "the other run has no such task"})
+            continue
+        lt, rt = (lr["deliverable"] or ""), (rr["deliverable"] or "")
+        if not lt.strip() or not rt.strip():
+            out["skipped"].append({
+                "task_id": tid,
+                "why": (lr["error"] or rr["error"] or "no deliverable")[:200]})
+            continue
+        crit = criteria_for(svc, lrun["suite"], tid)
+        task = _task_text(svc, lrun["suite"], tid)
+        got = await pw.compare(judge_model, task,
+                               {"model": out["left"], "text": lt},
+                               {"model": out["right"], "text": rt},
+                               criteria=crit)
+        got["task_id"] = tid
+        got["criteria"] = len(crit)
+        out["pairs"].append(got)
+        db.execute(
+            "INSERT INTO eval_pairs (ts, campaign_id, judge_model, "
+            "left_persona, right_persona, prompt_id, prompt, winner, flip, "
+            "matched, left_chars, right_chars, notes) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (utcnow(), 0, judge_model, out["left"], out["right"], 0,
+             f"{lrun['suite']}:{tid}", got["winner"] or "",
+             int(bool(got["flip"])), int(bool(got["matched"])),
+             got["style"]["left"]["chars"], got["style"]["right"]["chars"],
+             (got["notes"] or "")[:300]))
+    out["tally"] = tally(out["pairs"], out["left"])
+    if out["pairs"] and not crit_seen(out["pairs"]):
+        out["tally"]["notes"] = "; ".join(x for x in [
+            out["tally"].get("notes"),
+            "no task carried acceptance criteria, so this compared the "
+            "deliverables on the judge's taste alone"] if x)
+    if out["skipped"]:
+        out["tally"]["notes"] = "; ".join(x for x in [
+            out["tally"].get("notes"),
+            f"{len(out['skipped'])} task(s) had no deliverable from one side "
+            "and were left out"] if x)
+    return out
+
+
+def crit_seen(pairs: list) -> bool:
+    """Whether any pair was judged against stated requirements."""
+    return any(int(p.get("criteria") or 0) for p in pairs)
+
+
+def _task_text(svc, suite: str, task_id: str) -> str:
+    """The task as it was asked, from the built suite."""
+    from .bench import cases
+    for c in cases(svc, suite):
+        if (c.get("task_id") or "") == task_id:
+            for m in reversed(c.get("messages") or []):
+                if m.get("role") == "user":
+                    return str(m.get("content") or "")
+    return task_id
 
 
 def pair_history(db, campaign_id: int = 0, limit: int = 200) -> list:

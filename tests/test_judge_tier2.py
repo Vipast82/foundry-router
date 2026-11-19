@@ -223,7 +223,12 @@ def test_the_pairwise_panel_is_wired_to_the_route():
 
 
 def test_the_panel_says_what_the_protocol_does_before_showing_a_number():
-    panel = _page()[_page().index("Pairwise"):][:2500]
+    """Anchored on the heading, not on the first "Pairwise" in the file: a
+    button tooltip added later pointed at this panel by name and moved the
+    window onto itself. The same fragility as the byte-offset assertion in
+    v0.181.199, found the same way."""
+    page = _page()
+    panel = page[page.index("Pairwise — which of two"):][:2500]
     assert "swapped" in panel, "both orders is the protocol, not a detail"
     assert "both orders agree" in panel
     assert "never a judge" in panel

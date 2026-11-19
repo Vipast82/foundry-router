@@ -1,3 +1,69 @@
+## v0.181.206 - deliverable tasks, and refusing to score them
+
+The last piece asked for: tasks that ask for a thing to be **built**, which is
+what a model is for here and the one thing none of the other suites measured.
+Ten of them, from the work this ecosystem actually does rather than a public
+benchmark's domains - a RemoteEvent that trusts its client, a per-character
+connection leak that accumulates over respawns, pivots that arrive rotated,
+a Blender batch export that has to leave the scene as it was, an asyncio
+per-host pacer, a SQLite migration on a live database, a DataStore save that
+survives a shutdown, a diagnosis plan for a benchmark run that came in 11 points
+low, a JSONL checker, and a diff review whose bug is a mutable default argument.
+A model that cannot do these cannot run this ecosystem, which is the question:
+if the model changes, will the work still get done.
+
+**The hard part was not writing the tasks, it was making sure nothing scores
+them.** A deliverable has no answer key, and the two scorers that would fire on
+it both lie: `answer_score` is a length heuristic that returns 1.0 for anything
+over twenty characters, and `code_score` only compiles. That is precisely the
+needle fault of v0.181.199, where a model that found nothing scored 100. So a
+case marked `deliverable` gets `score: None` - not zero, because a zero is a
+judgement too - and the comparison is the only thing said about it.
+
+That refusal had to reach the run average, which is where this could have gone
+wrong quietly: the average divided the score total by the number of cases
+**done**, so an unscored case left in that denominator would have lowered every
+mixed run, and changing the arithmetic carelessly would have moved every
+existing suite's number. There is a separate denominator now, the suites with
+answer keys come out identical, and a run holding deliverables says in its note
+that they are not scored and what to do instead. A test reads the parsed source
+to assert the old divisor is gone, because the fault would have been arithmetic
+that looks right.
+
+**Eval tier 4** is the comparison, and it is the same protocol as tier 2 - both
+orders, blind, no model judging itself, style measured and reported - with one
+addition: the judge is shown **each task's acceptance criteria**, read from the
+suite the runs were built with rather than from today's source, so a criterion
+edited since cannot judge work that was never asked for it. That is the
+difference between a comparison and a preference poll: a judge asked "which is
+better" answers with its taste, and a judge asked "which meets these" answers
+about the work. Every task carries at least three criteria and one with none is
+dropped at build time.
+
+Each criterion is written from a failure this project has actually hit, which is
+why they are specific enough to disagree with: the price must come from a
+server-side table, the per-character connections must be disconnected on
+character removal and not only on leave, the migration must read
+`PRAGMA table_info` rather than catch an error, the save must bind to game close
+because a server can shut down with players still in it.
+
+Refusals, each because it is how this would mislead: two runs of different
+suites are refused rather than lined up by position, a run compared with itself
+is refused, a task only one run produced is skipped with its reason instead of
+scored a loss, a run that stored no deliverables says it ran before this release
+rather than returning an empty result, and an empty comparison does not claim it
+fell back on taste - it compared nothing, which is a different sentence.
+
+Nothing a model writes is executed. A Luau deliverable is prose to this router,
+and running model-written code remains a separate decision with a sandbox behind
+it.
+
+One test defect of my own, found by the gate the same way as yesterday's: the
+tier 2 panel assertion anchored on the first "Pairwise" in the page, and this
+release added a button whose tooltip points at that panel by name - earlier in
+the file - so the window moved onto itself. The same fragility as the byte-offset
+assertion in v0.181.199, and anchored on the heading now.
+
 ## v0.181.205 - the judge protocol: which of two, judged both ways round
 
 Eval tier 2 (pairwise with style control) and tier 4 (blind deliverable
