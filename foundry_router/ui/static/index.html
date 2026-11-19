@@ -9276,14 +9276,33 @@ async function tabBench() {
         <span class="hint" id="bench-cmp-msg"></span></div>`
       : '<p class="hint">No runs yet.</p>'}
     <div id="bench-detail"></div>`;
-  // what the corpus actually has, so the tags box is a choice rather than a guess
-  try {
-    const tg = await api("bench/tags");
-    window._pickerOptions = window._pickerOptions || {};
-    window._pickerOptions.benchTags = (tg.tags || []).map(
-      t => ({value: t.tag, hint: `${t.cases} case(s)`}));
-  } catch (e) { /* the store may not be prepared yet; the box still takes typing */ }
+  // What the corpus actually has — fetched when the box is first used, NOT on
+  // render: it is the same full walk building a suite does and took over two
+  // minutes on the live corpus, so firing it per glance at the tab hung the
+  // page (v0.181.202).
+  window._pickerOptions = window._pickerOptions || {};
+  window._pickerOptions.benchTags = window._pickerOptions.benchTags || [];
   enhancePickers($("#main"));
+  if ($("#bs-tags")) {
+    let asked = false;
+    $("#bs-tags").addEventListener("focus", async () => {
+      if (asked) return;
+      asked = true;
+      const was = $("#bs-tags").placeholder;
+      $("#bs-tags").placeholder = "reading the corpus…";
+      try {
+        const tg = await api("bench/tags");
+        window._pickerOptions.benchTags = (tg.tags || []).map(
+          t => ({value: t.tag, hint: `${t.cases} case(s)`}));
+        $("#bs-tags").placeholder = (tg.tags || []).length
+          ? (tg.tags || []).slice(0, 3).map(t => t.tag).join(", ") + "…"
+          : was;
+      } catch (e) {
+        asked = false;                       // let a second try happen
+        $("#bs-tags").placeholder = was;
+      }
+    }, {once: false});
+  }
   $("#bs-build").onclick = async () => {
     $("#bs-msg").textContent = "cutting the cases…";
     try {

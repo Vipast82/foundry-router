@@ -16,6 +16,7 @@ a tags filter all along and the console's form passed it, so the feature existed
 and nothing said which tags there were.
 """
 import json
+import os
 
 import pytest
 
@@ -166,3 +167,89 @@ def test_the_console_offers_the_tags_rather_than_a_free_text_box():
     assert 'data-options="benchTags"' in html[i:i + 200]
     assert "_pickerOptions.benchTags" in html
     assert "bench/tags" in html
+
+# -- the tag count is expensive, so it is asked for once (v0.181.202) --------------
+
+def test_the_count_is_cached_against_the_store(tmp_path, monkeypatch):
+    """It walks the whole prepared store - over two minutes on the live corpus -
+    and the answer only changes when the dataset is prepared again."""
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "normalized.sqlite").write_bytes(b"x")
+    svc = type("S", (), {"db": Database(tmp_path / "t.sqlite")})()
+    monkeypatch.setattr(bench, "_dirs_for_test", None, raising=False)
+
+    walks = []
+
+    def fake_examples(_store, _sessions, _tiers):
+        walks.append(1)
+        return iter(())
+
+    import foundry_router.training_prep as tp
+    monkeypatch.setattr(tp, "_dirs", lambda _s: {"store": store})
+    monkeypatch.setattr(bench, "_examples", fake_examples)
+    monkeypatch.setattr("foundry_training.store.TrainingStore",
+                        lambda *a, **k: object())
+
+    bench._TAGS_CACHE.clear()
+    first = bench.tag_counts(svc)
+    second = bench.tag_counts(svc)
+    assert len(walks) == 1, "the second call walked the store again"
+    assert first["cached"] is False and second["cached"] is True
+    assert second["tags"] == first["tags"]
+
+    # and asking for a refresh does walk it
+    bench.tag_counts(svc, refresh=True)
+    assert len(walks) == 2
+    bench._TAGS_CACHE.clear()
+
+
+def test_a_prepared_dataset_invalidates_the_cache(tmp_path, monkeypatch):
+    store = tmp_path / "store2"
+    store.mkdir()
+    f = store / "normalized.sqlite"
+    f.write_bytes(b"x")
+    svc = type("S", (), {"db": Database(tmp_path / "t2.sqlite")})()
+    walks = []
+    import foundry_router.training_prep as tp
+    monkeypatch.setattr(tp, "_dirs", lambda _s: {"store": store})
+    monkeypatch.setattr(bench, "_examples",
+                        lambda *a: (walks.append(1), iter(()))[1])
+    monkeypatch.setattr("foundry_training.store.TrainingStore",
+                        lambda *a, **k: object())
+    bench._TAGS_CACHE.clear()
+    bench.tag_counts(svc)
+    os.utime(f, (1, 1))                       # the dataset was prepared again
+    bench.tag_counts(svc)
+    assert len(walks) == 2, "a new store must not serve the old count"
+    bench._TAGS_CACHE.clear()
+
+
+def test_the_cache_does_not_grow_without_bound(tmp_path, monkeypatch):
+    """One dataset at a time; a map keyed by mtime would grow for ever."""
+    store = tmp_path / "store3"
+    store.mkdir()
+    f = store / "normalized.sqlite"
+    f.write_bytes(b"x")
+    svc = type("S", (), {"db": Database(tmp_path / "t3.sqlite")})()
+    import foundry_router.training_prep as tp
+    monkeypatch.setattr(tp, "_dirs", lambda _s: {"store": store})
+    monkeypatch.setattr(bench, "_examples", lambda *a: iter(()))
+    monkeypatch.setattr("foundry_training.store.TrainingStore",
+                        lambda *a, **k: object())
+    bench._TAGS_CACHE.clear()
+    for i in range(5):
+        os.utime(f, (i + 1, i + 1))
+        bench.tag_counts(svc)
+    assert len(bench._TAGS_CACHE) == 1
+    bench._TAGS_CACHE.clear()
+
+
+def test_the_console_asks_for_the_tags_on_focus_not_on_render():
+    """It was fired from the tab's render and the page hung for two minutes."""
+    html = open("foundry_router/ui/static/index.html", encoding="utf-8").read()
+    i = html.index('$("#bs-tags").addEventListener("focus"')
+    block = html[i:i + 800]
+    assert 'api("bench/tags")' in block
+    # and nowhere else: the render path must not call it
+    assert html.count('api("bench/tags")') == 1

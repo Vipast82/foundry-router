@@ -1,3 +1,36 @@
+## v0.181.202 - the tag count took two minutes, and I put it in a render path
+
+Found by using the thing rather than by a test: opening Labs - Benchmark fired
+`/admin/api/bench/tags`, which had not answered after 120 seconds. `tag_counts`
+walks the whole prepared store - every project, every session, every
+conversation, building each example to read its tags - which is the same work
+building a suite does when the operator presses a button and waits for it. I
+wired it into the tab's render, so the page hung on every visit.
+
+Two fixes, because either alone leaves it wrong. The answer is cached against
+the store's mtime, so it is computed once per dataset preparation instead of
+once per glance; and the console asks for it when the tags box is first used,
+not when the tab renders. A list of tags is worth a wait when you are about to
+pick one and worth nothing when you are looking at something else.
+
+The walk itself is not made quicker. It is the same walk `build` needs, and a
+second, faster, approximate one would be a second thing to keep in step.
+
+**What the two tool suites cover, which is not the same set.** The finder suite
+is built over the tools a finder persona can actually reach: 119 of them. The
+tool-picking suite is built over the whole registry: 159. The difference is not
+a bug in either - 33 of those 159 are `ask_<model>` delegation tools, and they
+are not MCP tools. `mcp_tools_for_persona` skips anything whose kind is not
+"mcp", so `foundry_find_tools` cannot return one.
+
+Worth stating plainly because it is a fact about how this router is set up
+rather than about the benchmark: the `ask_*` tools are offered through
+`specs_for_persona`, which has exactly one caller - the brain's tool loop. So
+they reach Foundry-Local, Foundry-Chat and Foundry-Max, which run
+`execution_mode: main`, and never a strict/direct persona in finder mode. A Kilo
+persona cannot delegate to `ask_claude_opus_5`: it will not find it, because the
+finder searches MCP tools only.
+
 ## v0.181.201 - the finder benchmark: the ecosystem as it is actually run
 
 v0.181.200 put all 132 tools in the prompt and asked which one fits. That is the

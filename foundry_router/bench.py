@@ -207,17 +207,31 @@ def _examples(store, sessions, want_tiers: set):
                 yield ex
 
 
-def tag_counts(svc, tiers=("verified",)) -> dict:
+_TAGS_CACHE: dict = {}
+
+
+def tag_counts(svc, tiers=("verified",), refresh: bool = False) -> dict:
     """{tag: how many cases a suite filtered to it would hold}, so the console
-    can offer what the corpus actually has instead of a free-text box."""
+    can offer what the corpus actually has instead of a free-text box.
+
+    Cached against the store's mtime: this is the same full walk `build` does,
+    which took over two minutes on the live corpus, and the answer only changes
+    when the dataset is prepared again (v0.181.202)."""
     from foundry_training import sessions
     from foundry_training.store import TrainingStore
 
     from . import training_prep
     root = training_prep._dirs(svc)["store"]
-    if not (root / "normalized.sqlite").exists():
+    db_file = root / "normalized.sqlite"
+    if not db_file.exists():
         return {"tags": [], "cases": 0,
                 "note": "the prepared store is empty — prepare the dataset first"}
+    try:
+        key = (str(db_file), db_file.stat().st_mtime_ns, tuple(sorted(tiers or ())))
+    except OSError:
+        key = None
+    if key and not refresh and key in _TAGS_CACHE:
+        return {**_TAGS_CACHE[key], "cached": True}
     store = TrainingStore(str(root), allow_in_repo=True)
     counts: dict = {}
     seen, total = set(), 0
@@ -231,9 +245,13 @@ def tag_counts(svc, tiers=("verified",)) -> dict:
         total += len(fresh)
         for t in (ex.get("meta") or {}).get("tags") or []:
             counts[str(t)] = counts.get(str(t), 0) + len(fresh)
-    return {"cases": total,
-            "tags": [{"tag": k, "cases": v}
-                     for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]}
+    out = {"cases": total,
+           "tags": [{"tag": k, "cases": v}
+                    for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]}
+    if key:
+        _TAGS_CACHE.clear()          # one dataset at a time; never a growing map
+        _TAGS_CACHE[key] = out
+    return {**out, "cached": False}
 
 
 def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=print) -> dict:

@@ -3035,7 +3035,8 @@ async def bench_tags(request: Request, tiers: str = "verified"):
     from .. import bench
     svc = _svc(request)
     return await asyncio.to_thread(
-        bench.tag_counts, svc, tuple(t for t in tiers.split(",") if t))
+        bench.tag_counts, svc, tuple(t for t in tiers.split(",") if t),
+        str(request.query_params.get("refresh") or "") in ("1", "true"))
 
 
 @router.post("/admin/api/bench/needle")
