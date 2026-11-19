@@ -83,28 +83,43 @@ def _result(db, run_id, prompt_id, passed, answer, ptok=10, ctok=20, ms=1000, er
          E.fingerprint(answer), answer[:200]))
 
 
-def test_the_same_answer_every_time_is_full_repeatability(tmp_path):
+def test_a_steady_verdict_is_full_repeatability(tmp_path):
     db = _db(tmp_path)
     for _ in range(3):
         r = _run(db, "P")
         _result(db, r, 1, True, "1912")
         _result(db, r, 2, True, "408")
-    rate, prompts, same = B.repeat_identity(db, [r["id"] for r in db.query(
-        "SELECT id FROM eval_runs")])
-    assert (rate, prompts, same) == (1.0, 2, 2)
+    rep = B.repeatability(db, [r["id"] for r in db.query("SELECT id FROM eval_runs")])
+    assert rep["verdict"] == 1.0 and rep["prompts"] == 2 and rep["flipped"] == 0
 
 
-def test_one_prompt_that_wandered_shows_up(tmp_path):
+def test_prose_that_varies_is_not_a_wobbling_verdict(tmp_path):
+    """The first version of this board called byte-identical answers
+    "repeat-identity" and warned that every score sat on a noise floor. On the
+    first real campaign it read 6% while the verdicts agreed 81% of the time: it
+    was measuring whether a model emits the same bytes twice (v0.181.191)."""
     db = _db(tmp_path)
-    answers = ["1912", "1913", "1912"]
     ids = []
-    for a in answers:
+    for a in ("the year was 1912", "it opened in 1912", "1912, in Sheffield"):
         r = _run(db, "P")
         ids.append(r)
-        _result(db, r, 1, True, a)          # this one wandered
-        _result(db, r, 2, True, "408")      # this one did not
-    rate, prompts, same = B.repeat_identity(db, ids)
-    assert prompts == 2 and same == 1 and rate == 0.5
+        _result(db, r, 1, True, a)          # different words, same verdict
+    rep = B.repeatability(db, ids)
+    assert rep["verdict"] == 1.0            # the score does not move
+    assert rep["answers"] == 0.0            # and the text never repeated
+    assert rep["flipped"] == 0
+
+
+def test_a_verdict_that_flips_is_reported_as_the_score_s_own_movement(tmp_path):
+    db = _db(tmp_path)
+    ids = []
+    for passed in (True, False, True):
+        r = _run(db, "P")
+        ids.append(r)
+        _result(db, r, 1, passed, "x")      # this one changed its mind
+        _result(db, r, 2, True, "y")        # this one did not
+    rep = B.repeatability(db, ids)
+    assert rep["verdict"] == 0.5 and rep["flipped"] == 1 and rep["prompts"] == 2
 
 
 # -- the board ---------------------------------------------------------------------
@@ -127,7 +142,7 @@ def test_the_board_ranks_and_prices_each_persona(tmp_path):
     # cost sits beside the score, in tokens and seconds
     assert rows["Strong"]["tokens"] == 2 * 6 * 150
     assert rows["Weak"]["seconds"] == 4.0
-    assert rows["Strong"]["repeat_identity"] == 1.0
+    assert rows["Strong"]["repeat_verdict"] == 1.0
     assert "interval" in out["note"] or "tier" in out["note"]
 
 
@@ -159,14 +174,29 @@ def test_prompts_that_answered_nothing_are_counted_separately(tmp_path):
     assert row["tier"] == ""
 
 
-def test_a_wandering_board_says_so_before_any_score(tmp_path):
+def test_a_board_whose_verdicts_move_says_so_before_any_score(tmp_path):
+    db = _db(tmp_path)
+    for i in range(5):
+        r = _run(db, "A")
+        for pid in range(6):
+            # prompt 0 cannot make its mind up; the rest are steady
+            _result(db, r, pid, (i % 2 == 0) if pid == 0 else True, f"a{pid}")
+    out = B.scoreboard(db)
+    assert "verdicts repeated" in out["note"] and "run to run" in out["note"]
+    assert out["rows"][0]["flipped"] == 1
+
+
+def test_prose_variation_alone_never_raises_the_warning(tmp_path):
+    """Every answer different, every verdict the same: nothing to warn about."""
     db = _db(tmp_path)
     for a in ("x", "y", "z", "w", "v"):
         r = _run(db, "A")
         for pid in range(6):
             _result(db, r, pid, True, a + str(pid))
-    note = B.scoreboard(db)["note"]
-    assert "repeat-identity" in note and "noise floor" in note
+    out = B.scoreboard(db)
+    assert "verdicts repeated" not in out["note"], out["note"]
+    assert out["rows"][0]["repeat_verdict"] == 1.0
+    assert out["rows"][0]["repeat_answers"] == 0.0
 
 
 def test_an_ungraded_persona_never_sits_above_a_graded_one(tmp_path):
@@ -205,3 +235,51 @@ async def test_personas_are_interleaved_by_repeat(tmp_path, monkeypatch):
     row = db.query_one("SELECT * FROM eval_campaigns WHERE id=?", (cid,))
     assert row["status"] == "done" and row["repeats"] == 3
     assert json.loads(row["personas"]) == ["A", "B"]
+
+# -- a prompt asked once cannot disagree with itself (v0.181.191) ------------------
+
+def test_a_single_run_reports_no_repeatability_rather_than_perfect(tmp_path):
+    """With repeats=1 every prompt has exactly one verdict, so counting a prompt
+    as steady when it agrees with itself read 100% off evidence that contains
+    none - the same fault as a check that cannot fail an answer. It says the
+    number is not measured instead."""
+    db = Database(tmp_path / "once.sqlite")
+    r = _run(db, "P")
+    for pid in (1, 2, 3):
+        _result(db, r, pid, True, f"answer {pid}")
+    out = B.repeatability(db, [r])
+    assert out["verdict"] is None, out
+    assert out["answers"] is None, out
+    assert out["prompts"] == 0, out
+
+
+def test_only_the_repeated_prompts_are_counted(tmp_path):
+    """Two prompts asked twice, one of them flipping, and a third asked once:
+    the rate is 1 of 2, not 2 of 3."""
+    db = Database(tmp_path / "mixed.sqlite")
+    a, b = _run(db, "P"), _run(db, "P")
+    _result(db, a, 1, True, "same")
+    _result(db, b, 1, True, "same")          # steady, identical text
+    _result(db, a, 2, True, "yes it does")
+    _result(db, b, 2, False, "no it does not")   # flipped
+    _result(db, a, 3, True, "asked once")        # must not count
+    out = B.repeatability(db, [a, b])
+    assert out["prompts"] == 2, out
+    assert out["verdict"] == 0.5, out
+    assert out["flipped"] == 1, out
+    assert out["answers"] == 0.5, out
+
+
+def test_the_verdict_holds_while_the_wording_moves(tmp_path):
+    """The number the first board put up as the one a score rests on. Prose does
+    not repeat byte for byte, so the text rate is 0 while both verdicts are
+    steady, which is how it came to say every score was unfounded."""
+    db = Database(tmp_path / "prose.sqlite")
+    a, b = _run(db, "P"), _run(db, "P")
+    for pid in (1, 2):
+        _result(db, a, pid, True, f"I cannot verify that, number {pid}.")
+        _result(db, b, pid, True, f"That is not something I can confirm, {pid}.")
+    out = B.repeatability(db, [a, b])
+    assert out["verdict"] == 1.0, out
+    assert out["answers"] == 0.0, out
+    assert out["flipped"] == 0, out

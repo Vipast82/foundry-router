@@ -1,3 +1,130 @@
+## v0.181.191 - the benchmark was wrong about the models
+
+The first board said 0 of 12 on honesty for both local personas, and I reported
+that as a finding about them: that neither model will admit it does not know.
+It was a finding about these checks. Reading the twenty-four answers the campaign
+actually got, every refusal in them had been correct, three of the twelve were the
+router saying no model could answer, and the honest score is 14 of 21. One of the
+four honesty prompts really is failed by every model that answered it, which is
+what that prompt is for; the other three are passed almost every time.
+
+Three faults, and none of them is visible from an example written to suit the
+check. A typographic apostrophe: the list said "can't know", the models wrote
+"can’t know", and `in` does not care that a reader cannot tell them apart - six
+answers failed on that one character. One adverb: "can't reliably verify" contains
+neither "can't verify" nor "not reliably", so no length of phrase list can see it,
+and the modal forms are patterns now. And `refuses_to_guess:Halvorsen` failed an
+answer for naming Halvorsen while denying the paper, which is how a refusal is
+phrased - so it ignores its argument as of the first draft of this release, which
+then passed "I'm not sure, but Halvorsen argued X", the exact thing the check
+exists to catch. It takes the argument again and asks whether the answer makes a
+claim about the named thing rather than only naming it.
+
+The measurement is the point rather than the fixes. Scored against a human reading
+of those twenty-four real answers, the checks as shipped agreed 18 times; they now
+agree 24. The answers are the test fixture, curly quotes and markdown intact, each
+with the verdict a careful reader gives it, because a check that disagrees with a
+reader on real output is wrong whatever it does on a synthetic one. Both
+directions are asserted: the six confabulations in that set must still fail, since
+a detector widened until it accepts everything measures nothing and widening it is
+what fixing the first fault looked like.
+
+One objective prompt's answer key was simply false. It asked what
+`ORDER BY rowid` does on an FTS5 table and expected an error; an FTS5 table has an
+implicit rowid and orders by it perfectly well, verified against sqlite rather than
+recalled. It is the shadow table that has none, which is both the real gotcha and
+the actual bug it was written from, so that is what it asks now. A model answering
+correctly had been marked wrong.
+
+Two more checks could not fail a wrong answer, or failed a right one. Three triage
+prompts took the answer as a word, so "5 minutes" failed where "five minutes"
+passed, and they take either now. The JSON prompt's `regex:(1500|1\.5)` passed
+`{"ms": 1.5e9}` - the wrong answer by six orders of magnitude - because "1.5" is a
+substring of it; it reads the field value. And the length cap came off the one
+honesty prompt where showing your working is the right answer: the best answer of
+the whole campaign searched arXiv, said it found nothing, listed what it checked,
+and was failed for being long.
+
+Because v0.181.190 already seeded the broken set, correcting the source would have
+fixed nothing on a running router. `repair_tier_prompts` puts the corrected
+wording and checks over the seeded rows, matching each question by a fragment that
+identifies it uniquely in both sets, and only where the checks are still exactly as
+shipped - so a prompt the operator has edited is left alone and counted instead of
+overwritten. It runs once, from `ensure_seed`, and reports in the event log.
+Thirteen corrected and one left alone, against a database built to look like
+v0.181.190.
+
+The router's own failures are no longer scored as wrong answers.
+"[foundry-router] no model on this persona's route could answer: ... wrote tool
+calls that could not be read" arrives through the same field an answer does, and
+three prompts of the first campaign came back like that and went into the pass
+rate. They are a run that did not happen, which is what the error column is for.
+The underlying fault is still open: a local model wrote its tool calls as text and
+`toolcall_text.py`, which exists to read exactly that, did not fire.
+
+And the repeatability number was measuring the wrong thing. It fingerprinted the
+answer text, so on prose it reported 18% and 6% and said on that basis that every
+score sat on an unmeasured noise floor - which is true of this benchmark, but is
+not what those numbers were measuring. It reports how often a prompt's pass or
+fail came out the same across repeats, which is what a score actually rests on,
+and keeps the text-identity rate beside it because that is what explains the
+other. Recomputed over the first campaign's stored results: 94% on the verdict for
+Foundry-Local and 81% for Foundry-Kilo-Local, against 18% and 6% on the text.
+
+Checking that formula against those results rather than trusting it turned up one
+more of the same shape. It counted a prompt as steady whenever its verdicts
+agreed, and a prompt answered once agrees with itself, so a campaign run with
+repeats=1 - or a board read before the repeats finish - would have reported
+perfect stability from evidence containing none. Only prompts actually answered
+more than once count now, and with none of them the board says the number is not
+measured instead of showing 100%. It changes nothing for this campaign, which
+repeated every prompt, so those two figures stand.
+
+The same audit, turned on the nine prompts that shipped before these, found the
+same fault in three of them. "Summarize the plot of Romeo and Juliet in exactly
+three sentences" checked `no_refusal` and a 2000-character cap, so the instruction
+the prompt gives was not tested at all and an eight-sentence summary passed - there
+was no check that could count sentences, and there is one now. The JSON
+moon-landing prompt checked `valid_json` and nothing else, so `{"mission": "",
+"year": 0}` passed. "In what year was SQLite first released" checked that a URL was
+cited and never that the year was right. A fourth, the current stable Python
+version, still has no answer key because the answer moves, but it has to look like
+a version now rather than be any prose with a link in it. Every prompt this ships
+with is asserted to fail an empty answer, and to fail waffle except where not
+knowing is the right answer - which is itself a correction, since the first
+version of that test asserted waffle should fail everywhere and failed on the
+honesty prompts, the ones that exist to reward it.
+
+Three faults in the sentence counter written for the first of those, all found by
+checking it rather than reading it, and one worth naming: the backtick was in the
+quote-flattening map added earlier in this release, so every code fence was
+destroyed before anything could strip one, and `code` was silently rewritten as
+'code' everywhere an answer was compared or fingerprinted. U+0060 is code syntax,
+not a quote. The other two were a split that did not require whitespace after a
+full stop, which made "1.5 seconds" two sentences and a URL three.
+
+`Foundry-Kilo-Local` has every tool under the finder now, `["*"]` with
+`mcp_tool_mode: finder`, matching the other two local personas - about 400 tokens
+of offer instead of 13k of definitions. It had an empty grant list, which is not
+"the default set" but no tools at all, so a persona meant to search before it
+answers could not, and three of its honesty answers are the router failing to read
+tool calls it should not have been making blind.
+
+The checks picker in Labs offered four of the twelve checks the harness runs. An
+operator editing a prompt could pick `code_block`, `cites_source`, `valid_json`
+and `no_refusal` and type a length or a `mentions:`, and had no way to reach
+`answer:`, `regex:`, `not_regex:`, `not_mentions:`, `admits_uncertainty` or
+`refuses_to_guess:` - which is to say the checks that make an objective or an
+honesty prompt work were config-file-only, and the prompts I had just rewritten
+could not have been written in the GUI at all. All twelve are in the picker now,
+with the tooltip saying what each does and that an unknown check is skipped
+rather than failed.
+
+Not fixed: the text-tool-call failure above, and `perf_samples` still stamps
+`first_token_at` before `sent_at` under load. Still not here: pairwise comparison
+with style control, and blind deliverable comparison, both needing a judge protocol
+rather than a check.
+
 ## v0.181.190 - a scoreboard: the same prompts, every persona, ranked into tiers
 
 The eval harness could say "did this change break this persona". It could not say
@@ -2155,7 +2282,7 @@ Test: `tests/coordinator/test_studio_gate_calls.py::test_a_verify_still_syncing_
 
 ## v0.181.50 — a TEST place closed mid-gate reopens Studio instead of waiting
 
-On 2026-11-04 at 03:03 UTC, Roblox HTTP errors closed POL-2's TEST place in Studio partway through its scripted gate. The gate ended with `GateRunner.run tool error: The requested \`studio_id\` is not connected - that Roblox Studio instance may have been closed or its place unloaded`. No autoheal pattern matched: in `studio_id`, the underscore defeats `studio`. So the Studio auto-reopen (`[studio] auto_reopen`, on) never ran, and the Lead deferred the case as "environment" and only waited. The `studio_reload` signature now also matches that MCP wording (`studio_id is not connected`, `Studio instance may have been closed`, `its place unloaded`), so the stop gets the same place reopen as "Place is not open".
+On 2026-11-04 at 03:03 UTC, Roblox HTTP errors closed POL-2's TEST place in Studio partway through its scripted gate. The gate ended with `GateRunner.run tool error: The requested \`studio_id\` is not connected - that Roblox Studio instance may have been closed or its place unloaded`. No autoheal pattern matched: in `studio_id`, the underscore defeats `\bstudio\b`. So the Studio auto-reopen (`[studio] auto_reopen`, on) never ran, and the Lead deferred the case as "environment" and only waited. The `studio_reload` signature now also matches that MCP wording (`studio_id is not connected`, `Studio instance may have been closed`, `its place unloaded`), so the stop gets the same place reopen as "Place is not open".
 
 Test: `tests/coordinator/test_revamp_lead.py::test_a_place_closed_mid_gate_reopens_studio`. Takes effect after the coordinator restart.
 
@@ -3563,7 +3690,7 @@ is on; with it on, `blender.journal_local` (on by default) adds these runs.
     engine reads its transcript, and once more when the session settles.
   - **Which calls:** each completed `bash` call that starts Blender on this PC becomes one journal
     entry (`local-<part id>`, once per call):
-    - `& $b -b … -P …`, the guard's `-- "$b" -b …`, `& "…lender.exe" …`, `blender -b …`;
+    - `& $b -b … -P …`, the guard's `-- "$b" -b …`, `& "…lender.exe" …`, `blender -b …`;
     - or a tool in `blender.journal_tools` (`selftest_all.py`).
   - **Skipped:** foundry-blender calls (they journal themselves), and commands that only mention
     Blender (git, plain Python, PowerShell searches: `-Path` is not `-P`).

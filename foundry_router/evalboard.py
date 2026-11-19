@@ -83,30 +83,59 @@ def tier_of(rows: list) -> list:
     return out
 
 
-def _fingerprint(db, run_ids: list) -> dict:
-    """(prompt_id -> set of answer fingerprints) across these runs."""
-    if not run_ids:
-        return {}
-    q = ",".join("?" * len(run_ids))
-    seen: dict = {}
-    for r in db.query(f"SELECT prompt_id, answer_hash FROM eval_results "
-                      f"WHERE run_id IN ({q})", run_ids):
-        seen.setdefault(r["prompt_id"], set()).add(r["answer_hash"] or "")
-    return seen
+def repeatability(db, run_ids: list) -> dict:
+    """How much of this persona's score would move if the runs were done again.
 
+    Two things, and only the first belongs on a board:
 
-def repeat_identity(db, run_ids: list) -> tuple:
-    """(rate, prompts, prompts that answered identically every time).
+    `verdict` is how often a prompt's pass/fail came out the same in every
+    repeat. That is what a score rests on, and 0.81 means about one prompt in
+    five changed its mind, so the score moves by roughly that share of a prompt
+    each time.
 
-    1.0 means every prompt gave the same answer in every repeat. Anything less
-    is the noise floor under the rest of the board, and it is reported rather
-    than smoothed away.
+    `answers` is how often the text came back identical, and it is near zero for
+    any prose answer, because prose varies. The first version of this board put
+    that number up as "repeat-identity" and said every score sat on an unmeasured
+    noise floor - on the first real campaign it read 6% and 18% while the
+    verdicts agreed 81% and 94% of the time. It was measuring whether a model
+    emits the same bytes twice, which is not news and not what anyone was asking.
+    It is kept because it explains the other number, and labelled for what it is
+    (v0.181.191).
+
+    Only prompts answered more than once count. A prompt asked a single time
+    cannot disagree with itself, and counting it as steady is the same fault as a
+    check that cannot fail an answer: a campaign with repeats=1, or one read
+    before its repeats finish, would have reported perfect stability from
+    evidence that contains none. It returns None instead, so the board says the
+    number is not measured rather than showing 100%.
     """
-    seen = _fingerprint(db, run_ids)
-    if not seen:
-        return None, 0, 0
-    same = sum(1 for v in seen.values() if len(v) == 1)
-    return same / len(seen), len(seen), same
+    out = {"verdict": None, "answers": None, "prompts": 0, "flipped": 0}
+    if not run_ids:
+        return out
+    q = ",".join("?" * len(run_ids))
+    verdicts: dict = {}
+    answers: dict = {}
+    for r in db.query(f"SELECT prompt_id, shape_pass, answer_hash FROM eval_results "
+                      f"WHERE run_id IN ({q})", run_ids):
+        verdicts.setdefault(r["prompt_id"], set()).add(int(r["shape_pass"] or 0))
+        answers.setdefault(r["prompt_id"], set()).add(r["answer_hash"] or "")
+    if not verdicts:
+        return out
+    # how many times each prompt was actually answered
+    seen: dict = {}
+    for r in db.query(f"SELECT prompt_id, COUNT(*) AS n FROM eval_results "
+                      f"WHERE run_id IN ({q}) GROUP BY prompt_id", run_ids):
+        seen[r["prompt_id"]] = int(r["n"] or 0)
+    repeated = [p for p, n in seen.items() if n > 1]
+    out["prompts"] = len(repeated)
+    if not repeated:
+        return out            # nothing was repeated, so nothing is measured
+    steady = sum(1 for p in repeated if len(verdicts.get(p, {0})) == 1)
+    same = sum(1 for p in repeated if len(answers.get(p, {""})) == 1)
+    out.update({"verdict": steady / len(repeated),
+                "answers": same / len(repeated),
+                "flipped": len(repeated) - steady})
+    return out
 
 
 def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
@@ -139,7 +168,7 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
         n = int(agg.get("n") or 0)
         passed = int(agg.get("passed") or 0)
         lo, hi = wilson(passed, n)
-        rate, prompts, same = repeat_identity(db, ids)
+        rep = repeatability(db, ids)
         rows.append({
             "persona": persona, "runs": len(ids), "scored": n,
             "passed": passed,
@@ -150,15 +179,19 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
             "judge": round(float(agg["judge"]), 2) if agg.get("judge") is not None else None,
             "seconds": round(float(agg.get("ms") or 0) / 1000.0, 1),
             "tokens": int(agg.get("ptok") or 0) + int(agg.get("ctok") or 0),
-            "repeat_identity": None if rate is None else round(rate, 3),
-            "repeat_prompts": prompts,
+            # the pass/fail verdict repeating is what a score rests on; the text
+            # coming back identical is mostly a fact about prose
+            "repeat_verdict": None if rep["verdict"] is None else round(rep["verdict"], 3),
+            "repeat_answers": None if rep["answers"] is None else round(rep["answers"], 3),
+            "repeat_prompts": rep["prompts"],
+            "flipped": rep["flipped"],
         })
     # ungraded rows last whatever their score: a 95% off two prompts is not a
     # result, and putting it above a graded row would read as one
     rows.sort(key=lambda r: (r["scored"] < MIN_FOR_TIERS, -r["score"], r["persona"]))
     rows = tier_of(rows)
-    worst = min([r["repeat_identity"] for r in rows
-                 if r["repeat_identity"] is not None] or [None], default=None)
+    worst = min([r["repeat_verdict"] for r in rows
+                 if r["repeat_verdict"] is not None] or [None], default=None)
     notes = []
     if rows and max(r["scored"] for r in rows) < MIN_FOR_TIERS:
         notes.append(f"fewer than {MIN_FOR_TIERS} scored prompts: no tiers given")
@@ -168,9 +201,11 @@ def scoreboard(db, campaign_id: Optional[int] = None, hours: float = 0) -> dict:
                      f"models inside one tier are not separated by this evidence, "
                      f"and more prompts, not a finer ranking, is what narrows it")
     if worst is not None and worst < 1.0:
-        notes.append(f"repeat-identity {worst:.0%}: the same prompt did not always "
-                     f"give the same answer, so every score here sits on an "
-                     f"unmeasured noise floor")
+        flipped = max((r["flipped"] for r in rows), default=0)
+        notes.append(f"verdicts repeated {worst:.0%} of the time - up to {flipped} "
+                     f"prompt(s) per persona passed in one repeat and failed in "
+                     f"another, which is the score's own movement run to run and "
+                     f"is separate from the interval")
     return {"rows": rows, "note": " | ".join(notes),
             "min_for_tiers": MIN_FOR_TIERS}
 

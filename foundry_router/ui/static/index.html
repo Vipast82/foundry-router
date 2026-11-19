@@ -711,10 +711,20 @@ document.addEventListener("mouseout", e => {
 // The input stays the source of truth (hidden, same format as before), so
 // existing load/save code is unchanged; assigning input.value re-renders.
 window._pickerOptions = window._pickerOptions || {};
+// Every check run_shape_checks implements, because the ones missing here were the
+// ones that make an objective or honesty prompt work and were unreachable from
+// the GUI (v0.181.191).
 window._pickerOptions.evalChecks = ["code_block", "cites_source", "valid_json", "no_refusal",
+  "admits_uncertainty",
   {value: "min_length:200", hint: "edit the number, Enter", template: true},
   {value: "max_length:2000", hint: "edit the number, Enter", template: true},
-  {value: "mentions:", hint: "type the word, Enter", template: true}];
+  {value: "sentences:3", hint: "exact number of sentences, Enter", template: true},
+  {value: "mentions:", hint: "type the word, Enter", template: true},
+  {value: "not_mentions:", hint: "fails if this word appears, Enter", template: true},
+  {value: "answer:", hint: "the whole answer, ignoring case and markup", template: true},
+  {value: "regex:", hint: "must match; (?i) for case-insensitive", template: true},
+  {value: "not_regex:", hint: "fails if this matches", template: true},
+  {value: "refuses_to_guess:", hint: "the invented thing it must not claim about", template: true}];
 const _valueDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
 function _pickParse(raw, fmt) {
   raw = (raw || "").trim();
@@ -9414,10 +9424,14 @@ async function tabEvals() {
       <td class="nw mono">${r.score.toFixed(1)}%</td>
       <td class="nw hint">±${(r.interval / 2).toFixed(0)}</td>
       <td class="nw">${r.judge == null ? "—" : r.judge.toFixed(1) + "/10"}</td>
-      <td class="nw">${r.repeat_identity == null ? "—"
-        : `<span class="pill ${r.repeat_identity >= 1 ? "ok" : "warn"}"
-             title="how often a repeat of the same prompt gave the same answer">
-             ${Math.round(r.repeat_identity * 100)}%</span>`}</td>
+      <td class="nw">${r.repeat_verdict == null ? "—"
+        : `<span class="pill ${r.repeat_verdict >= 0.95 ? "ok" : "warn"}"
+             title="how often a prompt's pass/fail came out the same in every repeat${
+               r.flipped ? ` — ${r.flipped} prompt(s) changed their mind` : ""}${
+               r.repeat_answers == null ? "" :
+               `. Identical text: ${Math.round(r.repeat_answers * 100)}%, which is low for
+                any prose answer and is not what the score rests on`}">
+             ${Math.round(r.repeat_verdict * 100)}%</span>`}</td>
       <td class="nw mono">${(r.tokens || 0).toLocaleString()}</td>
       <td class="nw mono">${(r.seconds || 0).toFixed(1)} s</td>
       <td class="nw">${r.runs} × ${r.scored}${r.silent
@@ -9439,8 +9453,10 @@ async function tabEvals() {
       the tier above. Two personas three points apart on a handful of prompts are one
       tier, and saying so is the honest answer — add prompts to separate them, because
       a finer ranking of the same evidence is invented precision. The dark bar inside
-      each row is that interval. <b>Repeat</b> is how often asking the same prompt again
-      gave the same answer: below 100% every score here sits on a noise floor.
+      each row is that interval. <b>Repeat</b> is how often a prompt's pass/fail came
+      out the same in every repeat — the score's own movement run to run, separate from
+      the interval. (Whether the <i>text</i> came back identical is in the tooltip and is
+      near zero for any prose answer, which is a fact about prose and not a fault.)
       Cost is tokens and seconds, never money — this router cannot know a
       subscription's marginal price.</p>
     ${bd.note ? `<p class="hint"><b>Read this first:</b> ${esc(bd.note)}</p>` : ""}
@@ -9501,7 +9517,7 @@ async function tabEvals() {
           <option>objective</option><option>honesty</option></select>
         <label>enabled</label><input type="checkbox" id="ep-on" checked></div>
       <div class="row"><label>prompt</label><input id="ep-prompt" size="90"></div>
-      <div class="row"><label title="JSON list. Available: code_block, cites_source, valid_json, no_refusal, min_length:N, max_length:N, mentions:word">checks</label>
+      <div class="row"><label title="JSON list, all ANDed. code_block, cites_source, valid_json, no_refusal, admits_uncertainty (says it does not know - the pass for a question with no answer), min_length:N, max_length:N, sentences:N, mentions:word, not_mentions:word, answer:exact, regex:pat, not_regex:pat, refuses_to_guess:thing (admits uncertainty AND makes no claim about thing). An unknown check is skipped, not failed.">checks</label>
         <input id="ep-checks" data-multi="json" data-options="evalChecks" value='["no_refusal"]' placeholder="pick checks; min_length:N etc. can be typed"></div>
       <div class="row"><button class="act primary" id="ep-save">Save prompt</button></div>
     </div>`;
