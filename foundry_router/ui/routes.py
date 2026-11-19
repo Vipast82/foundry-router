@@ -3068,6 +3068,46 @@ async def eval_run(request: Request):
     return {"ok": True, "started": True}
 
 
+@router.post("/admin/api/eval/campaign")
+async def eval_campaign(request: Request):
+    """The same prompts across several personas, repeated, so the scoreboard can
+    rank them: {personas: [...], repeats, categories, judge_model, name} - or
+    {stop: true}."""
+    import asyncio
+
+    from .. import evalboard
+    svc = _svc(request)
+    b = await request.json()
+    if b.get("stop"):
+        return {"ok": True, "run": evalboard.stop()}
+    if evalboard.running():
+        return JSONResponse({"error": "a campaign is already running"}, status_code=409)
+    names = [str(p) for p in (b.get("personas") or []) if str(p or "").strip()]
+    missing = [p for p in names if svc.personas.get(p) is None]
+    if missing:
+        return JSONResponse({"error": f"no persona named {missing[0]!r}"}, status_code=404)
+    if not names:
+        return JSONResponse({"error": "pick at least one persona"}, status_code=400)
+    task = asyncio.get_running_loop().create_task(evalboard.run_campaign(
+        svc, names, int(b.get("repeats") or 3), b.get("categories") or None,
+        str(b.get("judge_model") or ""), str(b.get("name") or "")))
+    svc._eval_tasks = [t for t in svc._eval_tasks if not t.done()] + [task]
+    return {"ok": True, "started": True, "run": evalboard.status()}
+
+
+@router.get("/admin/api/eval/scoreboard")
+async def eval_scoreboard(request: Request, campaign_id: int = 0, hours: float = 0):
+    """Every persona on one board: pass rate with its interval, tier, what it
+    cost. Repeatability first, because a board without it has an unmeasured
+    noise floor under every number."""
+    from .. import evalboard
+    svc = _svc(request)
+    return {**await asyncio.to_thread(evalboard.scoreboard, svc.db,
+                                      campaign_id or None, hours),
+            "campaigns": await asyncio.to_thread(evalboard.campaigns, svc.db, 20),
+            "run": evalboard.status()}
+
+
 @router.get("/admin/api/eval/runs")
 async def eval_runs(request: Request, persona: str = ""):
     return {"runs": _svc(request).evals.runs(persona or None)}

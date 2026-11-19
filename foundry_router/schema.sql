@@ -348,6 +348,20 @@ CREATE TABLE IF NOT EXISTS eval_results (
 
 CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
 
+-- A campaign: the same prompts, repeated, across several personas, so the
+-- scoreboard can rank them into tiers instead of reading one run at a time
+-- (evalboard.py)
+CREATE TABLE IF NOT EXISTS eval_campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  name TEXT,
+  personas TEXT,                    -- JSON list
+  repeats INTEGER,                  -- runs per persona; >1 measures repeatability
+  categories TEXT,                  -- JSON list, [] = each persona's default
+  judge_model TEXT,
+  status TEXT                       -- running | done | stopped | failed
+);
+
 -- Semantic response cache (quality spec Phase 3) -------------------------------
 -- Embeddings are little-endian float32 BLOBs (the format sqlite-vec's
 -- vec_distance_cosine consumes directly when the extension loads; the Python

@@ -670,6 +670,13 @@ class Database:
             ("bench_results", "recalled", "TEXT DEFAULT ''"),
             ("bench_runs", "lessons", "INTEGER DEFAULT 0"),
             ("lessons", "scope", "TEXT DEFAULT ''"),
+            ("eval_runs", "campaign_id", "INTEGER"),
+            ("eval_results", "prompt_tokens", "INTEGER DEFAULT 0"),
+            ("eval_results", "completion_tokens", "INTEGER DEFAULT 0"),
+            # an answer fingerprint, so asking the same prompt twice can be
+            # compared without storing every answer in full
+            ("eval_results", "answer_hash", "TEXT DEFAULT ''"),
+            ("eval_results", "answer_head", "TEXT DEFAULT ''"),
             ("personas", "lessons", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),

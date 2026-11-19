@@ -1,3 +1,59 @@
+## v0.181.190 - a scoreboard: the same prompts, every persona, ranked into tiers
+
+The eval harness could say "did this change break this persona". It could not say
+"which of these is better", which needs the same prompts, repeated, across every
+candidate, with the spread reported rather than hidden. Labs - Evals opens on a
+board now: tier, pass rate with its interval drawn inside the bar, judge score,
+repeatability, tokens, seconds.
+
+Three things it refuses to do, each because it is how a report like this misleads.
+
+**It ranks clusters, not models.** A persona drops a tier only when its whole 95%
+interval sits below the leader of the tier above, so a tier means "not separated
+from the best of this group by this evidence". Two personas three points apart on
+nine prompts are one tier, and the board says so rather than ordering them. The
+interval is Wilson, not the textbook normal one, because the textbook one turns 8
+of 8 into "100%, no doubt" - it reads 68-100% here. Under five scored prompts no
+tier is given at all, and the note says the widest interval in points, because
+what narrows it is more prompts and never a finer ranking of the same evidence.
+
+**It reports repeatability before any score.** Each answer is fingerprinted, so a
+repeat that said something else is visible: the board shows the repeat-identity
+rate per persona and, when it is below 1.0, says in words that every number on it
+sits on an unmeasured noise floor. This router's own benchmark moves about five
+points between identical runs and about nine per case, so that is the normal case
+and not an edge one.
+
+**It puts cost beside score, in tokens and seconds, never money.** A subscription
+has no marginal price this router can know, so it does not invent one.
+
+Fourteen prompts come with it, in three categories asked of every persona because
+none of them is a speciality: `triage` is a famous riddle with its trap removed,
+so the remembered answer is the wrong one and a model that pattern-matches rather
+than reads fails; `objective` has a checkable answer; `honesty` asks about things
+that do not exist, where the only pass is saying so, and is the one a confident
+model reliably fails. Five checks serve them - `answer:`, `regex:`,
+`not_mentions:`, `admits_uncertainty` and `refuses_to_guess:`, the last failing a
+model that hedges and then names the invented thing anyway. A judge is another
+model's opinion, which is right for "is this good writing" and wrong for "is this
+the right answer".
+
+Two things would have made all of it a no-op here, both the same shape as the
+other faults found this week. The prompt seed was flagged "seed once, never
+again", so the new prompts would have existed only on a database created after
+them and every running router would have shown an evaluation suite with none of
+them in it; the flag is per set now, and a prompt the operator deleted still
+stays deleted. And the three new categories were in no persona's defaults, so
+nothing would have asked them; `default_categories` returns the persona's own
+category plus those three, which makes every persona's own eval runs longer - 16
+or 17 prompts where there were 2 or 3 - and is the point, since the old runs were
+too thin to rank anything. One test asserted the speciality alone and now asserts
+the new contract with the reason written into it.
+
+Not here yet: pairwise comparison with style control, and blind deliverable
+comparison. Both need a judge protocol rather than a check, and neither is
+started.
+
 ## v0.181.189 - a rule reaches only the work it names
 
 Seven approved rules went into every prompt of a persona that runs code sprints

@@ -9362,8 +9362,9 @@ window.showBenchResults = async id => {
   $("#bench-detail").scrollIntoView({behavior: "smooth", block: "nearest"});
 };
 async function tabEvals() {
-  const [pd, md, rd, ed] = await Promise.all([
-    api("personas"), api("models"), api("eval/runs"), api("eval/prompts")]);
+  const [pd, md, rd, ed, bd] = await Promise.all([
+    api("personas"), api("models"), api("eval/runs"), api("eval/prompts"),
+    api("eval/scoreboard").catch(() => ({rows: [], note: "", campaigns: []}))]);
   const personaOpts = pd.personas.filter(p => p.enabled)
     .map(p => `<option>${esc(p.virtual_name)}</option>`).join("");
   const judgeOpts = ['<option value="">— shape checks only (no judge) —</option>']
@@ -9389,7 +9390,87 @@ async function tabEvals() {
     <td class="nw"><button class="act" onclick="editEvalPrompt(${p.id})">edit</button>
       <button class="act" onclick='run(api("eval/prompts/delete",{method:"POST",body:{id:${p.id}}}))'>delete</button></td>
     </tr>`).join("");
+  // ---- the scoreboard: every persona on one board, ranked into tiers ----------
+  const TIER_HUE = {S: "var(--ok)", A: "var(--ok)", B: "var(--warn)",
+                    C: "var(--warn)", D: "var(--bad)", E: "var(--bad)", F: "var(--bad)"};
+  const boardRows = (bd.rows || []).map(r => {
+    const w = Math.max(0, Math.min(100, r.score));
+    const lo = Math.max(0, Math.min(100, r.lo * 100));
+    const hi = Math.max(0, Math.min(100, r.hi * 100));
+    return `<tr>
+      <td class="nw">${r.tier
+        ? `<span class="pill" style="background:${TIER_HUE[r.tier] || "var(--line)"};
+             color:#000;font-weight:700">${r.tier}</span>`
+        : '<span class="pill" title="not enough scored prompts to grade">—</span>'}</td>
+      <td class="nw">${esc(r.persona)}</td>
+      <td style="min-width:220px">
+        <div style="position:relative;height:16px;background:var(--line);border-radius:3px">
+          <div style="position:absolute;left:0;top:0;height:16px;width:${w}%;
+                      background:var(--accent);border-radius:3px"></div>
+          <div title="95% interval: ${lo.toFixed(0)}–${hi.toFixed(0)}%"
+               style="position:absolute;left:${lo}%;width:${Math.max(1, hi - lo)}%;
+                      top:5px;height:6px;background:var(--fg);opacity:.45"></div>
+        </div></td>
+      <td class="nw mono">${r.score.toFixed(1)}%</td>
+      <td class="nw hint">±${(r.interval / 2).toFixed(0)}</td>
+      <td class="nw">${r.judge == null ? "—" : r.judge.toFixed(1) + "/10"}</td>
+      <td class="nw">${r.repeat_identity == null ? "—"
+        : `<span class="pill ${r.repeat_identity >= 1 ? "ok" : "warn"}"
+             title="how often a repeat of the same prompt gave the same answer">
+             ${Math.round(r.repeat_identity * 100)}%</span>`}</td>
+      <td class="nw mono">${(r.tokens || 0).toLocaleString()}</td>
+      <td class="nw mono">${(r.seconds || 0).toFixed(1)} s</td>
+      <td class="nw">${r.runs} × ${r.scored}${r.silent
+        ? ` <span class="pill bad" title="prompts that got no answer at all">${r.silent} silent</span>` : ""}</td>
+    </tr>`;
+  }).join("");
+  const campOpts = ['<option value="">— every run —</option>'].concat(
+    (bd.campaigns || []).map(c =>
+      `<option value="${c.id}">#${c.id} ${esc(c.name || "")} (${esc(c.status)})</option>`)
+  ).join("");
+  const personaChecks = pd.personas.filter(p => p.enabled).map(p =>
+    `<label class="hint" style="margin-right:10px"><input type="checkbox" class="ev-camp-p"
+       value="${esc(p.virtual_name)}"> ${esc(p.virtual_name)}</label>`).join("");
+
   $("#main").innerHTML = `
+    <h2>Scoreboard — every persona on the same prompts, ranked into tiers</h2>
+    <p class="hint">A tier is <b>"not separated from the best of its group by this
+      evidence"</b>: a persona drops a tier only when its whole 95% interval sits below
+      the tier above. Two personas three points apart on a handful of prompts are one
+      tier, and saying so is the honest answer — add prompts to separate them, because
+      a finer ranking of the same evidence is invented precision. The dark bar inside
+      each row is that interval. <b>Repeat</b> is how often asking the same prompt again
+      gave the same answer: below 100% every score here sits on a noise floor.
+      Cost is tokens and seconds, never money — this router cannot know a
+      subscription's marginal price.</p>
+    ${bd.note ? `<p class="hint"><b>Read this first:</b> ${esc(bd.note)}</p>` : ""}
+    <div class="card">
+      <div class="row" style="flex-wrap:wrap;gap:6px 12px">
+        <label>campaign</label><select id="ev-camp">${campOpts}</select>
+        <button class="act" id="ev-board-refresh">Refresh</button>
+        <span class="hint">${bd.run && bd.run.state === "running"
+          ? `running: ${esc(bd.run.persona || "")} ${bd.run.done}/${bd.run.total}`
+          : "idle"}</span>
+      </div>
+    </div>
+    <table><tr><th>tier</th><th>persona</th><th>pass rate</th><th></th><th>±pts</th>
+      <th>judge</th><th>repeat</th><th>tokens</th><th>avg</th><th>runs × scored</th></tr>
+      ${boardRows || '<tr><td colspan="10" class="hint">no finished runs yet — start a campaign below</td></tr>'}</table>
+    <div class="card">
+      <h2 style="margin-top:0">New campaign — the same prompts, repeated, across personas</h2>
+      <p class="hint">Repeats are what measure repeatability; 3 is the minimum worth
+        reporting and 5 is better. Personas run interleaved by repeat, not one after
+        another, so a machine that warms up or gets busy half way through does not hand
+        all of that to whichever persona happened to run then.</p>
+      <div class="row" style="flex-wrap:wrap">${personaChecks}</div>
+      <div class="row">
+        <label>repeats</label><input type="number" id="ev-camp-reps" value="3" min="1" max="10" style="width:70px">
+        <label>judge</label><select id="ev-camp-judge">${judgeOpts}</select>
+        <label>name</label><input type="text" id="ev-camp-name" placeholder="optional">
+        <button class="act primary" id="ev-camp-run">Start campaign</button>
+        <button class="act" id="ev-camp-stop">Stop</button>
+      </div>
+    </div>
     <h2>Eval harness — score a persona's real routing output</h2>
     <p class="hint">Runs the category's test prompts through the persona's actual routing path.
       Shape checks are deterministic pass/fail (code block present, source cited, valid JSON,
@@ -9416,7 +9497,8 @@ async function tabEvals() {
       <input type="hidden" id="ep-id" value="">
       <div class="row"><label>category</label>
         <select id="ep-cat"><option>coding</option><option>chat</option>
-          <option>research</option><option>rag</option></select>
+          <option>research</option><option>rag</option><option>triage</option>
+          <option>objective</option><option>honesty</option></select>
         <label>enabled</label><input type="checkbox" id="ep-on" checked></div>
       <div class="row"><label>prompt</label><input id="ep-prompt" size="90"></div>
       <div class="row"><label title="JSON list. Available: code_block, cites_source, valid_json, no_refusal, min_length:N, max_length:N, mentions:word">checks</label>
@@ -9424,6 +9506,28 @@ async function tabEvals() {
       <div class="row"><button class="act primary" id="ep-save">Save prompt</button></div>
     </div>`;
   window._evalPrompts = Object.fromEntries(ed.prompts.map(p => [p.id, p]));
+  $("#ev-board-refresh").onclick = async () => {
+    const id = $("#ev-camp").value;
+    const bd2 = await api("eval/scoreboard" + (id ? `?campaign_id=${id}` : ""));
+    bd.rows = bd2.rows; bd.note = bd2.note; bd.run = bd2.run;
+    tabEvals();
+  };
+  $("#ev-camp-run").onclick = async () => {
+    const personas = [...document.querySelectorAll(".ev-camp-p:checked")].map(c => c.value);
+    if (!personas.length) { toast("pick at least one persona", true); return; }
+    try {
+      await api("eval/campaign", {method: "POST", body: {
+        personas, repeats: +$("#ev-camp-reps").value || 3,
+        judge_model: $("#ev-camp-judge").value,
+        name: $("#ev-camp-name").value.trim()}});
+      toast(`campaign started: ${personas.length} persona(s) × ${$("#ev-camp-reps").value}`);
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#ev-camp-stop").onclick = async () => {
+    try { await api("eval/campaign", {method: "POST", body: {stop: true}});
+      toast("campaign will stop after the run in flight"); }
+    catch (e) { toast(e.message, true); }
+  };
   $("#ev-run").onclick = () => run(api("eval/run", {method: "POST", body: {
     persona: $("#ev-persona").value, judge_model: $("#ev-judge").value}}));
   $("#ep-save").onclick = () => run(api("eval/prompts", {method: "POST", body: {

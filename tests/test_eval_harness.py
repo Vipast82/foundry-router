@@ -61,15 +61,24 @@ def test_seed_is_idempotent_and_editable(tmp_path):
 
 
 def test_default_categories_mapping():
+    """The persona's own category comes first, then the three asked of every
+    persona.
+
+    This asserted the speciality alone until v0.181.190. Whether a model reasons
+    instead of pattern-matching, gets a checkable answer right, and admits what
+    it cannot know is not a speciality - and a scoreboard that ranks personas
+    needs prompts they all answer, or there is nothing to compare.
+    """
+    from foundry_router.evalharness import MODEL_CATEGORIES as M
     assert default_categories({"virtual_name": "Foundry-Coding",
-                               "benchmark_category": "coding"}) == ["coding"]
+                               "benchmark_category": "coding"}) == ["coding"] + M
     assert default_categories({"virtual_name": "Foundry-Research",
-                               "benchmark_category": "agentic"}) == ["research"]
+                               "benchmark_category": "agentic"}) == ["research"] + M
     assert default_categories({"virtual_name": "Foundry-Chat",
-                               "benchmark_category": "general_chat"}) == ["chat"]
+                               "benchmark_category": "general_chat"}) == ["chat"] + M
     # RAG shares general_chat, so the name wins
     assert default_categories({"virtual_name": "Foundry-RAG",
-                               "benchmark_category": "general_chat"}) == ["rag"]
+                               "benchmark_category": "general_chat"}) == ["rag"] + M
 
 
 # -- runs (injected answers — scoring logic under test, not routing) ---------------
