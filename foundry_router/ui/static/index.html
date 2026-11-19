@@ -9305,6 +9305,12 @@ window.showLessons = async state => {
       <span class="pill ${r.state === "active" ? "ok" : r.state === "rejected" ? "" : "warn"}">${esc(r.state)}</span>
       <span class="hint">seen ${+r.seen} time(s) in ${(r.tasks || []).length} task(s)${(r.sources || []).length ? " · " + esc((r.sources || []).join(", ")) : ""}${r.last_seen ? " · last " + esc(String(r.last_seen).slice(0, 10)) : ""}</span>
       <input type="text" class="ls-rule" style="flex-basis:100%" placeholder="the one line that would have prevented this" value="${esc(r.rule || r.draft || "")}">
+      <label class="hint" style="flex-basis:100%">applies to
+        <input type="text" class="ls-scope" style="width:240px" placeholder="everywhere"
+               title="Task-id patterns, comma separated, e.g. VQ*,VR-AS* — a rule only reaches a request that names one of them. Empty means every request this persona gets. Proposed from the task ids the findings came from."
+               value="${esc(r.scope || "")}">
+        <span class="hint">${r.scope ? "only work named here" : "every request"}</span>
+      </label>
       <button class="act" onclick="lessonDecide(${r.id}, 'active')">Approve</button>
       <button class="act" onclick="lessonDecide(${r.id}, 'rejected')">Reject</button>
       ${r.state !== "proposed" ? `<button class="act" onclick="lessonDecide(${r.id}, 'proposed')">Undecide</button>` : ""}
@@ -9317,9 +9323,15 @@ window.showLessons = async state => {
 
 window.lessonDecide = async (id, state) => {
   const row = document.querySelector(`[data-lesson="${id}"] .ls-rule`);
+  const sc = document.querySelector(`[data-lesson="${id}"] .ls-scope`);
   try {
-    await api("lessons/decide", {method: "POST", body: {id, state, rule: row ? row.value.trim() : ""}});
-    toast(state === "active" ? "Rule approved — it is in the prompt now" : `Lesson ${state}`);
+    await api("lessons/decide", {method: "POST", body: {id, state,
+      rule: row ? row.value.trim() : "", scope: sc ? sc.value.trim() : ""}});
+    toast(state === "active"
+      ? (sc && sc.value.trim()
+          ? `Rule approved for ${sc.value.trim()}`
+          : "Rule approved — it is in every prompt now")
+      : `Lesson ${state}`);
     showLessons($("#ls-list").dataset.state || "");
   } catch (e) { toast(e.message, true); }
 };

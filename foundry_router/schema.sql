@@ -433,6 +433,7 @@ CREATE TABLE IF NOT EXISTS lessons (
   first_seen TEXT,
   last_seen TEXT,
   state TEXT,                       -- proposed | active | rejected
+  scope TEXT DEFAULT '',            -- task-id patterns it applies to; '' is everywhere
   decided_by TEXT,
   decided_at TEXT
 );

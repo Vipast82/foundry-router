@@ -253,11 +253,11 @@ def test_a_rule_with_no_room_is_skipped_and_the_smaller_ones_after_it_still_fit(
     lessons.decide(svc, big, "active", "B" * 290)              # most seen, goes first
     small = _candidate(svc, anchor="small", seen=1)
     lessons.decide(svc, small, "active", "keep me")            # fewest, goes last
-    text, dropped = lessons.rulebook(svc.db, max_chars=600)
+    text, dropped, held = lessons.rulebook(svc.db, max_chars=600)
     assert "keep me" in text, text                             # the small one still fits
     assert dropped == []
     # a budget with room for the header and the small rule only
-    text, dropped = lessons.rulebook(svc.db, max_chars=200)
+    text, dropped, held = lessons.rulebook(svc.db, max_chars=200)
     assert dropped == [big], dropped                           # named, not silently gone
     assert "keep me" in text and "1. keep me" in text          # numbering stays contiguous
     assert len(text) <= 200

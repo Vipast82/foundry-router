@@ -380,7 +380,12 @@ def with_lessons(svc, case: dict) -> tuple:
     """
     from . import lessons
     cfg = getattr(svc.config_store.config, "lessons", None)
-    rules, _dropped = lessons.rulebook(svc.db, int(getattr(cfg, "max_chars", 1500) or 1500))
+    # text=None: every active rule regardless of scope. A suite case carries the
+    # task id it was cut from, so scoping would quietly turn the arm into "rules
+    # that happen to match this suite" and the comparison would drift with the
+    # queue rather than measuring the rulebook.
+    rules, _dropped, _held = lessons.rulebook(
+        svc.db, int(getattr(cfg, "max_chars", 1500) or 1500), None)
     if not rules:
         return case, 0
     msgs = list(case.get("messages") or [])

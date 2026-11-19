@@ -1,3 +1,54 @@
+## v0.181.189 - a rule reaches only the work it names
+
+Seven approved rules went into every prompt of a persona that runs code sprints
+as well as asset sprints, because the rulebook had no notion of what kind of work
+a request was. Each rule now carries a scope: task-id patterns, comma separated,
+and an empty scope still means everywhere, so nothing already approved changes.
+
+**The measurement first, because it did not say what the change rests on.** Ten
+runs, five a side, alternating: -0.18 per case, 10 cases better, 12 worse, 38
+unchanged, sign test p = 0.83, bootstrap 95% CI [-6.83, +6.72]. No effect either
+way. Two things that turned up while reading it matter more than the result:
+
+- the `baseline` suite is **55 of 60 asset-sprint cases**, all `tool_use` and
+  `role:implementer`, 44 tagged `blender`, 13 `luau`, and **none scored on
+  prose**. So the suite could not answer the question asked of it - the rules
+  concern what gets built, and the metric scores which tool was called. The cost
+  of unscoped rules on coding work is unmeasured, not disproved.
+- per-case noise is about **9 points** (mean within-case sd, both arms), with
+  single cases flipping 60-100, while run aggregates move only 1.5-4. Averaging
+  60 cases hides nearly all of it. A run-level sd is not a proxy for per-case
+  stability: the on-arm looked three times noisier in aggregate and was slightly
+  steadier per case.
+
+So this change rests on the budget instead, which was never in doubt: seven rules
+take 1862 of 2000 characters, the queue holds 168 more candidates, and since
+v0.181.187 a rule that does not fit is skipped - so the eighth approval would
+start evicting rules by finding-count across unrelated work. Scoping is what lets
+the rulebook grow at all.
+
+The miner proposes a scope from the task ids a cluster was mined from: one or two
+families become patterns, three or more leave it empty, since that is no longer
+about one kind of work. Of the 180 candidates, 39 came from one family, 118 from
+two and 23 from more, and all seven rules approved first came from `VQ` and
+`VR-AS` alone - which is what their proposal reads. The operator edits or clears
+it when approving, and re-mining never overwrites it, exactly as it never
+overwrites the wording.
+
+Patterns are matched against the request rather than a task id being extracted
+from it first. `interventions.sprint_of` exists and was the obvious thing to
+reach for, but its pattern takes `C15` and `R1` as readily as `VQ-17`, so
+extracting first adds a way to be wrong that testing the patterns does not have.
+A pattern carries no separator, because the ids disagree about it - `VQ-17` puts
+a dash after the family and `VR-AS09` does not - and the first version of this
+matched half the ids it should until a check on real task ids said so.
+
+Nothing is silent: the route note says how many rules were held back as scoped
+elsewhere beside how many did not fit, and `status()` carries a `scoped` count.
+The benchmark arm deliberately ignores scope and takes the whole rulebook, or it
+would quietly become "the rules that happen to match this suite" and drift every
+time a rule is approved.
+
 ## v0.181.188 - the benchmark can run with the rulebook in front of it
 
 Seven approved rules now go into every prompt of a persona that opted in, and

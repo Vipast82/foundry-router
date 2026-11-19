@@ -3673,7 +3673,8 @@ async def lessons_decide(request: Request):
         if str(body.get("state")) == "forget":
             return {"ok": True, "removed": lessons.forget(svc, int(body.get("id") or 0))}
         return lessons.decide(svc, int(body.get("id") or 0), str(body.get("state") or ""),
-                              str(body.get("rule") or ""), who)
+                              str(body.get("rule") or ""), who,
+                              None if body.get("scope") is None else str(body["scope"]))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 

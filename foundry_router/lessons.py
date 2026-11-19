@@ -234,12 +234,14 @@ def _upsert(db, c: dict) -> str:
     fields = (len(members), json.dumps(tasks), json.dumps(sources), json.dumps(examples),
               _iso(members[0]["ts"]), _iso(members[-1]["ts"]))
     if row:
+        # the operator's scope is theirs, like the wording: only measurements refresh
         db.execute("UPDATE lessons SET seen=?, tasks=?, sources=?, examples=?, first_seen=?, "
                    "last_seen=? WHERE id=?", (*fields, row["id"]))
         return row["state"]
     db.execute("INSERT INTO lessons (ts, anchor, rule, draft, seen, tasks, sources, examples, "
-               "first_seen, last_seen, state) VALUES (?,?,'','',?,?,?,?,?,?,'proposed')",
-               (utcnow(), c["anchor"], *fields))
+               "first_seen, last_seen, state, scope) "
+               "VALUES (?,?,'','',?,?,?,?,?,?,'proposed',?)",
+               (utcnow(), c["anchor"], *fields, scope_from(tasks)))
     return "new"
 
 
@@ -279,6 +281,10 @@ def status(svc) -> dict:
             # approved and not in the prompt, because the budget ran out: the one
             # number that said nothing when two rules silently fell off the end
             "dropped": len(rulebook(svc.db, int(getattr(cfg, "max_chars", 1500) or 1500))[1]),
+            # active rules that only reach the work they name
+            "scoped": int((svc.db.query_one(
+                "SELECT COUNT(*) AS n FROM lessons WHERE state='active' AND "
+                "COALESCE(scope,'')<>''") or {}).get("n") or 0),
             "hours": int(getattr(cfg, "mine_hours", 0) or 0),
             "below_bar": int(_state.get("below_bar") or 0),
             "draft_model": getattr(cfg, "draft_model", "") or "",
@@ -449,7 +455,8 @@ async def draft(svc, lesson_id: int, model: str = "") -> dict:
     return {"ok": True, "draft": line, "model": model, "backend": backend}
 
 
-def decide(svc, lesson_id: int, state: str, rule: str = "", who: str = "operator") -> dict:
+def decide(svc, lesson_id: int, state: str, rule: str = "", who: str = "operator",
+           scope: Optional[str] = None) -> dict:
     """Approve (with the wording that goes into the prompt), reject, or put a
     lesson back. A rule is never active without wording."""
     if state not in ("active", "rejected", "proposed"):
@@ -460,11 +467,14 @@ def decide(svc, lesson_id: int, state: str, rule: str = "", who: str = "operator
     rule = _clean(rule or row.get("rule") or "")[:300]
     if state == "active" and not rule:
         raise ValueError("write the rule that goes into the prompt before approving it")
-    svc.db.execute("UPDATE lessons SET state=?, rule=?, decided_by=?, decided_at=? WHERE id=?",
-                   (state, rule, who, utcnow(), lesson_id))
+    keep = row.get("scope") or ""
+    scope = keep if scope is None else _clean(scope)[:200]
+    svc.db.execute("UPDATE lessons SET state=?, rule=?, scope=?, decided_by=?, decided_at=? "
+                   "WHERE id=?", (state, rule, scope, who, utcnow(), lesson_id))
     svc.db.log_event("info", "lessons", f"lesson {lesson_id} {state} by {who}"
+                     + (f" for {scope}" if state == "active" and scope else "")
                      + (f": {rule}" if state == "active" else ""))
-    return {"ok": True, "id": lesson_id, "state": state, "rule": rule}
+    return {"ok": True, "id": lesson_id, "state": state, "rule": rule, "scope": scope}
 
 
 def forget(svc, lesson_id: int) -> int:
@@ -479,7 +489,81 @@ def on_for(cfg, persona: Optional[dict]) -> bool:
     return bool((persona or {}).get("lessons", 0))
 
 
-def rulebook(db, max_chars: int = 1500) -> tuple[str, list[int]]:
+SCOPE_CAP = 6000       # of the request we read looking for a task id
+_WORD = r"[A-Za-z0-9]"
+
+
+def scope_from(tasks: list) -> str:
+    """A scope proposed from the task ids a cluster was mined from: the families
+    it bit, as patterns, or "" when it is spread too wide to be about one kind of
+    work.
+
+    Measured on the queue this was built for: of 180 candidates, 39 came from one
+    family, 118 from two and 23 from three or more, and all seven rules approved
+    first came from VQ and VR-AS alone. So the task list is a good enough guess
+    to put in front of the operator, who edits or clears it (v0.181.189).
+    """
+    fams = sorted({_family(t) for t in tasks if t})
+    if not fams or len(fams) > 2:
+        return ""                     # everywhere, which is what an empty scope means
+    # a bare prefix, because the separator is not consistent: VQ-17 puts a dash
+    # after the family and VR-AS09 does not, so a pattern carrying one matches
+    # half the ids it should
+    return ",".join(f + "*" for f in fams)
+
+
+def _family(task: str) -> str:
+    """VR-AS09 -> VR-AS, VQ-14b -> VQ, POL-7a -> POL, WIRE-2 -> WIRE: the letters
+    that name the kind of work, stopping at the number that names the sprint."""
+    keep = []
+    for p in str(task or "").split("-"):
+        head = re.match(r"[A-Za-z]+", p or "")
+        if not head:
+            break                               # the part is a number: done
+        keep.append(head.group())
+        if head.group() != p:
+            break                               # letters then digits: AS09 ends it
+    return "-".join(keep)
+
+
+def in_scope(scope: str, text: str) -> bool:
+    """Whether a rule scoped to `scope` belongs in a request that reads like
+    `text`. An empty scope is everywhere.
+
+    The patterns are matched against the request rather than a task id being
+    pulled out of it first. `interventions.sprint_of` exists and would be the
+    obvious thing to use, but its pattern matches `C15` and `R1` as readily as
+    `VQ-17`, so extracting first adds a way to be wrong that testing the
+    patterns directly does not have.
+    """
+    pats = [p.strip() for p in str(scope or "").split(",") if p.strip()]
+    if not pats:
+        return True
+    head = (text or "")[:SCOPE_CAP]
+    for p in pats:
+        if p.endswith("*"):
+            stem = re.escape(p[:-1])
+            if re.search(rf"(?<!{_WORD}){stem}", head):
+                return True
+        elif re.search(rf"(?<!{_WORD}){re.escape(p)}(?!{_WORD})", head):
+            return True
+    return False
+
+
+def request_text(messages: list) -> str:
+    """The part of a request a task id is named in: the system turns and the
+    first thing the user said, which is where a sprint brief puts it."""
+    out = []
+    for m in (messages or [])[:6]:
+        c = m.get("content")
+        if isinstance(c, str) and c.strip():
+            out.append(c[:SCOPE_CAP])
+            if m.get("role") == "user":
+                break
+    return "\n".join(out)[:SCOPE_CAP]
+
+
+def rulebook(db, max_chars: int = 1500, text: Optional[str] = None) -> tuple:
     """The approved rulebook, most-seen first, as it goes into the prompt, and the
     ids of any rules there was no room for.
 
@@ -491,10 +575,18 @@ def rulebook(db, max_chars: int = 1500) -> tuple[str, list[int]]:
     anywhere said otherwise. The operator is told now, by the note that goes
     with the block and by the count in status() (v0.181.187).
     """
-    rows = db.query("SELECT id, rule, seen FROM lessons WHERE state='active' AND rule<>'' "
-                    "ORDER BY seen DESC, id ASC")
+    rows = db.query("SELECT id, rule, seen, scope FROM lessons WHERE state='active' "
+                    "AND rule<>'' ORDER BY seen DESC, id ASC")
     if not rows:
-        return "", []
+        return "", [], []
+    held = []
+    if text is not None:                      # None means "every rule", for the GUI
+        keep = []
+        for r in rows:
+            (keep if in_scope(r["scope"] or "", text) else held).append(r)
+        rows = keep
+    if not rows:
+        return "", [], [int(r["id"]) for r in held]
     head = ("Rules this project learned the hard way. Each one is a mistake that was made "
             "here more than once and was approved as a rule by the operator - follow them.")
     parts, used, dropped, n = [head], len(head), [], 0
@@ -506,9 +598,9 @@ def rulebook(db, max_chars: int = 1500) -> tuple[str, list[int]]:
         n += 1
         parts.append(line)
         used += len(line) + 1
-    return "\n".join(parts), dropped
+    return "\n".join(parts), dropped, [int(r["id"]) for r in held]
 
 
-def block(db, max_chars: int = 1500) -> str:
+def block(db, max_chars: int = 1500, text: Optional[str] = None) -> str:
     """The rulebook text alone, for callers that have nowhere to report a drop."""
-    return rulebook(db, max_chars)[0]
+    return rulebook(db, max_chars, text)[0]

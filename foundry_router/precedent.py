@@ -61,13 +61,18 @@ async def inject(svc: Any, persona: Optional[dict], messages: list,
 
     lcfg = cfg_for("lessons")
     if lessons.on_for(lcfg, persona):
-        rules, dropped = lessons.rulebook(
-            svc.db, int(getattr(lcfg, "max_chars", 1500) or 1500))
+        rules, dropped, held = lessons.rulebook(
+            svc.db, int(getattr(lcfg, "max_chars", 1500) or 1500),
+            lessons.request_text(messages))
+        if held and not rules:
+            notes.append(f"lessons: {len(held)} rule(s) are scoped to other work")
         if rules:
             insert_system(messages, rules)
             # the block numbers its rules, so count those rather than its lines
             n = len(re.findall(r"(?m)^\s*\d+\.", rules)) or rules.count("\n")
             note = f"lessons: {n} approved rule(s) in the prompt"
+            if held:
+                note += f", {len(held)} scoped to other work"
             if dropped:
                 note += (f", {len(dropped)} did not fit (raise lessons.max_chars): "
                          + ", ".join(str(i) for i in dropped[:8]))
