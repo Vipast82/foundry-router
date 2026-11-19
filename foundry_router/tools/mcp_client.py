@@ -193,7 +193,10 @@ class MCPManager:
         self._inflight_seq = 0
         # Persistent (pooled) MCP sessions, one per server: the handshake
         # (connect + initialize) is paid once, not on every tool call.
-        self._holders: dict[str, "_SessionHolder"] = {}
+        # keyed by (server, event loop): a session cannot be used from a loop
+        # other than the one that opened it, and the benchmark runs its own loop
+        # in a thread (v0.181.196)
+        self._holders: dict[tuple, "_SessionHolder"] = {}
         # External agents (Hermes) exposed as pseudo MCP servers "agent-<name>"
         # — set by Services; None = no agents.
         self.agents = None
@@ -610,9 +613,23 @@ class MCPManager:
     # -- persistent sessions -----------------------------------------------------------
 
     def _holder(self, server: str) -> "_SessionHolder":
-        h = self._holders.get(server)
+        """The pooled session for this server ON THIS LOOP.
+
+        A session opened on another loop is not reusable here - its lock, its
+        task and the session's own primitives belong to that loop - so each loop
+        gets its own holder rather than stealing and reopening the other's
+        (v0.181.196)."""
+        try:
+            # the loop OBJECT, not id(loop): an id is unique only while the
+            # object lives, and two sequential asyncio.run() loops can land on
+            # the same address - which would hand a new loop a dead loop's
+            # session, the very fault this avoids (v0.181.196)
+            key = (server, asyncio.get_running_loop())
+        except RuntimeError:                      # no loop: one shared holder
+            key = (server, None)
+        h = self._holders.get(key)
         if h is None:
-            h = self._holders[server] = _SessionHolder(self, server)
+            h = self._holders[key] = _SessionHolder(self, server)
         self._reap_idle()
         return h
 
@@ -620,9 +637,26 @@ class MCPManager:
         """Close pooled sessions idle for over IDLE_CLOSE seconds (a homelab MCP
         server shouldn't hold a connection for a tool nobody is using)."""
         now = time.monotonic()
-        for name, h in list(self._holders.items()):
-            if h.session is not None and now - h.last_used > self.IDLE_CLOSE:
-                asyncio.get_event_loop().create_task(h.reset())
+        try:
+            here = asyncio.get_running_loop()
+        except RuntimeError:
+            here = None
+        for key, h in list(self._holders.items()):
+            loop = key[1] if isinstance(key, tuple) and len(key) > 1 else None
+            # a closed loop's holder goes whatever its idle time: the loop is
+            # gone and so are its task and transport, and holding the key keeps
+            # the loop object alive
+            if loop is not None and loop.is_closed():
+                self._holders.pop(key, None)
+                continue
+            if h.session is None or now - h.last_used <= self.IDLE_CLOSE:
+                continue
+            if loop is not None and loop is not here:
+                # another LIVE loop's session: closing it from here is the
+                # cross-loop fault this keying exists to avoid. Leave it; that
+                # loop reaps its own.
+                continue
+            asyncio.get_event_loop().create_task(h.reset())
 
     async def close_sessions(self) -> None:
         for h in list(self._holders.values()):
@@ -630,11 +664,22 @@ class MCPManager:
         self._holders.clear()
 
     def session_status(self) -> dict:
+        """Per server, not per (server, loop): the panel asks whether a
+        connection is open, not which loop opened it (v0.181.196)."""
         now = time.monotonic()
-        return {name: {"open": h.session is not None,
-                       "idle_s": round(now - h.last_used, 1) if h.last_used else None,
-                       "connects": h.connects}
-                for name, h in self._holders.items()}
+        out: dict = {}
+        for key, h in self._holders.items():
+            name = key[0] if isinstance(key, tuple) else key
+            row = out.setdefault(name, {"open": False, "idle_s": None,
+                                        "connects": 0, "loops": 0})
+            row["loops"] += 1
+            row["connects"] += h.connects
+            if h.session is not None:
+                row["open"] = True
+            idle = round(now - h.last_used, 1) if h.last_used else None
+            if idle is not None and (row["idle_s"] is None or idle < row["idle_s"]):
+                row["idle_s"] = idle
+        return out
 
 
 PING_IDLE_SECONDS = 20.0      # a pooled session idle this long is pinged before reuse

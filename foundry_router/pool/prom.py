@@ -77,6 +77,54 @@ def _r(v: Optional[float], nd: int = 1) -> Optional[float]:
     return None if v is None else round(v, nd)
 
 
+# Keys inside /health that are counters rather than gauges, and the names they
+# are reported under. An expert-offload engine answers /health with a `tiers`
+# block and, on some builds, serves no /metrics at all (v0.181.196).
+_TIER_NAMES = {
+    "experts": "experts_total",
+    "vram_slots": "expert_vram_slots",
+    "vram_held": "expert_vram_held",
+    "ram_copies": "expert_ram_copies",
+    "mapped": "experts_mapped",
+    "tokens": "expert_tokens",
+    "ram_reads": "expert_ram_reads",
+    "file_reads": "expert_file_reads",
+    "file_mb": "expert_file_mb",
+    "warm_hints": "expert_warm_hints",
+    "major_faults": "major_faults",
+    "max_context": "max_context",
+    "mean_blob": "expert_mean_blob_bytes",
+}
+
+
+def summarize_health(data: dict) -> dict:
+    """Engine metrics from a /health payload, for an engine that serves no
+    /metrics. Normalised onto the names the Prometheus path already produces, so
+    one chart can hold both lanes."""
+    if not isinstance(data, dict):
+        return {}
+    out: dict = {}
+    tiers = data.get("tiers")
+    if isinstance(tiers, dict):
+        for key, name in _TIER_NAMES.items():
+            v = tiers.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[name] = _r(float(v))
+        hits, looks = tiers.get("vram_hits"), tiers.get("lookups")
+        if isinstance(hits, (int, float)) and isinstance(looks, (int, float)) and looks:
+            # the same name strata reports, so the lanes are comparable
+            out["expert_cache_hit_pct"] = _r(100.0 * float(hits) / float(looks))
+            out["expert_lookups_total"] = _r(float(looks))
+        held, slots = tiers.get("vram_held"), tiers.get("vram_slots")
+        if isinstance(held, (int, float)) and isinstance(slots, (int, float)) and slots:
+            out["expert_vram_fill_pct"] = _r(100.0 * float(held) / float(slots))
+    # a flag, not a metric: server_history skips booleans, and it belongs in the
+    # live view rather than a series
+    if data.get("tiers_stale") is True:
+        out["tiers_stale"] = True
+    return out
+
+
 def dialect(m: dict) -> Optional[str]:
     """Which engine's metric names these are: "vllm" | "llamacpp" | None."""
     names = list(m)

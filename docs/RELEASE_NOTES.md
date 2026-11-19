@@ -1,3 +1,57 @@
+## v0.181.196 - the brain lane was invisible, in three ways
+
+Asked whether the brain lane's performance is monitored like the rest, the answer
+was no, and it was not one gap.
+
+**No engine metrics, ever.** `brain-lane` (the brain model's own backend at
+192.168.0.111:8081, enabled and healthy) had never written a single engine
+sample. The probe asks for `/metrics` and, for llama.cpp, `/slots`; that host
+404s both. Its telemetry is on `/health`, under a `tiers` block, and it is
+exactly what someone asking "why is this lane slow" wants: 83.2% expert-cache hit
+rate (2,494,090 of 2,999,441 lookups), VRAM slots 100% full at 2,007 of 10,240
+experts, 8,233 mapped rather than resident, 69 major faults, and `tiers_stale`.
+The probe reads `/health` now when `/metrics` gave nothing, and the hit rate is
+reported under `expert_cache_hit_pct` - the name the Prometheus path already
+produces for Strata - so both lanes read on one chart, which is what "like the
+rest" has to mean. A working `/metrics` is never overridden, and the row says
+`metrics_source` so it is clear where the numbers came from.
+
+**No per-call samples either, and that one is not the lane's fault.**
+`brain-lane` had 0 per-call samples over 24 hours while a 60-case benchmark ran
+against it, where strata had 1,168 and meridian 1,308. The benchmark calls
+`svc.pool.chat` directly and records nothing. `telemetry.record_call` exists
+because every dispatch path used to repeat the same bookkeeping by hand and they
+drifted - its docstring lists the paths it unified - and the benchmark is not
+among them, so no bench run on any lane has ever reached the Performance tab,
+including the 600 cases of the lessons A/B. It records one call per case now,
+best-effort, naming the backend `pool.chat` actually used.
+
+**And one case was lost to a cross-loop asyncio Event.** The benchmark runs
+`asyncio.run()` in a daemon thread, so it has its own event loop while sharing
+the service objects, and a pooled MCP session belongs to the loop that opened it.
+The first case of the run died in 0.01 s with "Event ... is bound to a different
+event loop" and scored 0 - a plumbing loss recorded as the model getting the case
+wrong. Pooled sessions are keyed per loop now, so each loop opens and keeps its
+own and neither can take the other's; resetting the foreign one instead would
+have had the benchmark and the live router evicting each other's connections all
+run. A closed loop's holder is dropped rather than reset, since a cross-loop
+reset is the fault being fixed.
+
+The first version of that keyed on `id(loop)` and the tests here caught it before
+it shipped: two sequential `asyncio.run()` loops landed on the same address, so
+the second would have been handed the first one's session - the original bug,
+reintroduced by its own fix. The key holds the loop object.
+
+**What the benchmark then said**, now that it finished: the brain model
+(Qwen3.6-35B-A3B at IQ3_XXS) scores 61.5 on the baseline suite against a strata
+baseline of 72.9 mean over 28 runs, sd 3.9, range 62.8-79.9. The gap is 11.4
+points and falls below the whole observed range, so it is a real difference
+rather than this benchmark's run-to-run noise. It is tool calling: 16 cases with
+a zero tool score against 6 for strata, while the prose answer score is better
+(29.1 against 0-9.5). It is also about three times slower - 50 minutes of model
+time against 17, median 35 s a case, p90 119 s, one case 314 s. Read it as one
+run against twenty-eight.
+
 ## v0.181.195 - and on the path the sprints take
 
 v0.181.194 made an unreadable tool call explain itself in the brain's tool loop,

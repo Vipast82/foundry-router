@@ -27,10 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("foundry.bench")
 
 MAX_CASES = 500
 MAX_PROMPT_TOKENS = 24_000
@@ -398,7 +401,8 @@ def with_lessons(svc, case: dict) -> tuple:
     return {**case, "messages": msgs}, len(_re.findall(r"(?m)^\s*\d+\.", rules))
 
 
-async def ask(svc, model: str, case: dict, max_tokens: int = 2048) -> dict:
+async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
+              persona: str = "") -> dict:
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
     try:
@@ -409,6 +413,18 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048) -> dict:
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         return {"error": describe_exception(e), "seconds": round(time.monotonic() - t0, 2)}
+    # v0.181.196: the same telemetry every other dispatch path records. Without
+    # it a bench run is invisible to the Performance tab and to the Live view -
+    # the brain lane had 0 per-call samples in 24 hours while a 60-case
+    # benchmark was running against it.
+    try:
+        from . import telemetry
+        telemetry.record_call(
+            svc.db, svc.registry, model=model, backend=backend, result=result,
+            persona=persona or "bench", mode="bench",
+            wall_ms=(time.monotonic() - t0) * 1000.0, max_tokens=max_tokens)
+    except Exception:                                             # noqa: BLE001
+        log.exception("bench: could not record telemetry for %s", model)
     from .brain import prompts
     _think, clean = prompts.split_think(result.content or "")
     return {"content": clean.strip(), "backend": backend,

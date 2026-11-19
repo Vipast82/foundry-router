@@ -995,6 +995,21 @@ class OpenAIProtocol(BaseProtocol):
                 out.update(prom.summarize_slots(slots))
             except Exception:
                 pass
+        if not out.get("metrics_ok"):
+            # v0.181.196: an expert-offload engine may serve no /metrics and no
+            # /slots and still report its tiers on /health. brain-lane answered
+            # 404 to both and had never written an engine sample, while /health
+            # carried its expert-cache hit rate and fault count.
+            try:
+                health = await self._get_json("/health", timeout=4)
+                found = prom.summarize_health(health or {})
+                if found:
+                    out.update(found)
+                    out["metrics_ok"] = True
+                    out["metrics_source"] = "/health"
+                    out.pop("metrics_error", None)
+            except Exception as e:                                # noqa: BLE001
+                out.setdefault("metrics_error", str(e)[:120] or type(e).__name__)
         if running is not None:
             out["swap_running"] = [{"model": r.get("model"), "state": r.get("state")}
                                    for r in running]
