@@ -1,3 +1,90 @@
+## v0.181.205 - the judge protocol: which of two, judged both ways round
+
+Eval tier 2 (pairwise with style control) and tier 4 (blind deliverable
+comparison) have both read "not here yet" since v0.181.190, and the agent tasks
+need the same thing, so it is built once here and shared rather than three
+judging schemes that drift apart.
+
+The judge the harness has had since Phase 4 is the weakest kind there is: one
+model reads one answer and gives it 0-10. That number cannot be checked against
+anything, it moves with the judge's feelings about length and formatting, and it
+is worth most exactly where it is least verifiable. So the protocol asks a
+different question - **which of these two answers serves the prompt better** -
+which a judge can actually hold in mind, where "is this an 8 or a 7" cannot.
+
+**Every pair is judged twice, with the sides swapped, and counts only when both
+orders agree.** Position bias is the largest measured artifact in pairwise LLM
+judging, and a judge that prefers whatever it read first is perfectly
+consistent, perfectly repeatable and knows nothing. A disagreement between the
+orders makes the pair a tie and raises the flip rate, which is reported in
+words: at 30% or more the board says the judge is partly reading position rather
+than substance. Two **identical** answers come out as a tie with a flip, not a
+winner - which the smoke test demonstrated by accident before any test asserted
+it.
+
+**It is blind, and a model never judges itself.** Sides are A and B, and the
+model and family names are stripped from the answers too, because a model that
+signs its work ("As Qwen, I...") is otherwise identifying itself. A pair
+containing the judge's own answer is refused with a reason rather than quietly
+scored: self-preference is the one bias swapping the sides cannot cancel. That
+refusal found a real defect in itself - `ollama/Qwen3-30B:latest` normalised to
+"latest", so every Ollama-tagged model would have been cleared to judge its own
+answer, and every one of them would have matched every other. A tag is dropped
+only when it is `latest`, because an Ollama tag often carries the size and
+`qwen3:30b` is not `qwen3:8b`.
+
+**Style is measured and reported, never silently controlled.** Length and markup
+are recorded for both sides, and the result says how often the winner was simply
+the longer answer, beside the win rate over only those pairs whose lengths are
+within a quarter of each other. A 70% win rate where the longer answer won 95%
+of the time is a report about length, and the page says so. That is an honest
+style control: it shows the confound and gives the number with it removed,
+rather than applying a regression this project has no way to validate.
+
+**A Fable model is never a judge**, and it was being offered as one. The judge
+dropdown listed every reachable non-embedding model, against a rule stated as
+"should not be an option ever", and the run API never checked at all - so a POST
+could pick one whatever the dropdown said. Refused in the harness and left out
+of the picker, both asserted.
+
+One thing had to change before tier 2 could exist, and it is why this looked
+easy and was not: `eval_results` stored `answer_head`, **the first 200
+characters**. Comparing those would have ranked opening sentences and reported
+it as a win rate, which is worse than reporting nothing. The answer is kept in
+full now, to a cap on the Evals tab (`evals.keep_answer_chars`, 20,000, and 0
+keeps none), and a campaign that ran before this release has nothing to compare
+- which the comparison says in words, rather than returning an empty result that
+reads as a tie. That is the v0.181.191 shape: corrected code, old data, and a
+number that looks fine.
+
+The new knob also found the gap it would have fallen into: `/admin/api/config/evals`
+filters its body against an allow-list, so a control the page draws and sends is
+silently dropped unless the key is named there too.
+
+Two more refusals, both from faults this week: a prompt only one persona
+answered is skipped with the reason rather than scored as a loss - every timeout
+in campaign 2 was an honesty prompt, and counting silence against a persona
+would make the hardest category look like a defeat - and a judge that returned
+nothing usable gives no verdict rather than a tie, because a broken judge read
+as indecisive looks like two models that cannot be separated.
+
+Nothing is asked of either persona again: a campaign's answers are what they
+said, and re-asking would compare two fresh samples instead of the run being
+looked at.
+
+One pre-existing test defect this release's gate run found, which is the kind
+worth naming because it passed alone six times out of six: a pacing test
+asserted a 0.15s gap as `>= 0.14`, and asyncio fires a timer when `when <
+loop.time() + loop._clock_resolution`, so a sleep may return up to one clock
+resolution EARLY - 15.625ms on Windows, against the 10ms of slack that test
+allowed. It failed at 0.1400 under a loaded box. The test was thin rather than
+the pacer wrong, since a search server paced 15ms closer than asked is paced,
+and the tolerance now comes from the running loop instead of a typed number.
+
+Not here yet: tier 4 and the agent tasks, which use this protocol over whole
+deliverables rather than eval answers. The protocol is the shared part and it is
+done; the tasks are not written.
+
 ## v0.181.204 - a local code suite that can be failed, and values compared as values
 
 Asked for a local alternative to HumanEval, scored by `code_checks`. It cannot

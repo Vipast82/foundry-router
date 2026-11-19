@@ -2987,6 +2987,34 @@ async def bench_run(request: Request):
         bool(body.get("lessons")))}
 
 
+@router.post("/admin/api/eval/pairwise")
+async def eval_pairwise(request: Request):
+    """Eval tier 2: compare two personas over one campaign's stored answers.
+
+    {campaign_id, judge_model, left, right}. Every pair is judged in BOTH
+    orders and counts only when the two agree, so a judge reading position
+    rather than substance shows up as a flip rate instead of a clean result."""
+    from .. import judgeproto
+    from ..errors import describe_exception
+    svc = _svc(request)
+    b = await request.json()
+    try:
+        out = await judgeproto.pairwise_campaign(
+            svc, int(b.get("campaign_id") or 0),
+            str(b.get("judge_model") or ""),
+            str(b.get("left") or ""), str(b.get("right") or ""))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.get("/admin/api/eval/pairs")
+async def eval_pairs(request: Request, campaign_id: int = 0, limit: int = 200):
+    """Comparisons already made (newest first)."""
+    from .. import judgeproto
+    return {"pairs": judgeproto.pair_history(_svc(request).db, campaign_id, limit)}
+
+
 @router.post("/admin/api/bench/codereason")
 async def bench_codereason(request: Request):
     """Build the code-reasoning suite: {name?, limit?}.
@@ -3851,7 +3879,9 @@ async def set_evals(request: Request):
     from ..errors import describe_exception
     svc = _svc(request)
     body = await request.json()
-    allowed = {"per_prompt_timeout"}
+    # a key missing here is a control the page draws, sends and silently
+    # loses: the POST filter is the second place every eval setting lives
+    allowed = {"per_prompt_timeout", "keep_answer_chars"}
     updates = {k: v for k, v in body.items() if k in allowed}
     try:
         EvalsConfig(**{**svc.config_store.config.evals.model_dump(), **updates})

@@ -677,6 +677,10 @@ class Database:
             # compared without storing every answer in full
             ("eval_results", "answer_hash", "TEXT DEFAULT ''"),
             ("eval_results", "answer_head", "TEXT DEFAULT ''"),
+            # v0.181.205: the answer in full (to evals.keep_answer_chars), so
+            # two personas' answers to one prompt can be compared pairwise.
+            # answer_head is 200 characters, which would rank openings.
+            ("eval_results", "answer_full", "TEXT DEFAULT ''"),
             ("personas", "lessons", "INTEGER DEFAULT 0"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),

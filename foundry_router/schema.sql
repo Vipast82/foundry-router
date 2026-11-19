@@ -362,6 +362,28 @@ CREATE TABLE IF NOT EXISTS eval_campaigns (
   status TEXT                       -- running | done | stopped | failed
 );
 
+-- One pairwise comparison, judged in BOTH orders (judgeproto.py). A row is
+-- written per prompt per pair, so a disagreement between the orders stays
+-- visible instead of being averaged into a tie rate.
+CREATE TABLE IF NOT EXISTS eval_pairs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  campaign_id INTEGER,
+  judge_model TEXT,
+  left_persona TEXT,
+  right_persona TEXT,
+  prompt_id INTEGER,
+  prompt TEXT,
+  winner TEXT,                      -- a persona name, 'tie', or '' = no verdict
+  flip INTEGER,                     -- 1 = the two orders disagreed
+  matched INTEGER,                  -- 1 = the two answers were length-matched
+  left_chars INTEGER,
+  right_chars INTEGER,
+  notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_pairs_campaign ON eval_pairs(campaign_id, ts);
+
 -- Semantic response cache (quality spec Phase 3) -------------------------------
 -- Embeddings are little-endian float32 BLOBs (the format sqlite-vec's
 -- vec_distance_cosine consumes directly when the extension loads; the Python

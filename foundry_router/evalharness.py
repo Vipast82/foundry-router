@@ -34,6 +34,28 @@ log = logging.getLogger(__name__)
 PER_PROMPT_TIMEOUT = 420  # seconds — the default; evals.per_prompt_timeout wins
 
 
+KEEP_ANSWER_CHARS = 20_000   # the default; evals.keep_answer_chars wins
+
+
+def keep_answer_chars(svc) -> int:
+    """How much of each answer to store, for pairwise comparison later.
+
+    0 keeps nothing but the 200-character head and the fingerprint, which is
+    what every release before v0.181.205 did - and means no campaign of this
+    persona can be compared pairwise afterwards. An eval answer is a few
+    kilobytes and a campaign is a hundred rows, so the default keeps them."""
+    try:
+        v = getattr(svc.config_store.config.evals, "keep_answer_chars", None)
+    except AttributeError:
+        return KEEP_ANSWER_CHARS      # a bare service, as the tests build
+    if v is None:
+        return KEEP_ANSWER_CHARS
+    try:
+        return max(0, int(v))         # 0 is a real choice, not "unset"
+    except (TypeError, ValueError):
+        return KEEP_ANSWER_CHARS
+
+
 def per_prompt_timeout(svc) -> int:
     """How long one prompt may take, from the config, falling back to the
     constant when there is no config to read (tests build a bare service)."""
@@ -735,7 +757,12 @@ class EvalHarness:
                      response: str) -> tuple[Optional[float], str]:
         """(score 0-10 or None, notes). None = judge unavailable/denied/
         unparseable — shape checks still stand on their own."""
+        from .judgeproto import is_fable
         from .registry.research_agent import extract_json
+        if is_fable(judge_model):
+            # the operator's rule, and the picker was not enforcing it: a POST
+            # to the run API never went near the dropdown (v0.181.205)
+            return None, "a Fable model is never a judge"
         info = self.svc.pool.backend_info(judge_model)
         if info is None:
             return None, "judge model unreachable"
@@ -827,13 +854,15 @@ class EvalHarness:
                     "INSERT INTO eval_results (run_id, prompt_id, prompt, "
                     "response_chars, shape_pass, shape_detail, judge_score, "
                     "judge_notes, duration_ms, error, prompt_tokens, "
-                    "completion_tokens, answer_hash, answer_head) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "completion_tokens, answer_hash, answer_head, "
+                    "answer_full) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (run_id, p["id"], p["prompt"][:300], len(response),
                      int(passed), detail[:800], score, notes,
                      int((time.monotonic() - t0) * 1000), why[:600],
                      int(use.get("prompt") or 0), int(use.get("completion") or 0),
-                     fingerprint(response), (response or "")[:200]))
+                     fingerprint(response), (response or "")[:200],
+                     (response or "")[:keep_answer_chars(self.svc)]))
             silent = self.db.query_one(
                 "SELECT COUNT(*) AS n FROM eval_results WHERE run_id=? AND "
                 "COALESCE(error,'')<>''", (run_id,))

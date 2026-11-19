@@ -5,6 +5,7 @@ so the pacing gate and 429 retry now live there and cover all three (found live:
 worker-side tool calling hammered SearXNG with 429s the research fix never
 reached)."""
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 
@@ -102,11 +103,27 @@ async def test_non_429_is_not_retried(tmp_path):
 # -- pacing -----------------------------------------------------------------------
 
 async def test_calls_to_a_server_are_paced(tmp_path):
+    """The second call waits about a pace, within what asyncio guarantees.
+
+    This asserted `>= 0.14` against a 0.15s pace and failed in the v0.181.205
+    gate run at 0.1400, having passed alone six times out of six. asyncio fires
+    a timer when `when < loop.time() + loop._clock_resolution`, so a sleep is
+    allowed to return up to one clock resolution EARLY - and that is 15.625ms
+    on Windows against the 10ms of slack this allowed. The test was thin, not
+    the pacer: a search server paced 15ms closer than asked is paced.
+
+    So the tolerance is taken from the loop that is actually running rather
+    than from a number typed here, which also keeps it honest on a platform
+    with a finer timer, where it stays nearly exact."""
     cfg = MCPServerConfig(name="s", url="http://x", pace_seconds=0.15)
     mgr, session, _ = _mgr(tmp_path, cfg, lambda n: FakeResult("ok"))
     await mgr.call_tool("s", "t", {})       # first: no wait
     await mgr.call_tool("s", "t", {})       # second: waits ~pace
-    assert session.at[1] - session.at[0] >= 0.14
+    slack = asyncio.get_running_loop()._clock_resolution
+    gap = session.at[1] - session.at[0]
+    assert gap >= 0.15 - slack, f"{gap} is more than {slack}s short of the pace"
+    # and it really did wait: a pacer that did nothing would come back at ~0
+    assert gap >= 0.10
 
 
 async def test_pace_zero_disables(tmp_path):

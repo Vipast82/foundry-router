@@ -1029,6 +1029,11 @@ class EvalsConfig(BaseModel):
     board's two rates and is left out of the second, so this number decides how
     much of the hardest category gets scored (v0.181.193)."""
     per_prompt_timeout: int = Field(default=420, ge=30, le=3600)
+    # How much of each answer to keep, so two personas' answers to one prompt
+    # can be compared pairwise afterwards (judgeproto.py). Before v0.181.205
+    # only a 200-character head was kept, which would have ranked openings, so
+    # a campaign run before this cannot be compared at all. 0 keeps none.
+    keep_answer_chars: int = Field(default=20_000, ge=0, le=200_000)
 
 
 class A2AAgentConfig(BaseModel):

@@ -2502,6 +2502,45 @@ const _fmtK = n => n == null ? "—" : n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n
   : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
 function _dur(s) { s = Math.max(0, +s || 0); return s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h"; }
 
+// A pairwise comparison, rendered. Every number that could mislead on its own
+// sits beside the thing that would explain it away: the win rate beside its
+// interval, the flip rate beside what a flip means, and the overall rate beside
+// the length-matched one.
+function pairwiseView(d) {
+  if (d.note) return `<p class="hint"><b>Not compared:</b> ${esc(d.note)}</p>`;
+  const t = d.tally || {};
+  const pc = v => v == null ? "—" : Math.round(v * 100) + "%";
+  if (!t.decided) {
+    return `<p class="hint"><b>No pair was decided</b>, so there is no win rate.
+      ${t.pairs || 0} pair(s) judged, ${t.ties || 0} tie, ${t.flips || 0} with the
+      two orders disagreeing, ${t.undecided || 0} with no verdict.
+      ${esc(t.notes || "")}</p>`;
+  }
+  const rows = (d.pairs || []).map(p => `<tr>
+    <td>${esc((p.prompt || "").slice(0, 90))}</td>
+    <td class="nw">${p.winner === "tie" ? "tie"
+      : p.winner ? esc(p.winner) : "—"}${p.flip
+      ? ' <span class="pill bad" title="the two orders disagreed, so this pair is a tie">flip</span>' : ""}</td>
+    <td class="mono nw">${p.style.left.chars} / ${p.style.right.chars}${p.matched
+      ? '' : ' <span class="hint" title="the two answers are far apart in length, so length could explain this pair">≠</span>'}</td>
+    <td class="hint">${esc(p.notes || "")}</td></tr>`).join("");
+  return `
+    <p><b>${esc(t.subject)}</b> won <b>${t.wins}</b> of ${t.decided} decided
+      pairs — <b>${pc(t.win_rate)}</b> (95%: ${pc(t.lo)}–${pc(t.hi)}),
+      with ${t.ties} tie(s) and ${t.undecided} undecided.</p>
+    <p class="hint">
+      <b>Orders disagreed:</b> ${pc(t.flip_rate)} of pairs — a flip means the
+      judge picked whichever answer it read first, so the pair is counted a tie.
+      <b>Longer answer won:</b> ${pc(t.longer_won_pct)} of decided pairs.
+      <b>Length-matched only</b> (within a quarter): ${t.matched_pairs} pair(s),
+      ${pc(t.matched_win_rate)}. Read that one when the line before it is high —
+      a 70% win rate where the longer answer won 95% of the time is a report
+      about length.</p>
+    ${t.notes ? `<p class="hint"><b>Read this first:</b> ${esc(t.notes)}</p>` : ""}
+    <table><tr><th>prompt</th><th>winner</th><th>chars L/R</th><th>notes</th></tr>
+      ${rows}</table>`;
+}
+
 // The page's judgement, from the raw responses. Pure (no DOM), so it is
 // tested in node: tests/test_ui_overview.py.
 function overviewModel(st, ph, bu, adv, act) {
@@ -9502,9 +9541,16 @@ async function tabEvals() {
     api("eval/scoreboard").catch(() => ({rows: [], note: "", campaigns: []}))]);
   const personaOpts = pd.personas.filter(p => p.enabled)
     .map(p => `<option>${esc(p.virtual_name)}</option>`).join("");
+  // never a Fable-class model: the operator's rule is "should not be an
+  // option ever", and the harness refuses one as well, since a POST to the
+  // run API does not come through this list
+  const noFable = id => !/\bfable\b|\bmythos\b/i.test(id || "");
+  const judgeModels = (md.models || [])
+    .filter(m => m.reachable && !m.embedding && noFable(m.id));
   const judgeOpts = ['<option value="">— shape checks only (no judge) —</option>']
-    .concat((md.models || []).filter(m => m.reachable && !m.embedding)
-      .map(m => `<option>${esc(m.id)}</option>`)).join("");
+    .concat(judgeModels.map(m => `<option>${esc(m.id)}</option>`)).join("");
+  const personaAll = pd.personas.filter(p => p.enabled)
+    .map(p => `<option>${esc(p.virtual_name)}</option>`).join("");
   const pct = v => v == null ? "—" : Math.round(v * 100) + "%";
   const delta = v => v == null ? "" :
     ` <span class="pill ${v >= 0 ? "ok" : "bad"}">${v > 0 ? "+" : ""}${v}</span>`;
@@ -9599,6 +9645,15 @@ async function tabEvals() {
                style="width:80px" value="${(bd.evals || {}).per_prompt_timeout ?? 420}"> s
       </label>
       <button class="act" id="ev-timeout-save">Save</button>
+      <label title="How much of each answer to store, so two personas' answers
+                    to one prompt can be compared pairwise afterwards. Before
+                    v0.181.205 only a 200-character head was kept, which is why
+                    a campaign older than that cannot be compared - judging the
+                    head would rank opening sentences. 0 keeps none.">
+        keep of each answer
+        <input type="number" id="ev-keep" min="0" max="200000" step="1000"
+               style="width:90px" value="${(bd.evals || {}).keep_answer_chars ?? 20000}"> chars
+      </label>
     </div>
     <p class="hint">A tier is <b>"not separated from the best of its group by this
       evidence"</b>: a persona drops a tier only when its whole 95% interval sits below
@@ -9638,6 +9693,30 @@ async function tabEvals() {
         <button class="act primary" id="ev-camp-run">Start campaign</button>
         <button class="act" id="ev-camp-stop">Stop</button>
       </div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Pairwise — which of two, judged both ways round</h2>
+      <p class="hint">A judge given one answer and asked for 0-10 produces a
+        number nothing can check. Given two answers to the same prompt it is
+        answering a question it can hold in mind — so this takes the answers a
+        campaign already collected (nothing is asked of either persona again)
+        and compares them prompt by prompt. <b>Every pair is judged twice, with
+        the sides swapped, and counts only when both orders agree.</b> Position
+        bias is the largest artifact in pairwise judging: a judge that prefers
+        whatever it read first is perfectly consistent and knows nothing, and it
+        shows up here as a flip rate instead of a clean result. Sides are A and
+        B and the model and family names are stripped from the answers too, so
+        a model that signs its work is not identifying itself. A model may not
+        judge a pair containing its own answer — that is the one bias swapping
+        cannot cancel — and a Fable model is never a judge.</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px 12px">
+        <label>campaign</label><select id="pw-camp">${campOpts}</select>
+        <label>left</label><select id="pw-left">${personaAll}</select>
+        <label>right</label><select id="pw-right">${personaAll}</select>
+        <label>judge</label><select id="pw-judge">${judgeOpts}</select>
+        <button class="act primary" id="pw-run">Compare</button>
+      </div>
+      <div id="pw-out"></div>
     </div>
     <h2>Eval harness — score a persona's real routing output</h2>
     <p class="hint">Runs the category's test prompts through the persona's actual routing path.
@@ -9681,6 +9760,27 @@ async function tabEvals() {
                                 body: {per_prompt_timeout: v}});
       toast(`a prompt may now take ${v}s`);
     } catch (e) { toast("could not save: " + e.message, true); }
+  };
+  $("#ev-keep").onchange = async () => {
+    const v = Math.max(0, +$("#ev-keep").value || 0);
+    try {
+      await api("config/evals", {method: "POST", body: {keep_answer_chars: v}});
+      toast(v ? `keeping ${v} chars of each answer`
+              : "answers will not be kept — no campaign from now on can be compared");
+    } catch (e) { toast("could not save: " + e.message, true); }
+  };
+  $("#pw-run").onclick = async () => {
+    const [camp, left, right, judge] =
+      ["#pw-camp", "#pw-left", "#pw-right", "#pw-judge"].map(k => $(k).value);
+    if (!camp) { toast("pick a campaign", true); return; }
+    if (!judge) { toast("pairwise needs a judge model", true); return; }
+    if (left === right) { toast("pick two different personas", true); return; }
+    $("#pw-out").innerHTML = '<p class="hint">judging each pair twice…</p>';
+    try {
+      const d = await api("eval/pairwise", {method: "POST", body:
+        {campaign_id: +camp, judge_model: judge, left, right}});
+      $("#pw-out").innerHTML = pairwiseView(d);
+    } catch (e) { $("#pw-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
   };
   $("#ev-board-refresh").onclick = async () => {
     const id = $("#ev-camp").value;
