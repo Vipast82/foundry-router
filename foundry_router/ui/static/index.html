@@ -2502,6 +2502,31 @@ const _fmtK = n => n == null ? "—" : n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n
   : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
 function _dur(s) { s = Math.max(0, +s || 0); return s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h"; }
 
+// A judge's calibration. The verdict sentence comes first and the rates
+// after it, because a rate on its own invites exactly the reading this is
+// meant to prevent.
+function judgeCheckView(d) {
+  if (d.note) return `<p class="hint"><b>Not checked:</b> ${esc(d.note)}</p>`;
+  const bad = /^NOT usable|^weak|cannot be calibrated/.test(d.verdict || "");
+  const rows = Object.entries(d.by_kind || {}).map(([kind, k]) => `<tr>
+    <td>${kind === "near" ? "near miss" : "another question's answer"}</td>
+    <td class="mono">${k.agreed}/${k.decided}</td>
+    <td class="mono">${k.rate == null ? "—" : Math.round(k.rate * 100) + "%"}</td>
+    <td class="mono">${k.flips}</td></tr>`).join("");
+  const wrong = (d.pairs || []).filter(p => !p.agreed).slice(0, 8).map(p =>
+    `<tr><td class="mono">${esc(p.task_id)}</td><td>${esc(p.kind)}</td>
+     <td class="mono">${esc(p.right)}</td><td class="mono">${esc(p.wrong)}</td>
+     <td>${p.picked === null ? "no verdict" : esc(String(p.picked))}${
+       p.flip ? " (flipped)" : ""}</td></tr>`).join("");
+  return `
+    <p class="pill ${bad ? "bad" : "ok"}">${esc(d.judge_model)}: ${esc(d.verdict)}</p>
+    <table><tr><th>pairs of</th><th>agreed</th><th>rate</th><th>flipped</th></tr>
+      ${rows}</table>
+    ${wrong ? `<p class="hint">Where it disagreed with the key:</p>
+      <table><tr><th>case</th><th>kind</th><th>right</th><th>wrong</th>
+        <th>it picked</th></tr>${wrong}</table>` : ""}`;
+}
+
 // A pairwise comparison, rendered. Every number that could mislead on its own
 // sits beside the thing that would explain it away: the win rate beside its
 // interval, the flip rate beside what a flip means, and the overall rate beside
@@ -9733,6 +9758,27 @@ async function tabEvals() {
         <button class="act primary" id="pw-run">Compare</button>
       </div>
       <div id="pw-out"></div>
+      <h2>Check the judge — against answers already known to be right</h2>
+      <p class="hint">A pairwise win rate from a judge that cannot tell the
+        answers apart is the most convincing nonsense this benchmark can
+        produce, and it matters most for a <b>local</b> judge, which is what is
+        left when the frontier window is spent. So this hands the judge pairs
+        whose right answer comes from a suite's own key: the correct answer
+        against the answer to a different question, and the correct answer
+        against a <i>near miss</i> — 4 for 3, a list reversed, KeyError for
+        RuntimeError. Both orders, as always, so a judge reading position
+        scores no agreement rather than 50%. <b>It is a floor, not a
+        ceiling:</b> telling right from wrong is not the same skill as
+        preferring the better of two defensible deliverables, so a judge that
+        fails this is disqualified and one that passes is only not
+        disqualified.</p>
+      <div class="row" style="flex-wrap:wrap;gap:6px 12px">
+        <label>judge</label><select id="jc-judge">${judgeOpts}</select>
+        <label>against suite</label><input type="text" id="jc-suite"
+          value="codereason" style="width:120px">
+        <button class="act primary" id="jc-run">Check this judge</button>
+      </div>
+      <div id="jc-out"></div>
       <h2>Deliverables — two benchmark runs of the agent tasks</h2>
       <p class="hint">The agent tasks have no answer key, so they are never
         given a score and this is the only thing that can be said about them.
@@ -9816,6 +9862,16 @@ async function tabEvals() {
         {campaign_id: +camp, judge_model: judge, left, right}});
       $("#pw-out").innerHTML = pairwiseView(d);
     } catch (e) { $("#pw-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
+  };
+  $("#jc-run").onclick = async () => {
+    const judge = $("#jc-judge").value;
+    if (!judge) { toast("pick a judge to check", true); return; }
+    $("#jc-out").innerHTML = '<p class="hint">judging each known pair twice…</p>';
+    try {
+      const d = await api("eval/judge-check", {method: "POST", body:
+        {judge_model: judge, suite: $("#jc-suite").value || "codereason"}});
+      $("#jc-out").innerHTML = judgeCheckView(d);
+    } catch (e) { $("#jc-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
   };
   $("#pw-runs").onclick = async () => {
     const l = +$("#pw-lrun").value, r = +$("#pw-rrun").value;

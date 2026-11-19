@@ -3035,6 +3035,27 @@ async def bench_agent(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/eval/judge-check")
+async def eval_judge_check(request: Request):
+    """How often a judge picks an answer the suite already knows is right.
+
+    {judge_model, suite?, limit?}. A floor, not a ceiling: a judge that fails
+    this cannot be trusted at all, and one that passes is only not
+    disqualified. Matters most for a LOCAL judge, which is what is left when
+    the frontier window is spent."""
+    from .. import judgeproto
+    from ..errors import describe_exception
+    svc = _svc(request)
+    b = await request.json()
+    try:
+        out = await judgeproto.calibrate(
+            svc, str(b.get("judge_model") or ""),
+            str(b.get("suite") or "codereason"), int(b.get("limit") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/eval/pairwise-runs")
 async def eval_pairwise_runs(request: Request):
     """Eval tier 4: compare two benchmark runs' deliverables.

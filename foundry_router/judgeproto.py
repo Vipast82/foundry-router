@@ -625,6 +625,190 @@ def _task_text(svc, suite: str, task_id: str) -> str:
     return task_id
 
 
+# --------------------------------------------------------------------------- #
+# Calibration: can this judge pick an answer that is already known to be right #
+# --------------------------------------------------------------------------- #
+
+def perturb(repr_text: str) -> str:
+    """A near miss: the same KIND of answer, definitely wrong.
+
+    Built from the parsed value rather than its text, so "[2, 2, 2]" does not
+    become "[2, 2, 2]x". Returns "" when no different value of the same kind
+    can be made, and that case is then left out rather than paired with
+    itself."""
+    import ast
+    try:
+        v = ast.literal_eval(repr_text)
+    except (ValueError, SyntaxError):
+        # an exception NAME is not a literal, and it is the near miss that
+        # matters for the eight exception cases: telling RuntimeError from
+        # KeyError is the whole question those ask
+        return _other_exception(repr_text.strip())
+    if isinstance(v, bool):
+        out = not v
+    elif isinstance(v, int):
+        out = v + 1
+    elif isinstance(v, float):
+        out = round(v + 0.5, 6)
+    elif isinstance(v, str):
+        out = v[:-1] if len(v) > 1 else "x"
+    elif isinstance(v, (list, tuple)):
+        if len(v) > 1 and list(reversed(list(v))) != list(v):
+            out = type(v)(reversed(list(v)))
+        elif v:
+            out = type(v)(list(v)[:-1])
+        else:
+            return ""
+    elif isinstance(v, dict):
+        if not v:
+            return ""
+        out = {k: v[k] for k in list(v)[:-1]}
+    elif isinstance(v, set):
+        out = set(list(v)[:-1]) if v else None
+        if out is None:
+            return ""
+    else:
+        return ""
+    return "" if repr(out) == repr(v) else repr(out)
+
+
+_EXCEPTIONS = ("TypeError", "ValueError", "KeyError", "IndexError",
+               "AttributeError", "RuntimeError", "ZeroDivisionError",
+               "StopIteration", "NameError", "UnboundLocalError")
+
+
+def _other_exception(name: str) -> str:
+    """A different exception of the same shape, or "" when this is not one."""
+    if name not in _EXCEPTIONS:
+        return ""
+    i = _EXCEPTIONS.index(name)
+    return _EXCEPTIONS[(i + 1) % len(_EXCEPTIONS)]
+
+
+def _key_of(case: dict) -> str:
+    """The case's answer as text, or "" when it has no single key."""
+    ref = case.get("reference") or {}
+    if ref.get("deliverable"):
+        return ""                 # no key by design
+    if ref.get("py_value"):
+        return str(ref["py_value"])
+    inc = ref.get("must_include") or []
+    if len(inc) == 1 and str(inc[0]).strip():
+        return str(inc[0])
+    if ref.get("content") and len(str(ref["content"])) <= 120:
+        return str(ref["content"])
+    return ""
+
+
+def _question(case: dict) -> str:
+    for m in reversed(case.get("messages") or []):
+        if m.get("role") == "user":
+            return str(m.get("content") or "")
+    return ""
+
+
+def calibration_pairs(svc, suite: str, limit: int = 0) -> list:
+    """{task, right, wrong, kind} over a suite that has answer keys."""
+    from .bench import cases
+    rows = [c for c in cases(svc, suite) if _key_of(c) and _question(c)]
+    out = []
+    for i, c in enumerate(rows):
+        right, task = _key_of(c), _question(c)
+        other = _key_of(rows[(i + 1) % len(rows)]) if len(rows) > 1 else ""
+        if other and other != right:
+            out.append({"task_id": c.get("task_id") or "", "task": task,
+                        "right": right, "wrong": other, "kind": "other"})
+        near = perturb(right)
+        if near:
+            out.append({"task_id": c.get("task_id") or "", "task": task,
+                        "right": right, "wrong": near, "kind": "near"})
+    if limit:
+        out = out[:int(limit)]
+    return out
+
+
+async def calibrate(svc, judge_model: str, suite: str = "codereason",
+                    limit: int = 0, ask=None) -> dict:
+    """How often this judge picks the answer the suite already knows is right.
+
+    A floor, not a ceiling: see this module's docstring. Every pair is judged
+    in both orders like any other, so a position-reading judge scores no
+    agreement rather than 50%."""
+    out = {"judge_model": judge_model, "suite": suite, "pairs": [],
+           "note": "", "by_kind": {}, "verdict": ""}
+    why = judge_refusal(judge_model)
+    if why:
+        out["note"] = why
+        return out
+    rows = calibration_pairs(svc, suite, limit)
+    if not rows:
+        out["note"] = (f"the suite {suite!r} has no cases with a single answer "
+                       "key, so there is nothing here a judge can be checked "
+                       "against")
+        return out
+    pw = Pairwise(svc, ask=ask)
+    for r in rows:
+        got = await pw.compare(judge_model, r["task"],
+                               {"model": "right", "text": r["right"]},
+                               {"model": "wrong", "text": r["wrong"]})
+        out["pairs"].append({
+            "task_id": r["task_id"], "kind": r["kind"],
+            "right": r["right"], "wrong": r["wrong"],
+            "picked": got["winner"], "flip": got["flip"],
+            "agreed": got["winner"] == "right",
+        })
+    for kind in ("other", "near"):
+        got = [p for p in out["pairs"] if p["kind"] == kind]
+        if not got:
+            continue
+        decided = [p for p in got if p["picked"] in ("right", "wrong")]
+        out["by_kind"][kind] = {
+            "pairs": len(got), "decided": len(decided),
+            "agreed": sum(1 for p in got if p["agreed"]),
+            "rate": round(sum(1 for p in got if p["agreed"]) / len(decided), 3)
+            if decided else None,
+            "flips": sum(1 for p in got if p["flip"]),
+        }
+    out["verdict"] = _verdict(out["by_kind"])
+    return out
+
+
+# A judge that cannot beat an answer to a different question is not a judge.
+FLOOR_OTHER = 0.9
+# A near miss is the real test, and this is where a weak local model shows.
+FLOOR_NEAR = 0.8
+
+
+def _verdict(by_kind: dict) -> str:
+    """Plain words, because a rate on its own invites the wrong reading."""
+    o, n = by_kind.get("other") or {}, by_kind.get("near") or {}
+    bits = []
+    if o.get("rate") is None and n.get("rate") is None:
+        return ("this judge decided none of the pairs, so it cannot be "
+                "calibrated - treat it as unusable rather than neutral")
+    if o.get("rate") is not None:
+        bits.append(f"{round(o['rate'] * 100)}% against an answer to another "
+                    f"question ({o['agreed']} of {o['decided']} decided)")
+    if n.get("rate") is not None:
+        bits.append(f"{round(n['rate'] * 100)}% against a near miss "
+                    f"({n['agreed']} of {n['decided']} decided)")
+    flips = (o.get("flips") or 0) + (n.get("flips") or 0)
+    total = (o.get("pairs") or 0) + (n.get("pairs") or 0)
+    if flips:
+        bits.append(f"{round(100 * flips / total)}% of pairs flipped when the "
+                    f"sides were swapped")
+    head = "usable"
+    if (o.get("rate") or 0) < FLOOR_OTHER:
+        head = ("NOT usable: it cannot reliably tell a right answer from the "
+                "answer to a different question")
+    elif (n.get("rate") or 0) < FLOOR_NEAR:
+        head = ("weak: it beats an obviously wrong answer but not a near miss, "
+                "so read its win rates as indicative and not as evidence")
+    return head + " - " + "; ".join(bits) + (
+        ". This is a floor: telling right from wrong is not the same skill as "
+        "preferring the better of two defensible answers.")
+
+
 def pair_history(db, campaign_id: int = 0, limit: int = 200) -> list:
     """Comparisons already made, newest first."""
     if campaign_id:

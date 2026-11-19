@@ -1,3 +1,61 @@
+## v0.181.207 - checking a local judge against answers already known
+
+The frontier usage window is nearly spent, so the judge has to be a local
+model. **Nothing was stopping that.** `judge_refusal` bars a Fable model and a
+model judging its own answer, and nothing else; `check_paid_call` denies
+subscription and metered backends, not free local ones. Two local models are
+reachable here and either can judge today -
+`Qwen3.6-35B-A3B-UD-IQ3_XXS` and `qwen3.8-flash-next-unsloth-ud-iq3_xxs` - and
+neither spends any of the window.
+
+So the problem is not permission, it is **trust**. A pairwise win rate from a
+judge that cannot tell two answers apart is the most convincing nonsense this
+benchmark can produce, and a smaller model is likelier to be that judge. The
+protocol already catches one half of it: a judge reading position rather than
+substance disagrees with itself when the sides are swapped, and the flip rate
+says so. It cannot catch a judge that is consistently, confidently wrong.
+
+This can, because some suites already know the right answer. The judge is given
+pairs built from a suite's own key, in two kinds, reported separately because
+they measure different things:
+
+- **against another question's answer** - the correct answer paired with the
+  correct answer to a different case. Nothing is fabricated; the wrong side is
+  simply an answer to something else. A judge that cannot win here cannot judge
+  at all, and the floor is 90%.
+- **against a near miss** - the correct answer paired with a perturbation of
+  itself: 4 for 3, a list reversed, a string a character short, `KeyError` for
+  `RuntimeError`. This is the one that matters, because a real comparison is
+  between two plausible answers, and the floor is 80%.
+
+The near miss is built from the **parsed value** rather than its text, so
+`[2, 2, 2]` does not become `[2, 2, 2]x`, and a key with no distinct near miss
+(`'x'`, `[]`, `None`) is left out rather than paired with itself - a pair whose
+two sides are the same answer scores every judge on a question with no right
+answer. Exception names are not literals and would have had no near miss at all,
+which would have left the eight exception cases checked only against obvious
+nonsense: `RuntimeError` against `KeyError` is exactly the question those cases
+ask, so a name is perturbed to the next exception in a fixed list.
+
+**Every pair is judged in both orders, like everything else here**, and that is
+load-bearing rather than consistency for its own sake: the right answer is
+passed first, so a judge that always picks what it read first would score 100%
+if each pair were judged once. It scores no agreement at all instead, and the
+verdict says it cannot be calibrated rather than reporting it as neutral. A test
+asserts exactly that.
+
+**The verdict is a sentence, not a rate**, and it always carries the limit:
+this is a floor, not a ceiling. Telling a right answer from a wrong one is not
+the same skill as preferring the better of two defensible deliverables. A judge
+that fails is disqualified; a judge that passes is only not disqualified. Three
+outcomes are named in words - not usable, weak (beats nonsense, blind to a near
+miss, which is the likeliest shape for a small local model), and usable - and
+the page shows where it disagreed with the key, because which cases it got wrong
+says more than the percentage.
+
+32 tests, including one for each of those three outcomes and one asserting the
+first-position judge is caught.
+
 ## v0.181.206 - deliverable tasks, and refusing to score them
 
 The last piece asked for: tasks that ask for a thing to be **built**, which is
