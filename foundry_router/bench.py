@@ -187,6 +187,55 @@ def too_long(case: dict) -> bool:
     return int(n) > MAX_PROMPT_TOKENS
 
 
+def _examples(store, sessions, want_tiers: set):
+    """Every conversation in the prepared store that meets the tier filter.
+
+    Shared by `build` and `tag_counts`: a second copy of this walk would be a
+    second thing to keep in step (v0.181.200)."""
+    for pid in store.projects():
+        labels: dict = {}
+        for e in store.events(pid, "event_type='router_outcome'"):
+            if e.get("request_id"):
+                labels.setdefault(e["request_id"], []).append((e.get("facts") or {}).get("label"))
+        for _sid, calls in sessions._calls(store, pid):
+            for last, inside in sessions.conversations(store, calls):
+                ex = sessions.build_example(store, last, inside, labels)
+                if not ex:
+                    continue
+                if want_tiers and (ex.get("meta") or {}).get("tier") not in want_tiers:
+                    continue
+                yield ex
+
+
+def tag_counts(svc, tiers=("verified",)) -> dict:
+    """{tag: how many cases a suite filtered to it would hold}, so the console
+    can offer what the corpus actually has instead of a free-text box."""
+    from foundry_training import sessions
+    from foundry_training.store import TrainingStore
+
+    from . import training_prep
+    root = training_prep._dirs(svc)["store"]
+    if not (root / "normalized.sqlite").exists():
+        return {"tags": [], "cases": 0,
+                "note": "the prepared store is empty — prepare the dataset first"}
+    store = TrainingStore(str(root), allow_in_repo=True)
+    counts: dict = {}
+    seen, total = set(), 0
+    for ex in _examples(store, sessions, {t for t in tiers if t}):
+        fresh = [c for c in cases_from(ex)
+                 if c["id"] not in seen and not too_long(c)]
+        for c in fresh:
+            seen.add(c["id"])
+        if not fresh:
+            continue
+        total += len(fresh)
+        for t in (ex.get("meta") or {}).get("tags") or []:
+            counts[str(t)] = counts.get(str(t), 0) + len(fresh)
+    return {"cases": total,
+            "tags": [{"tag": k, "cases": v}
+                     for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]}
+
+
 def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=print) -> dict:
     """Cut a suite out of the prepared store. Newest conversations first, so a
     suite follows what the project is doing now."""
@@ -201,26 +250,15 @@ def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=pri
     store = TrainingStore(str(root), allow_in_repo=True)
     want_tiers, want_tags = {t for t in tiers if t}, {t for t in tags if t}
     picked, seen = [], set()
-    for pid in store.projects():
-        labels: dict = {}
-        for e in store.events(pid, "event_type='router_outcome'"):
-            if e.get("request_id"):
-                labels.setdefault(e["request_id"], []).append((e.get("facts") or {}).get("label"))
-        for _sid, calls in sessions._calls(store, pid):
-            for last, inside in sessions.conversations(store, calls):
-                ex = sessions.build_example(store, last, inside, labels)
-                if not ex:
-                    continue
-                meta = ex.get("meta") or {}
-                if want_tiers and meta.get("tier") not in want_tiers:
-                    continue
-                if want_tags and not (want_tags & set(meta.get("tags") or [])):
-                    continue
-                for c in cases_from(ex):
-                    if c["id"] in seen or too_long(c):
-                        continue
-                    seen.add(c["id"])
-                    picked.append(c)
+    for ex in _examples(store, sessions, want_tiers):
+        meta = ex.get("meta") or {}
+        if want_tags and not (want_tags & set(meta.get("tags") or [])):
+            continue
+        for c in cases_from(ex):
+            if c["id"] in seen or too_long(c):
+                continue
+            seen.add(c["id"])
+            picked.append(c)
     picked.sort(key=lambda c: c.get("task_id") or "", reverse=True)
     picked = picked[:max(1, min(limit, MAX_CASES))]
     f = _dir(svc) / f"{name}.jsonl"
@@ -458,6 +496,114 @@ def needle_breakdown(db, run_id: int) -> list:
     return [{"chars": c, "depth": d, "cases": v["n"],
              "score": round(100.0 * v["hit"] / v["n"], 1) if v["n"] else None}
             for (c, d), v in sorted(cells.items())]
+
+
+# -- the tool-picking suite ----------------------------------------------------------
+
+_PICK_SYSTEM = ("You choose tools. You are given every tool this system has, one "
+                "per line as NAME - description. Answer with exactly one tool "
+                "name, copied character for character, and nothing else.")
+_PICK_QUESTION = ("Which single tool would you use to {need}?\n"
+                  "Answer with the tool name only.")
+
+
+def _tool_rows(svc) -> list:
+    """(name, description) for every enabled tool the router offers."""
+    try:
+        rows = svc.tool_registry.status() or []
+    except Exception:                                             # noqa: BLE001
+        return []
+    out = []
+    for t in rows:
+        if not isinstance(t, dict) or t.get("disabled"):
+            continue
+        name = str(t.get("name") or "").strip()
+        desc = str(t.get("description") or "").strip()
+        # the registry prefixes the server in brackets; the need reads better without
+        if desc.startswith("[") and "]" in desc:
+            desc = desc.split("]", 1)[1].strip()
+        if name and desc:
+            out.append((name, desc))
+    return out
+
+
+def _need_from(desc: str) -> str:
+    """The description as something a person wants done."""
+    d = desc.strip().rstrip(".")
+    d = d[0].lower() + d[1:] if d else d
+    for head in ("use this to ", "used to ", "this tool ", "tool to "):
+        if d.startswith(head):
+            d = d[len(head):]
+    return d[:200]
+
+
+def _fit_catalogue(rows: list) -> tuple:
+    """(catalogue text, description cap). Every tool keeps a line; the
+    descriptions shrink until the whole thing fits the prompt budget.
+
+    Dropping tools instead would take the answer out of some cases and then
+    score the model for not finding it (v0.181.200)."""
+    # leave room for the system turn, the question and the answer
+    budget = int(MAX_PROMPT_TOKENS * 0.6) * 4            # ~4 chars a token
+    for cap in (160, 120, 90, 60, 40, 24):
+        text = "\n".join(f"{n} - {(d or '')[:cap].rstrip()}" for n, d in rows)
+        if len(text) <= budget:
+            return text, cap
+    # even at 24 characters it does not fit: names alone, which still names
+    # every tool and is the most that can honestly be shown
+    return "\n".join(n for n, _d in rows), 0
+
+
+def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
+    """Write a suite that asks which tool meets a stated need, with the whole
+    catalogue in the prompt as the distractor set."""
+    rows = _tool_rows(svc)
+    if len(rows) < 5:
+        raise ValueError("the tool registry has too few tools to build a suite "
+                         "(is the router connected to its MCP servers?)")
+    catalogue, desc_cap = _fit_catalogue(rows)
+    import random as _rnd
+    rnd = _rnd.Random("toolpick-v1")
+    order = list(rows)
+    rnd.shuffle(order)
+    out, skipped = [], 0
+    for tool_name, desc in order:
+        if len(out) >= max(1, int(limit)):
+            break
+        need = _need_from(desc)
+        # a need that names its own answer measures nothing
+        if not need or _contains(_norm(need), _norm(tool_name)):
+            skipped += 1
+            continue
+        short = tool_name.rsplit("__", 1)[-1].replace("_", " ")
+        if short and _contains(_norm(need), _norm(short)):
+            skipped += 1
+            continue
+        out.append({
+            "id": f"PICK-{len(out) + 1:03d}",
+            "task_id": tool_name,
+            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}"],
+            "messages": [
+                {"role": "system", "content": _PICK_SYSTEM},
+                {"role": "user", "content": catalogue + "\n\n" +
+                 _PICK_QUESTION.format(need=need)},
+            ],
+            "reference": {"content": tool_name, "must_include": [tool_name]},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench",
+                         f"built the {name} suite: {len(out)} cases over a "
+                         f"{len(rows)}-tool catalogue ({skipped} skipped, the need "
+                         f"named its own answer)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f),
+            "catalogue": len(rows), "skipped": skipped,
+            "description_chars": desc_cap, "prompt_chars": len(catalogue)}
 
 
 # -- running a suite ----------------------------------------------------------------------

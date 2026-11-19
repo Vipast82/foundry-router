@@ -2987,6 +2987,36 @@ async def bench_run(request: Request):
         bool(body.get("lessons")))}
 
 
+@router.post("/admin/api/bench/toolpick")
+async def bench_toolpick(request: Request):
+    """Build a tool-picking suite: {name?, limit?}.
+
+    Every tool this router offers goes in the prompt as the distractor set, and
+    each case asks which one meets a stated need - the thing a model has to get
+    right before it can do anything else."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_toolpick, svc, str(body.get("name") or "toolpick"),
+            max(1, min(200, int(body.get("limit") or 40))))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.get("/admin/api/bench/tags")
+async def bench_tags(request: Request, tiers: str = "verified"):
+    """Which tags the corpus has and how many cases each would cut, so the
+    suite builder can offer them instead of a free-text box."""
+    from .. import bench
+    svc = _svc(request)
+    return await asyncio.to_thread(
+        bench.tag_counts, svc, tuple(t for t in tiers.split(",") if t))
+
+
 @router.post("/admin/api/bench/needle")
 async def bench_needle(request: Request):
     """Build a needle-in-a-haystack suite: {name?, per_cell?, depths?, lengths?}.

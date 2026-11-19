@@ -1,4 +1,50 @@
-## v0.181.198/199 - removing runs, per-run performance, and a needle in the haystack
+## v0.181.200 - picking the right tool out of all of them, and finding the tags
+
+**The tool-picking suite.** This router offers 132 tools behind the finder, and
+choosing the right one is what a model has to do before it can do anything else
+- it is also where the brain model lost its benchmark run, 16 cases with a zero
+tool score against strata's 6. So the whole catalogue goes in the prompt as the
+distractor set and each case asks which single tool meets one stated need,
+scored exactly on the tool name. Forty cases over 132 tools, with three skipped
+because the need named its own answer, which would have measured copying rather
+than choosing.
+
+The limitation is in the suite's own docstring rather than glossed: each need is
+phrased FROM that tool's description, so this measures mapping a stated need
+onto the right entry in a long list, not knowing from experience what a tool
+does.
+
+The catalogue fits the prompt budget by shortening descriptions, never by
+dropping tools - 132 of them at a 160-character cap come to 19k characters. The
+obvious trim, fewer tools, would quietly take the answer out of some cases and
+then score the model for not finding what it was never shown; at 1,500 tools it
+degrades to names alone and every tool still has a line. The boundary matching
+added with the needle suite earns its keep here, since `list_tables` must not
+score for `SQLite__list_tables`.
+
+**The tag list.** Asked for a Luau benchmark, and it needed no new code: `build`
+has taken a `tags` filter all along and the console's form has always passed it.
+What was missing was any way to know which tags exist - the corpus holds 44
+blender, 13 luau, 6 roblox_studio and 1 roblox_ui - so `/admin/api/bench/tags`
+reports each tag with how many cases it would cut, and the tags box offers them
+instead of being a free-text guess. Saying so is better than building a second
+path to a feature that already worked.
+
+That meant lifting the corpus walk out of `build` so it and `tag_counts` share
+one traversal. A second copy would be a second thing to keep in step, which is
+the fault this week has been a run of.
+
+**And a defect in v0.181.199, found by this release's gate run.** Its heading
+read `## v0.181.198/199`, because the two were one piece of work, and that
+parses as 0.181.198 against a `__version__` of 0.181.199 - so the release failed
+its own parity test. The heading carries the shipped version now and the body
+says the rest. The process hole behind it is the real fix: the bump and the
+notes used to be written AFTER the gate run, so the suite never covered them.
+They come first now.
+
+## v0.181.199 - removing runs, per-run performance, and a needle in the haystack
+
+(With v0.181.198, which this supersedes: the two were one piece of work and ship together.)
 
 Three things asked for while looking at the Performance page: a way to remove old
 benchmark runs, performance recorded during a benchmark, and more benchmarks -
