@@ -102,3 +102,37 @@ def test_the_brain_path_records_it_with_the_text():
     # which does not exist and would have logged nothing while looking fine
     assert "self.svc.db.log_event" in src
     assert "clean.strip()[:600]" in src
+
+# -- the path the sprints actually take (v0.181.195) ------------------------------
+
+def test_the_pool_reader_reports_its_failures_not_only_its_successes():
+    """`if found:` had no else, so a call that could not be read left no trace
+    and the markup went to the client as the answer - while the success case
+    logged "recovered", which is the one that needs no explanation.
+
+    This is the path that matters most: every Kilo persona is routing strict
+    with execution_mode direct, so a sprint comes through here and never through
+    the brain's tool loop, where the same failure did report itself. v0.181.194
+    put the diagnosis in the path the sprints do not take."""
+    import inspect
+
+    from foundry_router.pool import protocols
+    src = inspect.getsource(protocols)
+    i = src.index("recovered")
+    after = src[i:i + 1200]
+    assert "else:" in after, "the failure branch is still silent"
+    assert "why_unread" in after
+    assert "could not " in after
+    # and it says the text goes out as the answer, because that is the part a
+    # reader of the log needs to know
+    assert "goes out as the answer" in after
+
+
+def test_the_reason_is_safe_to_put_in_a_log_line():
+    """It runs inside a response path; a raise there would turn an unreadable
+    tool call into a failed request."""
+    weird = ["<tool_call>" + "{" * 5000, "<function=" + "\x00" * 10,
+             "<tool_call>\u2019\u201c</tool_call>"]
+    for w in weird:
+        out = T.why_unread(w, FINDER)
+        assert isinstance(out, str) and out

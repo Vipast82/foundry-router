@@ -1155,6 +1155,15 @@ class OpenAIProtocol(BaseProtocol):
                 _c, finish = rest, "tool_calls"
                 log.info("openai-compat %s: %s wrote %d tool call(s) as text (%s); recovered",
                          self.url, model, len(found), ", ".join(c["name"] for c in found))
+            else:
+                # v0.181.195: this branch said nothing, so a call that could not be
+                # read left no trace and the markup went to the client as the answer.
+                # Every Kilo persona is strict + direct and comes through here rather
+                # than the brain's tool loop, so this is the path a sprint takes.
+                log.warning("openai-compat %s: %s wrote tool-call text that could not "
+                            "be read (%s) - it goes out as the answer. The text: %r",
+                            self.url, model,
+                            toolcall_text.why_unread(_c, tools), _c[:600])
         return ChatResult(
             content=_c,
             # Reasoning models on llama.cpp/vLLM separate their chain-of-thought

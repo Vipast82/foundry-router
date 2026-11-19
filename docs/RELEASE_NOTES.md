@@ -1,3 +1,23 @@
+## v0.181.195 - and on the path the sprints take
+
+v0.181.194 made an unreadable tool call explain itself in the brain's tool loop,
+which is the path the sprints do not take. Every Kilo persona is `routing: strict`
+with `execution_mode: direct`, so a sprint's model calls come through the pool's
+openai-compatible reader instead - and there `if found:` had no else. When the
+reader could not use what the model wrote, nothing was recorded and the markup
+went to the client as the answer, while the success case logged "recovered",
+which is the one that needs no explanation.
+
+Same reason text as the other path, through `toolcall_text.why_unread`, and the
+line says the text goes out as the answer, because that is the part a reader of
+the log needs to know. No behaviour change: what went out before still goes out.
+
+That makes three places this release series touched the same shape of fault - a
+thing that works when a test calls it and says nothing when it does not work in
+production - and this one was introduced by the fix for the previous one. The
+diagnosis went into the path I had been reading rather than the path that carries
+the work.
+
 ## v0.181.194 - the next unreadable tool call will say what happened
 
 Three answers of the last campaign came back as "<worker> wrote tool calls that
