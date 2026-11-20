@@ -11,6 +11,7 @@ Commands
                                            Foundry personas, git; changes nothing
   queue show [PROJECT]
   queue approve PROJECT TASK [--deps A,B] --by NAME [--note TEXT]
+  queue set-deps PROJECT TASK --deps A,B --by NAME   (a QUEUED sprint; a removed dep stays removed)
   status [--json]
   tick                                     one engine step for every task
   run [--poll S] [--max-ticks N] [--until-settled] [--control] [--telemetry]
@@ -345,6 +346,7 @@ def _state_dir(a) -> str:
 _WRITING = {("unblock", None), ("approve", None), ("reject", None), ("answer", None),
             ("resume", None), ("pause", None), ("cancel", None), ("decision", None),
             ("pause-project", None), ("resume-project", None), ("queue", "approve"),
+            ("queue", "set-deps"),
             ("studio-reserve", None), ("studio-release", None),
             ("tracks", "start"), ("tracks", "stop"), ("tracks", "merge"),
             ("tracks", "set-max-agents"), ("frontier", "request"), ("frontier", "return"),
@@ -729,6 +731,10 @@ def main(argv=None, clients=None, foundry=None) -> int:
     q2.add_argument("--note", default="")
     q2.add_argument("--adopt-existing", action="append", default=[], metavar="PATH",
                     help="explicitly adopt this dirty task-scope file, with verified external backup; repeat per file")
+    # 2026-11-20 REL-1a: change a QUEUED sprint's deps as a person (a removed dep stays
+    # removed even when the plan's Depends-on line names it); keeps its queue place and lane
+    q3 = qs.add_parser("set-deps"); q3.add_argument("project"); q3.add_argument("task")
+    q3.add_argument("--deps", default=""); q3.add_argument("--by", required=True)
     st = sub.add_parser("status"); st.add_argument("--json", action="store_true")
     sub.add_parser("tick")
     r = sub.add_parser("run"); r.add_argument("--poll", type=float, default=5)
@@ -1233,6 +1239,11 @@ def _dispatch(a, c: Coordinator) -> int:
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]
             e = c.approve(a.project, a.task, deps, a.by, a.note, a.adopt_existing)
             print(f"approved {a.project}/{a.task} (position {e['position']}, deps {e['deps']})")
+            return 0
+        if a.qcmd == "set-deps":
+            deps = [d.strip() for d in a.deps.split(",") if d.strip()]
+            e = c.set_deps(a.project, a.task, deps, a.by)
+            print(f"deps of {a.project}/{a.task}: {e['deps']} (track {e.get('track') or '-'})")
             return 0
         for p in s.projects():
             if a.project and p["project_id"] != a.project:
