@@ -3229,6 +3229,22 @@ async def eval_pairwise_runs(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/protocol")
+async def bench_protocol(request: Request):
+    """Build the coordinator protocol suite (v0.181.217): {name?, real?}."""
+    from .. import protocolbench
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(protocolbench.build_protocol, svc,
+                                      str(body.get("name") or "protocol"),
+                                      max(0, min(60, int(body.get("real", 20)))))
+    except Exception as e:                                        # noqa: BLE001
+        from ..errors import describe_exception
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/codereason")
 async def bench_codereason(request: Request):
     """Build the code-reasoning suite: {name?, limit?}.

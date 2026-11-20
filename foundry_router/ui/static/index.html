@@ -9964,6 +9964,13 @@ async function tabBench() {
                 nothing a model writes is ever run. Code checks only compile Python, which
                 every model passes, so they cannot score this."
         >Build the code suite</button>
+        <button class="act" id="bench-protocol" title="Build the coordinator protocol suite:
+                does a model end a sprint turn the way the coordinator reads it - a valid
+                coordinator-report block, the right status, the BLOCKED rules (product with
+                options, tooling and user_action without), a SCOPE_REQUEST for a file outside
+                the task. Scenarios with one right answer, plus real coordinator turns from
+                your corpus graded against the verified session's own report."
+        >Build the protocol suite</button>
         <button class="act" id="bench-agent" title="Build the agent-task suite: deliverables
                 from the work this ecosystem does — Luau and Roblox server code, Blender
                 scripting, this router's own asyncio and SQLite, and operating the sprint
@@ -10054,6 +10061,15 @@ async function tabBench() {
       const out = await api("bench/codereason", {method: "POST", body: {}});
       toast(`built "${out.name}": ${out.cases} cases` +
             ((out.refused || []).length ? `, ${out.refused.length} refused` : ""));
+      render();
+    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+  };
+  if ($("#bench-protocol")) $("#bench-protocol").onclick = async () => {
+    try {
+      $("#bench-cmp-msg").textContent = "reading the corpus for real coordinator turns…";
+      const out = await api("bench/protocol", {method: "POST", body: {}});
+      $("#bench-cmp-msg").textContent = "";
+      toast(`built "${out.name}": ${out.scenarios} scenario(s), ${out.real} real coordinator turn(s)`);
       render();
     } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };

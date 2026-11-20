@@ -56,6 +56,7 @@ SUITE_NAMES = {
     "toolflow": "Find and use tools",
     "toolpick": "Pick the right tool",
     "agent": "Agent deliverables",
+    "protocol": "Coordinator protocol",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -64,6 +65,8 @@ SUITE_ASKS = {
     "toolflow": "Search the live tool registry, then use the tool the task needs.",
     "toolpick": "From every tool this router has, name the one that fits a need.",
     "agent": "Build a deliverable from this ecosystem's real work. Judged, not scored.",
+    "protocol": "End a sprint turn the way the coordinator reads it: a valid report, the "
+                "right status, the BLOCKED rules, a scope request.",
 }
 
 
@@ -110,6 +113,11 @@ def miss_kind(suite: str, row) -> Optional[str]:
     if score >= 100:
         return None
     tags = _tags(row)
+    if suite == "protocol" or "protocol" in tags:
+        from .protocolbench import CHECK_WORDS
+        failed = _detail(row).get("failed", "")
+        first = failed.split(",")[0] if failed else ""
+        return CHECK_WORDS.get(first, "report scored low")
     if suite == "toolflow" or "finder" in tags:
         d = _detail(row)
         if d.get("found") != "True":
@@ -211,11 +219,21 @@ def facets(suite: str, rows: list) -> list:
                                                     .split("__", 1)[0]
                                                     if "__" in str(r["task_id"] or "")
                                                     else "router"), limit=10)})
+    if suite == "protocol":
+        names = {"done": "DONE", "not_done": "NOT DONE", "product": "BLOCKED: product",
+                 "tooling": "BLOCKED: tooling", "user_action": "BLOCKED: user_action",
+                 "scope": "a SCOPE_REQUEST"}
+        out.append({"name": "What the turn had to say",
+                    "rows": _group(rows, lambda r: names.get(_tag(_tags(r), "want") or "", None),
+                                   list(names.values()))})
+        out.append({"name": "Source",
+                    "rows": _group(rows, lambda r: "real coordinator turn"
+                                   if "real" in _tags(r) else "scenario")})
     if suite == "codereason":
         out.append({"name": "Question",
                     "rows": _group(rows, lambda r: "what it raises"
                                    if "exception" in _tags(r) else "what it returns")})
-    if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent"):
+    if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})

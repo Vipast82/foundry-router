@@ -1701,6 +1701,15 @@ async def score_one(svc, case: dict, got: dict) -> dict:
     if got.get("error"):
         return {"score": 0.0, "tools": 0.0, "code": None, "answer": 0.0,
                 "code_detail": "", "error": got["error"]}
+    if ref.get("protocol"):
+        # the coordinator's own rules, exactly (protocolbench, v0.181.217)
+        from . import protocolbench
+        ps = protocolbench.protocol_score(got.get("content") or "", ref["protocol"])
+        called = [t.get("name") for t in got.get("tool_calls") or [] if t.get("name")]
+        if called:
+            ps["detail"] += " (reached for " + ", ".join(called) + " instead of ending the turn)"
+        return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
+                "exact": None, "code_detail": ps["detail"], "error": ""}
     if ref.get("finder_tool"):
         fs = finder_score(got, str(ref.get("finder_tool")))
         return {"score": fs["score"], "tools": fs["picked"], "code": None,
@@ -1745,6 +1754,9 @@ def expected_of(case: dict) -> str:
     ref = case.get("reference") or {}
     if ref.get("deliverable"):
         return "a deliverable (no answer key)"
+    if ref.get("protocol"):
+        from . import protocolbench
+        return protocolbench.expected_text(ref["protocol"])
     if ref.get("finder_tool"):
         return f"use {ref['finder_tool']}"
     if ref.get("py_value"):

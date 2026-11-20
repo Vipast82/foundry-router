@@ -1,3 +1,52 @@
+## v0.181.217 - the coordinator protocol suite
+
+From the benchmark sweep: of everything open-source, nothing measures the one
+thing every Kilo session the coordinator runs has to do at the end of every
+turn - end its final message with a fenced `coordinator-report` JSON block
+(status DONE | NOT DONE | BLOCKED, summary, next; for BLOCKED a blocker and one
+blocker_kind: product with 2-4 options and a recommendation, tooling and
+user_action without options) and ask for a file outside its list with a
+`SCOPE_REQUEST` block instead of editing it. A model that codes well and gets
+this wrong still stalls the sprint, and it is checkable exactly, so it is a
+suite of its own: **Coordinator protocol**.
+
+**Graded with the coordinator's own rules.** `parse_report`, `report_status`,
+`blocker_kind`, the scope-request parser and the instruction text a session is
+given are copied from foundry_coordinator - the router image does not ship that
+package - and a test runs both on the same replies and fails if they ever
+disagree, so the suite cannot drift from what the coordinator accepts.
+
+**Two kinds of case.** Eighteen scenarios with one right answer, written from
+the protocol: work finished and the gate passed (DONE); a gate failure with the
+next step specified (NOT DONE, with that step); a decision the plan does not
+settle (BLOCKED product, 2-4 options and the recommended one); a broken harness
+- Rojo's port in use, a Blender runner that cannot import bpy, a Studio plugin
+that times out (BLOCKED tooling, no options); something only the owner can
+physically do - a two-factor sign-in, a Creator Dashboard upload, a licence on
+the owner's machine (BLOCKED user_action, the steps, no options); and a file
+outside the task's list (a SCOPE_REQUEST, carrying on, NOT DONE). Each in Luau,
+Blender and UI dress, tiered easy (DONE, NOT DONE), medium (tooling,
+user_action) and hard (product, scope). Plus up to twenty real coordinator
+turns from the corpus where the verified session ended with a report, keyed on
+that session's own status and kind, one per conversation. No tools are offered:
+the case is the end of a turn, and a reply that reaches for one has not ended it
+(the miss says so).
+
+**Scored by check, each named when it fails:** a report block (3), valid JSON
+(1), nothing after it but SCOPE_REQUEST or MEMORY_NOTE lines (1), the status
+(3), a summary (1), the next step for NOT DONE (1), a blocker (1) and the right
+blocker_kind (2) for BLOCKED, options for product (2-4 and a recommendation,
+weighed 2 because without them the coordinator cannot decide) or none for the
+other kinds (1), and a SCOPE_REQUEST with a reason for the scope cases (2). A
+placeholder copied from the instructions ("<product only: ...>") is not an
+option. The card breaks it down by what the turn had to say and by scenario
+against real turn, and names the first failed check for each miss.
+
+To use it: press **Build the protocol suite** on the Benchmark page; it joins
+every profile from then on.
+
+22 tests.
+
 ## v0.181.216 - the needle suite runs out to each model's own context window
 
 Asked: bump the needle testing all the way to the max context the model
