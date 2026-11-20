@@ -167,7 +167,7 @@ def _perf(db, project: str, task: str, hours: float) -> dict:
             "COALESCE(p.work_task_id, r.work_task_id) AS task, "
             "CASE WHEN p.timing_src='server' THEN 'measured' WHEN p.timing_src='estimated' "
             "THEN 'estimated' ELSE 'unknown' END AS bucket, COUNT(*) AS n, "
-            "ROUND(AVG(p.decode_tps),1) AS decode_tps, ROUND(AVG(p.prefill_tps),1) AS prefill_tps, "
+            "ROUND(AVG(p.decode_tps),1) AS decode_tps, ROUND(AVG(CASE WHEN p.prefill_tps <= 50000 THEN p.prefill_tps END),1) AS prefill_tps, "
             "ROUND(AVG(p.ttft_ms),0) AS ttft_ms, ROUND(AVG(p.eff_tps),1) AS eff_tps, "
             "ROUND(AVG(p.cache_hit_pct),1) AS cache_hit_pct, "
             "COALESCE(SUM(p.completion_tokens),0) AS out_tokens, COALESCE(SUM(p.wall_ms),0) AS wall_ms "

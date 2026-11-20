@@ -830,7 +830,8 @@ CREATE TABLE IF NOT EXISTS bench_runs (
   status TEXT,                      -- running | done | stopped | failed
   recall INTEGER DEFAULT 0,         -- the work recall found was put in front of every case
   lessons INTEGER DEFAULT 0,        -- the approved rulebook was put in front of every case
-  note TEXT
+  note TEXT,
+  suite_hash TEXT DEFAULT ''        -- the suite file + scorer version this run used
 );
 
 -- A judge calibration, kept rather than returned once: the full check is
@@ -884,7 +885,9 @@ CREATE TABLE IF NOT EXISTS bench_results (
   seconds REAL,
   error TEXT,
   recalled TEXT,                    -- JSON list: the past work put in front of this case
-  deliverable TEXT                  -- an agent task's answer, kept for pairwise comparison
+  deliverable TEXT,                 -- an agent task's answer, kept for pairwise comparison
+  answer TEXT DEFAULT '',           -- what the model answered (head), for reading a failure
+  expected TEXT DEFAULT ''          -- what the case wanted, as the run saw it
 );
 
 CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);

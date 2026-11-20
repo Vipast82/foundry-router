@@ -1,3 +1,133 @@
+## v0.181.211 - a benchmark audit, harder suites, and a report card you can read
+
+Asked for: go through every benchmark and make sure it is correct and
+substantive, add harder ones if the better models need them, show live how far
+and how fast a run is going with an ETA, make the card say where a model excels
+and fails and let the failures be opened, put the speed of each kind of work on
+it, and check that every performance metric is recorded and shown correctly,
+the brain lane's included. The audit was done against the first two real
+profiles (flash, 223 cases, and the brain lane, running), and it found faults
+in the benchmark itself as well as in how it was shown.
+
+### What was wrong with the benchmark
+
+**The finder suite scored good behaviour as failure.** A case ended at the
+model's FIRST `foundry_call_tool`. A model that took a page snapshot before
+clicking, listed the voices before speaking or checked the job list before
+cancelling was marked as choosing the wrong tool - and that was 22 of flash's
+25 toolflow misses. A case now ends when the tool the task needs is used,
+within the same round cap, so wandering still fails; every tool used is kept in
+order with the number of detours, and the miss is classified as "never found
+the tool", "found it, used another tool" or "found it, then used no tool".
+`bench.SCORER_VERSION` is 2 and every run records a suite version, so a
+toolflow run scored the old way is never lined up against a new one.
+
+**The finder suite recorded no performance at all.** `ask()` got its telemetry
+in v0.181.196; `ask_through_finder` was a second caller and never did - run 44,
+40 cases, 0 samples. Both now record through one function, `bench._record`,
+so a third path cannot miss it the same way.
+
+**Three of five suites were at the ceiling.** Flash scored 100 on the code,
+needle and tool-picking suites, so they could not tell a better model from a
+good one - which is the whole question when trying a new model. The needle
+suite now runs to 64k and 96k characters (about 16k-24k tokens, where context
+starts to cost) and adds decoy cases: a second sentence of exactly the same
+shape for a look-alike sprint id, placed in the other half of the context, and
+an answer that names the decoy scores 0 even beside the right code. The code
+suite adds sixteen snippets that have to be traced rather than recalled - a
+generator exhausted and summed twice, closures, a class attribute shadowed by
+an instance one, try/except/finally order, the MRO through super(), a dict key
+collision, a send()-driven generator, an inventory simulation, a memoised
+recursion - in hard and expert tiers, 28 cases to 44. Every case in both suites
+is tagged easy, medium, hard or expert. The tool-picking suite has no harder
+form that is not contrived, so it stays as it is and the card says it is at the
+ceiling instead of letting 100 read as strength.
+
+**The code suite ran its snippets with class-body scoping.** Separate globals
+and locals meant a function could not see a name defined beside it, so a
+snippet as ordinary as `log = []; def g(): log.append(1)` raised NameError at
+build time. Snippets now run in one namespace, as a module does; the original
+twenty-eight give exactly the same values either way, which was checked before
+changing it.
+
+**The brain lane reported prompt-cache hits as prefill.** 31,895 tokens
+"prefilled" in 104 ms - 307,570 t/s - with cached_tokens 0, from consecutive
+baseline cases sharing a prefix. A handful of those made run 47's average
+prefill 16,522 t/s against a real median near 1,400. A prefill rate above
+50,000 t/s is not recorded as a speed any more (the duration is kept), and the
+Performance and scorecard averages leave out the rows recorded before this. Why
+the brain lane does not report the cache is a separate question about what its
+server sends, to be checked against a real response once the GPU is free.
+
+**Each run started from a clean state only when started on its own.** A
+profile calls `bench._run` directly, suite after suite, so the previous run's
+finished/scored/delivered/seconds showed on the live status as this run's, and
+a stop left over from a stopped profile would have ended every suite of the
+next profile at its first case. `_run` starts from an empty state, keeping only
+a stop pressed in the moment the run begins.
+
+### The report card
+
+One card per model, and for every suite: a plain name and the question it
+asks; how many cases got full marks; a difficulty ladder - easy, medium, hard,
+expert, each coloured by its score - because two models can share an average
+and differ entirely in where they fall off; the breakdown that suite is read by
+(context size and decoys, tool server, whether the verified step was a tool
+call or words, the kind of work); how it missed, counted by kind; its speed;
+and a button that opens every miss with what was wanted beside what came back,
+filterable by kind. Each case now keeps the model's answer (2,000 characters)
+and what was wanted, so a miss is read rather than inferred; runs from before
+this say the answer was not kept and show what they did keep.
+
+Above the tiles: **Excels at**, **Fails at** and **Too easy to judge by**, read
+off the breakdowns. A suite at the ceiling is never listed as a strength, and a
+group is named only with at least three cases in it. Speed is per suite and
+overall: decode, prefill, effective rate, time to first token and drafts
+accepted, as medians, and decode and prefill by how full the context was, which
+is where a model that is quick on short prompts shows whether it holds up at
+the sizes this work uses. Prefill is rated only over prompts of 512 tokens or
+more, since a 60-token prompt is all overhead.
+
+The comparison lines the suites up with each model's score, full-marks count,
+decode rate and time per case; draws each suite's difficulty ladder side by
+side; never calls a difference in a rebuilt or rescored suite a win or a tie;
+and refuses to compare two composites over different suites - the first real
+comparison put a profile still on its third suite against a finished one and
+called the gap "inside the spread".
+
+### The live strip
+
+While anything runs, the top of the Benchmark page shows the model, a track of
+every suite in the profile, the current suite's progress, the pace per case,
+decode and effective t/s, cases at full marks so far, the running score, how
+long the case in flight has taken, and when the suite and the whole profile
+should finish. The current suite is timed from its own pace; a suite still to
+come from this model's past runs of it, or else from other models' runs scaled
+by how this model's pace has compared with theirs - and the strip says which,
+and says plainly when there is nothing to estimate from rather than inventing
+a number. It refreshes every five seconds. Its first real estimate, on the
+brain lane's toolflow suite, said 12:33-12:36 and the suite finished at 12:33.
+
+### Two things found in the UI while building it
+
+The Live tab already owns `.lv` and `.lv-bar`, and reusing them squeezed this
+progress bar to 120 pixels; the global `.bad` class turned the "Fails at" panel
+solid red. Both are renamed and a test keeps them apart.
+
+### After deploying
+
+Rebuild the needle and code suites (their buttons on the Benchmark page) to get
+the harder tiers; the toolflow fix applies to the existing suite at once. The
+first two profiles were run before this, so to compare models on the new
+suites, run a profile again for each.
+
+44 new tests in tests/test_bench_card.py, plus the three state tests above;
+six older tests updated to the new shape - the needle count now includes
+decoys, the code-suite refusal tests patch the new tables too, the panel test
+anchors on the renamed heading, and the two brain-lane telemetry tests read
+`bench._record` and now also assert that both benchmark paths call it - none
+of them loosened.
+
 ## v0.181.210 - the profile button was broken, and 36 tests did not notice
 
 Pressing "Run every suite" against the live router returned

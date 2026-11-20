@@ -3031,7 +3031,9 @@ async def bench_profiles(request: Request, limit: int = 40):
 async def bench_profile(request: Request, id: int):
     """One profile's card: composite, per-suite parts, the context grid."""
     from .. import benchprofile
-    return benchprofile.build_card(_svc(request), int(id))
+    # off the event loop: a card reads every case and every perf sample its
+    # runs recorded (v0.181.211)
+    return await asyncio.to_thread(benchprofile.build_card, _svc(request), int(id))
 
 
 @router.post("/admin/api/bench/profile/run")
@@ -3064,7 +3066,41 @@ async def bench_profile_compare(request: Request, ids: str = ""):
     cannot separate marked as such."""
     from .. import benchprofile
     want = [int(x) for x in ids.split(",") if x.strip().isdigit()]
-    return benchprofile.compare(_svc(request), want)
+    return await asyncio.to_thread(benchprofile.compare, _svc(request), want)
+
+
+@router.get("/admin/api/bench/live")
+async def bench_live(request: Request):
+    """How far a run is, how fast it is going and when it should finish
+    (v0.181.211). Polled by the progress strip while anything runs."""
+    from .. import benchcard
+    return await asyncio.to_thread(benchcard.live, _svc(request))
+
+
+@router.get("/admin/api/bench/failures")
+async def bench_failures(request: Request, profile_id: int = 0, suite: str = "",
+                         run_id: int = 0, limit: int = 200):
+    """Every case that missed, with what was wanted next to what came back -
+    for one suite of a profile, or one run (v0.181.211)."""
+    from .. import benchcard
+    svc = _svc(request)
+
+    def go():
+        if run_id:
+            r = svc.db.query_one("SELECT id, suite FROM bench_runs WHERE id=?",
+                                 (int(run_id),))
+            if r is None:
+                return {"error": f"there is no run {run_id}", "failures": []}
+            return {"suite": r["suite"], "run_ids": [r["id"]],
+                    "failures": benchcard.failures(svc, [r["id"]], r["suite"], limit)}
+        rows = svc.db.query("SELECT id FROM bench_runs WHERE profile_id=? AND suite=? "
+                            "ORDER BY id", (int(profile_id), suite))
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return {"error": f"profile {profile_id} has no {suite!r} run", "failures": []}
+        return {"suite": suite, "run_ids": ids,
+                "failures": benchcard.failures(svc, ids, suite, limit)}
+    return await asyncio.to_thread(go)
 
 
 @router.post("/admin/api/config/bench")

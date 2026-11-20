@@ -57,6 +57,9 @@ def test_a_snippet_that_stopped_raising_is_refused_not_shipped(svc, monkeypatch)
     against an answer the language no longer gives."""
     monkeypatch.setattr(bench, "_CODE_EXC", [("quiet", "x = 1")])
     monkeypatch.setattr(bench, "_CODE_SNIPPETS", [])
+    # v0.181.211: the traced tiers are tables of their own
+    monkeypatch.setattr(bench, "_CODE_HARD", [])
+    monkeypatch.setattr(bench, "_CODE_EXPERT", [])
     out = bench.build_codereason(svc)
     assert out["cases"] == 0
     assert any("raised nothing" in r for r in out["refused"])
@@ -65,6 +68,8 @@ def test_a_snippet_that_stopped_raising_is_refused_not_shipped(svc, monkeypatch)
 def test_a_snippet_that_will_not_run_is_refused(svc, monkeypatch):
     monkeypatch.setattr(bench, "_CODE_SNIPPETS", [("bad", "1/0", "x")])
     monkeypatch.setattr(bench, "_CODE_EXC", [])
+    monkeypatch.setattr(bench, "_CODE_HARD", [])
+    monkeypatch.setattr(bench, "_CODE_EXPERT", [])
     out = bench.build_codereason(svc)
     assert out["cases"] == 0 and out["refused"]
 

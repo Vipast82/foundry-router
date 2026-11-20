@@ -12,28 +12,146 @@
 <title>Foundry Router</title>
 <style>
 /* --- model profile ------------------------------------------------------- */
+/* v0.181.211: a report card rather than a list of numbers. One bold thing -
+   the difficulty ladder on every suite tile - and everything around it quiet.
+   Numbers are set in the condensed numeric face; prose stays in the UI face. */
 .pf-wrap { display: flex; flex-wrap: wrap; gap: 12px; }
 .pf-card { flex: 1 1 320px; border: 1px solid var(--line, #444); border-radius: 8px;
            padding: 12px 14px; background: var(--panel, #222); min-width: 300px; }
 .pf-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .pf-model { font-weight: 600; font-size: 15px; word-break: break-all; }
-.pf-score { font-size: 34px; font-weight: 700; line-height: 1; }
-.pf-score small { font-size: 12px; font-weight: 400; color: var(--dim, #999); }
+.pf-score { font: 700 34px/1 var(--num-font); }
+.pf-score small { font: 400 12px var(--ui-font); color: var(--dim, #999); }
 .pf-row { display: grid; grid-template-columns: 110px 1fr 46px; align-items: center;
           gap: 8px; margin: 5px 0; font-size: 12px; }
-.pf-bar { height: 10px; border-radius: 5px; background: color-mix(in srgb, var(--line, #444) 60%, transparent);
-          overflow: hidden; }
+.pf-bar { display: block; height: 10px; border-radius: 5px; overflow: hidden;
+          background: color-mix(in srgb, var(--line, #444) 60%, transparent); }
 .pf-bar i { display: block; height: 100%; border-radius: 5px; background: var(--ok, #6c7); }
 .pf-bar.mid i { background: var(--warn, #ea3); }
 .pf-bar.low i { background: var(--bad, #e55); }
-.pf-num { text-align: right; font-variant-numeric: tabular-nums; }
+.pf-num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--num-font); }
 .pf-dim { color: var(--dim, #999); }
 .pf-tie { color: var(--dim, #999); font-weight: 400; }
 .pf-win { color: var(--ok, #6c7); font-weight: 600; }
 .pf-lose { color: var(--bad, #e55); font-weight: 600; }
-/* the context grid: where it stops finding things */
+table.pf-grid { width: auto; max-width: 560px; }
 table.pf-grid td, table.pf-grid th { text-align: center; padding: 4px 8px; font-size: 12px; }
 table.pf-grid td.cell { color: #111; font-weight: 600; border-radius: 3px; }
+
+/* the report */
+.rc { border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+      padding: 16px 18px; margin: 10px 0; }
+.rc-top { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: start; }
+.rc-model { font: 600 20px/1.2 var(--num-font); word-break: break-all; }
+.rc-meta { color: var(--dim); font-size: 12px; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.rc-big { text-align: right; }
+.rc-big b { display: block; font: 700 56px/0.9 var(--num-font); letter-spacing: -1px; }
+.rc-big span { color: var(--dim); font-size: 12px; }
+.rc-read { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+           gap: 10px; margin: 14px 0 4px; }
+.rc-read > div { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; font-size: 13px; }
+.rc-read h4 { margin: 0 0 4px; font: 600 13px var(--ui-font); }
+.rc-read .rc-good { border-color: var(--ok); }
+.rc-read .rc-bad { border-color: var(--bad); }
+.rc-read .rc-flat { border-color: var(--info); }
+.rc-read ul { margin: 0; padding-left: 16px; }
+.rc-read li { margin: 2px 0; }
+.rc-speed { display: flex; flex-wrap: wrap; gap: 18px; margin: 12px 0 2px; padding: 10px 12px;
+            background: var(--panel-2); border-radius: 8px; }
+.rc-speed .k { color: var(--dim); font-size: 11px; }
+.rc-speed .v { font: 600 20px/1.1 var(--num-font); }
+.rc-speed .v small { font: 400 11px var(--ui-font); color: var(--dim); }
+.rc-ctx { display: grid; grid-template-columns: 110px 1fr 56px 70px 70px; gap: 4px 10px;
+          align-items: center; font-size: 12px; margin-top: 8px; }
+.rc-ctx .h { color: var(--dim); font-size: 11px; }
+.rc-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+            gap: 12px; margin-top: 14px; }
+.st { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 10px;
+      background: var(--bg); position: relative; }
+.st::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px;
+              border-radius: 0 3px 3px 0; background: var(--sc, var(--line)); }
+.st-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.st-name { font: 600 15px var(--ui-font); }
+.st-score { font: 700 30px/1 var(--num-font); color: var(--sc, var(--fg)); }
+.st-ask { color: var(--dim); font-size: 12px; margin: 3px 0 8px; line-height: 1.35; }
+.st-pass { font: 600 13px var(--num-font); }
+.st-flag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 9px;
+           background: var(--info-bg); color: var(--info); margin-left: 6px; }
+.ladder { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 8px 0 6px; }
+.ladder > div { border-radius: 5px; padding: 5px 6px; text-align: center;
+                background: var(--panel-2); color: var(--dim); }
+.ladder b { display: block; font: 700 15px/1.1 var(--num-font); }
+.ladder span { font-size: 10px; }
+.ladder .on { color: #111; }
+.fc { margin: 8px 0 2px; }
+.fc h5 { margin: 0 0 3px; font: 600 11px var(--ui-font); color: var(--dim); }
+.fc-row { display: grid; grid-template-columns: minmax(90px, 1.2fr) 2fr 64px; gap: 8px;
+          align-items: center; font-size: 12px; margin: 3px 0; }
+.fc-row .pf-num { font-size: 12px; }
+.miss { font-size: 12px; margin: 8px 0 4px; }
+.miss div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+.miss b { font-family: var(--num-font); }
+.st-speed { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--dim);
+            border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 8px; }
+.st-speed b { color: var(--fg); font: 600 12px var(--num-font); }
+.st-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+/* the misses, opened */
+.mx { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.mx-kinds { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.mx-kinds button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+                   border-radius: 14px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.mx-kinds button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.mx-case { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0;
+           background: var(--bg); }
+.mx-case-h { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font-size: 12px; }
+.mx-case-h b { font-family: var(--num-font); font-size: 13px; }
+.mx-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+.mx-pair > div { min-width: 0; }
+.mx-pair .k { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.mx-pair pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 220px;
+               overflow: auto; font-size: 12px; padding: 6px 8px; border-radius: 6px;
+               background: var(--panel-2); }
+.mx-pair .want pre { border-left: 3px solid var(--ok); }
+.mx-pair .got pre { border-left: 3px solid var(--bad); }
+
+/* the live strip */
+.bl { border: 1px solid var(--accent); border-radius: 10px; padding: 12px 16px; margin: 0 0 12px;
+      background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+.bl-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px;
+          align-items: baseline; }
+.bl-model { font: 600 16px var(--num-font); }
+.bl-where { font-size: 13px; }
+.bl-track { display: flex; gap: 3px; margin: 10px 0 6px; }
+.bl-track > div { flex: 1; height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
+.bl-track > div i { display: block; height: 100%; background: var(--accent); }
+.bl-track > div.done i { background: var(--ok); width: 100%; }
+.bl-names { display: flex; gap: 3px; font-size: 10px; color: var(--dim); }
+.bl-names > span { flex: 1; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-names > span.cur { color: var(--accent); font-weight: 600; }
+.bl-bar { height: 14px; border-radius: 7px; background: var(--panel-2); overflow: hidden; margin: 10px 0 4px; }
+.bl-bar i { display: block; height: 100%; background: var(--accent); transition: width .6s ease; }
+.bl-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px 14px;
+            margin-top: 8px; }
+.bl-stats .k { color: var(--dim); font-size: 11px; }
+.bl-stats .v { font: 600 18px/1.15 var(--num-font); }
+.bl-stats .v small { font: 400 11px var(--ui-font); color: var(--dim); }
+.bl-eta { margin-top: 8px; font-size: 13px; }
+.bl-eta b { font-family: var(--num-font); font-size: 15px; }
+@media (prefers-reduced-motion: reduce) { .bl-bar i { transition: none; } }
+
+/* compare */
+table.cmp { width: 100%; border-collapse: collapse; }
+table.cmp th, table.cmp td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.cmp td .pf-bar { margin: 3px 0; }
+.cmp-n { font: 700 18px var(--num-font); }
+.cmp-sub { font-size: 11px; color: var(--dim); }
+@media (max-width: 640px) {
+  .rc-top { grid-template-columns: 1fr; }
+  .rc-big { text-align: left; }
+  .mx-pair { grid-template-columns: 1fr; }
+  .rc-ctx { grid-template-columns: 90px 1fr 44px 56px 56px; }
+}
 
   /* Foundry palette, shared with the control center (/ui/control): "cast iron"
      dark, a cool "mill scale" light (not cream), molten orange from the logo as
@@ -9315,44 +9433,155 @@ function modeBadge(m) {
 // Your own benchmark (v0.181.167): cases cut from work this router already did.
 
 // ---- model profiles: every suite, one model, one card ----------------------
-// The question is "will this model carry my work", and the shape of the bars
-// answers it where the composite cannot: a model strong everywhere and
-// hopeless at finding tools cannot run this ecosystem whatever its average
-// says. So the big number carries its weights, the bars sit directly under it,
-// and a difference these runs cannot separate is drawn as "=" and not a win.
+// v0.181.211: a report card. The question is "will this model carry my work",
+// so the card says where it excels, where it fails and HOW, how fast it is at
+// each kind of work, and which suites it aces and therefore cannot be judged
+// by. Every miss can be opened with what was wanted beside what came back.
 function pfBar(v) {
   if (v == null) return '<span class="pf-dim">not scored</span>';
   const cls = v >= 70 ? "" : v >= 45 ? "mid" : "low";
   return `<span class="pf-bar ${cls}"><i style="width:${Math.max(0, Math.min(100, v))}%"></i></span>`;
 }
+const pfColor = v => v == null ? "var(--line)" : v >= 90 ? "var(--ok)" : v >= 60 ? "var(--warn)" : "var(--bad)";
+const pfN = (v, d = 1) => v == null ? "—" : (+v).toFixed(d).replace(/\.0+$/, "");
+function pfDur(s) {
+  if (s == null || !isFinite(s)) return "—";
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60), h = Math.floor(m / 60);
+  return h ? `${h} h ${m % 60} m` : `${m} m ${String(s % 60).padStart(2, "0")} s`;
+}
+const pfClock = t => t ? new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "—";
+const pfTok = n => n == null ? "—" : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${Math.round(n)}`;
+const PF_TIERS = ["easy", "medium", "hard", "expert"];
+
+// The difficulty ladder: the one shape that says whether a model is an
+// upgrade, since two models can share an average and differ entirely here.
+function pfLadder(p) {
+  const f = (p.facets || []).find(x => x.name === "Difficulty");
+  if (!f) return "";
+  return `<div class="ladder" role="list" aria-label="score by difficulty">${PF_TIERS.map(t => {
+    const r = f.rows.find(x => x.label === t);
+    if (!r) return `<div role="listitem" title="this suite has no ${t} cases"><b>—</b><span>${t}</span></div>`;
+    return `<div role="listitem" class="on" style="background:${pfColor(r.score)}"
+      title="${t}: ${r.passed} of ${r.n} at full marks, ${r.score} average"><b>${r.passed}/${r.n}</b><span>${t}</span></div>`;
+  }).join("")}</div>`;
+}
+
+function pfFacets(p) {
+  return (p.facets || []).filter(f => f.name !== "Difficulty").map(f => `
+    <div class="fc"><h5>${esc(f.name)}</h5>${f.rows.map(r => `
+      <div class="fc-row" title="${esc(r.label)}: ${r.passed} of ${r.n} at full marks, ${r.score} average">
+        <span>${esc(r.label)}</span>${pfBar(r.score)}
+        <span class="pf-num">${r.passed}/${r.n}</span></div>`).join("")}</div>`).join("");
+}
+
+function pfSpeedLine(sp, cases) {
+  if (!sp || !sp.samples) return `<div class="st-speed">no speed samples for this run</div>`;
+  const bits = [];
+  if (sp.decode_tps != null) bits.push(`<span>decode <b>${pfN(sp.decode_tps)}</b> t/s</span>`);
+  bits.push(sp.prefill_tps != null
+    ? `<span>prefill <b>${pfN(sp.prefill_tps, 0)}</b> t/s</span>`
+    : `<span title="Prompts under 512 tokens: prefill is all fixed overhead and has no meaningful rate.">prefill: prompts too short to rate</span>`);
+  if (sp.first_token_ms != null) bits.push(`<span>first token <b>${pfDur(sp.first_token_ms / 1000)}</b></span>`);
+  if (sp.wall_ms != null) bits.push(`<span>per call <b>${pfDur(sp.wall_ms / 1000)}</b></span>`);
+  if (sp.prompt_tokens != null) bits.push(`<span>context <b>${pfTok(sp.prompt_tokens)}</b> tok</span>`);
+  if (sp.out_tokens != null) bits.push(`<span>writes <b>${pfTok(sp.out_tokens)}</b> tok</span>`);
+  if (sp.unreported_cache) bits.push(`<span title="These prompts were served from a cache the backend did not report, so their 'prefill' was a lookup and is left out of the rate.">${sp.unreported_cache} cached, not rated</span>`);
+  return `<div class="st-speed" title="Medians over the ${sp.samples} model call(s) this suite made">${bits.join("")}</div>`;
+}
+
+function pfTile(p, pid, unscored) {
+  const sc = unscored ? null : p.score;
+  const misses = (p.misses || []).reduce((a, m) => a + m.n, 0);
+  return `<div class="st" style="--sc:${pfColor(sc)}">
+    <div class="st-h"><span class="st-name">${esc(p.title || p.suite)}</span>
+      <span class="st-score">${unscored ? "" : pfN(sc)}</span></div>
+    <div class="st-ask">${esc(p.asks || "")}</div>
+    ${unscored
+      ? `<div class="st-pass">${p.cases || 0} deliverable(s), no answer key</div>
+         <p class="hint" style="margin:4px 0">Judged by comparing two models' work under
+           Evals → Pairwise, never averaged in.</p>`
+      : `<div><span class="st-pass">${p.passed ?? "—"} of ${p.total ?? p.cases} at full marks</span>${
+          p.ceiling ? `<span class="st-flag" title="Every case passed. A suite this model aces cannot tell it apart from a better one, so this is not evidence of strength.">at the ceiling</span>` : ""}${
+          p.runs > 1 && p.low !== p.high ? `<span class="hint" style="margin-left:8px">${p.low}–${p.high} over ${p.runs} runs</span>` : ""}</div>
+         ${pfLadder(p)}${pfFacets(p)}
+         ${(p.misses || []).length ? `<div class="miss"><h5 style="margin:0 0 2px;font:600 11px var(--ui-font);color:var(--dim)">How it missed</h5>${
+           p.misses.map(m => `<div><span>${esc(m.kind)}</span><b>${m.n}</b></div>`).join("")}</div>` : ""}`}
+    ${pfSpeedLine(p.speed, p.cases)}
+    ${!unscored && misses ? `<div class="st-foot"><button class="act pf-miss" data-pid="${pid}"
+        data-suite="${esc(p.suite)}">Open the ${misses} miss${misses === 1 ? "" : "es"}</button></div>` : ""}
+  </div>`;
+}
+
+function pfRead(v) {
+  if (!v) return "";
+  const li = xs => xs.map(x => `<li>${esc(x.what)} <b class="pf-num">${pfN(x.score)}</b>${
+    x.n ? ` <span class="pf-dim">(${x.n})</span>` : ""}</li>`).join("");
+  return `<div class="rc-read">
+    <div class="rc-good"><h4>Excels at</h4>${(v.strengths || []).length
+      ? `<ul>${li(v.strengths)}</ul>` : '<span class="pf-dim">nothing that is not also at a ceiling</span>'}</div>
+    <div class="rc-bad"><h4>Fails at</h4>${(v.weaknesses || []).length
+      ? `<ul>${li(v.weaknesses)}</ul>` : '<span class="pf-dim">no group under 60</span>'}</div>
+    <div class="rc-flat"><h4>Too easy to judge by</h4>${(v.ceiling || []).length
+      ? `<ul>${v.ceiling.map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+         <span class="pf-dim" style="font-size:12px">Every case passed, so these cannot separate it from a better model.</span>`
+      : '<span class="pf-dim">none: every suite still has room above this model</span>'}</div>
+  </div>`;
+}
+
+function pfSpeed(s) {
+  const o = (s || {}).overall || {}, ctx = (s || {}).by_context || [];
+  if (!o.samples) return "";
+  const k = (label, v, unit, tip) => `<div title="${esc(tip || "")}"><div class="k">${label}</div>
+    <div class="v">${v}${unit ? ` <small>${unit}</small>` : ""}</div></div>`;
+  const maxDec = Math.max(1, ...ctx.map(c => c.decode_tps || 0));
+  return `<div class="rc-speed">
+      ${k("Decode", pfN(o.decode_tps), "t/s", "Output tokens per second of generation, median over every call, measured by the server")}
+      ${k("Prefill", pfN(o.prefill_tps, 0), "t/s", "Prompt tokens per second, over prompts of 512 tokens or more")}
+      ${k("Effective", pfN(o.eff_tps), "t/s", "Output tokens over the whole call, prompt included: what a person waits for")}
+      ${k("First token", pfDur((o.first_token_ms || 0) / 1000), "", "Median time spent reading the prompt before the first output token")}
+      ${o.spec_accept_pct != null ? k("Draft accepted", pfN(o.spec_accept_pct, 0), "%", "Speculative decoding: share of drafted tokens the model kept") : ""}
+      ${k("Calls", o.samples, "", `${o.measured} with server timings`)}
+    </div>
+    ${ctx.length ? `<div class="rc-ctx"><span class="h">context (calls)</span><span class="h">decode speed</span>
+        <span class="h pf-num">t/s</span><span class="h pf-num">prefill t/s</span><span class="h pf-num">1st token</span>
+      ${ctx.map(c => `<span>${esc(c.context)} <span class="pf-dim">(${c.samples})</span></span>
+        <span class="pf-bar"><i style="width:${Math.round(100 * (c.decode_tps || 0) / maxDec)}%;background:var(--info)"></i></span>
+        <span class="pf-num">${pfN(c.decode_tps)}</span>
+        <span class="pf-num">${pfN(c.prefill_tps, 0)}</span>
+        <span class="pf-num">${c.first_token_ms == null ? "—" : pfDur(c.first_token_ms / 1000)}</span>`).join("")}
+      </div>
+      <p class="hint" style="margin:4px 0 0">How speed changes as the context fills. Prefill is rated only over
+        prompts of 512 tokens or more; a short cached prompt still shows its real first-token time.</p>` : ""}`;
+}
 
 function pfCard(c, opts) {
-  if (c.error) return `<div class="pf-card"><p class="hint">${esc(c.error)}</p></div>`;
+  if (c.error) return `<div class="rc"><p class="hint">${esc(c.error)}</p></div>`;
   const o = opts || {};
-  const rows = (c.parts || []).map(p => `
-    <div class="pf-row" title="${esc(p.suite)}: ${p.runs} run(s) over ${p.cases} case(s)${
-      p.sd != null ? `, past runs of this pair have moved ±${p.sd}` : ""}${
-      p.low != null && p.high != null && p.low !== p.high ? `, this profile ${p.low}–${p.high}` : ""}">
-      <span>${esc(p.suite)}${(p.weight || 0) === 0 ? ' <span class="pf-dim">×0</span>' : ""}</span>
-      ${pfBar(p.score)}<span class="pf-num">${p.score == null ? "—" : p.score}</span></div>`).join("");
-  const un = (c.unscored || []).map(p => `
-    <div class="pf-row"><span>${esc(p.suite)}</span>
-      <span class="pf-dim">no answer key — compare two profiles</span>
-      <span class="pf-num">${p.cases || ""}</span></div>`).join("");
-  return `<div class="pf-card">
-    <div class="pf-head">
-      <div><div class="pf-model">${esc(c.model || "")}</div>
-        <div class="hint" style="margin:0">#${c.profile_id} · ${esc((c.ts || "").slice(0, 16))}${
-          c.label ? " · " + esc(c.label) : ""} · ${c.repeats || 1}×${
-          c.status && c.status !== "done" ? ` · <b>${esc(c.status)}</b>` : ""}</div></div>
-      <div style="text-align:right"><div class="pf-score">${
-        c.composite == null ? "—" : c.composite}</div>
-        <small>${(c.weighted || []).length} suite(s), equal weight</small></div>
+  const sp = ((c.speed || {}).overall) || {};
+  const tiles = (c.parts || []).map(p => pfTile(p, c.profile_id, false))
+    .concat((c.unscored || []).map(p => pfTile(p, c.profile_id, true))).join("");
+  const w = (c.weighted || []).length;
+  return `<div class="rc" id="rc-${c.profile_id}">
+    <div class="rc-top">
+      <div><div class="rc-model">${esc(c.model || "")}</div>
+        <div class="rc-meta"><span>profile #${c.profile_id}</span>
+          <span>${esc((c.ts || "").slice(0, 16))} UTC</span>
+          ${sp.backend ? `<span>on ${esc(sp.backend)}</span>` : ""}
+          ${c.label ? `<span>trying: ${esc(c.label)}</span>` : ""}
+          <span>${c.repeats || 1} pass${(c.repeats || 1) > 1 ? "es" : ""} per suite</span>
+          ${c.status && c.status !== "done" ? `<b>${esc(c.status)}</b>` : ""}</div></div>
+      <div class="rc-big" title="Weighted average of the scored suites: ${(c.weighted || []).map(x => `${x.suite} ×${x.weight}`).join(", ")}">
+        <b style="color:${pfColor(c.composite)}">${pfN(c.composite)}</b>
+        <span>${w} suite${w === 1 ? "" : "s"}, ${(c.weighted || []).every(x => x.weight === 1) ? "equal weight" : "your weights"}</span></div>
     </div>
-    ${rows}${un}
-    ${c.note ? `<p class="hint" style="margin:8px 0 0"><b>Read this first:</b> ${esc(c.note)}</p>` : ""}
-    ${o.grid !== false && c.needle && (c.needle.cells || []).length
-      ? pfGrid(c.needle) : ""}
+    ${pfRead(c.verdict)}
+    ${pfSpeed(c.speed)}
+    <div class="rc-tiles">${tiles}</div>
+    ${o.grid !== false && c.needle && (c.needle.cells || []).length ? pfGrid(c.needle) : ""}
+    ${c.note ? `<p class="hint" style="margin:10px 0 0"><b>Read this first:</b> ${esc(c.note)}</p>` : ""}
+    <div class="mx" id="mx-${c.profile_id}" hidden></div>
   </div>`;
 }
 
@@ -9371,77 +9600,210 @@ function pfGrid(g) {
       return `<td class="cell" style="background:hsl(${hue} 65% 62%)"
         title="${c.cases} case(s) at ${d}% through ${ch} characters">${Math.round(c.score)}</td>`;
     }).join("")}</tr>`).join("");
-  return `<p class="hint" style="margin:10px 0 2px">Context: where it stops finding
-    things — depth through the haystack across, haystack size down.</p>
+  return `<p class="hint" style="margin:12px 0 2px">Long-context recall: depth through the
+    context across, context size in characters down. Decoy cases are counted under the suite, not here.</p>
     <table class="pf-grid"><tr><th></th>${head}</tr>${body}</table>`;
+}
+
+// One suite's misses, opened: what was wanted beside what came back.
+async function pfMisses(pid, suite) {
+  const box = $(`#mx-${pid}`);
+  if (!box) return;
+  box.hidden = false;
+  box.innerHTML = '<p class="hint">reading the cases…</p>';
+  const d = await api(`bench/failures?profile_id=${pid}&suite=${encodeURIComponent(suite)}`);
+  const fs = d.failures || [];
+  if (d.error || !fs.length) { box.innerHTML = `<p class="hint">${esc(d.error || "no misses")}</p>`; return; }
+  const kinds = [...new Set(fs.map(f => f.kind))];
+  let pick = "";
+  const draw = () => {
+    const rows = fs.filter(f => !pick || f.kind === pick);
+    box.querySelector(".mx-list").innerHTML = rows.map(f => `<div class="mx-case">
+      <div class="mx-case-h"><b>${esc(f.case_id)}</b><span>${esc(f.kind)}</span>
+        ${f.tier ? `<span class="pill">${esc(f.tier)}</span>` : ""}
+        ${f.where ? `<span class="pf-dim">${esc(f.where)}</span>` : ""}
+        <span class="pf-dim">score ${pfN(f.score)}</span>
+        <span class="pf-dim">${pfDur(f.seconds)}</span></div>
+      <div class="mx-pair">
+        <div class="want"><div class="k">Wanted</div><pre>${esc(f.expected || "—")}</pre></div>
+        <div class="got"><div class="k">Got${f.answer_kept ? "" : " (the full answer was not kept before v0.181.211)"}</div>
+          <pre>${esc(f.answer || f.error || "—")}</pre></div>
+      </div>
+      ${f.detail ? `<div class="hint" style="margin:4px 0 0">${esc(f.detail)}</div>` : ""}
+    </div>`).join("");
+    box.querySelectorAll(".mx-kinds button").forEach(b =>
+      b.setAttribute("aria-pressed", String((b.dataset.k || "") === pick)));
+  };
+  box.innerHTML = `<div class="card-h">${esc(suite)}: ${fs.length} miss${fs.length === 1 ? "" : "es"}
+      <button class="act" style="margin-left:auto" id="mx-close-${pid}">Close</button></div>
+    <div class="mx-kinds"><button data-k="">all ${fs.length}</button>${kinds.map(k =>
+      `<button data-k="${esc(k)}">${esc(k)} ${fs.filter(f => f.kind === k).length}</button>`).join("")}</div>
+    <div class="mx-list"></div>`;
+  box.querySelectorAll(".mx-kinds button").forEach(b => b.onclick = () => { pick = b.dataset.k || ""; draw(); });
+  $(`#mx-close-${pid}`).onclick = () => { box.hidden = true; box.innerHTML = ""; };
+  draw();
+  box.scrollIntoView({behavior: "smooth", block: "start"});
+}
+
+function pfWireCards(root) {
+  (root || document).querySelectorAll(".pf-miss").forEach(b =>
+    b.onclick = () => pfMisses(b.dataset.pid, b.dataset.suite));
 }
 
 // Side by side. The first profile is the baseline every other is read against.
 function pfCompare(d) {
   if (!(d.cards || []).length) return `<p class="hint">${esc(d.note || "nothing to compare")}</p>`;
   const cards = d.cards;
-  const head = cards.map((c, i) => `<th>${esc(c.model)}<div class="hint" style="margin:0">#${
-    c.profile_id}${i ? "" : " · baseline"}</div></th>`).join("");
+  const head = cards.map((c, i) => `<th>${esc(c.model)}<div class="cmp-sub">#${
+    c.profile_id}${i ? "" : ", the baseline"}</div></th>`).join("");
   const rows = (d.rows || []).map(r => `<tr>
-    <td class="nw"><b>${esc(r.suite)}</b></td>
+    <td class="nw"><b>${esc(r.title || r.suite)}</b>${r.changed
+      ? `<div class="cmp-sub" title="The suite was rebuilt or rescored between these runs, so the difference is about the test as much as the model.">suite changed between runs</div>` : ""}</td>
     ${r.cells.map((c, i) => {
       if (c.missing) return '<td class="pf-dim">not run</td>';
+      if (c.unscored) return `<td class="pf-dim">${c.cases || ""} deliverables, judged pairwise${
+        c.speed && c.speed.decode_tps ? `<div class="cmp-sub">${pfN(c.speed.decode_tps)} t/s decode</div>` : ""}</td>`;
       if (c.score == null) return '<td class="pf-dim">no score</td>';
       let delta = "";
       if (i && c.delta != null) {
-        const cls = c.tie ? "pf-tie" : c.delta > 0 ? "pf-win" : "pf-lose";
-        delta = ` <span class="${cls}">${c.tie ? "=" : (c.delta > 0 ? "+" : "") + c.delta}</span>`;
+        const cls = c.changed ? "pf-tie" : c.tie ? "pf-tie" : c.delta > 0 ? "pf-win" : "pf-lose";
+        const txt = c.changed ? `${c.delta > 0 ? "+" : ""}${c.delta}?` : c.tie ? "=" : (c.delta > 0 ? "+" : "") + c.delta;
+        delta = ` <span class="${cls}">${txt}</span>`;
       }
-      return `<td style="min-width:150px">${pfBar(c.score)}
-        <span class="pf-num">${c.score}</span>${delta}</td>`;
+      const sp = c.speed || {};
+      return `<td style="min-width:170px"><span class="cmp-n" style="color:${pfColor(c.score)}">${pfN(c.score)}</span>${delta}
+        ${c.ceiling ? '<span class="st-flag">ceiling</span>' : ""}
+        ${pfBar(c.score)}
+        <div class="cmp-sub">${c.passed ?? "—"}/${c.total ?? "—"} at full marks${
+          sp.decode_tps != null ? `, ${pfN(sp.decode_tps)} t/s` : ""}${
+          c.seconds != null ? `, ${pfDur(c.seconds)} a case` : ""}</div></td>`;
     }).join("")}</tr>`).join("");
-  const comps = cards.map(c => `<td><b style="font-size:18px">${
-    c.composite == null ? "—" : c.composite}</b></td>`).join("");
+  // the difficulty ladder per suite, model by model: where each one falls off
+  const tiered = (d.rows || []).filter(r => r.cells.some(c => (c.facets || []).some(f => f.name === "Difficulty")));
+  const ladders = tiered.map(r => `<tr><td class="nw">${esc(r.title || r.suite)}</td>${r.cells.map(c => {
+    const f = (c.facets || []).find(x => x.name === "Difficulty");
+    if (!f) return '<td class="pf-dim">—</td>';
+    return `<td><div class="ladder" style="margin:0">${PF_TIERS.map(t => {
+      const x = f.rows.find(y => y.label === t);
+      return x ? `<div class="on" style="background:${pfColor(x.score)}" title="${t}: ${x.passed} of ${x.n}"><b>${x.passed}/${x.n}</b><span>${t}</span></div>`
+               : `<div><b>—</b><span>${t}</span></div>`; }).join("")}</div></td>`;
+  }).join("")}</tr>`).join("");
+  const comps = cards.map(c => {
+    const w = (c.weighted || []).length;
+    const same = d.same_suites !== false;
+    return `<td><span class="cmp-n" style="font-size:26px;color:${same ? pfColor(c.composite) : "var(--dim)"}"
+      title="${same ? "" : "Not comparable: the profiles' composites cover different suites"}">${pfN(c.composite)}</span>
+      <div class="cmp-sub">over ${w} suite${w === 1 ? "" : "s"}${same ? "" : ", not comparable"}</div></td>`; }).join("");
+  const speedRow = cards.map(c => {
+    const o = ((c.speed || {}).overall) || {};
+    return `<td class="cmp-sub" style="font-size:12px">${o.decode_tps != null ? `decode <b>${pfN(o.decode_tps)}</b> t/s<br>` : ""}${
+      o.prefill_tps != null ? `prefill <b>${pfN(o.prefill_tps, 0)}</b> t/s<br>` : ""}${
+      o.first_token_ms != null ? `first token ${pfDur(o.first_token_ms / 1000)}` : ""}</td>`; }).join("");
   return `
-    <table><tr><th>suite</th>${head}</tr>${rows}
-      <tr><td><b>composite</b></td>${comps}</tr></table>
-    <p class="hint"><b>=</b> means the gap is inside the spread these runs have
-      actually shown, so it is not a result. A real difference is coloured.</p>
+    <table class="cmp"><tr><th>suite</th>${head}</tr>${rows}
+      <tr><td><b>composite</b></td>${comps}</tr>
+      <tr><td><b>speed</b></td>${speedRow}</tr></table>
+    <p class="hint"><b>=</b> means the gap is inside the spread these runs have actually shown, so it is not a result.
+      A real difference is coloured. <b>?</b> means the suite changed between the runs.</p>
+    ${ladders ? `<div class="card-h" style="margin-top:14px">Where each one falls off</div>
+      <table class="cmp"><tr><th>suite</th>${head}</tr>${ladders}</table>` : ""}
     ${d.note ? `<p class="hint"><b>Read this first:</b> ${esc(d.note)}</p>` : ""}
-    <div class="pf-wrap" style="margin-top:10px">${
-      cards.map(c => pfCard(c, {grid: false})).join("")}</div>
-    ${cards.filter(c => c.needle && (c.needle.cells || []).length).map(c =>
-      `<div style="margin-top:8px"><b>${esc(c.model)}</b>${pfGrid(c.needle)}</div>`).join("")}`;
+    ${cards.map(c => pfCard(c, {grid: true})).join("")}`;
+}
+
+// The live strip: how far, how fast, how long. Polled every five seconds
+// while the Benchmark tab is open and something is running.
+async function pfLive() {
+  const box = $("#pf-live");
+  if (!box) return false;
+  let d;
+  try { d = await api("bench/live"); } catch (e) { return true; }
+  const b = d.bench || {}, p = d.profile || {}, r = d.run || {}, pe = d.profile_eta;
+  if (b.state !== "running") {
+    box.hidden = true; box.innerHTML = "";
+    return p.state === "running";            // between two suites: keep polling
+  }
+  box.hidden = false;
+  const names = p.state === "running" ? (p.suites || []) : [];
+  const cur = names.indexOf(b.suite);
+  const track = names.length ? `<div class="bl-track">${names.map((s, i) =>
+      `<div class="${i < cur ? "done" : ""}"><i style="width:${i === cur ? (r.pct || 0) : i < cur ? 100 : 0}%"></i></div>`).join("")}</div>
+    <div class="bl-names">${names.map((s, i) => `<span class="${i === cur ? "cur" : ""}">${esc(s)}</span>`).join("")}</div>` : "";
+  const stat = (k, v, unit, tip) => `<div title="${esc(tip || "")}"><div class="k">${k}</div><div class="v">${v}${unit ? ` <small>${unit}</small>` : ""}</div></div>`;
+  box.innerHTML = `
+    <div class="bl-top"><span class="bl-model">${esc(b.model || "")}</span>
+      <span class="bl-where">${names.length ? `suite ${cur + 1} of ${names.length}: ` : ""}<b>${esc(b.suite || "")}</b>${
+        p.repeats > 1 ? `, pass ${p.rep} of ${p.repeats}` : ""}</span></div>
+    ${track}
+    <div class="bl-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${r.cases || 0}" aria-valuenow="${r.done || 0}">
+      <i style="width:${r.pct || 0}%"></i></div>
+    <div class="hint" style="margin:0">${r.done || 0} of ${r.cases || 0} cases${r.pct != null ? ` (${pfN(r.pct, 0)}%)` : ""}</div>
+    <div class="bl-stats">
+      ${stat("Pace", r.per_case_s != null ? pfDur(r.per_case_s) : "—", "a case", "Wall time per finished case in this suite")}
+      ${stat("Decode", pfN(r.decode_tps), "t/s", "Median of the last eight calls, as the server measured them")}
+      ${stat("Effective", pfN(r.eff_tps), "t/s", "Output tokens over model time so far, prompt reading included")}
+      ${stat("Full marks", r.done ? `${r.passed || 0}/${r.done}` : "—", "", "Cases scored 100 so far")}
+      ${stat("Score so far", pfN(b.score), "", "Running average of the cases done")}
+      ${stat("This case", pfDur(r.this_case_s), "", "How long the case in flight has taken")}
+      ${stat("Elapsed", pfDur(r.elapsed_s), "", "")}
+      ${r.errors ? stat("Errors", r.errors, "", "Calls that failed") : ""}
+    </div>
+    <div class="bl-eta">This suite ends in <b>${pfDur(r.eta_s)}</b>${r.eta_s != null ? ` (about ${pfClock(d.now + r.eta_s)})` : ""}${
+      pe ? (pe.eta_s != null
+        ? `. The whole profile ends in <b>${pfDur(pe.eta_s)}</b>, about ${pfClock(pe.finish_at)}
+           <span class="pf-dim">(estimated from ${esc(pe.basis)})</span>`
+        : `. The rest of the profile cannot be estimated yet: no timing history for ${esc((pe.unknown || []).join(", "))}`
+          + (pe.partial_s ? ` (at least ${pfDur(pe.partial_s)})` : "")) : ""}.</div>
+    ${b.last && b.last.case ? `<div class="hint" style="margin:6px 0 0">Last case: ${esc(b.last.case)}, score ${pfN(b.last.score)}, ${pfDur(b.last.seconds)}${
+      b.last.error ? ` <span class="pill bad">${esc(b.last.error)}</span>` : ""}</div>` : ""}`;
+  return true;
+}
+
+function pfPoll() {
+  clearInterval(window._pfLiveTimer);
+  const tick = async () => {
+    if (current !== "Benchmark") { clearInterval(window._pfLiveTimer); return; }
+    const going = await pfLive();
+    if (!going && window._pfWasRunning) { window._pfWasRunning = false; pfRender(); }
+    if (going) window._pfWasRunning = true;
+  };
+  tick();
+  window._pfLiveTimer = setInterval(tick, 5000);
 }
 
 async function pfRender() {
   const d = await api("bench/profiles");
-  const r = d.run || {}, running = r.state === "running";
+  const r = d.run || {};
   const rows = (d.profiles || []).map(p => `<tr>
-    <td><input type="checkbox" class="pf-pick" value="${p.id}"></td>
+    <td><input type="checkbox" class="pf-pick" value="${p.id}" aria-label="pick profile ${p.id}"></td>
     <td class="mono nw">#${p.id}</td>
     <td class="mono nw">${esc((p.ts || "").slice(0, 16))}</td>
     <td class="nw">${esc(p.model || "")}</td>
     <td>${esc(p.label || "")}</td>
     <td class="nw">${p.repeats || 1}×</td>
-    <td class="nw"><b>${p.score == null ? "—" : (+p.score).toFixed(1)}</b></td>
+    <td class="nw"><b class="pf-num" style="color:${pfColor(p.score)};font-size:15px">${p.score == null ? "—" : (+p.score).toFixed(1)}</b></td>
     <td class="nw">${esc(p.status || "")}</td>
-    <td><button class="act pf-open" data-id="${p.id}">Open</button></td></tr>`).join("");
+    <td><button class="act pf-open" data-id="${p.id}">Open the card</button></td></tr>`).join("");
   $("#pf-list").innerHTML = rows
-    ? `<table><tr><th></th><th>#</th><th>when</th><th>model</th><th>trying</th>
-        <th>repeats</th><th>score</th><th>state</th><th></th></tr>${rows}</table>
+    ? `<table><tr><th></th><th>#</th><th>when (UTC)</th><th>model</th><th>trying</th>
+        <th>passes</th><th>score</th><th>state</th><th></th></tr>${rows}</table>
        <div class="row tight" style="margin-top:8px">
-         <button class="act primary" id="pf-compare">Compare the ticked</button></div>`
-    : '<p class="hint">no profile yet — run every suite against a model above</p>';
-  $("#pf-state").innerHTML = running
-    ? `<span class="pill warn">running ${esc(r.model || "")}: ${r.done || 0} of ${
-        r.total || 0} (${esc(r.suite || "")}${r.rep > 1 ? `, repeat ${r.rep}` : ""})</span>`
-    : (r.state === "failed" ? `<span class="pill bad">${esc(r.error || "failed")}</span>` : "");
+         <button class="act primary" id="pf-compare">Compare the ticked</button>
+         <span class="hint" style="margin:0">tick two or more; the one highest in the list is the baseline</span></div>`
+    : '<p class="hint">No profile yet. Pick a model above and run every suite.</p>';
+  $("#pf-state").innerHTML = r.state === "failed" ? `<span class="pill bad">${esc(r.error || "failed")}</span>` : "";
   document.querySelectorAll(".pf-open").forEach(b => b.onclick = async () => {
+    $("#pf-out").innerHTML = '<p class="hint">reading the card…</p>';
     const c = await api(`bench/profile?id=${b.dataset.id}`);
-    $("#pf-out").innerHTML = `<div class="pf-wrap">${pfCard(c)}</div>`;
+    $("#pf-out").innerHTML = pfCard(c);
+    pfWireCards($("#pf-out"));
   });
   if ($("#pf-compare")) $("#pf-compare").onclick = async () => {
     const ids = [...document.querySelectorAll(".pf-pick:checked")].map(c => c.value);
     if (ids.length < 2) { toast("tick at least two profiles", true); return; }
-    $("#pf-out").innerHTML = '<p class="hint">reading both…</p>';
-    $("#pf-out").innerHTML = pfCompare(await api(
-      `bench/profile/compare?ids=${ids.join(",")}`));
+    $("#pf-out").innerHTML = '<p class="hint">reading every card…</p>';
+    $("#pf-out").innerHTML = pfCompare(await api(`bench/profile/compare?ids=${ids.join(",")}`));
+    pfWireCards($("#pf-out"));
   };
 }
 
@@ -9474,6 +9836,7 @@ async function tabBench() {
     </tr>`).join("");
   $("#main").innerHTML = `
     <h2>Benchmark — does a model do <i>your</i> work?</h2>
+    <div id="pf-live" class="bl" hidden aria-live="polite"></div>
     <p class="hint">Cases are cut from conversations this router captured and a gate or a review passed:
       the conversation up to the point where the model had to act, the tools it was offered, and what it
       actually did then. A run sends every case to one model and scores what comes back on what can be
@@ -9496,19 +9859,17 @@ async function tabBench() {
         ${suites.length ? "Suites: " + suites.map(s => `<b>${esc(s.name)}</b> (${s.cases})`).join(", ") : "None yet."}</p>
     </div>
     <div class="card">
-      <div class="card-h">Run every suite — one model, one card <span id="pf-state"></span></div>
-      <p class="hint">Five suites and five numbers do not answer "will this model
-        carry my work". This runs every built suite against one model, in
-        sequence — they share a GPU, and two at once would measure the
-        contention — and reports one composite with the bars that produced it.
-        <b>The composite is a weighted average and the weights decide the
-        answer</b>, so they are equal per <i>suite</i> by default (not per case,
-        which would let a 60-case suite outvote a 28-case one by sitting still),
-        they are yours to change, and the bars are the real content. The agent
-        tasks have no answer key and are never averaged in. Repeats are what
-        make two models separable: this router's benchmark has moved about five
-        points between identical runs, so a single pass cannot call a gap
-        smaller than that.</p>
+      <div class="card-h">Model report card: every suite, one model <span id="pf-state"></span></div>
+      <p class="hint">Runs every built suite against one model, one after another, and gives
+        one card: where it excels, where it fails and how, and how fast it is at each kind of work.</p>
+      <details class="hint" style="margin:0 0 10px"><summary>How the score is made</summary>
+        <p>The composite is a weighted average and the weights decide the answer, so they are
+        equal per <i>suite</i> by default (not per case,
+        which would let a 60-case suite outvote a 28-case one). The tiles under it are the real
+        content. The agent tasks have no answer key and are never averaged in. This router's
+        benchmark has moved about five points between identical runs, so a single pass cannot
+        call a smaller gap; repeats are what separate two close models. Suites run one at a
+        time because they share a GPU, and two at once would measure the contention.</p></details>
       <div class="row tight">
         <label>model</label><select id="pf-model">${modelOpts}</select>
         <label title="Each repeat runs every suite again. Two models three points apart on one pass each are not distinguishable; repeats are the only thing that changes that.">repeats</label>
@@ -9610,13 +9971,15 @@ async function tabBench() {
     } catch (e) { $("#bs-msg").innerHTML = `<span class="pill bad">${esc(e.message)}</span>`; }
   };
   pfRender();
+  pfPoll();
   $("#pf-go").onclick = async () => {
     try {
       await api("bench/profile/run", {method: "POST", body: {
         model: $("#pf-model").value, label: $("#pf-label").value,
         repeats: +$("#pf-reps").value || 1}});
-      toast("running every suite — this takes a while");
+      toast("running every suite — progress shows at the top of this page");
       pfRender();
+      pfPoll();
     } catch (e) { toast(e.message, true); }
   };
   $("#pf-stop").onclick = async () => {
@@ -9796,10 +10159,12 @@ window.showBenchResults = async id => {
   } catch (e) { /* not a needle run, or an older run: no grid */ }
   $("#bench-detail").innerHTML = grid +
     `<div class="card"><div class="card-h">Run ${id} — every case</div>
-    <table><tr><th>case</th><th>task</th><th>score</th><th>tools wanted</th><th>tools called</th>
+    <table><tr><th>case</th><th>task</th><th>score</th><th>wanted</th><th>got</th><th>tools wanted</th><th>tools called</th>
       <th>code</th><th>chars</th><th>took</th><th>problem</th></tr>
     ${(d.results || []).map(r => `<tr><td class="mono">${esc(r.case_id)}</td><td class="nw">${esc(r.task_id || "")}</td>
-      <td class="nw">${n(r.score)}</td>
+      <td class="nw"><b style="color:${pfColor(r.score)}">${n(r.score)}</b></td>
+      <td class="mono" title="${esc(r.expected || "")}">${esc((r.expected || "—").slice(0, 80))}</td>
+      <td class="mono" title="${esc(r.answer || "")}">${r.answer ? esc(r.answer.slice(0, 120)) : '<span class="pf-dim">not kept before v0.181.211</span>'}</td>
       <td class="mono">${esc((JSON.parse(r.tools_expected || "[]") || []).join(", ") || "—")}</td>
       <td class="mono">${esc((JSON.parse(r.tools_called || "[]") || []).join(", ") || "—")}</td>
       <td class="nw">${r.code_pass == null ? "—" : r.code_pass ? '<span class="pill ok">pass</span>' : `<span class="pill bad" title="${esc(r.code_detail || "")}">fail</span>`}</td>

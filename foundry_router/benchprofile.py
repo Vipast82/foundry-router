@@ -57,6 +57,10 @@ MIN_FOR_SD = 3
 # smaller than this is not a result", never to fill in a number.
 ASSUMED_SPREAD = 5.0
 
+# Suites whose scoring changed meaning with bench.SCORER_VERSION 2
+# (v0.181.211): a run of one from before that version is a different test.
+RESCORED_IN_V2 = ("toolflow",)
+
 _state: dict = {"state": "idle"}
 _lock = threading.Lock()
 
@@ -252,6 +256,12 @@ def build_card(svc, profile_id: int) -> dict:
             "delivered": sum(int(r["cases"] or 0) for r in rows)
             if suite in UNSCORED else 0,
         }
+        try:
+            # the breakdown, the misses, the speed, the ceiling (v0.181.211)
+            from . import benchcard
+            benchcard.enrich_part(svc, part, rows)
+        except Exception:                                         # noqa: BLE001
+            log.exception("profile %s: could not break down %s", profile_id, suite)
         if part["score"] is None or suite in UNSCORED:
             unscored.append(part)
         else:
@@ -263,6 +273,13 @@ def build_card(svc, profile_id: int) -> dict:
     }
     card.update(composite(parts))
     card["needle"] = _needle_grid(svc, by_suite.get("needle") or [])
+    try:
+        from . import benchcard
+        card["speed"] = benchcard.card_speed(svc, runs)
+        card["verdict"] = benchcard.verdict(card)
+    except Exception:                                             # noqa: BLE001
+        log.exception("profile %s: could not read its speed", profile_id)
+        card["speed"], card["verdict"] = {}, {}
     card["note"] = "; ".join(_notes(card))
     return card
 
@@ -367,6 +384,13 @@ def compare(svc, profile_ids: list) -> dict:
                           "low": (p or {}).get("low"),
                           "high": (p or {}).get("high"),
                           "seconds": (p or {}).get("seconds"),
+                          "passed": (p or {}).get("passed"),
+                          "total": (p or {}).get("total"),
+                          "ceiling": (p or {}).get("ceiling"),
+                          "speed": (p or {}).get("speed") or {},
+                          "facets": (p or {}).get("facets") or [],
+                          "suite_hash": (p or {}).get("suite_hash") or [],
+                          "cases": (p or {}).get("cases"),
                           "missing": p is None,
                           "unscored": bool(p and p in c["unscored"])})
         first = cells[0]
@@ -376,10 +400,40 @@ def compare(svc, profile_ids: list) -> dict:
                              else round(cell["score"] - first["score"], 1))
             cell["tie"] = within_noise(first["score"], cell["score"],
                                        first["sd"], cell["sd"])
-        rows.append({"suite": suite, "cells": cells})
+            # a suite rebuilt between the two (harder cases, a new scorer) is
+            # a different test: the difference is shown and never called a
+            # win or a tie, since it is not about the models (v0.181.211)
+            ha = {h for h in first["suite_hash"] if h}
+            hb = {h for h in cell["suite_hash"] if h}
+            # one side from before suite versions were recorded: the same
+            # test only if it has as many cases AND its scorer did not change
+            one_sided = bool(ha) != bool(hb)
+            if (ha and hb and ha != hb) or (one_sided and (
+                    first.get("cases") != cell.get("cases")
+                    or suite in RESCORED_IN_V2)):
+                cell["changed"] = True
+                cell["tie"] = False
+        try:
+            from .benchcard import SUITE_NAMES
+            title = SUITE_NAMES.get(suite, suite)
+        except Exception:                                         # noqa: BLE001
+            title = suite
+        rows.append({"suite": suite, "title": title, "cells": cells,
+                     "changed": any(c.get("changed") for c in cells)})
     out = {"cards": cards, "rows": rows, "baseline": base["profile_id"],
            "note": ""}
     comps = [c.get("composite") for c in cards]
+    sets = [frozenset(w["suite"] for w in c.get("weighted") or []) for c in cards]
+    out["same_suites"] = len(set(sets)) <= 1
+    if not out["same_suites"]:
+        # two averages over different suites are not two measurements of one
+        # thing - a profile still running, or one a suite was added to, would
+        # be ranked on what it has not been asked yet (v0.181.211)
+        missing = sorted(set().union(*sets) - set.intersection(*map(set, sets)))
+        out["note"] = ("the composites cover different suites (" + ", ".join(missing)
+                       + " not in every profile), so they are not comparable; "
+                       "read the suites row by row")
+        return out
     if len([x for x in comps if x is not None]) > 1:
         a, b = comps[0], comps[1]
         if within_noise(a, b, _card_sd(cards[0]), _card_sd(cards[1])):

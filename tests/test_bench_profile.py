@@ -347,6 +347,72 @@ def test_a_profile_will_not_start_while_a_single_suite_is_running(tmp_path,
     assert out.get("state") != "running" or out.get("profile_id") is None
 
 
+def _real_run_svc(tmp_path, monkeypatch, seen=None):
+    """The REAL bench._run with only the model call and the scorer replaced.
+    The start() test above replaces _run whole, which is why the leftover
+    state below was never seen by a test: it lives inside _run."""
+    import foundry_router.bench as bench
+    svc = svc_with(tmp_path)
+    svc.capture = type("C", (), {"data_dir": str(tmp_path)})()
+    (bench._dir(svc) / "alpha.jsonl").write_text(
+        "".join(json.dumps({"id": f"c{i}", "task_id": f"t{i}",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "reference": {"content": "x"}}) + "\n"
+                for i in range(3)), encoding="utf-8")
+
+    async def fake_ask(svc_, model, case, *a, **k):
+        if seen is not None:
+            seen.append(dict(bench._state))
+        return {"content": "x", "seconds": 1.0}
+
+    async def fake_score(svc_, case, got):
+        return {"score": 80.0, "tools": 0.0, "code": None, "answer": None,
+                "exact": None, "code_detail": "", "error": ""}
+
+    monkeypatch.setattr(bench, "ask", fake_ask)
+    monkeypatch.setattr(bench, "score_one", fake_score)
+    return bench, svc
+
+
+def test_a_run_inside_a_profile_does_not_show_the_last_runs_numbers(
+        tmp_path, monkeypatch):
+    """Seen live on profile 2: the brain lane's baseline, 56 cases in, showed
+    'scored 10, delivered 10, seconds 27.06' and a finished time EARLIER than
+    its start - all left from flash's agent suite, because a profile calls
+    _run directly and only start() ever cleared the state."""
+    import asyncio
+    seen: list = []
+    bench, svc = _real_run_svc(tmp_path, monkeypatch, seen)
+    monkeypatch.setattr(bench, "_state", {
+        "state": "done", "finished": 1.0, "scored": 10, "delivered": 10,
+        "seconds": 27.06, "completion_tokens": 20109})
+    out = asyncio.run(bench._run(svc, "alpha", "m", "", 0))
+    assert out["scored"] == 3
+    for st in seen:
+        assert st["state"] == "running"
+        for stale in ("finished", "delivered", "seconds", "completion_tokens"):
+            assert stale not in st, (stale, st)
+
+
+def test_a_stopped_profile_does_not_stop_the_next_one(tmp_path, monkeypatch):
+    """Stopping a profile sets bench's stop flag, and nothing cleared it: the
+    next profile's every suite would have broken at its first case and been
+    recorded as a stopped run of nothing."""
+    import asyncio
+    bench, svc = _real_run_svc(tmp_path, monkeypatch)
+    monkeypatch.setattr(bench, "_state", {"state": "stopped", "stop": True})
+    assert asyncio.run(bench._run(svc, "alpha", "m", "", 0))["scored"] == 3
+
+
+def test_a_stop_asked_for_as_the_run_begins_is_kept(tmp_path, monkeypatch):
+    """start() marks the state running before its thread reaches _run; a stop
+    pressed in that moment is for this run and must not be wiped."""
+    import asyncio
+    bench, svc = _real_run_svc(tmp_path, monkeypatch)
+    monkeypatch.setattr(bench, "_state", {"state": "running", "stop": True})
+    assert asyncio.run(bench._run(svc, "alpha", "m", "", 0))["scored"] == 0
+
+
 def test_bench_exposes_its_state_without_a_service():
     """The accessor itself, since reaching into another module's _state is how
     this check silently stops matching what the page reports."""
@@ -386,9 +452,11 @@ def test_the_page_draws_the_card_and_the_comparison():
     # break an assertion about what it says. Three assertions here failed in a
     # row on line breaks rather than on content.
     import re
-    i = page.index("Run every suite — one model, one card")
+    # v0.181.211 renamed the panel and folded the explanation into a
+    # "How the score is made" toggle; what it must still say is unchanged
+    i = page.index("Model report card: every suite, one model")
     panel = re.sub(r"\s+", " ", page[i:i + 2000])
     assert "weights decide the answer" in panel
     assert "no answer key" in panel
     assert "five points" in panel
-    assert "in sequence" in panel, "why they are not run at once"
+    assert "one at a time" in panel, "why they are not run at once"

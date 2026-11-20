@@ -43,6 +43,12 @@ CASES_PER_CONVERSATION = 2     # one long session must not become the whole suit
 # of 9.5 points, nearly twice the 5.2 that turning recall on appeared to be worth. The
 # cause was simply that nothing pinned the sampling down (v0.181.175).
 SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "seed": 7, "repeat_penalty": 1.0}
+# Bumped whenever SCORING changes meaning, so a run scored the old way is never
+# lined up against one scored the new way as if they measured the same thing.
+# 2 (v0.181.211): the finder suite no longer ends a case at the first call,
+# and a decoy in a needle case scores 0 when the answer names it.
+SCORER_VERSION = "2"
+KEEP_ANSWER = 2000             # characters of each answer kept for reading a failure
 MIN_CONTEXT = 1                # one user turn is context enough: ask, then act
 _state: dict = {"state": "idle"}
 _lock = threading.Lock()
@@ -343,18 +349,25 @@ def _norm(s: str) -> str:
     return _re.sub(r"\s+", " ", out).strip().lower()
 
 
-def exact_score(text: str, must_include) -> Optional[float]:
+def exact_score(text: str, must_include, must_exclude=None) -> Optional[float]:
     """The share of the strings a case REQUIRES that are in the answer, or None
     when the case requires none (v0.181.199).
 
     This is what a retrieval case is scored on. `answer_score` cannot do it: it
     is a length heuristic and returns 1.0 for any answer over twenty characters.
+
+    `must_exclude` is for a case with a decoy in it (v0.181.211): an answer
+    that names the decoy scores 0 even if it names the right one too, because
+    listing every candidate is not finding the one that was asked for.
     """
     want = [w for w in (must_include or []) if str(w or "").strip()]
     if not want:
         return None
     body = _norm(text)
     if not body:
+        return 0.0
+    if any(_contains(body, _norm(x)) for x in (must_exclude or [])
+           if str(x or "").strip()):
         return 0.0
     hit = sum(1 for w in want if _contains(body, _norm(w)))
     return round(hit / len(want), 3)
@@ -464,7 +477,19 @@ def combine(tools: Optional[float], code: Optional[float], answer: Optional[floa
 # giving one number (v0.181.199).
 
 NEEDLE_DEPTHS = (0, 25, 50, 75, 100)
-NEEDLE_LENGTHS = (4000, 16000, 32000)      # characters of haystack, roughly 1k-8k tokens
+# characters of haystack. 4k-32k (~1k-8k tokens) is where both local models
+# already scored 100, so it could not tell a better model from a good one; 64k
+# and 96k (~16k-24k tokens) are where context starts to cost (v0.181.211)
+NEEDLE_LENGTHS = (4000, 16000, 32000, 64000, 96000)
+NEEDLE_DECOYS = 3              # decoy cases per length, kept OUT of the depth grid
+TIERS = ("easy", "medium", "hard", "expert")
+
+
+def needle_tier(length: int, decoy: bool = False) -> str:
+    """How hard a needle case is, for the card's difficulty ladder. A decoy
+    case is one step harder than a plain needle at the same length."""
+    i = 0 if length <= 4000 else 1 if length <= 32000 else 2 if length <= 64000 else 3
+    return TIERS[min(3, i + (1 if decoy else 0))]
 _NEEDLE_SENTENCE = ("Operational note: the verification code for sprint {task} is "
                     "{code}. Quote it exactly when asked.")
 _NEEDLE_QUESTION = ("Read the notes above. What is the verification code for sprint "
@@ -499,9 +524,12 @@ def _haystack_text(svc) -> str:
             if sum(len(x) for x in parts) > 400_000:
                 break
     body = "\n\n".join(parts).strip()
-    if len(body) < 20000:
-        # never fail for want of filler: repeat what there is rather than invent
-        body = (body + "\n\n") * (1 + 20000 // max(1, len(body)))
+    need = max(NEEDLE_LENGTHS) + 2000
+    if len(body) < need:
+        # never fail for want of filler: repeat what there is rather than invent.
+        # It must cover the LONGEST case, or a "96k" case would be cut short and
+        # still be labelled 96k
+        body = (body + "\n\n") * (1 + need // max(1, len(body)))
     return body
 
 
@@ -522,7 +550,8 @@ def _needle_case(hay: str, length: int, depth: int, seq: int) -> dict:
     return {
         "id": f"NEEDLE-{length//1000}k-d{depth}-{seq}",
         "task_id": task,
-        "tags": ["needle", "context", f"depth:{depth}", f"chars:{length}"],
+        "tags": ["needle", "context", f"depth:{depth}", f"chars:{length}",
+                 f"tier:{needle_tier(length)}"],
         "messages": [
             {"role": "system", "content": "You answer from the notes you are given."},
             {"role": "user", "content": body + "\n\n" +
@@ -534,16 +563,75 @@ def _needle_case(hay: str, length: int, depth: int, seq: int) -> dict:
     }
 
 
+def _decoy_task(task: str) -> str:
+    """A sprint id that reads like `task` - same prefix, digits swapped (or one
+    up) - so the decoy cannot be told apart by its shape."""
+    head, _, num = task.rpartition("-")
+    other = num[::-1] if num[::-1] != num else str(int(num) % 89 + 10)
+    return f"{head}-{other}"
+
+
+def _decoy_case(hay: str, length: int, seq: int) -> dict:
+    """A needle with a DECOY: a second sentence of exactly the same shape, for
+    a near-identical sprint id, somewhere else in the same context.
+
+    A plain needle is found by spotting the one sentence that does not belong;
+    every model here already does that to 32k. With a decoy it has to read
+    which sprint the sentence is about, and an answer naming both codes scores
+    0 - see exact_score's must_exclude."""
+    import random as _rnd
+    rnd = _rnd.Random(f"needle-decoy-{length}-{seq}")
+    code = f"{rnd.randint(100000, 999999)}"
+    fake = f"{rnd.randint(100000, 999999)}"
+    while fake == code:
+        fake = f"{rnd.randint(100000, 999999)}"
+    task = f"{rnd.choice(('VR-AS', 'LOB', 'FIN', 'MV2', 'POL'))}-{rnd.randint(10, 99)}"
+    decoy = _decoy_task(task)
+    start = rnd.randrange(0, max(1, len(hay) - length - 1))
+    filler = hay[start:start + length]
+    # the two land in different halves, the order chosen per case, so neither
+    # "the first one" nor "the last one" is the answer by position
+    lo, hi = rnd.randint(10, 40), rnd.randint(60, 90)
+    real_at, fake_at = (lo, hi) if rnd.random() < 0.5 else (hi, lo)
+    marks = sorted([(real_at, _NEEDLE_SENTENCE.format(task=task, code=code)),
+                    (fake_at, _NEEDLE_SENTENCE.format(task=decoy, code=fake))])
+    body, last = "", 0
+    for pct, sentence in marks:
+        at = int(len(filler) * pct / 100)
+        nl = filler.find("\n", at)
+        at = nl + 1 if 0 <= nl <= at + 400 else at
+        body += filler[last:at] + "\n" + sentence + "\n"
+        last = at
+    body += filler[last:]
+    return {
+        "id": f"NEEDLE-{length//1000}k-decoy-{seq}",
+        "task_id": task,
+        # no depth: tag, so the depth grid stays a grid of plain needles
+        "tags": ["needle", "context", "decoy", f"chars:{length}",
+                 f"tier:{needle_tier(length, decoy=True)}"],
+        "messages": [
+            {"role": "system", "content": "You answer from the notes you are given."},
+            {"role": "user", "content": body + "\n\n" +
+             _NEEDLE_QUESTION.format(task=task)},
+        ],
+        "reference": {"content": code, "must_include": [code],
+                      "must_exclude": [fake], "decoy_task": decoy},
+    }
+
+
 def build_needle(svc, name: str = "needle", per_cell: int = 3,
-                 depths=NEEDLE_DEPTHS, lengths=NEEDLE_LENGTHS) -> dict:
+                 depths=NEEDLE_DEPTHS, lengths=NEEDLE_LENGTHS,
+                 decoys: int = NEEDLE_DECOYS) -> dict:
     """Write a needle-in-a-haystack suite: `per_cell` cases at each depth and
-    length. Returns {name, cases, path}."""
+    length, plus `decoys` decoy cases per length. Returns {name, cases, path}."""
     hay = _haystack_text(svc)
     out = []
     for length in lengths:
         for depth in depths:
             for seq in range(int(per_cell)):
                 out.append(_needle_case(hay, int(length), int(depth), seq))
+        for seq in range(int(decoys or 0)):
+            out.append(_decoy_case(hay, int(length), seq))
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
         for c in out:
@@ -779,9 +867,12 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
     convo = wire(case.get("messages") or [])
     t0 = time.monotonic()
     searched, found, picked, calls = 0, False, "", []
+    used: list = []                    # every tool it CALLED, in order
     prompt_tokens = completion_tokens = 0
     backend = ""
+    result = None
     for _round in range(TOOLFLOW_ROUNDS):
+        r0 = time.monotonic()
         try:
             result, backend = await svc.pool.chat(
                 model, convo, tools=specs, max_tokens=max_tokens,
@@ -790,6 +881,11 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             from .errors import describe_exception
             return {"error": describe_exception(e),
                     "seconds": round(time.monotonic() - t0, 2)}
+        # every round is a model call and is recorded like one. Without this
+        # a finder run left no performance sample at all (v0.181.211): the
+        # telemetry ask() records was never added to this second path.
+        _record(svc, model, backend, result, (time.monotonic() - r0) * 1000.0,
+                max_tokens, label)
         prompt_tokens += result.prompt_tokens or 0
         completion_tokens += result.completion_tokens or 0
         tcs = result.tool_calls or []
@@ -816,19 +912,33 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
                     found = True
                 text = tool_finder.find_text(tools, args)
             elif tname == tool_finder.CALL_TOOL:
-                picked = str(args.get("name") or "")
+                name = str(args.get("name") or "")
+                if name:
+                    used.append(name)
+                if want and tool_finder_match(name, want):
+                    picked = name
                 # recorded, never run: a benchmark must not generate a video
                 text = ("[bench] the call was recorded and not executed.")
             else:
                 text = f"[bench] {tname} is not a tool you can use."
             convo.append({"role": "tool", "tool_call_id": tc.get("id") or f"c{i}",
                           "name": tname, "content": text})
+        # Stop when it has used the tool the task needs - NOT at its first call.
+        # Up to v0.181.210 the first call ended the case, so taking a page
+        # snapshot before clicking, or listing the voices before speaking, was
+        # scored as choosing the wrong tool: 22 of flash's 25 toolflow misses
+        # were that. A preparatory call costs a round, and the rounds are
+        # capped, so wandering is still a failure.
         if picked:
             break
-    return {"content": picked or (result.content or ""), "backend": backend,
+    first = used[0] if used else ""
+    return {"content": picked or first or ((result.content or "") if result else ""),
+            "backend": backend,
             "tool_calls": [{"name": n, "arguments": {}} for n in calls],
-            "finder": {"searched": searched, "found": found, "picked": picked,
-                       "want": want, "rounds": len(calls)},
+            "finder": {"searched": searched, "found": found,
+                       "picked": picked or first, "want": want,
+                       "used": used, "hit": bool(picked),
+                       "rounds": len(calls)},
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
             "seconds": round(time.monotonic() - t0, 2)}
 
@@ -841,10 +951,17 @@ def finder_score(got: dict, want: str) -> dict:
     differently from one that never found it, and one number hides which."""
     f = (got or {}).get("finder") or {}
     found = 1.0 if f.get("found") else 0.0
-    picked = 1.0 if want and tool_finder_match(f.get("picked") or "", want) else 0.0
+    used = [str(u) for u in (f.get("used") or []) if u] or (
+        [str(f.get("picked"))] if f.get("picked") else [])
+    picked = 1.0 if want and any(tool_finder_match(u, want) for u in used) else 0.0
     return {"found": found, "picked": picked,
             "score": round(100 * (0.5 * found + 0.5 * picked), 1),
-            "searched": int(f.get("searched") or 0)}
+            "searched": int(f.get("searched") or 0),
+            "used": used,
+            # calls made before the one the task needed: not wrong, but slower
+            "detours": (next((i for i, u in enumerate(used)
+                              if tool_finder_match(u, want)), len(used))
+                        if picked else len(used))}
 
 
 def tool_finder_match(got: str, want: str) -> bool:
@@ -911,6 +1028,101 @@ _CODE_SNIPPETS = [
      "result = list(range(10, 0, -3))", "result"),
 ]
 
+# Harder tiers (v0.181.211). The twenty-eight above are one-line gotchas and
+# the small flash model scored all of them, so the suite said nothing about a
+# better model. These have to be TRACED: state carried across a loop, a
+# generator, a closure, the MRO, a try/finally. Same rule as the rest - the
+# answer is computed by running the snippet when the suite is built.
+_CODE_HARD = [
+    ("generator_exhausted",
+     "g = (x * x for x in range(4))\nfirst = sum(g)\nsecond = sum(g)\n"
+     "result = (first, second)", "result"),
+    ("closure_counters",
+     "def make():\n    n = 0\n    def inc(k=1):\n        nonlocal n\n        n += k\n"
+     "        return n\n    return inc\na = make()\nb = make()\na()\na(5)\nb(2)\n"
+     "result = (a(0), b(0))", "result"),
+    ("class_attr_shadow",
+     "class C:\n    items = []\n    count = 0\n    def add(self, x):\n"
+     "        self.items.append(x)\n        self.count += 1\na, b = C(), C()\n"
+     "a.add(1)\nb.add(2)\na.add(3)\nresult = (len(C.items), C.count, a.count, b.count)",
+     "result"),
+    ("try_except_finally",
+     "log = []\ndef g(v):\n    try:\n        log.append('t')\n        return 10 // v\n"
+     "    except ZeroDivisionError:\n        log.append('e')\n        return -1\n"
+     "    finally:\n        log.append('f')\nresult = (g(2), g(0), ''.join(log))",
+     "result"),
+    ("mro_super",
+     "class A:\n    def who(self): return 'A'\nclass B(A):\n"
+     "    def who(self): return 'B' + super().who()\nclass C(A):\n"
+     "    def who(self): return 'C' + super().who()\nclass D(B, C):\n"
+     "    def who(self): return 'D' + super().who()\nresult = D().who()", "result"),
+    ("nested_comprehension",
+     "result = [(i, j) for i in range(4) if i % 2 for j in range(i) if j != 1]",
+     "result"),
+    ("dict_key_collision",
+     "d = {1: 'int', 1.0: 'float', True: 'bool'}\nresult = (len(d), d[1])", "result"),
+    ("walrus_loop",
+     "data = [3, 1, 4, 1, 5, 9, 2, 6]\nout = []\ni = 0\n"
+     "while (n := data[i]) != 9:\n    if n % 2:\n        out.append(n * 10)\n"
+     "    i += 1\nresult = (out, i)", "result"),
+]
+
+_CODE_EXPERT = [
+    ("inventory_orders",
+     "stock = {'wood': 5, 'stone': 2}\n"
+     "orders = [('wood', 3), ('stone', 3), ('iron', 1), ('wood', 2), ('stone', 2), ('wood', 1)]\n"
+     "filled, short = [], {}\nfor item, qty in orders:\n    have = stock.get(item, 0)\n"
+     "    if have >= qty:\n        stock[item] = have - qty\n        filled.append(item[0])\n"
+     "    else:\n        short[item] = short.get(item, 0) + qty - have\n"
+     "        stock[item] = 0\nresult = (''.join(filled), stock, short)", "result"),
+    ("memo_recursion",
+     "from functools import lru_cache\ncalls = []\n@lru_cache(maxsize=None)\n"
+     "def ways(n):\n    calls.append(n)\n    if n < 0:\n        return 0\n"
+     "    if n == 0:\n        return 1\n    return ways(n - 1) + ways(n - 3)\n"
+     "result = (ways(7), len(calls))", "result"),
+    ("generator_send",
+     "def acc():\n    total = 0\n    while True:\n        x = yield total\n"
+     "        if x is None:\n            break\n        total += x\ng = acc()\n"
+     "seen = [next(g)]\nfor v in (5, -2, 10):\n    seen.append(g.send(v))\ntry:\n"
+     "    g.send(None)\nexcept StopIteration:\n    seen.append('done')\nresult = seen",
+     "result"),
+    ("multi_key_sort",
+     "rows = [('ana', 3, 9.5), ('bo', 1, 7.0), ('cy', 3, 8.0), ('di', 2, 9.5), ('ed', 1, 9.0)]\n"
+     "by = sorted(rows, key=lambda r: (-r[1], r[2], r[0]))\nresult = [r[0] for r in by]",
+     "result"),
+    ("run_length_decode",
+     "s = 'x3y12z'\nout, num, prev = '', '', ''\nfor ch in s + '!':\n"
+     "    if ch.isdigit():\n        num += ch\n        continue\n    if prev:\n"
+     "        out += prev * (int(num) if num else 1)\n    prev, num = ch, ''\n"
+     "result = (out, len(out))", "result"),
+    ("closure_sees_last_binding",
+     "x = 'g'\ndef outer():\n    x = 'o'\n    def inner():\n        return x\n"
+     "    x = 'o2'\n    return inner\nf = outer()\nx = 'g2'\nresult = f() + '/' + x",
+     "result"),
+    ("bit_flags",
+     "flags = 0\nfor bit in (0, 3, 5, 3):\n    flags ^= 1 << bit\n"
+     "mask = flags & ~(1 << 5)\nresult = (flags, mask, bin(flags).count('1'))", "result"),
+    ("exception_cause",
+     "def parse(v):\n    try:\n        return int(v)\n    except ValueError as e:\n"
+     "        raise KeyError(v) from e\nout = []\nfor v in ('1', 'x', '3'):\n    try:\n"
+     "        out.append(parse(v))\n    except KeyError as e:\n"
+     "        out.append(type(e.__cause__).__name__)\nresult = out", "result"),
+]
+
+# which of the original twenty-eight are more than a single rule to recall
+_CODE_MEDIUM = {"modulo_negative", "empty_is_falsy", "late_binding",
+                "default_arg_shared", "sort_stability", "dict_update_order",
+                "is_vs_equals", "chained_comparison", "tuple_single",
+                "str_split_empty", "dict_mutation", "unbound_local"}
+
+
+def code_tier(key: str) -> str:
+    if any(k == key for k, _s, _e in _CODE_EXPERT):
+        return "expert"
+    if any(k == key for k, _s, _e in _CODE_HARD):
+        return "hard"
+    return "medium" if key in _CODE_MEDIUM else "easy"
+
 _CODE_EXC = [
     ("dict_mutation",
      "d = {'a': 1, 'b': 2}\nfor k in d:\n    del d[k]"),
@@ -941,9 +1153,15 @@ def _run_snippet(src: str, expr: str):
 
     This is this module's own code, not a model's: the suite is a fixed table
     above, and nothing from a request ever reaches here (v0.181.204)."""
-    ns: dict = {}
-    exec(compile(src, "<bench-snippet>", "exec"), {"__builtins__": __builtins__}, ns)
-    return eval(expr, {"__builtins__": __builtins__}, ns)       # noqa: S307
+    # ONE namespace, as a module has. Separate globals and locals is class-body
+    # scoping: a function in the snippet could not see a name defined beside
+    # it, so a snippet like `log = []; def g(): log.append(...)` raised
+    # NameError here although it runs fine as a file. The original twenty-eight
+    # give the same values either way (checked in v0.181.211); the traced
+    # snippets need this.
+    ns: dict = {"__builtins__": __builtins__}
+    exec(compile(src, "<bench-snippet>", "exec"), ns)
+    return eval(expr, ns)                                        # noqa: S307
 
 
 def _raised_by(src: str) -> str:
@@ -959,7 +1177,7 @@ def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
     """A suite that asks what code does, with every answer computed by running
     the snippet here rather than recalled."""
     out, refused = [], []
-    for key, src, expr in _CODE_SNIPPETS:
+    for key, src, expr in _CODE_SNIPPETS + _CODE_HARD + _CODE_EXPERT:
         try:
             value = _run_snippet(src, expr)
         except Exception as e:                                    # noqa: BLE001
@@ -968,7 +1186,7 @@ def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
         out.append({
             "id": f"CODE-{key}",
             "task_id": key,
-            "tags": ["codereason", "python", "code"],
+            "tags": ["codereason", "python", "code", f"tier:{code_tier(key)}"],
             "messages": [
                 {"role": "system", "content": "You reason about code precisely."},
                 {"role": "user", "content": _VALUE_Q.format(src=src)},
@@ -984,7 +1202,8 @@ def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
         out.append({
             "id": f"CODE-{key}",
             "task_id": key,
-            "tags": ["codereason", "python", "exception", "code"],
+            "tags": ["codereason", "python", "exception", "code",
+                     f"tier:{code_tier(key)}"],
             "messages": [
                 {"role": "system", "content": "You reason about code precisely."},
                 {"role": "user", "content": _EXC_Q.format(src=src)},
@@ -1181,6 +1400,25 @@ def run_label(run_id, model: str, label: str = "") -> str:
     return " ".join(b for b in bits if b)
 
 
+def _record(svc, model: str, backend: str, result, wall_ms: float,
+            max_tokens: int, label: str = "", persona: str = "") -> None:
+    """One model call's telemetry, for EVERY path a benchmark asks through.
+
+    v0.181.196 added this to ask() after the brain lane showed 0 samples while
+    a 60-case run was going against it; the finder path was a second caller and
+    did not get it, so every toolflow run was invisible to the Performance tab
+    until v0.181.211. One function, so a third path cannot miss it the same way."""
+    try:
+        from . import telemetry
+        telemetry.record_call(
+            svc.db, svc.registry, model=model, backend=backend, result=result,
+            persona=persona or "bench", mode="bench",
+            wall_ms=wall_ms, max_tokens=max_tokens,
+            extra={"run_label": label} if label else None)
+    except Exception:                                             # noqa: BLE001
+        log.exception("bench: could not record telemetry for %s", model)
+
+
 async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
               persona: str = "", label: str = "") -> dict:
     """One case through one model, with the tools that case was offered."""
@@ -1193,19 +1431,8 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         return {"error": describe_exception(e), "seconds": round(time.monotonic() - t0, 2)}
-    # v0.181.196: the same telemetry every other dispatch path records. Without
-    # it a bench run is invisible to the Performance tab and to the Live view -
-    # the brain lane had 0 per-call samples in 24 hours while a 60-case
-    # benchmark was running against it.
-    try:
-        from . import telemetry
-        telemetry.record_call(
-            svc.db, svc.registry, model=model, backend=backend, result=result,
-            persona=persona or "bench", mode="bench",
-            wall_ms=(time.monotonic() - t0) * 1000.0, max_tokens=max_tokens,
-            extra={"run_label": label} if label else None)
-    except Exception:                                             # noqa: BLE001
-        log.exception("bench: could not record telemetry for %s", model)
+    _record(svc, model, backend, result, (time.monotonic() - t0) * 1000.0,
+            max_tokens, label, persona)
     from .brain import prompts
     _think, clean = prompts.split_think(result.content or "")
     return {"content": clean.strip(), "backend": backend,
@@ -1234,7 +1461,8 @@ async def score_one(svc, case: dict, got: dict) -> dict:
         return {"score": fs["score"], "tools": fs["picked"], "code": None,
                 "answer": fs["found"], "exact": None, "code_detail":
                     f"found={bool(fs['found'])} picked={(got.get('finder') or {}).get('picked') or '-'} "
-                    f"searches={fs['searched']}",
+                    f"searches={fs['searched']} used={','.join(fs['used']) or '-'} "
+                    f"detours={fs['detours']}",
                 "error": ""}
     tools = tool_score(ref.get("tool_calls") or [], got.get("tool_calls") or [])
     code, detail = await code_score(svc, got.get("content") or "")
@@ -1242,13 +1470,73 @@ async def score_one(svc, case: dict, got: dict) -> dict:
               if not (ref.get("tool_calls") or []) else None)
     exact = value_score(got.get("content") or "", str(ref.get("py_value") or "")) \
         if ref.get("py_value") else \
-        exact_score(got.get("content") or "", ref.get("must_include"))
+        exact_score(got.get("content") or "", ref.get("must_include"),
+                    ref.get("must_exclude"))
     return {"score": combine(tools, code, answer, exact), "tools": tools, "code": code,
             "answer": answer, "exact": exact, "code_detail": detail, "error": ""}
 
 
 def _row(db, sql, args=()):
     db.execute(sql, args)
+
+
+def suite_hash(svc, suite: str) -> str:
+    """The suite's content and the scorer version, as twelve hex characters.
+
+    Two runs with the same name and a different hash are different tests: the
+    needle suite rebuilt with 96k contexts is not the 32k one, and a toolflow
+    run scored before v0.181.211 is not scored like one after it."""
+    import hashlib
+    h = hashlib.sha1(f"scorer:{SCORER_VERSION}\n".encode())
+    try:
+        h.update((_dir(svc) / f"{suite}.jsonl").read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:12]
+
+
+def expected_of(case: dict) -> str:
+    """What a case wanted, in words a person reads next to the answer."""
+    ref = case.get("reference") or {}
+    if ref.get("deliverable"):
+        return "a deliverable (no answer key)"
+    if ref.get("finder_tool"):
+        return f"use {ref['finder_tool']}"
+    if ref.get("py_value"):
+        return str(ref["py_value"])
+    if ref.get("must_include"):
+        s = " and ".join(str(x) for x in ref["must_include"])
+        if ref.get("must_exclude"):
+            s += f" (not the decoy {', '.join(str(x) for x in ref['must_exclude'])}" \
+                 + (f" for {ref['decoy_task']}" if ref.get("decoy_task") else "") + ")"
+        return s
+    calls = [t.get("name") for t in ref.get("tool_calls") or [] if t.get("name")]
+    if calls:
+        return "call " + ", then ".join(calls)
+    return "answer in words, no tool"
+
+
+def answer_of(got: dict) -> str:
+    """What the model did, kept for reading a failure: its text, and the tools
+    it called when it called any."""
+    parts = []
+    f = got.get("finder") or {}
+    if f:
+        if f.get("used"):
+            parts.append("used " + " → ".join(f["used"]))
+        parts.append(f"{f.get('searched', 0)} search(es), "
+                     + ("the right tool came up" if f.get("found")
+                        else "the right tool never came up"))
+    else:
+        calls = [t.get("name") for t in got.get("tool_calls") or [] if t.get("name")]
+        if calls:
+            parts.append("called " + ", ".join(calls))
+    text = (got.get("content") or "").strip()
+    if text and not f:
+        parts.append(text)
+    if got.get("error"):
+        parts.append("error: " + str(got["error"]))
+    return "\n".join(parts)[:KEEP_ANSWER]
 
 
 async def _run(svc, suite: str, model: str, label: str, limit: int,
@@ -1258,14 +1546,30 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
     if not items:
         raise ValueError(f"the suite {suite!r} has no cases")
     db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, "
-               "recall, lessons) VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?, ?)",
+               "recall, lessons, suite_hash) "
+               "VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?, ?, ?)",
                (suite, model, label, len(items), 1 if use_recall else 0,
-                1 if use_lessons else 0))
+                1 if use_lessons else 0, suite_hash(svc, suite)))
     run_id = db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]
+    # a fresh state for every run (v0.181.211). start() clears it, but a
+    # profile calls _run directly, suite after suite, so the previous run's
+    # finished/scored/delivered/seconds showed on the live status as if they
+    # were this run's - and a stop left over from a stopped profile would have
+    # ended every suite of the NEXT profile at its first case. A stop asked
+    # for in the moment between start() and here is kept: that one is meant
+    # for this run.
+    keep_stop = _state.get("state") == "running" and bool(_state.get("stop"))
+    _state.clear()
+    if keep_stop:
+        _state["stop"] = True
     _state.update({"state": "running", "run_id": run_id, "suite": suite, "model": model,
                    "cases": len(items), "done": 0, "started": time.time(), "score": None,
                    "recall": bool(use_recall), "recalled": 0,
-                   "lessons": bool(use_lessons), "ruled": 0})
+                   "lessons": bool(use_lessons), "ruled": 0,
+                   # live, for the progress strip: how fast, how well, how long
+                   "model_seconds": 0.0, "out_tokens": 0, "in_tokens": 0,
+                   "passed": 0, "errors": 0, "last": None,
+                   "case_started": time.time()})
     # every perf sample this run writes is filed under its own label, so the
     # Performance page can show exactly the calls this benchmark made
     # (v0.181.198)
@@ -1300,7 +1604,8 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         db.execute(
             "INSERT INTO bench_results (run_id, case_id, task_id, tags, tools_expected, "
             "tools_called, tools_score, code_pass, code_detail, answer_chars, score, seconds, "
-            "error, recalled, deliverable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "error, recalled, deliverable, answer, expected) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, case.get("id") or "", case.get("task_id") or "",
              json.dumps(case.get("tags") or []),
              json.dumps([t.get("name") for t in (case.get("reference") or {}).get("tool_calls") or []]),
@@ -1309,7 +1614,8 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
              len(got.get("content") or ""), s["score"], got.get("seconds") or 0, s["error"],
              json.dumps([h["case_id"] for h in hits]),
              (got.get("content") or "")
-             if (case.get("reference") or {}).get("deliverable") else ""))
+             if (case.get("reference") or {}).get("deliverable") else "",
+             answer_of(got), expected_of(case)))
         if s["score"] is None:
             totals["delivered"] += 1
         else:
@@ -1329,6 +1635,16 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         _state["done"] = i
         _state["score"] = (round(totals["score"] / totals["score_n"], 1)
                            if totals["score_n"] else None)
+        _state["model_seconds"] = round(totals["seconds"], 2)
+        _state["out_tokens"] = totals["completion"]
+        _state["in_tokens"] = totals["prompt"]
+        _state["errors"] = totals["errors"]
+        if s["score"] is not None and s["score"] >= 100:
+            _state["passed"] = _state.get("passed", 0) + 1
+        _state["last"] = {"case": case.get("id") or "", "score": s["score"],
+                          "seconds": got.get("seconds") or 0,
+                          "error": (s["error"] or "")[:160]}
+        _state["case_started"] = time.time()
     n = max(1, _state["done"])
     sn = totals["score_n"]
     out = {"run_id": run_id, "suite": suite, "model": model, "cases": len(items),

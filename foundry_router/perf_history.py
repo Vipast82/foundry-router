@@ -82,6 +82,11 @@ def set_run_label(db: Database, label: str) -> str:
     return label
 
 
+# No GPU this router drives prefills faster than this; a rate above it is an
+# unreported prompt-cache hit, not throughput (v0.181.211).
+MAX_PLAUSIBLE_PREFILL_TPS = 50_000.0
+
+
 def _rate(n: Optional[int], duration_ns: Optional[int]) -> Optional[float]:
     """tokens/sec from a count and a nanosecond duration, or None when either is
     missing (so a backend that reports no timing leaves a gap, not a zero)."""
@@ -123,6 +128,13 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
     prefill time; 0 falls back to prompt_tokens (Ollama reports them as one)."""
     decode_tps = _rate(completion_tokens, eval_duration_ns)
     prefill_tps = _rate(prefill_tokens or prompt_tokens, prompt_eval_duration_ns)
+    if prefill_tps is not None and prefill_tps > MAX_PLAUSIBLE_PREFILL_TPS:
+        # Not a speed: a prompt served from the KV cache by a backend that did
+        # not say so. The brain lane reported 31,895 tokens "prefilled" in
+        # 104 ms (307,570 t/s) with cached_tokens 0, and a handful of those
+        # made its benchmark's average prefill 16,522 t/s against a real
+        # median near 1,400 (v0.181.211). The duration is kept; the rate is not.
+        prefill_tps = None
     decode_ms = round(eval_duration_ns / 1e6, 1) if eval_duration_ns else None
     prefill_ms = round(prompt_eval_duration_ns / 1e6, 1) if prompt_eval_duration_ns else None
     eff_tps = (round(completion_tokens / (wall_ms / 1000), 2)
@@ -251,6 +263,10 @@ _EST_KEYS = ("decode_tps", "prefill_tps", "ttft_ms", "eff_tps")
 
 def _avg_expr(k: str) -> str:
     """AVG of a metric; speed metrics over measured samples only."""
+    if k == "prefill_tps":
+        # rows recorded before the guard above still hold the impossible rates
+        return (f"ROUND(AVG(CASE WHEN timing_src='server' AND {k} <= "
+                f"{MAX_PLAUSIBLE_PREFILL_TPS:.0f} THEN {k} END), 2) AS {k}")
     if k in SPEED_KEYS:
         return f"ROUND(AVG(CASE WHEN timing_src='server' THEN {k} END), 2) AS {k}"
     return f"ROUND(AVG({k}), 2) AS {k}"

@@ -104,11 +104,15 @@ def test_the_bench_records_telemetry_like_every_other_path():
     import inspect
 
     from foundry_router import bench
-    src = inspect.getsource(bench.ask)
+    # v0.181.211: the call lives in bench._record, which EVERY benchmark path
+    # calls - the finder path had been a second caller that recorded nothing
+    src = inspect.getsource(bench._record)
     assert "telemetry.record_call" in src
     assert 'mode="bench"' in src
     # best-effort: telemetry must never break a case
     assert "except Exception" in src.split("telemetry.record_call")[1][:400]
+    for path in (bench.ask, bench.ask_through_finder):
+        assert "_record(svc, model, backend, result" in inspect.getsource(path)
 
 
 def test_the_bench_telemetry_names_the_backend_it_actually_used():
@@ -117,10 +121,12 @@ def test_the_bench_telemetry_names_the_backend_it_actually_used():
     import inspect
 
     from foundry_router import bench
-    src = inspect.getsource(bench.ask)
+    src = inspect.getsource(bench._record)
     head = src.split("telemetry.record_call")[1][:300]
     assert "backend=backend" in head          # the one pool.chat returned
     assert "model=model" in head
+    # and the callers hand over the backend pool.chat returned, not a guess
+    assert "result, backend = await svc.pool.chat(" in inspect.getsource(bench.ask)
 
 
 # -- a pooled MCP session belongs to one loop --------------------------------------
