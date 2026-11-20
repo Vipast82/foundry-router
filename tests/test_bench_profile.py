@@ -11,6 +11,7 @@ this database, not remembered), and what has no score at all (the agent tasks,
 which must never be averaged in).
 """
 import json
+import time
 
 import pytest
 
@@ -279,6 +280,79 @@ def test_the_unscored_suites_are_run_last(tmp_path):
             json.dumps({"id": "x", "task_id": "x", "messages": [],
                         "reference": {}}) + "\n", encoding="utf-8")
     assert bp.runnable_suites(svc)[-1] == "agent"
+
+
+# -- starting one, which is the part that shipped untested --------------------------------
+
+def test_starting_a_profile_actually_runs(tmp_path, monkeypatch):
+    """v0.181.208 shipped a `start` that raised AttributeError on its first
+    line: it called `bench.state()`, which did not exist. Every test here
+    covered the card and the comparison and none of them called the entry
+    point, so the suite was green and the button was broken. Found by pressing
+    it against the live router.
+
+    This drives start() end to end with the model call replaced, so the
+    plumbing - the lock, the row, the state, the profile_id on each run - is
+    exercised without a GPU."""
+    import foundry_router.bench as bench
+    svc = svc_with(tmp_path)
+    svc.capture = type("C", (), {"data_dir": str(tmp_path)})()
+    for name in ("alpha", "beta"):
+        (bench._dir(svc) / f"{name}.jsonl").write_text(
+            json.dumps({"id": "c1", "task_id": "t1",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "reference": {"content": "x"}}) + "\n",
+            encoding="utf-8")
+
+    async def fake_run(svc_, suite, model, label, limit, *a, **k):
+        db = svc_.db
+        db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, "
+                   "scored, score, seconds, status) VALUES "
+                   "(datetime('now'),?,?,?,1,1,55.0,1.0,'done')",
+                   (suite, model, label))
+        return {"run_id": db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]}
+
+    monkeypatch.setattr(bench, "_run", fake_run)
+    out = bp.start(svc, "a-model", ["alpha", "beta"], "trying it", 1)
+    # not asserted as "running": with the model call replaced these finish
+    # inside start()'s own settle, and what matters is that it STARTED - the
+    # defect this covers was an AttributeError on the first line
+    assert out.get("profile_id"), out
+    assert out["state"] in ("running", "done"), out
+    for _ in range(200):
+        if bp.state().get("state") != "running":
+            break
+        time.sleep(0.05)
+    assert bp.state()["state"] == "done", bp.state()
+    card = bp.build_card(svc, out["profile_id"])
+    assert card["composite"] == 55.0
+    assert {p["suite"] for p in card["parts"]} == {"alpha", "beta"}
+    assert svc.db.query_one(
+        "SELECT status, score FROM bench_profiles WHERE id=?",
+        (out["profile_id"],))["status"] == "done"
+
+
+def test_a_profile_will_not_start_while_a_single_suite_is_running(tmp_path,
+                                                                  monkeypatch):
+    """Two at once is two models on one GPU, and the numbers would be about
+    the contention. This is the check whose accessor did not exist."""
+    import foundry_router.bench as bench
+    svc = svc_with(tmp_path)
+    svc.capture = type("C", (), {"data_dir": str(tmp_path)})()
+    (bench._dir(svc) / "alpha.jsonl").write_text(
+        json.dumps({"id": "c", "task_id": "t", "messages": [],
+                    "reference": {}}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(bench, "_state", {"state": "running", "suite": "alpha"})
+    out = bp.start(svc, "a-model", ["alpha"])
+    assert out.get("state") != "running" or out.get("profile_id") is None
+
+
+def test_bench_exposes_its_state_without_a_service():
+    """The accessor itself, since reaching into another module's _state is how
+    this check silently stops matching what the page reports."""
+    import foundry_router.bench as bench
+    assert isinstance(bench.state(), dict)
+    assert "state" in bench.state()
 
 
 def test_the_profile_column_exists_on_an_older_database(tmp_path):

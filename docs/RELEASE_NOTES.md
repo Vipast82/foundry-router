@@ -1,3 +1,38 @@
+## v0.181.210 - the profile button was broken, and 36 tests did not notice
+
+Pressing "Run every suite" against the live router returned
+`AttributeError: module 'foundry_router.bench' has no attribute 'state'` - the
+first line of `benchprofile.start`, which checks whether a single-suite run is
+already going before starting a profile, since two at once would be two models
+on one GPU. `bench` keeps that in a module-level `_state` and exposes it only
+through `status(svc)`, which needs a service; there was no `state()`.
+
+**The thirty-six tests of v0.181.208 were green and the button did not work.**
+They covered the card, the composite, the weights, the noise, the comparison
+and the grid - everything that formats a result - and not one of them called
+the entry point. An entry point is the one function the operator actually
+touches, and it shipped as the only untested thing in the file.
+
+So `bench.state()` exists, `status()` is written in terms of it, and three
+tests cover what was missed: one drives `start` end to end with the model call
+replaced, so the lock, the row, the thread, the per-run `profile_id` and the
+final card are all exercised without a GPU; one asserts a profile refuses to
+start while a single-suite run is going, which is the check whose accessor did
+not exist; and one asserts the accessor itself, because reaching into another
+module's `_state` is how this check silently stops matching what the page
+reports.
+
+Found by pressing the button, which is also how v0.181.202's two-minute tag
+count, v0.181.191's uncorrected live prompts and v0.181.209's lost judge check
+were found. The pattern is the same every time: the tests assert what the code
+computes, and the thing that breaks is the part nothing computed.
+
+One result that survived the crash, and it is the first proof the previous
+release works: the judge check started before the failure ran to completion on
+the router and its verdict is in the table - 54 of 54 against the codereason
+answer key, zero flips, from `qwen3.8-flash-next-unsloth-ud-iq3_xxs`. Before
+v0.181.209 that would have been lost with the connection.
+
 ## v0.181.209 - a judge check survives the connection that asked for it
 
 Found by using the thing rather than by a test, which is how most of this

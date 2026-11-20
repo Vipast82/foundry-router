@@ -1393,8 +1393,18 @@ def stop() -> dict:
     return dict(_state)
 
 
+def state() -> dict:
+    """The run in progress, without needing a service.
+
+    benchprofile has to know whether a single-suite run is already going
+    before it starts a profile - two at once would be two models on one GPU -
+    and reaching into `_state` from another module is how that check silently
+    stops matching the one `status` reports."""
+    return dict(_state)
+
+
 def status(svc) -> dict:
-    return {"run": dict(_state), "suites": suites(svc)}
+    return {"run": state(), "suites": suites(svc)}
 
 
 def reconcile(db) -> int:
