@@ -1,3 +1,59 @@
+## v0.181.208 - one model, every suite, one card
+
+Five suites meant five runs and five numbers held in your head, which does not
+answer the question they exist for: will this model, or this quantisation
+variant, carry my work. So a profile runs every built suite against one model
+and reports one composite with the bars that produced it, and two profiles can
+be read side by side.
+
+The suites run **in sequence**, because they share one GPU and two at once would
+measure the contention rather than the model. The runs stay ordinary
+`bench_runs` rows carrying a `profile_id`, so nothing about a single run
+changes and a profile is a grouping rather than a second format.
+
+Three things here are judgement calls rather than arithmetic, and a composite
+score is exactly where a benchmark stops being evidence and becomes an opinion
+with a number on it - so each is shown rather than buried.
+
+**The weights.** One score over five suites is a weighted average and the
+weights decide the answer. Equal weight per **suite** is the default, not per
+case: the number of cases in a suite is a fact about how much work it was to
+build, and per-case weighting would let the 60-case baseline outvote the
+28-case code suite by sitting still. They are configurable on the page, they are
+printed next to the number, and a suite weighted 0 is still run and still shown
+as deliberately excluded - a card that quietly drops a suite is "absent"
+pretending to be "excluded on purpose". The bars under the number are the real
+content: a model strong everywhere and hopeless at finding tools cannot run this
+ecosystem whatever its average says, and the card names a suite under 50 in
+words, because the average hides exactly that.
+
+**The noise.** This router's benchmark has moved about five points between
+identical runs, so a three-point gap is not a result. Rather than printing that
+as a remembered constant, the spread is **measured from this database**: the
+standard deviation over past runs of the same suite and model, used when there
+are at least three, and never including the run being reported. In a
+comparison, a difference inside the combined spread is drawn as `=` rather than
+as a win, and where neither side has history the measured floor stands in - an
+unmeasured pair is treated as noisy, not as precise. With one pass the card says
+so instead of implying precision it has not earned.
+
+**What has no score.** The agent tasks are deliverables with no answer key
+(v0.181.206), so they are never averaged in. They appear as a count that points
+at the pairwise comparison, which is the only honest thing to say about them,
+and they are run **last**, so a profile stopped part way still has every scored
+suite.
+
+The context suite stays a grid rather than a number, as it has since
+v0.181.199: depth across, haystack size down, coloured, because where a model
+stops finding things is the only question that suite answers and one number
+cannot say it.
+
+Three assertions in these tests failed in a row on **line breaks rather than
+content** - a call wrapped across lines, a sentence reflowed - which is the
+same fragility as the byte-offset assertion in v0.181.199 and the panel anchor
+in v0.181.206. The panel assertions normalise whitespace now, so reflowing the
+prose cannot break them.
+
 ## v0.181.207 - checking a local judge against answers already known
 
 The frontier usage window is nearly spent, so the judge has to be a local

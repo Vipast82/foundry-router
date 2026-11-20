@@ -686,6 +686,9 @@ class Database:
             # to one task can be compared. A deliverable has no answer key and
             # is never scored; answer_chars alone cannot be compared.
             ("bench_results", "deliverable", "TEXT DEFAULT ''"),
+            # v0.181.208: which profile run this belongs to (NULL = a run of
+            # one suite on its own, which is still how most runs are made)
+            ("bench_runs", "profile_id", "INTEGER"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

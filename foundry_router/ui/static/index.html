@@ -11,6 +11,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Foundry Router</title>
 <style>
+/* --- model profile ------------------------------------------------------- */
+.pf-wrap { display: flex; flex-wrap: wrap; gap: 12px; }
+.pf-card { flex: 1 1 320px; border: 1px solid var(--line, #444); border-radius: 8px;
+           padding: 12px 14px; background: var(--panel, #222); min-width: 300px; }
+.pf-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.pf-model { font-weight: 600; font-size: 15px; word-break: break-all; }
+.pf-score { font-size: 34px; font-weight: 700; line-height: 1; }
+.pf-score small { font-size: 12px; font-weight: 400; color: var(--dim, #999); }
+.pf-row { display: grid; grid-template-columns: 110px 1fr 46px; align-items: center;
+          gap: 8px; margin: 5px 0; font-size: 12px; }
+.pf-bar { height: 10px; border-radius: 5px; background: color-mix(in srgb, var(--line, #444) 60%, transparent);
+          overflow: hidden; }
+.pf-bar i { display: block; height: 100%; border-radius: 5px; background: var(--ok, #6c7); }
+.pf-bar.mid i { background: var(--warn, #ea3); }
+.pf-bar.low i { background: var(--bad, #e55); }
+.pf-num { text-align: right; font-variant-numeric: tabular-nums; }
+.pf-dim { color: var(--dim, #999); }
+.pf-tie { color: var(--dim, #999); font-weight: 400; }
+.pf-win { color: var(--ok, #6c7); font-weight: 600; }
+.pf-lose { color: var(--bad, #e55); font-weight: 600; }
+/* the context grid: where it stops finding things */
+table.pf-grid td, table.pf-grid th { text-align: center; padding: 4px 8px; font-size: 12px; }
+table.pf-grid td.cell { color: #111; font-weight: 600; border-radius: 3px; }
+
   /* Foundry palette, shared with the control center (/ui/control): "cast iron"
      dark, a cool "mill scale" light (not cream), molten orange from the logo as
      the accent and steel blue for information. Dark is the default; the header
@@ -9254,6 +9278,138 @@ function modeBadge(m) {
 
 /* ----------------------------------------------------------------- evals -- */
 // Your own benchmark (v0.181.167): cases cut from work this router already did.
+
+// ---- model profiles: every suite, one model, one card ----------------------
+// The question is "will this model carry my work", and the shape of the bars
+// answers it where the composite cannot: a model strong everywhere and
+// hopeless at finding tools cannot run this ecosystem whatever its average
+// says. So the big number carries its weights, the bars sit directly under it,
+// and a difference these runs cannot separate is drawn as "=" and not a win.
+function pfBar(v) {
+  if (v == null) return '<span class="pf-dim">not scored</span>';
+  const cls = v >= 70 ? "" : v >= 45 ? "mid" : "low";
+  return `<span class="pf-bar ${cls}"><i style="width:${Math.max(0, Math.min(100, v))}%"></i></span>`;
+}
+
+function pfCard(c, opts) {
+  if (c.error) return `<div class="pf-card"><p class="hint">${esc(c.error)}</p></div>`;
+  const o = opts || {};
+  const rows = (c.parts || []).map(p => `
+    <div class="pf-row" title="${esc(p.suite)}: ${p.runs} run(s) over ${p.cases} case(s)${
+      p.sd != null ? `, past runs of this pair have moved ±${p.sd}` : ""}${
+      p.low != null && p.high != null && p.low !== p.high ? `, this profile ${p.low}–${p.high}` : ""}">
+      <span>${esc(p.suite)}${(p.weight || 0) === 0 ? ' <span class="pf-dim">×0</span>' : ""}</span>
+      ${pfBar(p.score)}<span class="pf-num">${p.score == null ? "—" : p.score}</span></div>`).join("");
+  const un = (c.unscored || []).map(p => `
+    <div class="pf-row"><span>${esc(p.suite)}</span>
+      <span class="pf-dim">no answer key — compare two profiles</span>
+      <span class="pf-num">${p.cases || ""}</span></div>`).join("");
+  return `<div class="pf-card">
+    <div class="pf-head">
+      <div><div class="pf-model">${esc(c.model || "")}</div>
+        <div class="hint" style="margin:0">#${c.profile_id} · ${esc((c.ts || "").slice(0, 16))}${
+          c.label ? " · " + esc(c.label) : ""} · ${c.repeats || 1}×${
+          c.status && c.status !== "done" ? ` · <b>${esc(c.status)}</b>` : ""}</div></div>
+      <div style="text-align:right"><div class="pf-score">${
+        c.composite == null ? "—" : c.composite}</div>
+        <small>${(c.weighted || []).length} suite(s), equal weight</small></div>
+    </div>
+    ${rows}${un}
+    ${c.note ? `<p class="hint" style="margin:8px 0 0"><b>Read this first:</b> ${esc(c.note)}</p>` : ""}
+    ${o.grid !== false && c.needle && (c.needle.cells || []).length
+      ? pfGrid(c.needle) : ""}
+  </div>`;
+}
+
+// Where it stops finding things. A context benchmark answers WHERE, and one
+// number cannot say it, so this stays a grid.
+function pfGrid(g) {
+  const depths = g.depths || [], lengths = g.lengths || [];
+  const at = (ch, d) => (g.cells || []).find(c => c.chars === ch && c.depth === d);
+  const head = depths.map(d => `<th>${d}%</th>`).join("");
+  const body = lengths.map(ch => `<tr><th style="text-align:right">${
+    ch >= 1000 ? Math.round(ch / 1000) + "k" : ch}</th>${
+    depths.map(d => {
+      const c = at(ch, d);
+      if (!c || c.score == null) return '<td class="pf-dim">—</td>';
+      const hue = Math.round(1.2 * c.score);          // 0 red → 120 green
+      return `<td class="cell" style="background:hsl(${hue} 65% 62%)"
+        title="${c.cases} case(s) at ${d}% through ${ch} characters">${Math.round(c.score)}</td>`;
+    }).join("")}</tr>`).join("");
+  return `<p class="hint" style="margin:10px 0 2px">Context: where it stops finding
+    things — depth through the haystack across, haystack size down.</p>
+    <table class="pf-grid"><tr><th></th>${head}</tr>${body}</table>`;
+}
+
+// Side by side. The first profile is the baseline every other is read against.
+function pfCompare(d) {
+  if (!(d.cards || []).length) return `<p class="hint">${esc(d.note || "nothing to compare")}</p>`;
+  const cards = d.cards;
+  const head = cards.map((c, i) => `<th>${esc(c.model)}<div class="hint" style="margin:0">#${
+    c.profile_id}${i ? "" : " · baseline"}</div></th>`).join("");
+  const rows = (d.rows || []).map(r => `<tr>
+    <td class="nw"><b>${esc(r.suite)}</b></td>
+    ${r.cells.map((c, i) => {
+      if (c.missing) return '<td class="pf-dim">not run</td>';
+      if (c.score == null) return '<td class="pf-dim">no score</td>';
+      let delta = "";
+      if (i && c.delta != null) {
+        const cls = c.tie ? "pf-tie" : c.delta > 0 ? "pf-win" : "pf-lose";
+        delta = ` <span class="${cls}">${c.tie ? "=" : (c.delta > 0 ? "+" : "") + c.delta}</span>`;
+      }
+      return `<td style="min-width:150px">${pfBar(c.score)}
+        <span class="pf-num">${c.score}</span>${delta}</td>`;
+    }).join("")}</tr>`).join("");
+  const comps = cards.map(c => `<td><b style="font-size:18px">${
+    c.composite == null ? "—" : c.composite}</b></td>`).join("");
+  return `
+    <table><tr><th>suite</th>${head}</tr>${rows}
+      <tr><td><b>composite</b></td>${comps}</tr></table>
+    <p class="hint"><b>=</b> means the gap is inside the spread these runs have
+      actually shown, so it is not a result. A real difference is coloured.</p>
+    ${d.note ? `<p class="hint"><b>Read this first:</b> ${esc(d.note)}</p>` : ""}
+    <div class="pf-wrap" style="margin-top:10px">${
+      cards.map(c => pfCard(c, {grid: false})).join("")}</div>
+    ${cards.filter(c => c.needle && (c.needle.cells || []).length).map(c =>
+      `<div style="margin-top:8px"><b>${esc(c.model)}</b>${pfGrid(c.needle)}</div>`).join("")}`;
+}
+
+async function pfRender() {
+  const d = await api("bench/profiles");
+  const r = d.run || {}, running = r.state === "running";
+  const rows = (d.profiles || []).map(p => `<tr>
+    <td><input type="checkbox" class="pf-pick" value="${p.id}"></td>
+    <td class="mono nw">#${p.id}</td>
+    <td class="mono nw">${esc((p.ts || "").slice(0, 16))}</td>
+    <td class="nw">${esc(p.model || "")}</td>
+    <td>${esc(p.label || "")}</td>
+    <td class="nw">${p.repeats || 1}×</td>
+    <td class="nw"><b>${p.score == null ? "—" : (+p.score).toFixed(1)}</b></td>
+    <td class="nw">${esc(p.status || "")}</td>
+    <td><button class="act pf-open" data-id="${p.id}">Open</button></td></tr>`).join("");
+  $("#pf-list").innerHTML = rows
+    ? `<table><tr><th></th><th>#</th><th>when</th><th>model</th><th>trying</th>
+        <th>repeats</th><th>score</th><th>state</th><th></th></tr>${rows}</table>
+       <div class="row tight" style="margin-top:8px">
+         <button class="act primary" id="pf-compare">Compare the ticked</button></div>`
+    : '<p class="hint">no profile yet — run every suite against a model above</p>';
+  $("#pf-state").innerHTML = running
+    ? `<span class="pill warn">running ${esc(r.model || "")}: ${r.done || 0} of ${
+        r.total || 0} (${esc(r.suite || "")}${r.rep > 1 ? `, repeat ${r.rep}` : ""})</span>`
+    : (r.state === "failed" ? `<span class="pill bad">${esc(r.error || "failed")}</span>` : "");
+  document.querySelectorAll(".pf-open").forEach(b => b.onclick = async () => {
+    const c = await api(`bench/profile?id=${b.dataset.id}`);
+    $("#pf-out").innerHTML = `<div class="pf-wrap">${pfCard(c)}</div>`;
+  });
+  if ($("#pf-compare")) $("#pf-compare").onclick = async () => {
+    const ids = [...document.querySelectorAll(".pf-pick:checked")].map(c => c.value);
+    if (ids.length < 2) { toast("tick at least two profiles", true); return; }
+    $("#pf-out").innerHTML = '<p class="hint">reading both…</p>';
+    $("#pf-out").innerHTML = pfCompare(await api(
+      `bench/profile/compare?ids=${ids.join(",")}`));
+  };
+}
+
 async function tabBench() {
   const [d, md] = await Promise.all([api("bench"), api("models")]);
   const r = d.run || {}, suites = d.suites || [], runs = d.runs || [];
@@ -9303,6 +9459,32 @@ async function tabBench() {
         <span class="hint" id="bs-msg"></span></div>
       <p class="hint" style="margin:6px 0 0">Built from the router's prepared store, newest work first.
         ${suites.length ? "Suites: " + suites.map(s => `<b>${esc(s.name)}</b> (${s.cases})`).join(", ") : "None yet."}</p>
+    </div>
+    <div class="card">
+      <div class="card-h">Run every suite — one model, one card <span id="pf-state"></span></div>
+      <p class="hint">Five suites and five numbers do not answer "will this model
+        carry my work". This runs every built suite against one model, in
+        sequence — they share a GPU, and two at once would measure the
+        contention — and reports one composite with the bars that produced it.
+        <b>The composite is a weighted average and the weights decide the
+        answer</b>, so they are equal per <i>suite</i> by default (not per case,
+        which would let a 60-case suite outvote a 28-case one by sitting still),
+        they are yours to change, and the bars are the real content. The agent
+        tasks have no answer key and are never averaged in. Repeats are what
+        make two models separable: this router's benchmark has moved about five
+        points between identical runs, so a single pass cannot call a gap
+        smaller than that.</p>
+      <div class="row tight">
+        <label>model</label><select id="pf-model">${modelOpts}</select>
+        <label title="Each repeat runs every suite again. Two models three points apart on one pass each are not distinguishable; repeats are the only thing that changes that.">repeats</label>
+        <input type="number" id="pf-reps" value="1" min="1" max="10" style="width:60px">
+        <label>what is this trying?</label>
+        <input id="pf-label" size="24" placeholder="e.g. IQ4 instead of IQ3">
+        <button class="act primary" id="pf-go" ${running ? "disabled" : ""}>Run every suite</button>
+        <button class="act" id="pf-stop">Stop</button>
+      </div>
+      <div id="pf-list"></div>
+      <div id="pf-out" style="margin-top:10px"></div>
     </div>
     <div class="card">
       <div class="card-h">Run one${running ? ` <span class="pill warn">running: ${r.done || 0} of ${r.cases || 0}${r.score != null ? `, ${n(r.score)} so far` : ""}</span>` : ""}</div>
@@ -9391,6 +9573,20 @@ async function tabBench() {
       if (out.error) { $("#bs-msg").innerHTML = `<span class="pill bad">${esc(out.error)}</span>`; return; }
       toast(`${out.suite.cases} case(s) in ${out.suite.name}`); render();
     } catch (e) { $("#bs-msg").innerHTML = `<span class="pill bad">${esc(e.message)}</span>`; }
+  };
+  pfRender();
+  $("#pf-go").onclick = async () => {
+    try {
+      await api("bench/profile/run", {method: "POST", body: {
+        model: $("#pf-model").value, label: $("#pf-label").value,
+        repeats: +$("#pf-reps").value || 1}});
+      toast("running every suite — this takes a while");
+      pfRender();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#pf-stop").onclick = async () => {
+    await api("bench/profile/stop", {method: "POST", body: {}});
+    pfRender();
   };
   $("#br-go").onclick = async () => {
     try {

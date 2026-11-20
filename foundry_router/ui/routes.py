@@ -3015,6 +3015,80 @@ async def eval_pairs(request: Request, campaign_id: int = 0, limit: int = 200):
     return {"pairs": judgeproto.pair_history(_svc(request).db, campaign_id, limit)}
 
 
+@router.get("/admin/api/bench/profiles")
+async def bench_profiles(request: Request, limit: int = 40):
+    """Every profile, newest first, plus what is running."""
+    from .. import benchprofile
+    svc = _svc(request)
+    return {"profiles": benchprofile.profiles(svc.db, limit),
+            "run": benchprofile.state(),
+            "suites": benchprofile.runnable_suites(svc),
+            "weights": dict(getattr(svc.config_store.config.bench,
+                                    "suite_weights", {}) or {})}
+
+
+@router.get("/admin/api/bench/profile")
+async def bench_profile(request: Request, id: int):
+    """One profile's card: composite, per-suite parts, the context grid."""
+    from .. import benchprofile
+    return benchprofile.build_card(_svc(request), int(id))
+
+
+@router.post("/admin/api/bench/profile/run")
+async def bench_profile_run(request: Request):
+    """Run every suite against one model: {model, suites?, label?, repeats?}."""
+    from .. import benchprofile
+    from ..errors import describe_exception
+    svc = _svc(request)
+    b = await request.json()
+    try:
+        out = benchprofile.start(
+            svc, str(b.get("model") or ""), list(b.get("suites") or ()),
+            str(b.get("label") or ""), int(b.get("repeats") or 1),
+            int(b.get("limit") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.post("/admin/api/bench/profile/stop")
+async def bench_profile_stop(request: Request):
+    from .. import benchprofile
+    del request
+    return {"ok": True, **benchprofile.stop()}
+
+
+@router.get("/admin/api/bench/profile/compare")
+async def bench_profile_compare(request: Request, ids: str = ""):
+    """Two or more profiles side by side, with the differences this evidence
+    cannot separate marked as such."""
+    from .. import benchprofile
+    want = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+    return benchprofile.compare(_svc(request), want)
+
+
+@router.post("/admin/api/config/bench")
+async def set_bench(request: Request):
+    """The composite's weights, which decide the one number a profile reports
+    and are therefore the operator's rather than this code's."""
+    from ..config import BenchConfig
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    allowed = {"suite_weights"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    try:
+        BenchConfig(**{**svc.config_store.config.bench.model_dump(), **updates})
+
+        def mutate(raw):
+            raw.setdefault("bench", {}).update(updates)
+
+        svc.config_store.mutate(mutate)
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, "bench": svc.config_store.config.bench.model_dump()}
+
+
 @router.post("/admin/api/bench/agent")
 async def bench_agent(request: Request):
     """Build the agent-task suite: {name?, limit?}.

@@ -833,6 +833,23 @@ CREATE TABLE IF NOT EXISTS bench_runs (
   note TEXT
 );
 
+-- A profile: every suite, one model, one card (benchprofile.py). The runs
+-- stay ordinary bench_runs rows and carry profile_id, so nothing about a
+-- single run changes and a profile is a grouping rather than a second format.
+CREATE TABLE IF NOT EXISTS bench_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  model TEXT,
+  label TEXT,
+  suites TEXT,                      -- JSON list, in the order they were run
+  repeats INTEGER,
+  score REAL,                       -- the composite, weighted per suite
+  status TEXT,                      -- running | done | stopped | failed
+  note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bench_profiles_model ON bench_profiles(model, ts);
+
 CREATE TABLE IF NOT EXISTS bench_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER REFERENCES bench_runs(id),

@@ -1036,6 +1036,19 @@ class EvalsConfig(BaseModel):
     keep_answer_chars: int = Field(default=20_000, ge=0, le=200_000)
 
 
+class BenchConfig(BaseModel):
+    """The benchmark profile (benchprofile.py).
+
+    `suite_weights` decides the one composite score a profile reports, which is
+    the point at which a benchmark stops being evidence and becomes an opinion
+    with a number on it - so it is the operator's, it is shown next to the
+    number, and the default is equal weight per SUITE rather than per case. Per
+    case would let a 60-case suite outvote a 28-case one by sitting still. A
+    suite weighted 0 is still run and still shown; it is left out of the
+    composite and named as excluded."""
+    suite_weights: dict = Field(default_factory=dict)
+
+
 class A2AAgentConfig(BaseModel):
     """A remote A2A agent a persona's helper row may name (a2a.py)."""
     name: str
@@ -1325,6 +1338,7 @@ class AppConfig(BaseModel):
     recall: RecallConfig = Field(default_factory=RecallConfig)
     lessons: LessonsConfig = Field(default_factory=LessonsConfig)
     evals: EvalsConfig = Field(default_factory=EvalsConfig)
+    bench: BenchConfig = Field(default_factory=BenchConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     operator_chat: OperatorChatConfig = Field(default_factory=OperatorChatConfig)
