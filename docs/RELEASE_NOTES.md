@@ -1,3 +1,43 @@
+## v0.181.216 - the needle suite runs out to each model's own context window
+
+Asked: bump the needle testing all the way to the max context the model
+supports. The suite stopped at 96k characters, about 27k tokens; strata serves
+qwen3.8-flash in one slot of 262,144 tokens and the brain lane holds 65,536, so
+the suite was measuring a tenth of one window and under half of the other.
+
+**Sized to every local window.** Unless lengths are named, building the needle
+suite now adds two lengths for each local model's context window - half of it
+and nearly all of it - read from the model registry. For the two models here
+that is 101k and 198k characters (about 29k and 57k tokens, the brain lane) and
+425k and 815k (about 121k and 233k tokens, flash), on top of the 4k-96k grid.
+The filler measured about 3.5 characters a token on both models; lengths are
+sized at 3.3, which over-counts tokens, so the longest case for a window lands
+near 90% of it and never past it, with 2,048 tokens left for the answer. The
+haystack is built as long as the longest case (it was capped near 400k
+characters and would have cut an 815k case short and still labelled it 815k).
+
+**A case past a model's window is not sent to it.** Both models share one
+suite, and a 233k-token case sent to a 65k model fails and scores 0 - a fact
+about the window, not about recall, and it would have dragged the brain lane's
+score down for something it was never built to do. Such a case is recorded as
+not sent, left out of the average, said in the run's note ("N case(s) longer
+than this model's 65,536-token context were not sent"), and drawn as "beyond"
+in the context grid, so the grid ends where the window does. Only needle cases
+are ever held back on an estimate; every case carries its token estimate as a
+tag.
+
+**The long end costs hours, not days.** Past 96k characters a length gets one
+case per depth and one decoy instead of three and three: a 233k-token case
+takes several minutes to read on strata, and the router's 30-minute request
+timeout leaves room for it.
+
+Context sizes on the card now read in tokens as well ("815k chars (~233k
+tokens)"), since a window is counted in tokens.
+
+To use it: build the needle suite again (its button), then run a profile.
+
+9 tests.
+
 ## v0.181.215 - is a low score the model's, or the test's?
 
 Asked: look at the low scores, check the output, and find out whether tools

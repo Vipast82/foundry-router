@@ -176,7 +176,11 @@ def _kchars(n) -> str:
         n = int(n)
     except (TypeError, ValueError):
         return str(n)
-    return f"{n // 1000}k chars" if n >= 1000 else f"{n} chars"
+    if n < 1000:
+        return f"{n} chars"
+    # tokens are what a context window is counted in; this filler runs about
+    # 3.5 characters a token on both local models (v0.181.216)
+    return f"{n // 1000}k chars (~{max(1, round(n / 3500))}k tokens)"
 
 
 def facets(suite: str, rows: list) -> list:

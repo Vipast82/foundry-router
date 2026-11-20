@@ -9599,6 +9599,7 @@ function pfGrid(g) {
     ch >= 1000 ? Math.round(ch / 1000) + "k" : ch}</th>${
     depths.map(d => {
       const c = at(ch, d);
+      if (c && c.beyond) return '<td class="pf-dim" title="Longer than this model&#39;s context window: not sent">beyond</td>';
       if (!c || c.score == null) return '<td class="pf-dim">—</td>';
       const hue = Math.round(1.2 * c.score);          // 0 red → 120 green
       return `<td class="cell" style="background:hsl(${hue} 65% 62%)"
@@ -9940,8 +9941,11 @@ async function tabBench() {
         <button class="act bad" id="bench-delete">Delete the ticked runs</button>
         <button class="act" id="bench-needle" title="Build a needle-in-a-haystack suite
                 from this project's own writing: an unguessable code placed at 0, 25, 50,
-                75 and 100% through contexts of 4k, 16k and 32k characters. It measures
-                where a model stops finding things, which one number cannot say."
+                75 and 100% through contexts from 4k characters out to each local
+                model's own context window (half of it and nearly all of it), plus
+                decoy cases. A case longer than a model's window is not sent to it.
+                It measures where a model stops finding things, which one number
+                cannot say. The longest cases take minutes each."
         >Build the needle suite</button>
         <button class="act" id="bench-toolpick" title="Build a tool-picking suite: every
                 tool this router offers goes in the prompt, and each case asks which one

@@ -320,12 +320,15 @@ def _needle_grid(svc, runs: list) -> dict:
     for r in runs:
         for row in needle_breakdown(svc.db, r["id"]):
             key = (int(row["chars"] or 0), int(row["depth"] or 0))
-            c = cells.setdefault(key, {"sum": 0.0, "cases": 0})
+            c = cells.setdefault(key, {"sum": 0.0, "cases": 0, "beyond": False})
+            if row.get("beyond"):
+                c["beyond"] = True       # past this model's window (v0.181.216)
             if row.get("score") is not None:
                 c["sum"] += float(row["score"]) * int(row["cases"] or 0)
                 c["cases"] += int(row["cases"] or 0)
     grid = [{"chars": k[0], "depth": k[1], "cases": v["cases"],
-             "score": round(v["sum"] / v["cases"], 1) if v["cases"] else None}
+             "score": round(v["sum"] / v["cases"], 1) if v["cases"] else None,
+             "beyond": bool(v["beyond"] and not v["cases"])}
             for k, v in sorted(cells.items())]
     return {"cells": grid,
             "lengths": sorted({c["chars"] for c in grid}),

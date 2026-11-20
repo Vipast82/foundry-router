@@ -532,6 +532,79 @@ NEEDLE_LENGTHS = (4000, 16000, 32000, 64000, 96000)
 NEEDLE_DECOYS = 3              # decoy cases per length, kept OUT of the depth grid
 TIERS = ("easy", "medium", "hard", "expert")
 
+# v0.181.216: lengths sized to each local model's own context window, so the
+# suite answers "where does THIS model stop finding things" up to the end of
+# what it can hold - 262,144 tokens on strata, 65,536 on the brain lane.
+# This filler measured about 3.5 characters a token on both models; sizing is
+# done at 3.3, which over-counts tokens, so a case meant for 95% of a window
+# lands near 90% of it and never over the edge.
+CHARS_PER_TOKEN = 3.3
+CONTEXT_FRACTIONS = (0.5, 0.95)
+LONG_CHARS = 96000             # beyond this a case takes minutes: fewer of them
+OUTPUT_ROOM = 2048             # tokens left for the answer
+
+
+def context_lengths(contexts) -> list:
+    """Haystack lengths, in characters, at half and nearly all of each window."""
+    out = set()
+    for c in contexts or []:
+        try:
+            c = int(c)
+        except (TypeError, ValueError):
+            continue
+        if c < 8192:
+            continue
+        for f in CONTEXT_FRACTIONS:
+            tokens = int(c * f) - OUTPUT_ROOM
+            chars = int(tokens * CHARS_PER_TOKEN) // 1000 * 1000
+            if chars > max(NEEDLE_LENGTHS):
+                out.add(chars)
+    return sorted(out)
+
+
+def model_context(svc, model: str) -> Optional[int]:
+    """The context window the router knows for a model, or None."""
+    try:
+        meta = svc.registry.get(model) or {}
+    except Exception:                                             # noqa: BLE001
+        return None
+    v = meta.get("context_length") or meta.get("context")
+    try:
+        return int(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def local_contexts(svc) -> list:
+    """The context window of every model on a local (not paid) chat backend."""
+    from .budget import is_paid
+    out = set()
+    for s in (getattr(getattr(svc, "pool", None), "backends", None) or {}).values():
+        try:
+            if is_paid(s.config):
+                continue
+        except Exception:                                         # noqa: BLE001
+            continue
+        for m in list(s.models or []) + list(getattr(s.config, "models", []) or []):
+            if "embed" in str(m).lower():
+                continue
+            c = model_context(svc, m)
+            if c:
+                out.add(c)
+    return sorted(out)
+
+
+def case_tokens(case: dict) -> int:
+    """An over-estimate of a needle case's prompt, from its tag or its text."""
+    for t in case.get("tags") or []:
+        if str(t).startswith("tokens:"):
+            try:
+                return int(str(t).split(":", 1)[1])
+            except ValueError:
+                pass
+    text = "".join(str(m.get("content") or "") for m in case.get("messages") or [])
+    return int(len(text) / CHARS_PER_TOKEN)
+
 
 def needle_tier(length: int, decoy: bool = False) -> str:
     """How hard a needle case is, for the card's difficulty ladder. A decoy
@@ -544,7 +617,7 @@ _NEEDLE_QUESTION = ("Read the notes above. What is the verification code for spr
                     "{task}? Answer with the code and nothing else.")
 
 
-def _haystack_text(svc) -> str:
+def _haystack_text(svc, need: int = 0) -> str:
     """Prose and code from this project, for filler that reads like the work."""
     import pathlib
     here = pathlib.Path(__file__).resolve().parent.parent
@@ -564,15 +637,16 @@ def _haystack_text(svc) -> str:
         d = here / rel
         if not d.is_dir():
             continue
-        for p in sorted(d.glob("*.py"))[:25] + sorted(d.glob("*.md"))[:15]:
+        many = 25 if need <= 400_000 else 400
+        for p in sorted(d.glob("*.py"))[:many] + sorted(d.glob("*.md"))[:many]:
             try:
                 parts.append(p.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 pass
-            if sum(len(x) for x in parts) > 400_000:
+            if sum(len(x) for x in parts) > max(400_000, need + 2000):
                 break
     body = "\n\n".join(parts).strip()
-    need = max(NEEDLE_LENGTHS) + 2000
+    need = max(max(NEEDLE_LENGTHS), int(need or 0)) + 2000
     if len(body) < need:
         # never fail for want of filler: repeat what there is rather than invent.
         # It must cover the LONGEST case, or a "96k" case would be cut short and
@@ -599,7 +673,8 @@ def _needle_case(hay: str, length: int, depth: int, seq: int) -> dict:
         "id": f"NEEDLE-{length//1000}k-d{depth}-{seq}",
         "task_id": task,
         "tags": ["needle", "context", f"depth:{depth}", f"chars:{length}",
-                 f"tier:{needle_tier(length)}"],
+                 f"tier:{needle_tier(length)}",
+                 f"tokens:{int(len(body) / CHARS_PER_TOKEN) + 60}"],
         "messages": [
             {"role": "system", "content": "You answer from the notes you are given."},
             {"role": "user", "content": body + "\n\n" +
@@ -656,7 +731,8 @@ def _decoy_case(hay: str, length: int, seq: int) -> dict:
         "task_id": task,
         # no depth: tag, so the depth grid stays a grid of plain needles
         "tags": ["needle", "context", "decoy", f"chars:{length}",
-                 f"tier:{needle_tier(length, decoy=True)}"],
+                 f"tier:{needle_tier(length, decoy=True)}",
+                 f"tokens:{int(len(body) / CHARS_PER_TOKEN) + 60}"],
         "messages": [
             {"role": "system", "content": "You answer from the notes you are given."},
             {"role": "user", "content": body + "\n\n" +
@@ -672,13 +748,17 @@ def build_needle(svc, name: str = "needle", per_cell: int = 3,
                  decoys: int = NEEDLE_DECOYS) -> dict:
     """Write a needle-in-a-haystack suite: `per_cell` cases at each depth and
     length, plus `decoys` decoy cases per length. Returns {name, cases, path}."""
-    hay = _haystack_text(svc)
+    lengths = sorted({int(n) for n in lengths})
+    hay = _haystack_text(svc, max(lengths) if lengths else 0)
     out = []
     for length in lengths:
+        # a 250k-token case takes minutes to read: one per depth and one decoy
+        # past LONG_CHARS, so the long end costs hours, not days (v0.181.216)
+        long = length > LONG_CHARS
         for depth in depths:
-            for seq in range(int(per_cell)):
+            for seq in range(1 if long else int(per_cell)):
                 out.append(_needle_case(hay, int(length), int(depth), seq))
-        for seq in range(int(decoys or 0)):
+        for seq in range(min(1, int(decoys or 0)) if long else int(decoys or 0)):
             out.append(_decoy_case(hay, int(length), seq))
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
@@ -707,11 +787,17 @@ def needle_breakdown(db, run_id: int) -> list:
         chars = next((t.split(":", 1)[1] for t in tags if t.startswith("chars:")), None)
         if depth is None:
             continue
-        cell = cells.setdefault((int(chars or 0), int(depth)), {"n": 0, "hit": 0.0})
+        cell = cells.setdefault((int(chars or 0), int(depth)),
+                                {"n": 0, "hit": 0.0, "beyond": 0})
+        if r["score"] is None:
+            # not sent: past this model's context (v0.181.216) - not a miss
+            cell["beyond"] += 1
+            continue
         cell["n"] += 1
         cell["hit"] += float(r["score"] or 0) / 100.0
     return [{"chars": c, "depth": d, "cases": v["n"],
-             "score": round(100.0 * v["hit"] / v["n"], 1) if v["n"] else None}
+             "score": round(100.0 * v["hit"] / v["n"], 1) if v["n"] else None,
+             "beyond": bool(v["beyond"] and not v["n"])}
             for (c, d), v in sorted(cells.items())]
 
 
@@ -1743,7 +1829,8 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
               # cases that HAVE a score. The average divided by cases done,
               # which would quietly lower a run holding unscorable cases, and
               # for a suite with no deliverable in it this is the same number
-              "score_n": 0, "delivered": 0}
+              "score_n": 0, "delivered": 0, "beyond": 0}
+    ctx_limit = model_context(svc, model)
     for i, case in enumerate(items, start=1):
         if _state.get("stop"):
             break
@@ -1756,9 +1843,19 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
             case, _nrules = with_lessons(svc, case)
             if _nrules:
                 _state["ruled"] = _nrules
+        # A needle case longer than this model's window is not sent (v0.181.216):
+        # the suite is sized to the largest local model, and a 249k-token case
+        # sent to a 65k model would fail and score 0 - a fact about the window,
+        # which the card shows as the end of the grid, not about recall.
+        if "needle" in (case.get("tags") or []) and ctx_limit                 and case_tokens(case) + OUTPUT_ROOM > ctx_limit:
+            got = {"content": "", "seconds": 0}
+            s = {"score": None, "tools": 0.0, "code": None, "answer": None,
+                 "exact": None, "error": "",
+                 "code_detail": f"beyond this model's context: ~{case_tokens(case):,} "
+                                f"tokens > {ctx_limit:,}"}
         # a case that names a finder_tool is run THROUGH the finder: the search
         # really happens, the chosen tool is recorded and never executed
-        if (case.get("reference") or {}).get("finder_tool"):
+        elif (case.get("reference") or {}).get("finder_tool"):
             got = await ask_through_finder(svc, model, case, label=rlabel)
             s = await score_one(svc, case, got)
         else:
@@ -1779,7 +1876,9 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
              (got.get("content") or "")
              if (case.get("reference") or {}).get("deliverable") else "",
              answer_of(got), expected_of(case)))
-        if s["score"] is None:
+        if s["score"] is None and str(s.get("code_detail") or "").startswith("beyond"):
+            totals["beyond"] += 1
+        elif s["score"] is None:
             totals["delivered"] += 1
         else:
             totals["score"] += s["score"]
@@ -1812,6 +1911,7 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
     sn = totals["score_n"]
     out = {"run_id": run_id, "suite": suite, "model": model, "cases": len(items),
            "scored": _state["done"], "delivered": totals["delivered"],
+           "beyond": totals["beyond"],
            "score": round(totals["score"] / sn, 1) if sn else None,
            "tools": round(100 * totals["tools"] / n, 1),
            "code": round(100 * totals["code"] / totals["code_n"], 1) if totals["code_n"] else None,
@@ -1834,7 +1934,10 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
                     if use_lessons else "",
                     f"{out['delivered']} deliverable task(s) are not scored - "
                     f"compare this run with another one"
-                    if out["delivered"] else "") if x), run_id))
+                    if out["delivered"] else "",
+                    f"{out['beyond']} case(s) longer than this model's "
+                    f"{ctx_limit:,}-token context were not sent"
+                    if out["beyond"] else "") if x), run_id))
     _state.update({"state": "done", "finished": time.time(), **out})
     return out
 

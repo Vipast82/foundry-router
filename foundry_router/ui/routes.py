@@ -3310,17 +3310,23 @@ async def bench_needle(request: Request):
     from .. import bench
     svc = _svc(request)
     body = await request.json()
+    # v0.181.216: unless lengths are named, the suite runs out to each local
+    # model's own window - half of it and nearly all of it - so it says where
+    # a model stops finding things up to the end of what it can hold
+    contexts = bench.local_contexts(svc)
+    lengths = ([int(n) for n in body["lengths"]] if body.get("lengths")
+               else list(bench.NEEDLE_LENGTHS) + bench.context_lengths(contexts))
     try:
         out = await asyncio.to_thread(
             bench.build_needle, svc,
             str(body.get("name") or "needle"),
             max(1, min(10, int(body.get("per_cell") or 3))),
             [int(d) for d in (body.get("depths") or bench.NEEDLE_DEPTHS)],
-            [int(n) for n in (body.get("lengths") or bench.NEEDLE_LENGTHS)])
+            lengths)
     except Exception as e:                                        # noqa: BLE001
         from ..errors import describe_exception
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
-    return {"ok": True, **out}
+    return {"ok": True, "contexts": contexts, "lengths": sorted(set(lengths)), **out}
 
 
 @router.get("/admin/api/bench/needle-breakdown")
