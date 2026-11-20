@@ -238,6 +238,11 @@ class Coordinator:
             raise ValueError(f"{project_id}/{task_id} is already {existing['state']}")
         adopted = (handoff.capture(P.ws, spec, self.state_dir, adopt_existing, approver)
                    if adopt_existing else None)
+        if not track:
+            # 2026-11-20 REL-1a: re-approving a queued sprint to change its deps wrote
+            # track='' and silently took it off the lane `tracks start` had just put it
+            # on; a re-approval keeps the sprint's lane unless a new one is given
+            track = (self.store.queue_entry(project_id, task_id) or {}).get("track") or ""
         with self.store.tx():
             entry = self.store.approve(project_id, task_id, deps, approver, note, track=track)
             if adopted:

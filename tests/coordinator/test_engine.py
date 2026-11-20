@@ -43,6 +43,21 @@ def test_preapproved_followup_waits_for_parent(tmp_path):
     assert len([q for q in c.store.queue("game") if q["task_id"] == "T2"]) == 1
 
 
+def test_re_approving_a_queued_sprint_keeps_its_lane(tmp_path):
+    """2026-11-20 REL-1a: `queue approve` to drop a dependency wrote track='' and took the
+    sprint off the lane `tracks start` had just put it on."""
+    root, _ = make_repo(tmp_path, "game", [T1, T2])
+    c = coordinator(tmp_path, [write_profile(tmp_path, "game", root)], {"game": write_ok("src/a.txt")})
+    c.approve("game", "T1", [], "Victor")
+    c.approve("game", "T2", ["T1"], "Victor")
+    c.store.x("UPDATE queue SET track='rel1a' WHERE project_id='game' AND task_id='T2'")
+    c.approve("game", "T2", [], "operator")
+    q = c.store.queue_entry("game", "T2")
+    assert q["deps"] == [] and q["track"] == "rel1a"
+    c.approve("game", "T2", [], "operator", track="other")      # an explicit lane still wins
+    assert c.store.queue_entry("game", "T2")["track"] == "other"
+
+
 @pytest.fixture()
 def game(tmp_path):
     root, remote = make_repo(tmp_path, "game", [T1, T2])
