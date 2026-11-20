@@ -833,6 +833,24 @@ CREATE TABLE IF NOT EXISTS bench_runs (
   note TEXT
 );
 
+-- A judge calibration, kept rather than returned once: the full check is
+-- about fourteen minutes of judging and a dropped connection used to lose all
+-- of it (judgeproto.py).
+CREATE TABLE IF NOT EXISTS judge_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT,
+  judge_model TEXT,
+  suite TEXT,
+  pairs INTEGER,
+  verdict TEXT,                     -- the sentence, never a bare rate
+  by_kind TEXT,                     -- JSON: other / near, each with its rate
+  detail TEXT,                      -- JSON: every pair, so the misses can be read
+  note TEXT,
+  status TEXT                       -- running | done | refused | failed
+);
+
+CREATE INDEX IF NOT EXISTS idx_judge_checks_model ON judge_checks(judge_model, ts);
+
 -- A profile: every suite, one model, one card (benchprofile.py). The runs
 -- stay ordinary bench_runs rows and carry profile_id, so nothing about a
 -- single run changes and a profile is a grouping rather than a second format.

@@ -237,7 +237,9 @@ def test_the_route_and_the_control_exist():
 
     import foundry_router
     from foundry_router.ui import routes
-    assert "calibrate" in inspect.getsource(routes.eval_judge_check)
+    # v0.181.209 made the route START a check rather than hold one open for
+    # fourteen minutes, so this asserts the wiring and not the old contract
+    assert "start_check" in inspect.getsource(routes.eval_judge_check)
     page = (Path(foundry_router.__file__).parent / "ui" / "static"
             / "index.html").read_text(encoding="utf-8")
     assert 'id="jc-run"' in page and 'api("eval/judge-check"' in page

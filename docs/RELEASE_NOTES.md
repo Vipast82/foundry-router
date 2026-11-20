@@ -1,3 +1,39 @@
+## v0.181.209 - a judge check survives the connection that asked for it
+
+Found by using the thing rather than by a test, which is how most of this
+week's faults have been found. The full check is 56 pairs judged twice - about
+fourteen minutes against a local model - and v0.181.207 held it open as a
+single HTTP request. A dropped connection threw all of it away. That is not a
+hypothetical: it happened twice while the first real check was being run, and
+**the run was fine both times - only the answer was lost**. A browser or a
+proxy does the same to the operator, who has no curl timeout to raise.
+
+So it runs in the background and the result is **kept**, which the benchmark
+has done since it existed and this should have copied from the start. Press the
+button, leave the page, read the verdict afterwards. Each check keeps its
+pairs too, so which cases a judge got wrong can be read later - and that says
+more than the percentage does.
+
+A check that **failed** is recorded rather than discarded, because a judge that
+cannot be reached is a fact about that judge, and throwing it away leaves the
+operator pressing the button again to learn the same thing. A refused judge - a
+Fable model, or none named - is refused before a row is written at all, since a
+refusal is not a check that ran.
+
+Two things about the first real check, which found this:
+
+The fast local model **can** judge. On ten pairs it agreed with the answer key
+ten times out of ten, with no flips - it read the answers rather than their
+positions. That is the floor this measures and not a ceiling, and the verdict
+says so in the same sentence as the number.
+
+And the rate is not fixed: the same check ran at 3.7 seconds a call at one
+point and 15 seconds a call an hour later, on the same model, because the GPU
+was busier. A benchmark that competes with sprints measures the contention as
+much as the model, which is the reason a profile's suites run one at a time
+(v0.181.208) and the reason these numbers carry a spread rather than a decimal
+place.
+
 ## v0.181.208 - one model, every suite, one card
 
 Five suites meant five runs and five numbers held in your head, which does not

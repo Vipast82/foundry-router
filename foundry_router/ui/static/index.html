@@ -2526,6 +2526,41 @@ const _fmtK = n => n == null ? "—" : n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n
   : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
 function _dur(s) { s = Math.max(0, +s || 0); return s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h"; }
 
+// Checks already run. The result is kept rather than returned once: the full
+// check is about fourteen minutes of judging, and a dropped connection used to
+// throw all of it away - which happened twice while this was being used, and a
+// browser gives the operator no timeout to raise.
+async function jcRender() {
+  const d = await api("eval/judge-checks");
+  const r = d.run || {};
+  const rows = (d.checks || []).map(c => `<tr>
+    <td class="mono nw">${esc((c.ts || "").slice(0, 16))}</td>
+    <td class="nw">${esc(c.judge_model || "")}</td>
+    <td class="nw">${esc(c.suite || "")}</td>
+    <td class="nw">${c.pairs || 0}</td>
+    <td>${c.status === "done"
+      ? `<span class="pill ${/^NOT usable|^weak|cannot be/.test(c.verdict || "")
+          ? "bad" : "ok"}">${esc((c.verdict || "").split(" - ")[0])}</span>`
+      : `<span class="pill ${c.status === "running" ? "warn" : "bad"}">${esc(c.status || "")}</span>`}</td>
+    <td><button class="act jc-open" data-id="${c.id}">Open</button></td></tr>`).join("");
+  $("#jc-out").innerHTML =
+    (r.state === "running"
+      ? `<p class="hint"><span class="pill warn">checking ${esc(r.judge_model || "")} against ${esc(r.suite || "")}</span> — it runs on the router, so you can leave this page.</p>`
+      : "")
+    + (rows
+      ? `<table><tr><th>when</th><th>judge</th><th>against</th><th>pairs</th>
+          <th>verdict</th><th></th></tr>${rows}</table>`
+      : '<p class="hint">no judge has been checked yet</p>');
+  document.querySelectorAll(".jc-open").forEach(b => b.onclick = async () => {
+    const c = await api(`eval/judge-check?id=${b.dataset.id}`);
+    $("#jc-out").innerHTML = judgeCheckView({
+      judge_model: c.judge_model, verdict: c.verdict, note: c.note,
+      by_kind: c.by_kind, pairs: c.pairs_detail || []})
+      + '<div class="row tight"><button class="act" id="jc-back">Back to the list</button></div>';
+    $("#jc-back").onclick = jcRender;
+  });
+}
+
 // A judge's calibration. The verdict sentence comes first and the rates
 // after it, because a rate on its own invites exactly the reading this is
 // meant to prevent.
@@ -10059,14 +10094,17 @@ async function tabEvals() {
       $("#pw-out").innerHTML = pairwiseView(d);
     } catch (e) { $("#pw-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
   };
+  jcRender();
   $("#jc-run").onclick = async () => {
     const judge = $("#jc-judge").value;
     if (!judge) { toast("pick a judge to check", true); return; }
-    $("#jc-out").innerHTML = '<p class="hint">judging each known pair twice…</p>';
     try {
-      const d = await api("eval/judge-check", {method: "POST", body:
+      await api("eval/judge-check", {method: "POST", body:
         {judge_model: judge, suite: $("#jc-suite").value || "codereason"}});
-      $("#jc-out").innerHTML = judgeCheckView(d);
+      toast("checking — the full set is about 56 pairs judged twice, so it " +
+            "takes a while. It runs on the router and the result is kept, so " +
+            "you can leave this page.");
+      jcRender();
     } catch (e) { $("#jc-out").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
   };
   $("#pw-runs").onclick = async () => {

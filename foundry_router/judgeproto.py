@@ -48,8 +48,11 @@ absolute judge has always had.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import threading
+import time
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -770,6 +773,103 @@ async def calibrate(svc, judge_model: str, suite: str = "codereason",
             "flips": sum(1 for p in got if p["flip"]),
         }
     out["verdict"] = _verdict(out["by_kind"])
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Running a check in the background, and keeping what it found                #
+# --------------------------------------------------------------------------- #
+
+_check_state: dict = {"state": "idle"}
+_check_lock = threading.Lock()
+
+
+def check_state() -> dict:
+    return dict(_check_state)
+
+
+def start_check(svc, judge_model: str, suite: str = "codereason",
+                limit: int = 0) -> dict:
+    """Run a calibration in the background and keep the result.
+
+    Fourteen minutes of judging held open as one HTTP request loses everything
+    when the connection drops, which is not a hypothetical - it happened twice
+    while this was being used, and a browser gives the operator no timeout to
+    raise. The work was fine both times; only the answer was thrown away."""
+    from .db import utcnow
+    if _check_state.get("state") == "running":
+        return dict(_check_state)
+    why = judge_refusal(judge_model)
+    if why:
+        return {"state": "failed", "error": why}
+    if not _check_lock.acquire(blocking=False):
+        return dict(_check_state)
+    db = svc.db
+    db.execute("INSERT INTO judge_checks (ts, judge_model, suite, status) "
+               "VALUES (?,?,?,'running')", (utcnow(), judge_model, suite))
+    cid = db.query_one("SELECT MAX(id) AS id FROM judge_checks")["id"]
+    _check_state.clear()
+    _check_state.update({"state": "running", "id": cid, "judge_model": judge_model,
+                         "suite": suite, "started": time.time()})
+
+    def go():
+        import asyncio
+        try:
+            out = asyncio.run(calibrate(svc, judge_model, suite, limit))
+            db.execute(
+                "UPDATE judge_checks SET status=?, pairs=?, verdict=?, "
+                "by_kind=?, note=?, detail=? WHERE id=?",
+                ("done" if not out.get("note") else "refused",
+                 len(out.get("pairs") or []), out.get("verdict") or "",
+                 json.dumps(out.get("by_kind") or {}), out.get("note") or "",
+                 json.dumps(out.get("pairs") or [])[:200000], cid))
+            _check_state.update({"state": "done", "finished": time.time(),
+                                 "verdict": out.get("verdict") or "",
+                                 "note": out.get("note") or ""})
+        except Exception as e:                                    # noqa: BLE001
+            from .errors import describe_exception
+            msg = describe_exception(e)
+            db.execute("UPDATE judge_checks SET status='failed', note=? "
+                       "WHERE id=?", (msg[:400], cid))
+            _check_state.update({"state": "failed", "error": msg,
+                                 "finished": time.time()})
+        finally:
+            _check_lock.release()
+
+    threading.Thread(target=go, name="foundry-judge-check", daemon=True).start()
+    time.sleep(0.05)
+    return dict(_check_state)
+
+
+def checks(db, limit: int = 30) -> list:
+    """Checks already run, newest first, with their detail parsed."""
+    rows = db.query("SELECT id, ts, judge_model, suite, pairs, verdict, "
+                    "by_kind, note, status FROM judge_checks "
+                    "ORDER BY id DESC LIMIT ?", (int(limit),))
+    out = []
+    for r in rows:
+        row = dict(r)
+        try:
+            row["by_kind"] = json.loads(row.get("by_kind") or "{}")
+        except (ValueError, TypeError):
+            row["by_kind"] = {}
+        out.append(row)
+    return out
+
+
+def check_detail(db, check_id: int) -> dict:
+    """One check's pairs, for reading which cases it got wrong - which says
+    more than the percentage does."""
+    r = db.query_one("SELECT * FROM judge_checks WHERE id=?", (int(check_id),))
+    if r is None:
+        return {"error": f"there is no check {check_id}"}
+    out = dict(r)
+    for key in ("by_kind", "detail"):
+        try:
+            out[key] = json.loads(out.get(key) or ("{}" if key == "by_kind" else "[]"))
+        except (ValueError, TypeError):
+            out[key] = {} if key == "by_kind" else []
+    out["pairs_detail"] = out.pop("detail")
     return out
 
 

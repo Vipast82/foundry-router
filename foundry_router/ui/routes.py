@@ -3122,12 +3122,31 @@ async def eval_judge_check(request: Request):
     svc = _svc(request)
     b = await request.json()
     try:
-        out = await judgeproto.calibrate(
+        out = judgeproto.start_check(
             svc, str(b.get("judge_model") or ""),
             str(b.get("suite") or "codereason"), int(b.get("limit") or 0))
     except Exception as e:                                        # noqa: BLE001
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    if out.get("state") == "failed" and out.get("error"):
+        return JSONResponse({"error": out["error"]}, status_code=400)
     return {"ok": True, **out}
+
+
+@router.get("/admin/api/eval/judge-checks")
+async def eval_judge_checks(request: Request, limit: int = 30):
+    """Checks already run, and whatever is running now."""
+    from .. import judgeproto
+    svc = _svc(request)
+    return {"checks": judgeproto.checks(svc.db, limit),
+            "run": judgeproto.check_state()}
+
+
+@router.get("/admin/api/eval/judge-check")
+async def eval_judge_check_one(request: Request, id: int):
+    """One check in full, including every pair, so the misses can be read -
+    which says more than the percentage."""
+    from .. import judgeproto
+    return judgeproto.check_detail(_svc(request).db, int(id))
 
 
 @router.post("/admin/api/eval/pairwise-runs")
