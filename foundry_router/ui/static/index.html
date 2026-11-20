@@ -5815,7 +5815,7 @@ helpers_allowed not set">${n} · no limit</span>`
   };
   const breaker = x => !x ? "" : x.state === "closed"
     ? `<span class="hint" style="margin:0">closed</span>`
-    : `<span class="pill ${x.state === "open" ? "bad" : "warn"}" title="${esc(x.last_error || "")}">${x.state}${x.retry_in_s ? " · " + x.retry_in_s + "s" : ""}</span> <button class="act" title="Close the breaker now (after fixing the backend)" onclick='resetBreaker(${JSON.stringify(x.backend)})'>reset</button>`;
+    : `<span class="pill ${x.state === "open" ? "bad" : "warn"}" title="${esc((x.generations_failing ? "Taken out of rotation: " + x.failed_generations + " generations failed in a row. It still answers its model list, which no longer puts it back; a generation that succeeds does, or reset. " : "") + (x.last_error || ""))}">${x.state}${x.generations_failing ? ", generations failing" : ""}${x.retry_in_s ? " · " + x.retry_in_s + "s" : ""}</span> <button class="act" title="Close the breaker now (after fixing the backend)" onclick='resetBreaker(${JSON.stringify(x.backend)})'>reset</button>`;
   const rows = fh.backends.map(b => {
     const [cls, label] = pill[b.status] || ["", b.status];
     const ok = b.last_ok ? `${esc(age(b.last_ok.age_s))} · <span class="mono">${esc(b.last_ok.model || "")}</span> <span class="hint" style="margin:0">(${esc(b.last_ok.source)})</span>` : '<span class="hint">none in 24 h</span>';

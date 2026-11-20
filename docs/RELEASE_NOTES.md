@@ -1,3 +1,45 @@
+## v0.181.213 - a backend that lists its models and fails its generations is taken out
+
+Seen live on 2026-11-20, after the router host's outage at 12:42: Meridian came
+back at 13:00 answering `/v1/models` in 2 ms, and its own `/health` said
+healthy with the upstream "ok" - and it failed every generation with HTTP 503
+`overloaded_error`, "Session bookkeeping is unavailable; retry shortly", about
+two seconds in, without ever reaching Anthropic. 58 of 58 for 32 minutes,
+until it was restarted at 13:32. Throughout, the Backend Pool showed it
+healthy and its breaker closed, and the sprints' Claude calls kept going to it
+rather than failing over.
+
+The cause was in the pool, not in how it was shown. Its liveness check is a
+model listing every 15 seconds, and every passing listing reset the failure
+count to zero and marked the backend healthy. Live failures arriving about
+every 20 seconds therefore never reached the threshold of three in a row - and
+had they reached it, the next listing would have put the backend straight back.
+The cheap evidence overruled the dear one. The "Can it serve?" table did say
+"failing", because it reads the real calls; the routing did not.
+
+Failed generations are now counted on their own, where a listing cannot reset
+them. Three in a row take the backend out of rotation for the cooldown; while
+it is out, a model only it serves fails at once (so a persona's fallback, a
+GPT model for the Kilo implementer, takes the call) and a model another backend
+serves goes there. After the cooldown the next call is a trial: success puts it
+back, failure takes it out for another cooldown. A passing listing refreshes
+its model list and does not put it back; a generation that succeeds does, and
+so does the breaker's reset button. One success between failures keeps it in,
+so intermittent errors are not this. A backend whose listing fails is handled
+exactly as before.
+
+On the page the breaker reads "open, generations failing" with the count, and
+the serve table shows the backend as failing and reachable, not as down - it
+is up, it just cannot do the one thing it is for.
+
+Not changed: the CLIProxyAPI "failing" on the same screen was one failed probe
+of `gpt-6-sol` three minutes after a real `gpt-6-astra` call succeeded, and its
+own dashboard showed 55 of 56; the serve table shows the latest outcome, and a
+paid backend is not re-probed on its own, so one failed probe shows until the
+next success.
+
+10 tests, eight of which fail on the previous pool.
+
 ## v0.181.212 - the cache hits the ceiling missed, and a profile a restart left running
 
 **The brain lane hides its cache hits, and v0.181.211's ceiling caught only

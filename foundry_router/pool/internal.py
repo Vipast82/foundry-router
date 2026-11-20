@@ -42,6 +42,13 @@ class BackendState:
     last_error: str = ""
     last_ok: float = 0.0
     busy: int = 0                      # calls in flight on THIS backend right now
+    # v0.181.213: generations failing while the model list still answers.
+    # A listing check cannot clear these - only a generation that succeeds
+    # (or the operator) can - because a backend that lists its models in 2 ms
+    # and fails every generation is not healthy (Meridian, 2026-11-20).
+    live_failures: int = 0             # consecutive failed GENERATIONS
+    failing_live: bool = False         # taken out of rotation by those
+    listing_ok: Optional[bool] = None  # the last model-list check
 
 
 class QueueTimeout(Exception):
@@ -286,6 +293,7 @@ class InternalPool(BackendPool):
             # backend is down — but we have no cheaper liveness probe that
             # works across all three protocols, so treat it as a failed check
             # and rely on failure_threshold to absorb blips.
+            s.listing_ok = False
             changed = self._record_failure(s, f"discovery failed: {describe_exception(e)}")
             if s.config.models and s.healthy:
                 s.models = list(s.config.models)
@@ -293,6 +301,18 @@ class InternalPool(BackendPool):
 
         if not models and s.config.models:
             models = list(s.config.models)
+        s.listing_ok = True
+        if s.failing_live:
+            # It answers its model list and fails its generations. The list is
+            # the cheaper evidence and must not overrule the dearer one: until
+            # 2026-11-20 every 15 s check reset the failure count and marked it
+            # healthy, so Meridian failed 58 of 58 calls for 32 minutes with
+            # its breaker closed. Models are refreshed; health is not.
+            if set(models) != set(s.models):
+                changed = True
+            s.models = models
+            s.ever_checked = True
+            return changed
         if not s.healthy or not s.ever_checked:
             changed = True
             if s.ever_checked:
@@ -308,13 +328,32 @@ class InternalPool(BackendPool):
         s.last_ok = time.monotonic()
         return changed
 
-    def _record_failure(self, s: BackendState, error: str) -> bool:
+    def _record_failure(self, s: BackendState, error: str, live: bool = False) -> bool:
         """Shared by health checks and live-call failures. State only flips to
         unhealthy after failure_threshold consecutive failures — this same
-        threshold is Tool Sync's removal grace period (§4.2)."""
+        threshold is Tool Sync's removal grace period (§4.2).
+
+        `live` = a generation failed. Those are also counted on their own,
+        where a passing model-list check cannot reset them (v0.181.213)."""
         s.consecutive_failures += 1
         s.last_error = error[:300]
         s.ever_checked = True
+        if live:
+            s.live_failures += 1
+            if s.failing_live:
+                # the trial call after a cooldown failed too: out again
+                s.cooldown_until = time.monotonic() + self.cfg.cooldown_seconds
+                return False
+            if s.live_failures >= self.cfg.failure_threshold:
+                was = s.healthy
+                s.healthy = False
+                s.failing_live = True
+                s.cooldown_until = time.monotonic() + self.cfg.cooldown_seconds
+                self.db.log_event(
+                    "warning", "backend_pool",
+                    f"backend {s.config.name} taken out of rotation: {s.live_failures} "
+                    f"generations failed in a row", error)
+                return was
         if s.healthy and s.consecutive_failures >= self.cfg.failure_threshold:
             s.healthy = False
             s.cooldown_until = time.monotonic() + self.cfg.cooldown_seconds
@@ -322,6 +361,20 @@ class InternalPool(BackendPool):
                               f"backend {s.config.name} marked unhealthy", error)
             return True
         return False
+
+    def _live_ok(self, s: BackendState) -> None:
+        """A generation succeeded: the only evidence that puts a backend taken
+        out for failing generations back in rotation (v0.181.213)."""
+        s.consecutive_failures = 0
+        s.live_failures = 0
+        if s.failing_live:
+            s.failing_live = False
+            s.healthy = True
+            s.last_error = ""
+            s.cooldown_until = 0.0
+            self.db.log_event("info", "backend_pool",
+                              f"backend {s.config.name} is generating again")
+            self._notify()
 
     # -- listeners -------------------------------------------------------------------
 
@@ -584,7 +637,7 @@ class InternalPool(BackendPool):
                     result = await s.protocol.chat(model, messages, tools=tools,
                                                    options=options, max_tokens=max_tokens,
                                                    keep_alive=keep_alive, think=think, fmt=fmt)
-                    s.consecutive_failures = 0
+                    self._live_ok(s)
                     from ..budget import ended_final
                     self._settle(eid, "settled", result.prompt_tokens, result.completion_tokens,
                                  final=ended_final(result.tool_calls))
@@ -606,7 +659,7 @@ class InternalPool(BackendPool):
                         cap.finish_call(ctok, model=model, backend=s.config.name,
                                         messages=messages, tools=tools, settings=csettings,
                                         error=detail, status="error")
-                    if self._record_failure(s, detail):
+                    if self._record_failure(s, detail, live=True):
                         self._notify()
                     self.db.log_event("warning", "backend_pool",
                                       f"call to {s.config.name} for {model} failed, trying next",
@@ -716,6 +769,8 @@ class InternalPool(BackendPool):
                 state, retry = "half-open", 0
             out.append({"backend": s.config.name, "state": state,
                         "consecutive_failures": s.consecutive_failures,
+                        "generations_failing": s.failing_live,
+                        "failed_generations": s.live_failures,
                         "threshold": self.cfg.failure_threshold,
                         "retry_in_s": retry, "last_error": s.last_error or None})
         return out
@@ -725,6 +780,8 @@ class InternalPool(BackendPool):
         if s is None:
             return False
         s.consecutive_failures = 0
+        s.live_failures = 0
+        s.failing_live = False
         s.cooldown_until = 0.0
         s.healthy = True
         s.last_error = ""
@@ -859,13 +916,13 @@ class InternalPool(BackendPool):
                 if ctok is not None:
                     accumulate(cacc, chunk)
                 yield chunk
-            s.consecutive_failures = 0
+            self._live_ok(s)
             usage.update(status="settled", detail="")
         except (httpx.HTTPError, ProtocolError, OSError, ExceptionGroup) as e:
             detail = describe_exception(e)
             usage.update(detail=detail, status="released" if isinstance(
                 e, (httpx.ConnectError, httpx.ConnectTimeout)) else "error")
-            if self._record_failure(s, detail):
+            if self._record_failure(s, detail, live=True):
                 self._notify()
             raise AllBackendsFailed(f"stream from {s.config.name} failed: {detail}") from e
         finally:

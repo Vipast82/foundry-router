@@ -98,7 +98,11 @@ class HealthMonitor:
             if probe and not probe["ok"] and (not last_err or probe["at"] > last_err["at"]):
                 last_err = {"at": probe["at"], "model": probe["model"],
                             "detail": "probe: " + (probe.get("detail") or "failed")}
-            if s.ever_checked and not s.healthy:
+            if getattr(s, "failing_live", False):
+                # it lists its models and fails its generations: out of
+                # rotation, but not down (v0.181.213)
+                st = "failing"
+            elif s.ever_checked and not s.healthy:
                 st = "down"
             elif last_err and (not last_ok or last_err["at"] > last_ok["at"]) \
                     and now - last_err["at"] < fresh:
@@ -110,7 +114,10 @@ class HealthMonitor:
             out.append({
                 "backend": c.name, "type": c.type, "flavor": c.effective_flavor,
                 "paid": self._paid(c), "status": st,
-                "reachable": (s.healthy if s.ever_checked else None),
+                "reachable": (getattr(s, "listing_ok", None)
+                              if getattr(s, "listing_ok", None) is not None
+                              else (s.healthy if s.ever_checked else None)),
+                "out_of_rotation": bool(getattr(s, "failing_live", False)),
                 "reachable_error": s.last_error or None,
                 "last_ok": _aged(last_ok, now), "last_error": _aged(last_err, now),
                 "calls_1h": e["calls_1h"], "errors_1h": e["errors_1h"],
