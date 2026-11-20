@@ -458,6 +458,49 @@ def _card_sd(card: dict) -> Optional[float]:
     return round(math.sqrt(sum(x * x for x in sds)) / len(sds), 2)
 
 
+def delete(svc, profile_ids: list) -> dict:
+    """Remove model profiles and everything they produced (v0.181.215): the
+    profile row, its suite runs, their cases and the perf samples those runs
+    recorded - a card is the runs, so a card left without them would be a
+    profile reporting suites that are gone.
+
+    The running profile is refused, as a running single run is: deleting rows
+    a run is still writing would leave it half gone and nobody told."""
+    from . import bench
+    out = {"deleted": 0, "runs": 0, "cases": 0, "samples": 0,
+           "refused": [], "missing": []}
+    live = _state.get("profile_id") if _state.get("state") == "running" else None
+    db = svc.db
+    for raw in profile_ids or []:
+        try:
+            pid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if live is not None and pid == int(live):
+            out["refused"].append(pid)
+            continue
+        if db.query_one("SELECT id FROM bench_profiles WHERE id=?", (pid,)) is None:
+            out["missing"].append(pid)
+            continue
+        run_ids = [r["id"] for r in db.query(
+            "SELECT id FROM bench_runs WHERE profile_id=?", (pid,))]
+        gone = bench.delete_runs(svc, run_ids)
+        if gone["refused"]:
+            # its suite run is the one going: the profile stays whole
+            out["refused"].append(pid)
+            continue
+        db.execute("DELETE FROM bench_profiles WHERE id=?", (pid,))
+        out["deleted"] += 1
+        out["runs"] += gone["deleted"]
+        out["cases"] += gone["cases"]
+        out["samples"] += gone["samples"]
+    if out["deleted"]:
+        db.log_event("info", "bench",
+                     f"deleted {out['deleted']} model profile(s): {out['runs']} run(s), "
+                     f"{out['cases']} case(s), {out['samples']} perf sample(s)")
+    return out
+
+
 def reconcile(svc) -> int:
     """A profile whose thread is gone says "running" for ever.
 

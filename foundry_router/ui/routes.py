@@ -3053,6 +3053,24 @@ async def bench_profile_run(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/profile/delete")
+async def bench_profile_delete(request: Request):
+    """Remove model profiles: {ids: [...]}. Each goes with its suite runs,
+    their cases and their perf samples; the running one is refused (v0.181.215)."""
+    from .. import benchprofile
+    svc = _svc(request)
+    body = await request.json()
+    ids = body.get("ids") or ([body["id"]] if body.get("id") else [])
+    if not ids:
+        return JSONResponse({"error": "name the profile(s) to delete"}, status_code=400)
+    out = await asyncio.to_thread(benchprofile.delete, svc, list(ids))
+    if out["refused"] and not out["deleted"]:
+        return JSONResponse(
+            {"error": f"profile {out['refused'][0]} is still running - stop it first",
+             **out}, status_code=409)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/profile/stop")
 async def bench_profile_stop(request: Request):
     from .. import benchprofile
@@ -3075,6 +3093,13 @@ async def bench_live(request: Request):
     (v0.181.211). Polled by the progress strip while anything runs."""
     from .. import benchcard
     return await asyncio.to_thread(benchcard.live, _svc(request))
+
+
+@router.get("/admin/api/bench/case")
+async def bench_case(request: Request, suite: str, id: str, last: int = 8):
+    """One case as the model saw it - the prompt behind a miss (v0.181.215)."""
+    from .. import bench
+    return await asyncio.to_thread(bench.case_view, _svc(request), suite, id, last)
 
 
 @router.get("/admin/api/bench/failures")

@@ -215,7 +215,7 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})
-        generic = {"needle", "context", "toolflow", "finder", "tool_use", "toolpick",
+        generic = {"needle", "context", "toolflow", "finder", "tool_use", "toolpick", "split-turn",
                    "tool_choice", "codereason", "python", "code", "exception"}
         work = [r for r in rows if any(":" not in t and t not in generic
                                        for t in _tags(r))]

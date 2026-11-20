@@ -215,7 +215,8 @@ def test_the_suite_is_built_from_the_live_registry(tmp_path):
     cases = bench.cases(svc, "toolflow")
     assert {c["reference"]["finder_tool"] for c in cases} <= {t.name for t in TOOLS}
     for c in cases:
-        assert c["messages"][1]["content"].startswith("Please ")
+        # v0.181.215: a clean request with its inputs, not "Please <docstring>"
+        assert c["messages"][1]["content"].startswith("I need this done: ")
         assert "toolflow" in c["tags"] and "finder" in c["tags"]
 
 

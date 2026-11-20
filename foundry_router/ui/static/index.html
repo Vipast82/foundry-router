@@ -113,6 +113,10 @@ table.pf-grid td.cell { color: #111; font-weight: 600; border-radius: 3px; }
                overflow: auto; font-size: 12px; padding: 6px 8px; border-radius: 6px;
                background: var(--panel-2); }
 .mx-pair .want pre { border-left: 3px solid var(--ok); }
+.mx-turn { margin-top: 4px; }
+.mx-turn .k { font-size: 11px; color: var(--dim); }
+.mx-turn pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto;
+               font-size: 12px; padding: 5px 8px; border-radius: 6px; background: var(--panel-2); }
 .mx-pair .got pre { border-left: 3px solid var(--bad); }
 
 /* the live strip */
@@ -9630,7 +9634,24 @@ async function pfMisses(pid, suite) {
           <pre>${esc(f.answer || f.error || "—")}</pre></div>
       </div>
       ${f.detail ? `<div class="hint" style="margin:4px 0 0">${esc(f.detail)}</div>` : ""}
+      <div style="margin-top:6px"><button class="act mx-show" data-id="${esc(f.case_id)}"
+        title="The conversation the model was given, the tools it was offered and what was wanted">Show the prompt</button></div>
+      <div class="mx-prompt"></div>
     </div>`).join("");
+    box.querySelectorAll(".mx-show").forEach(b => b.onclick = async () => {
+      const slot = b.parentElement.nextElementSibling;
+      if (slot.innerHTML) { slot.innerHTML = ""; b.textContent = "Show the prompt"; return; }
+      slot.innerHTML = '<p class="hint">reading the case…</p>';
+      const c = await api(`bench/case?suite=${encodeURIComponent(suite)}&id=${encodeURIComponent(b.dataset.id)}`);
+      if (c.error) { slot.innerHTML = `<p class="hint">${esc(c.error)}</p>`; return; }
+      b.textContent = "Hide the prompt";
+      const turn = m => `<div class="mx-turn"><div class="k">${esc(m.role)}${m.name ? " (" + esc(m.name) + ")" : ""}</div>
+        <pre>${esc(m.content || "")}${(m.tool_calls || []).map(t => `\n→ ${esc(t.name)}(${esc(t.arguments)})`).join("")}</pre></div>`;
+      slot.innerHTML = `<div class="hint" style="margin:6px 0 2px">The last ${c.shown.length} of ${c.turns} turns the model saw${
+          (c.tags || []).includes("split-turn") ? ", and the verified step was narration followed by a call (scored as the call)" : ""}.
+        Tools offered: ${c.tools_offered.length ? esc(c.tools_offered.slice(0, 40).join(", ")) + (c.tools_offered.length > 40 ? "…" : "") : "none"}</div>
+        ${c.shown.map(turn).join("")}`;
+    });
     box.querySelectorAll(".mx-kinds button").forEach(b =>
       b.setAttribute("aria-pressed", String((b.dataset.k || "") === pick)));
   };
@@ -9789,6 +9810,7 @@ async function pfRender() {
         <th>passes</th><th>score</th><th>state</th><th></th></tr>${rows}</table>
        <div class="row tight" style="margin-top:8px">
          <button class="act primary" id="pf-compare">Compare the ticked</button>
+         <button class="act bad" id="pf-delete" title="Delete the ticked profiles with their suite runs, cases and performance samples. Cannot be undone.">Delete the ticked</button>
          <span class="hint" style="margin:0">tick two or more; the one highest in the list is the baseline</span></div>`
     : '<p class="hint">No profile yet. Pick a model above and run every suite.</p>';
   $("#pf-state").innerHTML = r.state === "failed" ? `<span class="pill bad">${esc(r.error || "failed")}</span>` : "";
@@ -9798,6 +9820,22 @@ async function pfRender() {
     $("#pf-out").innerHTML = pfCard(c);
     pfWireCards($("#pf-out"));
   });
+  if ($("#pf-delete")) $("#pf-delete").onclick = async () => {
+    const picked = [...document.querySelectorAll(".pf-pick:checked")];
+    if (!picked.length) { toast("tick the profiles to delete", true); return; }
+    const what = picked.map(c => {
+      const p = (d.profiles || []).find(x => String(x.id) === c.value) || {};
+      return `#${c.value} ${p.model || ""}`; }).join("\n");
+    if (!confirm(`Delete ${picked.length} profile${picked.length === 1 ? "" : "s"}?\n\n${what}\n\n`
+        + "Each goes with its suite runs, their cases and their performance samples. This cannot be undone.")) return;
+    try {
+      const out = await api("bench/profile/delete", {method: "POST", body: {ids: picked.map(c => c.value)}});
+      toast(`deleted ${out.deleted} profile(s), ${out.runs} run(s), ${out.cases} case(s)` +
+            (out.refused && out.refused.length ? `; #${out.refused.join(", #")} is running and was kept` : ""));
+      $("#pf-out").innerHTML = "";
+      pfRender();
+    } catch (e) { toast(e.message, true); }
+  };
   if ($("#pf-compare")) $("#pf-compare").onclick = async () => {
     const ids = [...document.querySelectorAll(".pf-pick:checked")].map(c => c.value);
     if (ids.length < 2) { toast("tick at least two profiles", true); return; }

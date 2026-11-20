@@ -89,6 +89,42 @@ def cases(svc, name: str, limit: int = 0) -> list:
     return out
 
 
+def case_view(svc, suite: str, case_id: str, last: int = 8) -> dict:
+    """One case as the model saw it, for reading a miss (v0.181.215): the last
+    turns of its conversation, the tools it was offered, and what was wanted.
+
+    A score says a case was missed; only the prompt says whether the miss was
+    the model's or the test's - a task with no URL in it, a reference that was
+    really narration before a call. Text is trimmed for the page; nothing is
+    changed."""
+    for c in cases(svc, suite):
+        if str(c.get("id")) != str(case_id):
+            continue
+        msgs = c.get("messages") or []
+
+        def _m(m):
+            out = {"role": m.get("role"), "content": str(m.get("content") or "")[:4000]}
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                out["tool_calls"] = [
+                    {"name": (tc.get("function") or tc).get("name") or "",
+                     "arguments": str((tc.get("function") or tc).get("arguments") or "")[:600]}
+                    for tc in tcs]
+            if m.get("name"):
+                out["name"] = m["name"]
+            return out
+        return {"suite": suite, "id": c.get("id"), "task_id": c.get("task_id") or "",
+                "tags": c.get("tags") or [], "turns": len(msgs),
+                "shown": [_m(m) for m in msgs[-max(1, int(last)):]],
+                "system": next((str(m.get("content") or "")[:1500] for m in msgs
+                                if m.get("role") == "system"), ""),
+                "tools_offered": [(t.get("function") or t).get("name") or ""
+                                  for t in c.get("tools") or []],
+                "reference": c.get("reference") or {}}
+    return {"error": f"no case {case_id!r} in the {suite!r} suite - it may have been "
+                     "rebuilt since this run"}
+
+
 def _fit(msgs: list, upto: int) -> Optional[list]:
     """As much of the conversation before `upto` as fits in a prompt, kept whole:
     the system turn, then the newest turns, never starting in the middle of a
@@ -124,14 +160,26 @@ def _case_at(example: dict, at: int) -> Optional[dict]:
         return None
     ref = msgs[at]
     meta = example.get("meta") or {}
+    tags = list(meta.get("tags") or [])
+    calls = ref.get("tool_calls") or []
+    # A words-only turn followed straight away by another ASSISTANT turn that
+    # calls a tool is one move written as two messages - "Let me check the
+    # file." and then the call - and the move is the call (v0.181.215). Scored
+    # as "answer in words", a model that narrates and calls in one turn was
+    # marked wrong for doing exactly what the verified session did. A real
+    # end of turn is followed by a user message, and is left alone.
+    if not calls and at + 1 < len(msgs) and msgs[at + 1].get("role") == "assistant" \
+            and msgs[at + 1].get("tool_calls"):
+        calls = msgs[at + 1]["tool_calls"]
+        tags.append("split-turn")
     return {"id": f"{meta.get('task_id') or 'case'}-{meta.get('session') or ''}-{at}".strip("-"),
             "task_id": meta.get("task_id") or "", "tier": meta.get("tier") or "",
-            "tags": meta.get("tags") or [], "models": meta.get("models") or [],
+            "tags": tags, "models": meta.get("models") or [],
             "messages": prefix, "tools": example.get("tools") or [],
             "reference": {"content": (ref.get("content") or "")[:20000],
                           "tool_calls": [{"name": (tc.get("function") or tc).get("name") or "",
                                           "arguments": (tc.get("function") or tc).get("arguments")}
-                                         for tc in (ref.get("tool_calls") or [])]}}
+                                         for tc in calls]}}
 
 
 def cases_from(example: dict) -> list:
@@ -797,6 +845,108 @@ def _task_from(name: str, desc: str) -> str:
     return d[:200]
 
 
+def _first_sentence(desc: str, cap: int = 220) -> str:
+    """What the tool does, as one clean sentence (v0.181.215).
+
+    The v0.181.201 task was the description pasted in whole and cut at 200
+    characters: docstring blocks included ("Args: name: ..."), words cut in half
+    ("...captio."), and phrases that are not requests ("Please narrated tutorial
+    video ..."). A model asked something unreadable is not being measured."""
+    d = (desc or "").strip()
+    if d.startswith("[") and "]" in d:
+        d = d.split("]", 1)[1].strip()
+    import re as _re
+    # the summary paragraph only: docstring sections and later paragraphs go
+    d = _re.split(r"\n\s*\n|\n\s*(?:Args|Arguments|Returns|Parameters|Example|Examples|"
+                  r"Raises|Note|Notes)\s*:", d, maxsplit=1)[0]
+    d = " ".join(d.split())
+    m = _re.match(r"(.+?[.!?])(?:\s|$)", d)
+    if m and len(m.group(1)) >= 20:
+        d = m.group(1)
+    if len(d) > cap:
+        cut = d[:cap].rsplit(" ", 1)[0].rstrip(",;:-")
+        d = cut + "..."
+    return d.rstrip()
+
+
+# Example values for a tool's REQUIRED inputs, by the parameter's name, so the
+# task carries what the tool needs. Without them a correct model has to look the
+# input up first (snapshot the page, list the jobs) or ask for it - and both were
+# scored as misses (v0.181.215). The target tool is never executed, so the
+# values only need to be the right kind of thing.
+_ARG_EXAMPLES = (
+    ("url", "https://example.com/docs/getting-started"),
+    ("urls", ["https://example.com/a", "https://example.com/b"]),
+    ("job_id", "a1b2c3d4e5f6"),
+    ("ref", "e12"),
+    ("element", "the Submit button"),
+    ("selector", "#submit"),
+    ("path", "assets/example.png"),
+    ("file", "assets/example.png"),
+    ("image", "assets/example.png"),
+    ("video", "assets/example.mp4"),
+    ("audio", "assets/example.wav"),
+    ("text", "Welcome to Animal Uprising."),
+    ("prompt", "a red barn at sunset, painted style"),
+    ("query", "player data saving"),
+    ("name", "example"),
+    ("voice", "narrator"),
+    ("entities", ["PlayerService", "DataStore"]),
+    ("relations", [{"from": "PlayerService", "to": "DataStore", "relationType": "uses"}]),
+    ("entityNames", ["PlayerService"]),
+    ("fields", [{"name": "email", "type": "textbox", "ref": "e7", "value": "a@b.c"}]),
+    ("expression", "() => document.title"),
+    ("function", "() => document.title"),
+    ("time", 2),
+)
+
+
+def _example_arg(pname: str, schema: dict):
+    s = schema or {}
+    if s.get("enum"):
+        return s["enum"][0]
+    low = pname.lower()
+    for key, val in _ARG_EXAMPLES:
+        if low == key.lower() or low.endswith("_" + key.lower()):
+            return val
+    t = s.get("type")
+    if t in ("integer", "number"):
+        return 5
+    if t == "boolean":
+        return True
+    if t == "array":
+        return ["example"]
+    if t == "object":
+        return {}
+    for key, val in _ARG_EXAMPLES:
+        if key.lower() in low and isinstance(val, str):
+            return val
+    return "example"
+
+
+def task_inputs(parameters: dict, limit: int = 4) -> dict:
+    """{required parameter: an example value} for a tool's schema."""
+    p = parameters or {}
+    props = p.get("properties") or {}
+    out = {}
+    for name in (p.get("required") or [])[:limit]:
+        out[name] = _example_arg(str(name), props.get(name) or {})
+    return out
+
+
+def toolflow_task(desc: str, parameters: dict) -> str:
+    """The request a toolflow case makes: what to do, and what with."""
+    what = _first_sentence(desc)
+    if not what:
+        return ""
+    inputs = task_inputs(parameters)
+    ask = f"I need this done: {what}"
+    if inputs:
+        ask += "\nUse these inputs: " + "; ".join(
+            f"{k} = {json.dumps(v, ensure_ascii=False)}" for k, v in inputs.items())
+    return ask
+
+
 def build_toolflow(svc, name: str = "toolflow", limit: int = 40,
                    persona: Optional[dict] = None) -> dict:
     """A suite of tasks to be done THROUGH the finder, built from the live registry."""
@@ -812,7 +962,10 @@ def build_toolflow(svc, name: str = "toolflow", limit: int = 40,
     for t in order:
         if len(out) >= max(1, int(limit)):
             break
-        task = _task_from(t.name, getattr(t, "description", ""))
+        # the same shuffle as before, so a rebuilt suite tests the same tools and
+        # only the wording and the inputs change (v0.181.215)
+        task = toolflow_task(getattr(t, "description", ""),
+                             getattr(t, "parameters", None) or {})
         if not task:
             skipped += 1
             continue
@@ -822,7 +975,7 @@ def build_toolflow(svc, name: str = "toolflow", limit: int = 40,
             "tags": ["toolflow", "finder", "tool_use", f"server:{t.server or '?'}"],
             "messages": [
                 {"role": "system", "content": _FLOW_SYSTEM},
-                {"role": "user", "content": f"Please {task}."},
+                {"role": "user", "content": task},
             ],
             # the finder is the test; the target tool is never run
             "reference": {"finder_tool": t.name, "content": t.name,
@@ -868,6 +1021,7 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
     t0 = time.monotonic()
     searched, found, picked, calls = 0, False, "", []
     used: list = []                    # every tool it CALLED, in order
+    queries: list = []                 # what it searched for (v0.181.215)
     prompt_tokens = completion_tokens = 0
     backend = ""
     result = None
@@ -905,6 +1059,7 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             calls.append(tname)
             if tname == tool_finder.FIND_TOOL:
                 searched += 1
+                queries.append(str(args.get("query") or "")[:200])
                 hits = tool_finder.search(
                     tools, str(args.get("query") or ""),
                     tool_finder.DEFAULT_LIMIT)
@@ -937,7 +1092,11 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             "tool_calls": [{"name": n, "arguments": {}} for n in calls],
             "finder": {"searched": searched, "found": found,
                        "picked": picked or first, "want": want,
-                       "used": used, "hit": bool(picked),
+                       "used": used, "hit": bool(picked), "queries": queries,
+                       # what it said instead, when it ended without the tool:
+                       # "which URL?" is a different miss from a wrong pick
+                       "said": ((result.content or "") if result else "")[:600]
+                       if not picked else "",
                        "rounds": len(calls)},
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
             "seconds": round(time.monotonic() - t0, 2)}
@@ -1527,6 +1686,10 @@ def answer_of(got: dict) -> str:
         parts.append(f"{f.get('searched', 0)} search(es), "
                      + ("the right tool came up" if f.get("found")
                         else "the right tool never came up"))
+        if f.get("queries"):
+            parts.append("searched: " + "; ".join(json.dumps(q) for q in f["queries"]))
+        if f.get("said"):
+            parts.append("then said: " + f["said"].strip())
     else:
         calls = [t.get("name") for t in got.get("tool_calls") or [] if t.get("name")]
         if calls:

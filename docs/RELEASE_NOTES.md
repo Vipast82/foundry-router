@@ -1,3 +1,74 @@
+## v0.181.215 - is a low score the model's, or the test's?
+
+Asked: look at the low scores, check the output, and find out whether tools
+weren't called because of the model, the routing, the tool search, the gateway
+or how a persona is set up. Flash's first profile was read case by case against
+the live tool registry and the finder's own search code.
+
+**Find and use tools, 67.5: mostly the test.** Of its 25 misses:
+
+- The finder and gateway were not the cause. 24 of the 25 had the right tool
+  come up in the model's own searches, and the one that did not -
+  `roblox_list_fflag_prefixes` - is ranked FIRST by the real search for every
+  reasonable phrasing ("FastFlag prefixes", "fflag prefix types", "feature flag
+  prefixes"), so that miss was the model's search. The bench uses its own
+  finder persona with every tool granted, so no live persona's setup was
+  involved either.
+- The task text was the tool's description pasted in whole and cut at 200
+  characters: docstring blocks ("Args: name: ..."), words cut in half
+  ("...captio."), and phrases that are not requests ("Please narrated tutorial
+  / how-to video ..."). And it named none of the inputs the tool needs: "type
+  text into editable element" with no page, "cancel a queued or running media
+  job" with no job id, "add captions to a video" with no video, "crawl a list
+  of URLs" with none. Snapshotting the page, listing the jobs or voices, or
+  answering "which URL?" was the correct move, and was scored as a miss -
+  twice over before v0.181.211, which also ended a case at the first call.
+- What is left that is the model's: picking `roblox_get_luau_globals` (list
+  them all) for "a specific Luau global", `generate_image` for a graphic with
+  exact text where `make_graphic` is the precise tool, `ask` for crawling URLs,
+  and - the one outright fault - calling `find_fable_5` for the comic task, a
+  tool that exists nowhere in the registry.
+
+So the suite is rebuilt properly. Each task is now the summary sentence of the
+description, cut between words when it is long, as "I need this done: ...",
+with an example value for every REQUIRED input the tool's own schema names
+(`url`, `job_id`, `ref`/`element`, `text`, an enum's first value, a number for
+a number), so a correct model has nothing to look up first. The same shuffle
+picks the same forty tools in the same order, so old and new runs ask about the
+same tools; only the wording and the inputs change, and the suite version
+recorded on each run (v0.181.211) keeps the two from being compared as one. A
+finder case now also keeps every search query and anything the model said
+instead of calling a tool, so "it asked which URL" reads differently from "it
+picked the wrong tool".
+
+**Real work replay, "an answer in words" 0 of 11: probably the test, now
+handled either way.** The eleven came in consecutive pairs from one
+conversation - VR-MAP2 turns 6 and 7, VR-MAP1 turns 18 and 20 - which is the
+shape of one move recorded as two messages, the narration ("Let me check the
+file.") and then the call. A case whose verified step is words followed
+straight away by another assistant turn that calls a tool is now scored as that
+call and tagged `split-turn`; a real end of turn, followed by a user message,
+is left as words. Confirming it needs the suite file on the router host, so:
+
+**Show the prompt.** Every miss in the card's drill-down has a button that shows
+the case as the model saw it - its last turns, the tools it was offered, the
+system prompt and what was wanted - from `GET /admin/api/bench/case`. A score
+says a case was missed; only the prompt says whose miss it was.
+
+**Deleting a profile.** There was no way to: the Runs table's remove ticks
+delete single suite runs and left the profile and its card behind. The
+profile list now has **Delete the ticked** beside Compare, with a confirmation
+naming each profile. A profile goes with its suite runs, their cases and the
+performance samples those runs recorded, since a card is its runs and one left
+without them would report suites that are gone. The running profile is refused
+and kept whole. `POST /admin/api/bench/profile/delete {ids: [...]}`.
+
+To use it: rebuild the finder suite and the real-work suite (their buttons on
+the Benchmark page), then run the profile again.
+
+15 tests; one older test that pinned the "Please ..." wording now pins the new
+one.
+
 ## v0.181.214 - an overloaded Claude is not an exhausted Claude
 
 On 2026-11-20 between 19:02 and 19:36 UTC, 59 calls through Meridian failed
