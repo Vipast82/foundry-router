@@ -85,7 +85,11 @@ def test_exhaustion_error_shapes_recognized():
     assert looks_like_window_exhaustion(
         'HTTP 401: {"error":{"type":"authentication_error",'
         '"message":"authentication expired"}}')
-    assert looks_like_window_exhaustion("HTTP 429 rate_limit_error")
+    # v0.181.214: a per-minute 429 is not a spent window (that one is in
+    # test_overload_not_exhaustion.py); a 429 that says the usage limit was
+    # reached still is
+    assert not looks_like_window_exhaustion("HTTP 429 rate_limit_error")
+    assert looks_like_window_exhaustion("HTTP 429: Claude AI usage limit reached")
     assert not looks_like_window_exhaustion("connection refused")
 
 

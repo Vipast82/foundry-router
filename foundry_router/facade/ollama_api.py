@@ -42,7 +42,8 @@ from ..guardrails import RequestGuardState
 from ..pool.base import AllBackendsFailed
 from ..pool.protocols import ChatResult
 from ..usage import (RequestLogger, estimate_cost_usd,
-                     log_subscription_usage, looks_like_window_exhaustion)
+                     log_subscription_usage,
+                     note_subscription_failure)
 from . import translate as tr
 
 log = logging.getLogger(__name__)
@@ -2999,9 +3000,8 @@ async def _direct_dispatch_chat(svc, persona, model_name, messages, client_tools
         if "does not support chat" in str(e).lower():
             svc.registry.mark_embedding(model_id)
         binfo = svc.pool.backend_info(model_id)
-        if (binfo and binfo.get("type") == "anthropic-compatible"
-                and looks_like_window_exhaustion(str(e))):
-            svc.meridian_usage.note_observed_exhaustion(binfo["url"])
+        if binfo and binfo.get("type") == "anthropic-compatible":
+            note_subscription_failure(svc.meridian_usage, binfo, e)
         if finish:
             logger.finish("error", str(e))
 
@@ -3565,9 +3565,9 @@ def _note_exhaustion(svc, model: str, err: BaseException) -> None:
     """A Claude-window-exhaustion-shaped failure from Meridian is real usage
     signal (its quota sources can be blind) — record it on every path."""
     binfo = svc.pool.backend_info(model) or {}
-    if binfo.get("type") == "anthropic-compatible" and looks_like_window_exhaustion(str(err)):
+    if binfo.get("type") == "anthropic-compatible":
         try:
-            svc.meridian_usage.note_observed_exhaustion(binfo["url"])
+            note_subscription_failure(svc.meridian_usage, binfo, err)
         except Exception:
             pass
 

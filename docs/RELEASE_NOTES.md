@@ -1,3 +1,57 @@
+## v0.181.214 - an overloaded Claude is not an exhausted Claude
+
+On 2026-11-20 between 19:02 and 19:36 UTC, 59 calls through Meridian failed
+with HTTP 503 `{"type":"error","error":{"type":"overloaded_error",
+"message":"Session bookkeeping is unavailable; retry shortly."}}`. They were
+Meridian's own - it came back from the router host's outage with its session
+store broken, and its telemetry shows upstream time 0 on every one, so they
+never reached Anthropic - until it was restarted at 19:32. "overloaded" was
+one of `EXHAUSTION_ERROR_MARKERS`, so each of them recorded "window exhaustion
+OBSERVED from a live call failure" and backed Claude off for about 30 minutes,
+while the quota endpoint showed the weekly window 5% used. The guardrail then
+denied Claude to every strict-route persona - "denied claude-sonnet-5-5: Claude
+usage window exhausted (window exhaustion OBSERVED ...; backing off ~30 min)" -
+and the routes fell through to gpt-6-astra, which is out of credits, and then
+to local qwen: "strict route: claude-sonnet-5-5 denied -> gpt-6-astra denied ->
+qwen3.8-flash-next-unsloth-ud-iq3_xxs".
+
+**What counts as an exhausted window now.** The auth-shaped text Anthropic sends
+for a spent window as well as for a real credential failure ("authentication
+expired", "authentication_error" - see the comment above the markers), and an
+explicit usage-limit message ("usage limit", "usage_limit"). Those keep the
+30-minute backoff, unchanged, and a successful Claude call still clears it.
+
+**What does not.** An overload - "overloaded", HTTP 503 or 529 - and a bare
+per-minute rate limit - "429", "rate_limit" with no usage-limit text. Both are
+classified as what they are, logged as "Claude overloaded (HTTP 503/529): a
+transient capacity error - not counted as an exhausted usage window" or as
+rate-limited (one event per backend per kind every five minutes, so a run of 59
+is one line), and set no backoff in the usage state, so nothing they do makes
+the guardrail deny Claude. The failing request still fails over to the next
+model in its route. The short backoff they warrant is the pool's breaker from
+v0.181.213: three failed generations in a row take the backend out for its
+60-second cooldown, reported as failing generations and never as an exhausted
+window. A 429 that says the usage limit was reached is still exhaustion, because
+the exhaustion check comes first.
+
+**A second fault on the same path.** The three callers - the brain's dispatch
+worker, the persona chat's error handler and the passthrough - each matched the
+whole text of `AllBackendsFailed`, which joins every backend's error as "name:
+detail | name: detail". So a CLIProxyAPI 429 or auth error on a model both
+backends serve would have marked MERIDIAN's window exhausted for 30 minutes.
+All three now go through one function, `usage.note_subscription_failure`, which
+reads only the Meridian backend's own part of the message, so they cannot drift
+apart again.
+
+Nothing else checked re-labels a 503: `guardrails.check_paid_call` reads the
+usage snapshot rather than error text, the chat engine's failover does not
+classify errors, and the budget monitor's "429" counter only counts. No
+persona, model order, cutoff or other router config is changed.
+
+17 tests in tests/test_overload_not_exhaustion.py; the old assertion that a bare
+"HTTP 429 rate_limit_error" is exhaustion is updated to the new contract, with a
+usage-limit 429 asserted to still be one.
+
 ## v0.181.213 - a backend that lists its models and fails its generations is taken out
 
 Seen live on 2026-11-20, after the router host's outage at 12:42: Meridian came

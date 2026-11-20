@@ -1238,7 +1238,7 @@ class AgentRunner:
         sources can be completely blind (oauth null, sdk count 0 — confirmed
         live at 100% used), so an exhaustion-shaped failure on a subscription
         backend is recorded as real signal, and a success clears it."""
-        from ..usage import looks_like_window_exhaustion
+        from ..usage import note_subscription_failure as _note_subscription_failure
         info = self.pool.backend_info(model_id)
         is_subscription = bool(info and info.get("type") == "anthropic-compatible")
         num_ctx = self._num_ctx_for(persona, model_id)
@@ -1319,8 +1319,8 @@ class AgentRunner:
             # Reliability signal: a failed/timed-out dispatch marks the model
             # down as a within-tier score multiplier (observed, deployment-real).
             self.model_registry.record_call_outcome(model_id, ok=False)
-            if is_subscription and looks_like_window_exhaustion(str(e)):
-                self.meridian_usage.note_observed_exhaustion(info["url"])
+            if is_subscription:
+                _note_subscription_failure(self.meridian_usage, info, e)
             raise
         if is_subscription:
             self.meridian_usage.note_successful_call(info["url"])

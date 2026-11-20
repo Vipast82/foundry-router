@@ -119,13 +119,62 @@ def _is_fable_bucket(bucket_type: str) -> bool:
 # fired). When Meridian's quota sources are blind (oauth null, sdk
 # entryCount 0 — both confirmed non-functional for this profile), a failure
 # of this shape on a subscription backend is the only real signal we get.
+#
+# v0.181.214: ONLY those, and an explicit usage-limit message. "overloaded",
+# "429" and "rate_limit" were in this list too, and an overload is a capacity
+# blip, not a spent window: on 2026-11-20, 19:02-19:36 UTC, 59 HTTP 503
+# `overloaded_error` replies through Meridian (its own "Session bookkeeping is
+# unavailable" after a host outage - they never reached Anthropic) each backed
+# Claude off for 30 minutes while the quota endpoint showed the weekly window
+# 5% used, and the strict routes fell through to a GPT model with no credits
+# and then to local. A per-minute rate limit is not a spent window either.
 EXHAUSTION_ERROR_MARKERS = ("authentication expired", "authentication_error",
-                            "rate_limit", "429", "overloaded")
+                            "usage limit", "usage_limit", "usage-limit")
+
+# Transient: the call failed and the next may not. These never set the
+# 30-minute window backoff; the pool's breaker (v0.181.213) takes a backend
+# out for its cooldown after three failed generations in a row, which is the
+# short backoff these warrant, and it is reported as failing generations,
+# never as an exhausted window.
+OVERLOAD_ERROR_MARKERS = ("overloaded", "http 503", "http 529", "status 503",
+                          "status 529", "error 529")
+RATE_LIMIT_ERROR_MARKERS = ("rate_limit", "rate limit", "429")
 
 
-def looks_like_window_exhaustion(error_text: str) -> bool:
-    t = (error_text or "").lower()
-    return any(m in t for m in EXHAUSTION_ERROR_MARKERS)
+def backend_error_text(error_text: str, backend: str = "") -> str:
+    """The part of an error that is about `backend`.
+
+    AllBackendsFailed joins every backend's error as "name: detail | name:
+    detail", so the whole text can carry another backend's 429 - and reading
+    it whole would mark THIS backend's window spent for what CLIProxyAPI said.
+    Without a name, or when the name is not in it, the whole text is used."""
+    t = error_text or ""
+    if not backend or f"{backend}:" not in t:
+        return t
+    parts = [p.strip() for p in t.split(" | ")]
+    mine = [p for p in parts if p.startswith(f"{backend}:") or f" {backend}:" in p]
+    return " | ".join(mine) or t
+
+
+def subscription_error_kind(error_text: str, backend: str = "") -> Optional[str]:
+    """"exhausted", "overloaded", "rate_limited" or None.
+
+    Exhaustion is checked first: an explicit usage-limit or the auth-shaped
+    text Anthropic sends for a spent window is the one signal worth a long
+    backoff, and a 429 that SAYS the usage limit was reached is exhaustion,
+    not a rate limit."""
+    t = backend_error_text(error_text, backend).lower()
+    if any(m in t for m in EXHAUSTION_ERROR_MARKERS):
+        return "exhausted"
+    if any(m in t for m in OVERLOAD_ERROR_MARKERS):
+        return "overloaded"
+    if any(m in t for m in RATE_LIMIT_ERROR_MARKERS):
+        return "rate_limited"
+    return None
+
+
+def looks_like_window_exhaustion(error_text: str, backend: str = "") -> bool:
+    return subscription_error_kind(error_text, backend) == "exhausted"
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +366,22 @@ def parse_extra_usage(data: Any) -> Optional[float]:
         return None
 
 
+def note_subscription_failure(usage, binfo: dict, err) -> Optional[str]:
+    """Every path a subscription call can fail on, through one classifier.
+
+    Three callers (the brain's dispatch, the persona chat, the passthrough)
+    each matched the error text themselves; one function so they cannot drift
+    apart, and so each reads only ITS backend's part of a joined failure."""
+    if usage is None or not binfo:
+        return None
+    kind = subscription_error_kind(str(err), str(binfo.get("name") or ""))
+    if kind == "exhausted":
+        usage.note_observed_exhaustion(binfo["url"])
+    elif kind in ("overloaded", "rate_limited"):
+        usage.note_transient(binfo["url"], kind, str(err))
+    return kind
+
+
 class MeridianUsage:
     """Cached quota snapshots — one slow endpoint must not add latency to
     every escalation decision. The snapshot feeds three consumers: the
@@ -379,6 +444,28 @@ class MeridianUsage:
             "window exhaustion OBSERVED from a live call failure — quota endpoint "
             "reports no signal; treating window as exhausted (auto-clears on the "
             "next successful Claude call or after the backoff)", base_url)
+
+    def note_transient(self, base_url: str, kind: str, detail: str = "") -> None:
+        """A Claude call failed for capacity (overloaded / 503 / 529) or a
+        per-minute rate limit (429). Logged as what it is and NOT as window
+        exhaustion: nothing here makes the guardrail deny Claude (v0.181.214).
+        The short backoff is the pool's breaker - three failed generations in
+        a row take the backend out for its cooldown. One event per backend per
+        kind every five minutes, so a run of 59 overloads is one line, not 59."""
+        if not hasattr(self, "_transient_logged"):
+            self._transient_logged: dict = {}
+        key = (base_url, kind)
+        now = time.monotonic()
+        if now - self._transient_logged.get(key, -1e9) < 300:
+            return
+        self._transient_logged[key] = now
+        what = {"overloaded": "overloaded (HTTP 503/529): a transient capacity error",
+                "rate_limited": "rate-limited (HTTP 429): a per-minute limit"}.get(kind, kind)
+        self.db.log_event(
+            "warning", "usage",
+            f"Claude {what} - not counted as an exhausted usage window; the call "
+            f"fails over and the pool's breaker backs the backend off briefly if "
+            f"it keeps failing", f"{base_url}: {(detail or '')[:240]}")
 
     @staticmethod
     def _exhausted_signature(snap: dict, min_fraction: float) -> tuple:
