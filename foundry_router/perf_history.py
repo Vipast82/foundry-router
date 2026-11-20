@@ -22,6 +22,8 @@ other half: wipe a model / backend / run and start clean.
 from __future__ import annotations
 
 import random
+import statistics
+import threading
 from typing import Any, Optional
 
 from .db import Database, utcnow
@@ -86,6 +88,88 @@ def set_run_label(db: Database, label: str) -> str:
 # unreported prompt-cache hit, not throughput (v0.181.211).
 MAX_PLAUSIBLE_PREFILL_TPS = 50_000.0
 
+# The absolute ceiling catches only the big cache hits. Probing the brain lane
+# directly (v0.181.212) showed its server reports timings.prompt_n as the WHOLE
+# prompt even when it reused its cache, and sends no cache_n: the same 3,428
+# token prompt twice gave 943 t/s cold and 44,869 t/s cached - under the
+# ceiling. So a rate is also judged against what that model on that backend
+# has actually measured: far above its own recent median, with the backend
+# reporting nothing cached, it is a cache hit and not a speed.
+UNREPORTED_CACHE_RATIO = 5.0
+PREFILL_MIN_TOKENS = 512          # below this a prefill is overhead, not a rate
+_COLD_MIN = 8                     # history needed before a rate is judged
+_COLD_WINDOW = 60
+_COLD_STREAK = 8                  # this many rejections in a row = a real shift
+_cold: dict = {}                  # (backend, model) -> {"rates": [...], "streak": n}
+_cold_lock = threading.Lock()
+
+
+def _cold_history(db: Database, backend: str, model: str) -> dict:
+    """The recent plausible prefill rates for one model on one backend, read
+    from the database the first time and kept in memory after.
+
+    Keyed by model as well as backend: a backend that swaps a 35B model for a
+    4B one has not become five times faster, it is a different thing to
+    measure, and it starts with no history rather than being judged by the
+    old one's."""
+    # the database is part of the key: one process can hold more than one
+    # (the tests do), and one database's history must not judge another's
+    where = getattr(db, "path", None) or getattr(getattr(db, "_db", None), "path", None)         or id(db)
+    key = (where, backend or "", model or "")
+    with _cold_lock:
+        if key in _cold:
+            return _cold[key]
+    rates: list = []
+    try:
+        rows = db.query(
+            "SELECT prefill_tps FROM perf_samples WHERE backend=? AND model=? "
+            "AND prefill_tps IS NOT NULL AND prefill_tps <= ? AND timing_src='server' "
+            "AND COALESCE(NULLIF(prefill_tokens, 0), prompt_tokens, 0) >= ? "
+            "ORDER BY id DESC LIMIT ?",
+            (key[1], key[2], MAX_PLAUSIBLE_PREFILL_TPS, PREFILL_MIN_TOKENS, _COLD_WINDOW))
+        rates = [float(r["prefill_tps"]) for r in rows][::-1]
+    except Exception:                                          # noqa: BLE001
+        rates = []
+    with _cold_lock:
+        return _cold.setdefault(key, {"rates": rates, "streak": 0})
+
+
+def unreported_cache_hit(db: Database, backend: str, model: str,
+                         rate: Optional[float], prefill_n: int,
+                         cached_tokens: int) -> bool:
+    """Whether this prefill rate is a cache hit the backend did not report.
+
+    Never when the backend reported a cached count (its prefill count already
+    excludes the cache, so the rate is honest), never for a short prompt, and
+    never before there is enough history to judge by. Eight rejections in a
+    row are a real change - a faster card, a new build - not eight cache hits,
+    so the history is restarted from them rather than refusing every rate the
+    faster hardware produces for ever."""
+    if rate is None or cached_tokens or (prefill_n or 0) < PREFILL_MIN_TOKENS:
+        return False
+    h = _cold_history(db, backend, model)
+    with _cold_lock:
+        rates = h["rates"]
+        if len(rates) >= _COLD_MIN and rate > UNREPORTED_CACHE_RATIO * statistics.median(rates):
+            h["streak"] += 1
+            h.setdefault("rejected", []).append(rate)
+            if h["streak"] < _COLD_STREAK:
+                return True
+            # a sustained shift: start again from what is being measured now
+            h["rates"] = list(h.get("rejected") or [])[-_COLD_WINDOW:]
+            h["streak"], h["rejected"] = 0, []
+            return False
+        h["streak"], h["rejected"] = 0, []
+        rates.append(rate)
+        del rates[:-_COLD_WINDOW]
+        return False
+
+
+def reset_cold_history() -> None:
+    """For tests, and for a caller that knows the hardware changed."""
+    with _cold_lock:
+        _cold.clear()
+
 
 def _rate(n: Optional[int], duration_ns: Optional[int]) -> Optional[float]:
     """tokens/sec from a count and a nanosecond duration, or None when either is
@@ -134,6 +218,11 @@ def record_sample(db: Database, *, model: str, backend: str = "", persona: str =
         # 104 ms (307,570 t/s) with cached_tokens 0, and a handful of those
         # made its benchmark's average prefill 16,522 t/s against a real
         # median near 1,400 (v0.181.211). The duration is kept; the rate is not.
+        prefill_tps = None
+    elif prefill_tps is not None and unreported_cache_hit(
+            db, backend, model, prefill_tps, prefill_tokens or prompt_tokens,
+            cached_tokens):
+        # the smaller hits the ceiling misses (v0.181.212)
         prefill_tps = None
     decode_ms = round(eval_duration_ns / 1e6, 1) if eval_duration_ns else None
     prefill_ms = round(prompt_eval_duration_ns / 1e6, 1) if prompt_eval_duration_ns else None

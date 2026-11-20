@@ -324,6 +324,16 @@ def speed(samples: list) -> dict:
            and s["prefill_tps"] is not None]
     hidden_cache = [s for s in pre if s["prefill_tps"] > MAX_PLAUSIBLE_PREFILL_TPS]
     pre = [s for s in pre if s["prefill_tps"] <= MAX_PLAUSIBLE_PREFILL_TPS]
+    # the smaller unreported hits, judged against this set's own median, as
+    # perf_history judges a new sample (v0.181.212): samples recorded before
+    # that still hold them, e.g. 3,428 tokens in 76 ms on the brain lane
+    from .perf_history import UNREPORTED_CACHE_RATIO
+    if len(pre) >= 8:
+        med = statistics.median(float(s["prefill_tps"]) for s in pre)
+        far = [s for s in pre if not (s["cached_tokens"] or 0)
+               and s["prefill_tps"] > UNREPORTED_CACHE_RATIO * med]
+        hidden_cache += far
+        pre = [s for s in pre if s not in far]
     return {
         "samples": len(samples), "measured": len(measured),
         "decode_tps": _median(s["decode_tps"] for s in measured),

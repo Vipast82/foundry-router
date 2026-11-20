@@ -162,6 +162,11 @@ class Services:
         self.agent.svc = self            # recall.py needs the index and the embedder
         from . import bench, recall as _recall
         bench.reconcile(db)              # a run the last restart cut off is not 'running'
+        try:
+            from . import benchprofile   # ...and neither is a profile (v0.181.212)
+            benchprofile.reconcile(self)
+        except Exception:                                         # noqa: BLE001
+            log.exception("could not reconcile model profiles")
         _recall.catch_up_words(db)       # an index built before the word channel existed
         self.mcp_aggregator = MCPAggregator(self)
         from .media import MediaService

@@ -270,6 +270,9 @@ def build_card(svc, profile_id: int) -> dict:
         "profile_id": int(profile_id), "model": p["model"], "ts": p["ts"],
         "label": p["label"] or "", "status": p["status"],
         "repeats": p["repeats"], "parts": parts, "unscored": unscored,
+        # why a profile did not finish, said where the card is read (v0.181.212)
+        "stopped_note": (p["note"] or "") if p["status"] in ("interrupted", "stopped",
+                                                             "failed") else "",
     }
     card.update(composite(parts))
     card["needle"] = _needle_grid(svc, by_suite.get("needle") or [])
@@ -332,6 +335,8 @@ def _needle_grid(svc, runs: list) -> dict:
 def _notes(card: dict) -> list:
     """What has to be read before the big number is."""
     out = []
+    if card.get("stopped_note"):
+        out.append(card["stopped_note"])
     if card.get("composite") is None:
         out.append("no suite in this profile produced a score")
         return out
@@ -451,6 +456,42 @@ def _card_sd(card: dict) -> Optional[float]:
         return None
     # equal weights: the mean of independent parts narrows by sqrt(n)
     return round(math.sqrt(sum(x * x for x in sds)) / len(sds), 2)
+
+
+def reconcile(svc) -> int:
+    """A profile whose thread is gone says "running" for ever.
+
+    bench.reconcile has done this for single runs since they existed; a
+    profile was a second thing that could be cut off and was not covered, so
+    the brain lane's first profile, stopped by a restart during its last
+    suite, sat at "running" with no score although five of its six suites had
+    finished (v0.181.212). It is marked interrupted and given the composite of
+    the suites it did finish - those are complete results - with a note saying
+    which did not run."""
+    db = svc.db
+    rows = db.query("SELECT id, suites FROM bench_profiles WHERE status='running'")
+    for p in rows:
+        try:
+            card = build_card(svc, p["id"])
+            ran = {x["suite"] for x in card.get("parts", []) + card.get("unscored", [])}
+            want = json.loads(p["suites"] or "[]")
+            missing = [s for s in want if s not in ran]
+            note = ("the router restarted during this profile"
+                    + (f"; not run: {', '.join(missing)}" if missing else ""))
+            db.execute("UPDATE bench_profiles SET status='interrupted', score=?, note=? "
+                       "WHERE id=?", (card.get("composite"), note[:600], p["id"]))
+        except Exception:                                         # noqa: BLE001
+            log.exception("profile %s: could not reconcile", p["id"])
+            db.execute("UPDATE bench_profiles SET status='interrupted', "
+                       "note='the router restarted during this profile' WHERE id=?",
+                       (p["id"],))
+    if rows:
+        try:
+            db.log_event("info", "bench", f"{len(rows)} model profile(s) were "
+                                          "interrupted by a restart")
+        except Exception:                                         # noqa: BLE001
+            pass
+    return len(rows)
 
 
 def profiles(db, limit: int = 40) -> list:

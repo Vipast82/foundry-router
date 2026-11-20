@@ -1,3 +1,47 @@
+## v0.181.212 - the cache hits the ceiling missed, and a profile a restart left running
+
+**The brain lane hides its cache hits, and v0.181.211's ceiling caught only
+the big ones.** With the GPU free after the profiles, the brain lane's server
+was asked the same 3,428-token prompt twice, directly. Cold: `prompt_n` 3428,
+`prompt_ms` 3633 - 943 t/s. Cached: `prompt_n` 3428, `prompt_ms` 76 - 44,869
+t/s. So its server reports `prompt_n` as the whole prompt even when it reused
+its KV cache, sends no `cache_n`, and has no `/props` endpoint (it is not
+mainline llama-server). The 50,000 t/s ceiling caught the 31,895-token hits
+from the benchmark and not this one.
+
+A prefill rate is now also judged against what THAT model on THAT backend has
+measured: more than five times its recent median, with the backend reporting
+nothing cached, is a cache hit and is not recorded as a speed (the duration is
+kept). The history is the last sixty plausible rates, read from the database
+the first time and kept in memory, so it survives a restart. It is never
+applied when the backend reports a cached count (its rate is already honest),
+to a prompt under 512 tokens, or before there are eight samples. It is keyed by
+model as well as backend, so a small model swapped onto the lane starts fresh
+rather than being judged by the big one. And eight rejections in a row restart
+the history from them - that is a faster card or a new build, not eight cache
+hits, and refusing every rate the new hardware produced would be the same fault
+the other way round. The report card applies the same check to samples
+recorded before this.
+
+**A profile a restart cut off said "running" for ever.** The brain lane's first
+profile was stopped by a restart during its last suite, the unscored agent
+tasks; its five scored suites had finished and were linked, and the row still
+said running with no score. `bench.reconcile` has marked interrupted single
+runs at startup since it existed; a profile was a second thing a restart could
+cut off and was not covered. Startup now marks it interrupted, gives it the
+composite of the suites it did finish - those are complete results - and the
+card says the router restarted and which suites did not run.
+
+**The two profiles, compared** (one pass each, on the suites as they were
+before v0.181.211): flash 88.4, brain lane 84.6, inside the spread. The one
+real difference is the real-work replay, 74.4 against 62.9; code reasoning,
+tool picking and the needle are level and two of them at the ceiling, and the
+toolflow numbers were both scored the old way. The brain lane is two to three
+times slower per case on the long-context suites (50 s against 17 s a case on
+the replay). Rerun both on the rebuilt suites to separate them.
+
+11 tests.
+
 ## v0.181.211 - a benchmark audit, harder suites, and a report card you can read
 
 Asked for: go through every benchmark and make sure it is correct and
