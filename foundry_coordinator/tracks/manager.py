@@ -517,10 +517,23 @@ class TrackManager:
         `tracks start` moves it onto the track as it is. 2026-11-02 vfx-2: moving AS-V08..V12
         meant cancelling them first; AS-D18 and S53 saw a CANCELLED dependency in that window,
         stopped BLOCKED and opened two Lead cases."""
-        return (t.get("state") in (S.QUEUED, S.READY)
-                and not self.store.task_track(P.id, t["task_id"])
-                and int(t.get("attempt") or 0) == 0 and int(t.get("sessions") or 0) == 0
-                and not t.get("session_id"))
+        if t.get("state") not in (S.QUEUED, S.READY) or self.store.task_track(P.id, t["task_id"]):
+            return False
+        if int(t.get("attempt") or 0) == 0 and int(t.get("sessions") or 0) == 0 \
+                and not t.get("session_id"):
+            return True
+        # 2026-11-20 FIN-4a (Victor: "Only move FIN-4a"): a main-line sprint that already
+        # ran sessions waited READY behind FIN-2c for the one main checkout while two slots
+        # sat idle. With the operator's explicit --move-started it moves too, but only when
+        # it is READY (between sessions) and its last session has ended: its commits are on
+        # master already, so the track branch (cut from master) holds all of its work.
+        if t["task_id"] not in self.move_started or t.get("state") != S.READY:
+            return False
+        sid = t.get("session_id")
+        row = self.store.session(sid) if sid else None
+        return not sid or not row or bool(row.get("ended_ts"))
+
+    move_started: frozenset = frozenset()
 
     def _movable_from_track(self, P, t: dict) -> str:
         """The running/planned track a never-started sprint waits on ('' = none). 2026-11-03:

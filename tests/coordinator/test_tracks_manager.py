@@ -437,6 +437,29 @@ def test_a_never_started_main_sprint_moves_onto_a_track_without_cancelling(tmp_p
         c.tracks.create(P, "blender", ["B1"], actor="victor")
 
 
+def test_a_started_ready_sprint_moves_only_with_move_started_and_no_live_session(tmp_path):
+    """2026-11-20 FIN-4a: a main-line sprint that had run sessions waited READY behind FIN-2c
+    for the main checkout while two slots were idle. `--move-started` moves it when it is
+    READY and its last session has ended; a live session still refuses."""
+    c, P, _ = env(tmp_path, extra=chr(10).join(["", "[automation]", "max_agents = 2", ""]))
+    c.approve("game", "B1", [], "victor")
+    c.store.update_task("game", "B1", state=S.READY, attempt=4, sessions=12, session_id="s-old")
+    c.store.x("INSERT INTO sessions (session_id, project_id, task_id, status, created_ts, "
+              "ended_ts, data) VALUES ('s-old','game','B1','ended',1,2,'{}')")
+    c.tracks.move_started = frozenset({"B1"})
+    c.tracks.create(P, "fin4a", ["B1"], actor="operator")
+    c.tracks.start(P, "fin4a", "operator")
+    assert c.store.task_track("game", "B1") == "fin4a"
+    assert c.store.task("game", "B1")["state"] == S.QUEUED
+    c.approve("game", "X1", [], "victor")
+    c.store.update_task("game", "X1", state=S.READY, attempt=1, sessions=1, session_id="s-live")
+    c.store.x("INSERT INTO sessions (session_id, project_id, task_id, status, created_ts, data) "
+              "VALUES ('s-live','game','X1','working',1,'{}')")
+    c.tracks.move_started = frozenset({"X1"})
+    with pytest.raises(TrackError, match="never-started"):
+        c.tracks.create(P, "other", ["X1"], actor="operator")
+
+
 def test_a_slotless_studio_track_takes_the_workstation_studio_rows():
     """v0.181.74: vr-c (no slot, needs studio) ran ASSET_CHECK play sessions in the
     workstation Studio while BAL-1 held it; its sessions now take the main Studio rows.

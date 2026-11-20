@@ -812,6 +812,9 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1.add_argument("--slot", default="", help="bind the track to a Studio slot ([slots.<id>]): "
                                               "its Studio gate and Studio MCP run in the slot")
     x1.add_argument("--by", default="operator")
+    x1.add_argument("--move-started", action="store_true",
+                    help="also move a main-line sprint that already ran sessions, when it is "
+                         "READY and its last session has ended (its commits are on master)")
     x1 = xs.add_parser("stop"); x1.add_argument("project"); x1.add_argument("name")
     x1.add_argument("--reason", default=""); x1.add_argument("--by", default="operator")
     x1 = xs.add_parser("merge"); x1.add_argument("project"); x1.add_argument("name")
@@ -1176,6 +1179,8 @@ def _tracks(c: Coordinator, a) -> int:
             if a.plan:
                 rows = tm.start_plan(P, a.plan, a.by)
             else:
+                if getattr(a, "move_started", False):
+                    tm.move_started = frozenset(a.sprints)
                 tm.create(P, a.name, a.sprints, None, a.by, slot=getattr(a, "slot", "") or "")
                 rows = [tm.start(P, a.name, a.by)]
             for r in rows:
