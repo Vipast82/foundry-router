@@ -815,7 +815,8 @@ def start_check(svc, judge_model: str, suite: str = "codereason",
     def go():
         import asyncio
         try:
-            out = asyncio.run(calibrate(svc, judge_model, suite, limit))
+            from .loopclient import run_on_own_loop
+            out = run_on_own_loop(svc, calibrate(svc, judge_model, suite, limit))
             db.execute(
                 "UPDATE judge_checks SET status=?, pairs=?, verdict=?, "
                 "by_kind=?, note=?, detail=? WHERE id=?",

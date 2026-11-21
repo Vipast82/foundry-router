@@ -123,6 +123,10 @@ def miss_kind(suite: str, row) -> Optional[str]:
         return "the call failed"
     if score >= 100:
         return None
+    if _detail(row).get("out_of_room"):
+        # thought through the whole budget (8,192 tokens after one retry) and
+        # gave no answer - v0.181.219
+        return "ran out of tokens before answering"
     tags = _tags(row)
     if suite == "protocol" or "protocol" in tags:
         from .protocolbench import CHECK_WORDS

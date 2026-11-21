@@ -111,8 +111,11 @@ def test_the_bench_records_telemetry_like_every_other_path():
     assert 'mode="bench"' in src
     # best-effort: telemetry must never break a case
     assert "except Exception" in src.split("telemetry.record_call")[1][:400]
+    # v0.181.219: both paths call the model through bench._chat, which records
+    # each call it makes (the retry with room to think as well)
+    assert inspect.getsource(bench._chat).count("_record(svc, model, backend, result") == 2
     for path in (bench.ask, bench.ask_through_finder):
-        assert "_record(svc, model, backend, result" in inspect.getsource(path)
+        assert "await _chat(" in inspect.getsource(path)
 
 
 def test_the_bench_telemetry_names_the_backend_it_actually_used():
@@ -126,7 +129,8 @@ def test_the_bench_telemetry_names_the_backend_it_actually_used():
     assert "backend=backend" in head          # the one pool.chat returned
     assert "model=model" in head
     # and the callers hand over the backend pool.chat returned, not a guess
-    assert "result, backend = await svc.pool.chat(" in inspect.getsource(bench.ask)
+    # (v0.181.219: that call is in bench._chat, both times it asks)
+    assert inspect.getsource(bench._chat).count("result, backend = await svc.pool.chat(") == 2
 
 
 # -- a pooled MCP session belongs to one loop --------------------------------------

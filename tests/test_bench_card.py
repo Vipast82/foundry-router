@@ -143,9 +143,15 @@ def test_every_finder_round_records_a_performance_sample(tmp_path):
 
 def test_both_benchmark_paths_record_through_one_function():
     import inspect
-    assert "_record(" in inspect.getsource(bench.ask)
-    assert "_record(" in inspect.getsource(bench.ask_through_finder)
-    assert "telemetry.record_call" not in inspect.getsource(bench.ask)
+    # v0.181.219: both paths call the model through _chat, which records every
+    # call it makes (the retry with room to think too); neither calls the pool
+    # itself, so neither can skip the telemetry
+    chat = inspect.getsource(bench._chat)
+    assert chat.count("_record(") == chat.count("svc.pool.chat(") == 2
+    for path in (bench.ask, bench.ask_through_finder):
+        src = inspect.getsource(path)
+        assert "await _chat(" in src and "svc.pool.chat(" not in src, path.__name__
+        assert "telemetry.record_call" not in src
 
 
 # -- the needle suite ------------------------------------------------------------------

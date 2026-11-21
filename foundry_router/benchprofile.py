@@ -172,7 +172,8 @@ def start(svc, model: str, suites=(), label: str = "", repeats: int = 1,
     def go():
         import asyncio
         try:
-            asyncio.run(_run(svc, pid, model, names, label, reps, limit))
+            from .loopclient import run_on_own_loop
+            run_on_own_loop(svc, _run(svc, pid, model, names, label, reps, limit))
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             msg = describe_exception(e)

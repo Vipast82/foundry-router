@@ -84,9 +84,15 @@ class Services:
         # Cline context + tool schemas) to a COLD-loading model blocks until
         # Ollama starts draining the socket (~an 18GB load at high context), so
         # a 30s write cap would fire mid-send (observed as WriteTimeout).
+        # One client PER EVENT LOOP (v0.181.219): benchmarks, profiles and
+        # judge calibrations run on their own asyncio.run() loop in a thread,
+        # and httpx's connection pool cannot be shared across loops - a request
+        # waiting for a connection raised "bound to a different event loop" or
+        # hung to the read timeout. See loopclient.py.
+        from .loopclient import LoopLocalClient
         _rt = float(cfg.backend_pool.request_timeout_seconds)
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(
-            connect=5.0, read=_rt, write=_rt, pool=5.0))
+        self.http = LoopLocalClient(lambda: httpx.AsyncClient(timeout=httpx.Timeout(
+            connect=5.0, read=_rt, write=_rt, pool=5.0)))
 
         self.pool = build_pool(cfg, self.http, db)
         self.ollama_admin = OllamaAdmin(self.http, self.pool, db)

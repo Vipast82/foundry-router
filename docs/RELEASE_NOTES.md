@@ -1,3 +1,47 @@
+## v0.181.219 - what the brain lane lost to the router and the budget
+
+Asked: read the brain lane's finished profile against flash's. It scored 83.9
+to flash's 93.0, and case by case two of the causes were not the model.
+
+**One HTTP client per event loop.** Three of its cases (two in the real-work
+replay, one in tool picking) failed with "<asyncio.locks.Event ...> is bound to
+a different event loop", one only after the full 1,800-second timeout, and were
+scored 0 as "the call failed". A benchmark, a model profile and a judge check
+each run in their own thread on their own asyncio.run() loop, and they called
+the pool through the one httpx client the server made on its loop. httpx's
+connection pool cannot be shared across loops: a request that waits for a
+connection waits on an Event of the other loop, and either raises or is never
+woken. The service now hands out a client per loop (loopclient.py): the server's
+loop keeps its own, each background run gets its own with the same settings and
+closes it when the run ends, and a client whose loop has ended is dropped. The
+three background runs go through one helper, so a fourth cannot forget it.
+
+**Room to think.** All 11 of its code-reasoning misses were empty answers, each
+about 41 seconds long - 2,048 tokens of thinking at its decode speed, cut off
+before it said anything, scored as a wrong value. Flash answers these in about
+450 tokens. A benchmark call that uses its whole budget and gives neither an
+answer nor a tool call is now asked once more with 8,192 tokens, on both the
+plain path and the finder's, and both calls are recorded. A case that runs out
+again is called "ran out of tokens before answering" on the card, not wrong.
+So its 75.0 on code reasoning measured the budget; the next profile measures
+the reasoning.
+
+**What the finder showed.** Two of its finder misses searched "video
+generation", which ranks the wanted video tool 6th and 8th of 8 among tied
+video tools, so whether it was cut off at run time could not be told from the
+record. Each search now keeps the tools it showed, and a miss lists them ("video
+generation" showed: ...) with how many tools there were. Its other misses there
+were the model's: searching "web search" for a Roblox enum list, then calling
+the web search seven times.
+
+What stays the brain lane's: the real-work replay (58.4, scored on v0.181.215's
+rules - v0.181.218 drops the end-of-turn report cases and credits a look as a
+look), and it is slower - 46 tokens a second decoding against flash's 104 -
+though faster to a first token (3.6 s against 9.2 s) on these short prompts.
+
+10 tests; three older tests now check that both ask paths call the model only
+through the function that records every call, and that it names the backend.
+
 ## v0.181.218 - accurate, and not too easy
 
 Asked: go through what flash scored on the rebuilt suites (93.0) and make sure

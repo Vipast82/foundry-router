@@ -1345,6 +1345,56 @@ def _granted_tools(svc, persona: Optional[dict] = None) -> list:
         return []
 
 
+THINK_ROOM = 8192      # the budget a case gets again when thinking used it all
+
+
+def out_of_room(result, max_tokens: int) -> bool:
+    """The model spent the whole budget and said nothing: no answer, no call,
+    stopped for length (or used every token, when the backend sends no reason)."""
+    text = str(getattr(result, "content", "") or "")
+    # what is left once the reasoning is taken out: after the last </think>,
+    # or nothing when a <think> was never closed (cut off mid-thought).
+    # split_think would hand the reasoning back as the answer here.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    elif "<think>" in text:
+        text = ""
+    if text.strip():
+        return False
+    if getattr(result, "tool_calls", None):
+        return False
+    if str(getattr(result, "finish_reason", "") or "").lower() in ("length", "max_tokens"):
+        return True
+    return int(getattr(result, "completion_tokens", 0) or 0) >= int(max_tokens) - 8
+
+
+async def _chat(svc, model: str, convo, tools, max_tokens: int, label: str = "",
+                persona: str = ""):
+    """One model call for a benchmark, with room to think.
+
+    The brain lane (Qwen3.6-35B, a thinking model) spent all 2,048 tokens
+    reasoning on 11 of 44 code cases and returned nothing - each scored 0 as a
+    "wrong value" in ~41 s, the budget at its decode speed, while flash answered
+    in ~450. That measured the budget, not the code reasoning (v0.181.219). A
+    call that runs out of room with nothing to show is asked once more with
+    THINK_ROOM; if it runs out again it is reported as out of room, not wrong.
+    Every call is recorded. Returns (result, backend, budget, out_of_room)."""
+    t0 = time.monotonic()
+    result, backend = await svc.pool.chat(model, convo, tools=tools,
+                                          max_tokens=max_tokens, options=dict(SAMPLING))
+    _record(svc, model, backend, result, (time.monotonic() - t0) * 1000.0,
+            max_tokens, label, persona)
+    budget = max_tokens
+    if max_tokens < THINK_ROOM and out_of_room(result, max_tokens):
+        budget = THINK_ROOM
+        t0 = time.monotonic()
+        result, backend = await svc.pool.chat(model, convo, tools=tools,
+                                              max_tokens=budget, options=dict(SAMPLING))
+        _record(svc, model, backend, result, (time.monotonic() - t0) * 1000.0,
+                budget, label, persona)
+    return result, backend, budget, out_of_room(result, budget)
+
+
 async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048,
                              label: str = "", persona: Optional[dict] = None) -> dict:
     """One task, done the way a finder persona does it.
@@ -1362,24 +1412,22 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
     searched, found, picked, calls = 0, False, "", []
     used: list = []                    # every tool it CALLED, in order
     queries: list = []                 # what it searched for (v0.181.215)
+    shown: list = []                   # what each search showed (v0.181.219)
     prompt_tokens = completion_tokens = 0
     backend = ""
     result = None
+    ran_out = 0                        # the budget it ran out of, if it did
     for _round in range(TOOLFLOW_ROUNDS):
-        r0 = time.monotonic()
         try:
-            result, backend = await svc.pool.chat(
-                model, convo, tools=specs, max_tokens=max_tokens,
-                options=dict(SAMPLING))
+            # every round is a model call and is recorded like one (v0.181.211),
+            # with room to think (v0.181.219) - both inside _chat
+            result, backend, _budget, room_out = await _chat(
+                svc, model, convo, specs, max_tokens, label)
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             return {"error": describe_exception(e),
                     "seconds": round(time.monotonic() - t0, 2)}
-        # every round is a model call and is recorded like one. Without this
-        # a finder run left no performance sample at all (v0.181.211): the
-        # telemetry ask() records was never added to this second path.
-        _record(svc, model, backend, result, (time.monotonic() - r0) * 1000.0,
-                max_tokens, label)
+        ran_out = _budget if room_out else 0        # only the LAST round's counts
         prompt_tokens += result.prompt_tokens or 0
         completion_tokens += result.completion_tokens or 0
         tcs = result.tool_calls or []
@@ -1405,6 +1453,10 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
                     tool_finder.DEFAULT_LIMIT)
                 if want and any(h.name == want for h in hits):
                     found = True
+                # what this search showed it (v0.181.219): "never came up" is
+                # the model's query or the finder's ranking, and only the list
+                # it saw can say which
+                shown.append([h.name for h in hits])
                 text = tool_finder.find_text(tools, args)
             elif tname == tool_finder.CALL_TOOL:
                 name = str(args.get("name") or "")
@@ -1433,12 +1485,14 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             "finder": {"searched": searched, "found": found,
                        "picked": picked or first, "want": want,
                        "used": used, "hit": bool(picked), "queries": queries,
+                       "shown": shown, "tools": len(tools),
                        # what it said instead, when it ended without the tool:
                        # "which URL?" is a different miss from a wrong pick
                        "said": ((result.content or "") if result else "")[:600]
                        if not picked else "",
                        "rounds": len(calls)},
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "out_of_room": ran_out,
             "seconds": round(time.monotonic() - t0, 2)}
 
 
@@ -1923,18 +1977,16 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
     try:
-        result, backend = await svc.pool.chat(
-            model, wire(case.get("messages") or []),
-            tools=wire_tools(case.get("tools") or []) or None, max_tokens=max_tokens,
-            options=dict(SAMPLING))
+        result, backend, budget, room_out = await _chat(
+            svc, model, wire(case.get("messages") or []),
+            wire_tools(case.get("tools") or []) or None, max_tokens, label, persona)
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         return {"error": describe_exception(e), "seconds": round(time.monotonic() - t0, 2)}
-    _record(svc, model, backend, result, (time.monotonic() - t0) * 1000.0,
-            max_tokens, label, persona)
     from .brain import prompts
     _think, clean = prompts.split_think(result.content or "")
-    return {"content": clean.strip(), "backend": backend,
+    return {"content": clean.strip(), "backend": backend, "budget": budget,
+            "out_of_room": budget if room_out else 0,
             "tool_calls": [{"name": tc.get("name"), "arguments": tc.get("arguments")}
                            for tc in (result.tool_calls or [])],
             "prompt_tokens": result.prompt_tokens or 0,
@@ -2040,6 +2092,12 @@ def answer_of(got: dict) -> str:
                         else "the right tool never came up"))
         if f.get("queries"):
             parts.append("searched: " + "; ".join(json.dumps(q) for q in f["queries"]))
+        if f.get("shown") and not f.get("found"):
+            # the finder's answers, so a miss shows whether the tool was there
+            for q, names in zip(f.get("queries") or [], f["shown"]):
+                parts.append(f"{json.dumps(q)} showed: " + (", ".join(names) or "nothing"))
+            if f.get("tools"):
+                parts.append(f"(out of {f['tools']} tools)")
         if f.get("said"):
             parts.append("then said: " + f["said"].strip())
     else:
@@ -2134,6 +2192,11 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         else:
             got = await ask(svc, model, case, label=rlabel)
             s = await score_one(svc, case, got)
+        if got.get("out_of_room") and s.get("score") is not None and s["score"] < 100:
+            # it thought through the whole budget, twice, and said nothing: the
+            # card calls that "ran out of tokens before answering", not wrong
+            s["code_detail"] = (f"out_of_room={int(got['out_of_room'])} "
+                                + str(s.get("code_detail") or "")).strip()
         db.execute(
             "INSERT INTO bench_results (run_id, case_id, task_id, tags, tools_expected, "
             "tools_called, tools_score, code_pass, code_detail, answer_chars, score, seconds, "
@@ -2230,7 +2293,8 @@ def start(svc, suite: str, model: str, label: str = "", limit: int = 0,
 
     def go():
         try:
-            asyncio.run(_run(svc, suite, model, label, limit, use_recall, use_lessons))
+            from .loopclient import run_on_own_loop
+            run_on_own_loop(svc, _run(svc, suite, model, label, limit, use_recall, use_lessons))
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             _state.update({"state": "failed", "error": describe_exception(e),
