@@ -308,6 +308,55 @@ def test_code_too_big_blocks_as_insufficiently_inspected_without_a_review_call(g
     assert len(ev) == 1 and json.loads(ev[0]["detail"])["code_files"] == 2
 
 
+def _two_big_files(ctx):
+    return {"writes": {"src/a.txt": "OK " + "a" * 3000 + "\n",
+                       "src/tests/test_a.py": "OK = True\n" + "# " + "t" * 3000 + "\n"},
+            "commit": "T1: work",
+            "final": '```coordinator-report\n{"status": "DONE", "summary": "did it"}\n```'}
+
+
+def test_a_diff_too_big_for_one_packet_is_reviewed_in_parts_and_approved_when_all_are(game):
+    """2026-11-20 FIN-4a: 683 KB of its own source/test diff against a 536 KB packet budget
+    (200K-token reviewers) stopped it "insufficiently inspected". Files that fit alone are
+    reviewed in parts; the sprint is APPROVED only when every part is."""
+    c, ff, P = _build(game, script=_two_big_files)
+    P.profile.review["max_diff_bytes"] = 4500
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) == S.COMPLETE, limit=80)
+    revs = c.store.reviews("game", "T1")
+    assert [r["verdict"] for r in revs] == ["APPROVED", "APPROVED"]
+    assert [r["result"]["packet"]["split"]["part"] for r in revs] == [1, 2]
+    assert all(r["result"]["packet"]["split"]["of"] == 2 for r in revs)
+    assert len(ff.chats) == 2
+    assert "split review, part 1 of 2" in ff.chats[0]["packet"]
+    assert "split review, part 2 of 2" in ff.chats[1]["packet"]
+    assert c.store.q("SELECT * FROM events WHERE kind='review_insufficient'") == []
+    assert len(c.store.q("SELECT * FROM events WHERE kind='review_split'")) == 1
+
+
+def test_every_part_is_reviewed_before_a_split_asks_for_changes(game):
+    """A part that asks for changes does not stop the split: the other part is reviewed at
+    the same commit, then the sprint goes back with the findings of every part that asked."""
+    seen = []
+
+    def reviewer(packet):
+        seen.append(packet)
+        if len(seen) == 1:
+            return review_json(packet, "CHANGES_REQUIRED", findings=[
+                {"severity": "major", "file": "src/a.txt", "line": 1, "message": "fix part one"}])
+        return review_json(packet)
+    c, ff, P = _build(game, script=_two_big_files, ff=RecordingFoundry(reviewer))
+    P.profile.review["max_diff_bytes"] = 4500
+    c.approve("game", "T1", [], "victor")
+    assert run_until(c, lambda: _state(c) in (S.CHANGES_REQUIRED, S.IMPLEMENTING) and
+                     len(c.store.reviews("game", "T1")) >= 2, limit=80)
+    revs = c.store.reviews("game", "T1")
+    assert [r["verdict"] for r in revs[:2]] == ["CHANGES_REQUIRED", "APPROVED"]
+    assert revs[0]["reviewed_sha"] == revs[1]["reviewed_sha"]
+    t = c.store.task("game", "T1")
+    assert any("fix part one" in f for f in (t["data"].get("findings") or []))
+
+
 # -- 5. earlier findings through the normal lifecycle ----------------------------------
 
 def test_repaired_head_is_reviewed_with_the_earlier_findings_and_fresh_verification(game):

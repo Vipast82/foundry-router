@@ -229,7 +229,9 @@ def _store_gate(tmp_path, verdicts, changed_from, head="h" * 40, trees=None):
         if "merge-base" in argv:
             return (0, "") if changed_from.get(argv[-2]) is not None else (1, "")
         if "diff" in argv:
-            return 0, "\n".join(changed_from.get(argv[-2]) or [])
+            # the commit follows --name-only (58387c0 appends a pathspec after `--`)
+            prev = argv[argv.index("--name-only") + 1] if "--name-only" in argv else argv[-2]
+            return 0, "\n".join(changed_from.get(prev) or [])
         return 1, ""
     g = G.Gate.__new__(G.Gate)
     g.head, g.gate_dir, g.repo, g.run_cmd = head, str(gd), str(tmp_path), run_cmd

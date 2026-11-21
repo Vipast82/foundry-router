@@ -2693,8 +2693,19 @@ class Coordinator:
         # its checks is never reused
         again |= set(t["data"].get("early_review_discarded") or [])
         valid = [r for r in valid if r["review_id"] not in again]
-        if valid:
-            return None if early else {"apply": valid[-1]}
+        # 2026-11-20 split review: a part review is this commit's verdict only once every
+        # part is APPROVED (or as soon as one part asks for changes)
+        parts = [r for r in valid if self._split_of(r)]
+        whole = [r for r in valid if not self._split_of(r)]
+        if whole:
+            return None if early else {"apply": whole[-1]}
+        if parts:
+            of = int(self._split_of(parts[-1])["of"])
+            seen = self._split_parts_reviewed(pid, tid, head, of)
+            if len(seen) >= of:
+                return None if early else {"apply": self._split_verdict(seen)}
+            if early:
+                return None              # the next part is the normal REVIEWING step's
         older = [r for r in prior if r["valid"]]
         invalid = len([r for r in prior if not r["valid"]])
         n = len(prior)                                  # call index at this head (op key)
@@ -2872,6 +2883,30 @@ class Coordinator:
             provenance={"spec_from": spec_from, "notes": list(spec_notes or []) + dnotes},
             budget=budget,
             earlier=earlier, authors=authors, question=P.profile.review.get("question") or "")
+        split = None
+        if info["insufficient"] and not early and \
+                P.profile.review.get("split_when_too_big", True):
+            split = self._review_split(P, t, head, dbase, rv_files, priority, rv_mixed, info)
+            if split:
+                part_files, si, sn, keep = split
+                snote = (f"split review, part {si + 1} of {sn}: this sprint's source/test diff "
+                         f"is too big for one review packet, so it is reviewed in {sn} parts by "
+                         f"file. This packet holds only these {len(keep)} source/test file(s): "
+                         + ", ".join(keep[:60]) + (" ..." if len(keep) > 60 else "")
+                         + ". The other parts are reviewed separately and the sprint is approved "
+                         "only when every part is. Judge the files shown; a concern that "
+                         "depends on a file you cannot see goes in residual_risks, not in a "
+                         "CHANGES_REQUIRED finding.")
+                packet, info = R.build_packet(
+                    project_id=pid, task_id=tid, title=spec.title, spec=spec.spec,
+                    scope=spec.scope, base=dbase, head=head, commits=rv_commits,
+                    verification=ver, files=part_files,
+                    patch=lambda rel: self._review_patch(P, rv_mixed, dbase, head, rel),
+                    priority=priority, evidence=evidence, contract=contract,
+                    provenance={"spec_from": spec_from,
+                                "notes": list(spec_notes or []) + dnotes + [snote]},
+                    budget=budget, earlier=earlier, authors=authors,
+                    question=P.profile.review.get("question") or "")
         if info["insufficient"]:
             if early:
                 return None
@@ -2898,6 +2933,8 @@ class Coordinator:
                        "omitted": cov["omitted"][:50], "evidence": cov["evidence"][:30],
                        "incremental_from": dbase if dbase != base else None,
                        "early": bool(early)}
+        if split:
+            meta_packet["split"] = {"part": split[1] + 1, "of": split[2], "files": len(split[3])}
         rsid = f"review-{t['run_id']}-{n}"
         prep = {"key": key, "rsid": rsid, "role": role, "persona": persona, "packet": packet,
                 "max_tokens": budget["max_tokens"], "meta_packet": meta_packet, "head": head,
@@ -3309,9 +3346,109 @@ class Coordinator:
             except FoundryError:
                 pass
 
+    # -- split review (2026-11-20 FIN-4a) ------------------------------------------------
+    # FIN-4a's own source/test diff was 683 KB against a 536 KB review packet budget (the
+    # reviewers have 200K-token contexts, so a bigger budget would only overflow the call)
+    # and the sprint stopped "insufficiently inspected". A diff that does not fit is now
+    # reviewed in parts by file; the sprint is APPROVED when every part is, and goes back
+    # to the implementer as soon as one part asks for changes.
+    REVIEW_SPLIT_FILL = 0.85
+
+    @staticmethod
+    def _split_of(rev: dict) -> dict:
+        return ((rev.get("result") or {}).get("packet") or {}).get("split") or {}
+
+    def _split_parts_reviewed(self, pid: str, tid: str, head: str, of: int) -> dict:
+        """{0-based part index: its latest valid review} of an `of`-part split at `head`.
+        Every part is reviewed at the same commit before the verdict applies, so a later
+        incremental re-review never skips a part nobody read."""
+        seen = {}
+        for r in self.store.reviews(pid, tid, head):
+            sp = self._split_of(r)
+            if r["valid"] and int(sp.get("of") or 0) == of \
+                    and R.packet_version(r) == R.PACKET_VERSION:
+                seen[int(sp["part"]) - 1] = r
+        return seen
+
+    def _split_verdict(self, seen: dict) -> dict:
+        """The verdict of a fully reviewed split: the last part's review when every part
+        is APPROVED, else a CHANGES_REQUIRED / BLOCKED review carrying the findings and
+        repairs of every part that asked for them."""
+        revs = [seen[k] for k in sorted(seen)]
+        asked = [r for r in revs if r["verdict"] != "APPROVED"]
+        if not asked:
+            return revs[-1]
+        top = next((r for r in asked if r["verdict"] == "BLOCKED"), asked[-1])
+        res = dict(top.get("result") or {})
+        for key in ("findings", "required_repairs", "missing_evidence"):
+            vals = []
+            for r in asked:
+                vals.extend(list((r.get("result") or {}).get(key) or []))
+            if vals:
+                res[key] = vals
+        return {**top, "result": res}
+
+    def _review_split(self, P: Project, t: dict, head: str, dbase: str, files: list,
+                      priority, mixed, info: dict):
+        """(part_files, part_index, parts, part_paths) for the next part not yet APPROVED,
+        or None when the diff cannot be split (one file alone too big, or one part)."""
+        pid, tid = P.id, t["task_id"]
+        room = int((info.get("coverage") or {}).get("budget") or 0)
+        if room <= 0:
+            return None
+        cur_t = self.store.task(pid, tid) or t
+        plan = (cur_t.get("data") or {}).get("review_split") or {}
+        if plan.get("head") != head or plan.get("base") != dbase:
+            target = int(room * self.REVIEW_SPLIT_FILL)
+            sizes = {}
+            for f in files:
+                if priority(f) <= R.CODE_MAX_PRIORITY:
+                    sizes[f["path"]] = len(self._review_patch(P, mixed, dbase, head, f["path"])) \
+                        + len(f["path"]) + 60
+            if not sizes or any(s > target for s in sizes.values()):
+                return None
+            parts, cur, used = [], [], 0
+            for path in sorted(sizes):              # path order keeps a folder together
+                if cur and used + sizes[path] > target:
+                    parts.append(cur)
+                    cur, used = [], 0
+                cur.append(path)
+                used += sizes[path]
+            if cur:
+                parts.append(cur)
+            if len(parts) < 2:
+                return None
+            plan = {"head": head, "base": dbase, "parts": parts}
+            self.store.merge_data(pid, tid, review_split=plan)
+            self.store.event(pid, tid, "review_split", detail={
+                "head": head, "base": dbase, "budget": room, "parts": [len(p) for p in parts],
+                "bytes": sum(sizes.values())})
+        n = len(plan["parts"])
+        done = self._split_parts_reviewed(pid, tid, head, n)
+        i = next((k for k in range(n) if k not in done), None)
+        if i is None:
+            return None
+        keep = list(plan["parts"][i])
+        ks = set(keep)
+        part_files = [f for f in files if f["path"] in ks
+                      or (i == 0 and priority(f) > R.CODE_MAX_PRIORITY)]
+        return part_files, i, n, keep
+
     def _apply_review(self, P: Project, t: dict, rev: dict) -> None:
         pid, tid = P.id, t["task_id"]
         rev = self._track_review_owed_only(P, t, rev)
+        sp = self._split_of(rev)
+        if sp:
+            seen = self._split_parts_reviewed(pid, tid, rev["reviewed_sha"], int(sp["of"]))
+            if len(seen) < int(sp["of"]):
+                # one part of a split review is in: the next part follows (REVIEWING)
+                self.store.event(pid, tid, "review_split_part", detail={
+                    "review_id": rev["review_id"], "part": sp.get("part"), "of": sp.get("of"),
+                    "verdict": rev["verdict"], "reviewed_commit_sha": rev["reviewed_sha"]})
+                return self._note(P, t, f"code review part {sp.get('part')}/{sp.get('of')} at "
+                                        f"{rev['reviewed_sha'][:12]}: {rev['verdict']}; the next "
+                                        f"part follows")
+            rev = self._split_verdict(seen)
         res = rev["result"]
         if self._lc(P) and self._lc_apply_review(P, t, rev):
             return
