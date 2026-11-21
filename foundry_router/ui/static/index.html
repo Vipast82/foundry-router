@@ -9902,6 +9902,12 @@ async function pfRender() {
   };
 }
 
+// " (70 easy, 26 medium, ...)" for a build's toast
+function pfTiers(out) {
+  const t = Object.entries((out || {}).tiers || {}).map(([k, n]) => `${n} ${k}`).join(", ");
+  return t ? ` (${t})` : "";
+}
+
 async function tabBench() {
   const [d, md] = await Promise.all([api("bench"), api("models")]);
   const r = d.run || {}, suites = d.suites || [], runs = d.runs || [];
@@ -10003,11 +10009,15 @@ async function tabBench() {
                 It measures where a model stops finding things, which one number
                 cannot say. The longest cases take minutes each."
         >Build the needle suite</button>
+        <label class="nw hint" style="margin:0" title="The highest rung of the long-context ladders (many notes to put together: add up a ledger, the status of many sprints). At 10, Opus 5.5 passes and Sonnet 5.5 runs over the budget; at 11 and 12 both fail (2026-11-21). Raise it when a model clears the top.">top level
+          <input type="number" id="bench-needle-top" min="4" max="20" value="12" style="width:52px"></label>
         <button class="act" id="bench-toolpick" title="Build a tool-picking suite: every
                 tool this router offers goes in the prompt, and each case asks which one
                 meets a stated need. Picking the right tool out of all of them is what a
                 model has to do before it can do anything else."
         >Build the tool-picking suite</button>
+        <label class="nw hint" style="margin:0" title="The highest rung of the 'best value' look-alike ladder: several generated tools qualify and the cheapest that can take the file is wanted. Level 9 is 160 qualifying tools among 1,200. Sonnet 5.5 and Opus 5.5 pass every level and qwen3.8-flash misses only level 9 (2026-11-21): this separates smaller models, not frontier ones.">top level
+          <input type="number" id="bench-pick-top" min="2" max="14" value="9" style="width:52px"></label>
         <button class="act primary" id="bench-toolflow" title="Build the finder suite: tasks
                 done THROUGH foundry_find_tools and foundry_call_tool, the way these personas
                 actually run. The searches really happen against the live registry; the tool
@@ -10142,16 +10152,19 @@ async function tabBench() {
   };
   if ($("#bench-toolpick")) $("#bench-toolpick").onclick = async () => {
     try {
-      const out = await api("bench/toolpick", {method: "POST", body: {limit: 40}});
+      const out = await api("bench/toolpick", {method: "POST", body: {limit: 40,
+        top_level: +($("#bench-pick-top") || {}).value || 0}});
       toast(`built "${out.name}": ${out.cases} cases over ${out.catalogue} tools` +
+            pfTiers(out) +
             (out.skipped ? ` (${out.skipped} skipped: the need named its own answer)` : ""));
       render();
     } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };
   if ($("#bench-needle")) $("#bench-needle").onclick = async () => {
     try {
-      const out = await api("bench/needle", {method: "POST", body: {per_cell: 3}});
-      toast(`built "${out.name}": ${out.cases} cases`);
+      const out = await api("bench/needle", {method: "POST", body: {per_cell: 3,
+        top_level: +($("#bench-needle-top") || {}).value || 0}});
+      toast(`built "${out.name}": ${out.cases} cases` + pfTiers(out));
       render();
     } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
   };

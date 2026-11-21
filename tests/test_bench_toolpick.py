@@ -83,6 +83,8 @@ def test_the_whole_catalogue_is_in_every_prompt(tmp_path):
     bench.build_toolpick(svc, limit=5)
     names = [n for n, _d in bench._tool_rows(svc)]
     for c in bench.cases(svc, "toolpick"):
+        if "lookalikes" in c["tags"]:
+            continue                  # a generated catalogue, not the live one (v0.181.224)
         body = c["messages"][1]["content"]
         for n in names:
             assert n in body, (c["id"], n)
@@ -92,6 +94,8 @@ def test_the_answer_is_the_tool_and_is_scored_exactly(tmp_path):
     svc = _svc(tmp_path)
     bench.build_toolpick(svc, limit=5)
     for c in bench.cases(svc, "toolpick"):
+        if "lookalikes" in c["tags"]:
+            continue
         want = c["reference"]["must_include"]
         assert want == [c["task_id"]]
         assert bench.exact_score(want[0], want) == 1.0

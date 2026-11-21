@@ -250,7 +250,11 @@ def ladder_reach(rows: list) -> list:
     for lad in sorted(by):
         b = by[lad]
         top = max(b["passed"]) if b["passed"] else 0
-        name = lad.split(":", 1)[-1]
+        # "trace:grid" -> grid; "ctx:ledger:1" -> ledger (second set)
+        bits = lad.split(":")
+        name = bits[1] if len(bits) > 1 else bits[0]
+        if len(bits) > 2 and bits[2] not in ("", "0"):
+            name += " (second set)"
         out.append({"label": f"{name}: level {top} of {max(b['levels'])}" if top
                     else f"{name}: none of {max(b['levels'])}",
                     "n": len(b["levels"]), "passed": len(b["passed"]),
@@ -272,7 +276,12 @@ def facets(suite: str, rows: list) -> list:
                     "rows": _group(rows, lambda r: _kchars(_tag(_tags(r), "chars")),
                                    [_kchars(n) for n in lengths])})
         kinds = (("decoy", "beside a decoy"), ("multi", "three to collect"),
-                 ("updated", "corrected later"), ("paraphrase", "asked in other words"))
+                 ("updated", "corrected later"), ("paraphrase", "asked in other words"),
+                 # v0.181.224: many notes to put together
+                 ("ctx-chain", "follow a chain of notes"), ("ctx-asof", "in force on a date"),
+                 ("ctx-top", "compare several totals"),
+                 ("ctx-blocked", "the status of many sprints"),
+                 ("ctx-ledger", "add up a ledger"))
 
         def _kind(r):
             t = _tags(r)
@@ -316,12 +325,14 @@ def facets(suite: str, rows: list) -> list:
                         "rows": _group(rows, lambda r: families.get(
                             _tag(_tags(r), "family") or "", "short snippets"),
                             ["short snippets"] + list(families.values()))})
-        reach = ladder_reach(rows)
-        if reach:
-            out.append({"name": "How far up each ladder", "rows": reach})
         out.append({"name": "Question",
                     "rows": _group(rows, lambda r: "what it raises"
                                    if "exception" in _tags(r) else "what it returns")})
+    reach = ladder_reach(rows)
+    if reach:
+        # any suite with generated ladders (v0.181.223, every suite v0.181.224)
+        out.insert(1 if out and out[0]["name"] == "Difficulty" else 0,
+                   {"name": "How far up each ladder", "rows": reach})
     if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"

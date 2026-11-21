@@ -196,10 +196,13 @@ def test_score_one_passes_the_decoy_through():
     assert s["score"] == 0.0
 
 
-def test_the_needle_tiers_climb_with_length():
+def test_the_needle_grid_is_tiered_by_what_was_measured():
+    """v0.181.224: it climbed with length, by eye. Flash found 141 of 141 out to
+    815,000 characters and the brain lane 122 of 123, so no length is hard for
+    a model that can hold it; hard and expert are the long-context ladders."""
     tiers = [bench.needle_tier(n) for n in (4000, 16000, 32000, 64000, 96000)]
-    assert tiers == ["easy", "medium", "medium", "hard", "expert"]
-    assert bench.needle_tier(16000, decoy=True) == "hard"
+    assert tiers == ["easy"] * 5
+    assert bench.needle_tier(16000, decoy=True) == "easy"
 
 
 # -- the code suite --------------------------------------------------------------------

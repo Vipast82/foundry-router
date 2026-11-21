@@ -227,14 +227,15 @@ def _case(cid, want, tier, weight=None, ladder="", level=0):
 
 
 def test_a_run_is_scored_by_tier_not_by_head_count(tmp_path):
-    cases = [_case(f"e{i}", 1, "easy") for i in range(6)] + [_case("x", 9, "expert")]
+    cases = ([_case(f"e{i}", 1, "easy") for i in range(12)]
+             + [_case(f"x{i}", 9, "expert") for i in range(4)])
     for c in cases:
         c["weight"] = bench.tier_weights(cases)[c["tags"][1].split(":")[1]]
-    pool = _Pool(lambda q: "ANSWER: 1")            # every easy one right, the expert wrong
+    pool = _Pool(lambda q: "ANSWER: 1")            # every easy one right, every expert wrong
     svc = _svc(tmp_path, pool)
     _suite(svc, cases)
     out = asyncio.run(bench._run(svc, "codereason", "m", "", 0))
-    assert out["score"] == 50.0, "6 of 7 right, and half the tiers"
+    assert out["score"] == 50.0, "12 of 16 right, and half the tiers"
 
 
 # -- a ladder stops being climbed -------------------------------------------------------------

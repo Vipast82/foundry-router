@@ -1,8 +1,9 @@
 # Benchmark difficulty: what the tiers mean and how to raise them
 
-Written for v0.181.223 (2026-11-21). Code: `foundry_router/benchhard.py`,
-`foundry_router/bench.py`. Covers the code-reasoning suite; the other suites
-are listed at the end with where they stand.
+Written for v0.181.223 and v0.181.224 (2026-11-21). Code:
+`foundry_router/benchhard.py`, `foundry_router/bench.py`. Covers code
+reasoning, long-context recall and tool picking; the other suites are listed
+at the end with where they stand.
 
 ## What a tier means
 
@@ -88,7 +89,9 @@ by running it when the suite is built. Nothing a model writes is ever run.
 
 **The score weights every tier the same.** 70 easy cases would otherwise
 outvote 9 expert ones: each case carries a weight so the four tiers each
-contribute a quarter (`bench.tier_weights`).
+contribute a quarter (`bench.tier_weights`). A suite is weighed this way only
+when every tier in it has at least four cases: tool picking has one medium
+case, which would otherwise be half its score.
 
 **A ladder stops being climbed.** After two levels of one ladder are missed in
 a row, the levels above are not sent: they score 0 and the card says "above
@@ -110,14 +113,79 @@ Limits, set by build time rather than by difficulty: hampaths stops at 9 items
 and route at 10 stops (a brute-force count over orderings), sat at 16
 variables. Past those, add a kind rather than a level.
 
+## Long-context recall (v0.181.224)
+
+The grid of single notes is kept: it says where a model stops finding things,
+out to the end of its window. Every case in it is now **easy**, because that is
+what was measured: flash found 141 of 141 out to 815,000 characters, the brain
+lane 122 of the 123 that fit its window.
+
+Added: ladders that put many notes into 32,000 characters of the same filler
+and ask for something that needs the right ones put together.
+
+| Kind | The question | In the suite |
+|---|---|---|
+| chain | a sprint's code, given through other sprints' codes (some "plus N") | hops: 12 and 40 |
+| asof | the code in force on a date, from dated notes out of order | notes: 27 and 100 |
+| top | which sprint spent the most, and how much | amounts: 30 and 140 |
+| blocked | which sprints are blocked by their latest status note | sprints: 12 to 160 |
+| ledger | one sprint's total over every ledger note | amounts: 20 to 450 |
+
+| Kind and level | flash | Sonnet 5.5 | Opus 5.5 | Tier |
+|---|---|---|---|---|
+| chain, asof, blocked, ledger, levels 1-4 | 15/16 | - | - | easy |
+| the same four, levels 3, 5, 7 | - | 12/12 | 11/12 | - |
+| chain, asof, levels 6, 8, 10 | 6/6 | right to level 7 | right to level 7 | easy |
+| top, level 8 / level 10 | right / wrong | right / right | right / right | easy / medium |
+| blocked, ledger, level 6 | 2/2 | - | - | easy |
+| blocked, ledger, levels 8-9 | 0/4 | 4/4 | 3/3 | medium |
+| blocked, ledger, level 10 (100 sprints, 270 amounts) | 0/2 | 0/2, over budget | 2/2 | hard |
+| blocked, ledger, levels 11-12 | - | 0/4 | 0/3, and one call that failed | expert |
+
+Following a chain or finding the note in force on a date is solved at every
+size tried. What separates the models is putting a great many notes together
+inside the budget. The suite takes blocked and ledger to level 12 (two sets
+from level 9) and the other three at levels 6 and 10: 28 cases. "top level"
+beside *Build the needle suite* adds rungs to blocked and ledger.
+
+## Tool picking (v0.181.224)
+
+The 48 cases over the live catalogue are kept and are **easy**: both local
+models chose right 48 times in 48.
+
+Added: generated catalogues of near-identical tools - an action, a kind of
+file, a mode, where it runs, where the result goes, a size limit and a price -
+where the request is worded differently from the descriptions.
+
+| Kind | The right answer |
+|---|---|
+| fit | the one tool that meets every part of the request |
+| none | "none": a sibling meets all but one part, nothing meets all |
+| best | of several tools that qualify, the cheapest that can take the file (from level 5: lowest price per megabyte) |
+
+Level sets the catalogue (80 to 1,200 tools; 1,200 is about 48,000 tokens,
+which is as far as the brain lane's window allows), the siblings one step from
+the answer (4 to 18) and, for *best*, the tools that all qualify (4 to 160).
+
+**There is no hard tier here.** Sonnet 5.5 and Opus 5.5 chose right in every
+case sent (28 calls), to 1,200 tools and 160 qualifying rivals, in about a
+thousand tokens each. The one case both "missed" was the answer key's fault: the request
+said "without touching the graphics card", which an edge-node tool also
+satisfies, so they were right and the key was not. Every request phrase now
+fits one value only, and a test holds that.
+
+qwen3.8-flash chose right in 10 of 11: every *fit* and *none* to 1,200 tools,
+*best* to 96 rivals, and missed *best* at 160 rivals. That rung is the suite's
+one medium case; everything else in tool picking is easy. The ladder is there
+for a smaller model than the ones run today, and "top level" beside *Build the
+tool-picking suite* raises *best*.
+
 ## The other suites
 
-Not changed in v0.181.223. Where they stand on the two local profiles:
+Not changed yet. Where they stand on the two local profiles:
 
 | Suite | flash | brain lane | Note |
 |---|---|---|---|
-| Long-context recall | 100.0 | 99.2 | at the ceiling: needs multi-hop and counting kinds |
-| Tool picking | 100.0 | 100.0 | at the ceiling: needs indirect needs and near-twins |
-| Find and use tools | 93.8 | 86.2 | near it: needs paraphrased tasks and argument checks |
+| Find and use tools | 93.8 | 86.2 | near the ceiling: needs paraphrased tasks and argument checks |
 | Coordinator protocol | 86.5 | 59.0 | separates the local models; frontier not measured |
 | Real work replay | 79.9 | 68.3 | separates the local models; frontier not measured |

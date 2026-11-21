@@ -1,3 +1,54 @@
+## v0.181.224 - recall and tool picking: tiers that are measured
+
+Second part of raising the benchmarks' difficulty (v0.181.223 did code
+reasoning). Both suites were at the ceiling for both local models: recall 100.0
+and 99.2, tool picking 100.0 and 100.0. Same method: generate candidates, send
+them to qwen3.8-flash, Sonnet 5.5 and Opus 5.5 with working allowed and an
+8,192-token budget, and tier each rung by who misses it. The numbers are in
+docs/BENCH_DIFFICULTY.md.
+
+**Long-context recall.** The grid of single notes stays, because it says where
+a model stops finding things; every case in it is now easy, which is what was
+measured (flash 141 of 141 out to 815,000 characters, the brain lane 122 of
+123). Added: 28 cases on generated ladders that put many notes into 32,000
+characters and ask for something that needs them put together. Following a
+chain of notes and finding the code in force on a date turned out to be solved
+at every size tried (flash to 40 hops and 100 dated notes, the Claude models
+to level 7).
+Adding up a ledger and working out which sprints are blocked separate them by
+size: flash passes level 6 and misses level 8; Sonnet and Opus pass levels 8
+and 9 (all 7 calls that came back); at level 10 (270 amounts, 100 sprints) Opus is right and Sonnet runs
+over the budget; at levels 11 and 12 both fail. So level 10 is hard and 11-12
+expert. The suite's score weights each tier the same.
+
+**Tool picking has no hard tier, and now says so.** The 48 cases over the live
+catalogue stay and are easy. Added: 11 cases over generated catalogues of
+near-identical tools, where one tool meets every part of a request worded
+differently from the descriptions, or none does, or the cheapest of several
+that qualify is wanted. Sonnet and Opus chose right in every case sent, to
+1,200 tools and 160 qualifying rivals, in about a thousand tokens; flash in 10
+of 11, missing only the 160-rival rung. That rung is medium and the rest are
+easy: the ladder is there for a smaller model than the ones run today.
+
+**A wrong answer key, found by reading the misses.** Both Claude models
+"missed" the same case, naming a tool where the key said none. The request
+said "without touching the graphics card", which an edge-node tool also
+satisfies: they were right. Every request phrase now fits one value only, and
+a test holds that. A sprint id that sat inside another (AS-29 in VR-AS-29)
+was removed for the same reason.
+
+Also: a case too long for a model's window is left out as "beyond" in any
+suite, not only recall (the 1,200-tool catalogue is about 48,000 tokens). A
+tier is weighed against the others only when every tier has at least four
+cases, or tool picking's single medium case would be half its score. "top
+level" boxes beside Build the needle suite (default 12) and Build the
+tool-picking suite (default 9) add rungs. The card shows "How far up each
+ladder" for every suite that has ladders.
+
+Rebuild both suites to use this; scores are not comparable with runs of the
+old ones. Not changed yet: find-and-use-tools, coordinator protocol, real work
+replay. 35 tests.
+
 ## v0.181.223 - code reasoning: tiers that are measured, difficulty as a dial
 
 Asked: go through the benchmarks and raise the difficulty as models improve, so

@@ -716,10 +716,17 @@ def case_tokens(case: dict) -> int:
 
 
 def needle_tier(length: int, decoy: bool = False) -> str:
-    """How hard a needle case is, for the card's difficulty ladder. A decoy
-    case is one step harder than a plain needle at the same length."""
-    i = 0 if length <= 4000 else 1 if length <= 32000 else 2 if length <= 64000 else 3
-    return TIERS[min(3, i + (1 if decoy else 0))]
+    """The tier of a find-the-note case, as MEASURED (v0.181.224): easy.
+
+    These were tiered by length, a decoy one step up. On two full profiles
+    qwen3.8-flash found 141 of 141, out to 815,000 characters, and the brain
+    lane 122 of the 123 that fit its window: finding one note is something the
+    local models do at any length they can hold, so no length is "hard". The
+    grid still says WHERE a model stops, which is why it is kept; hard and
+    expert are benchhard's long-context ladders, where many notes have to be
+    put together."""
+    del length, decoy
+    return "easy"
 _NEEDLE_SENTENCE = ("Operational note: the verification code for sprint {task} is "
                     "{code}. Quote it exactly when asked.")
 _NEEDLE_QUESTION = ("Read the notes above. What is the verification code for sprint "
@@ -873,9 +880,38 @@ def _sprint(rnd) -> str:
     return f"{rnd.choice(('VR-AS', 'LOB', 'FIN', 'MV2', 'POL', 'HK', 'UI'))}-{rnd.randint(10, 99)}"
 
 
+def _context_cases(hay: str, top_level: int) -> list:
+    """benchhard's long-context ladders as cases (v0.181.224): many notes in
+    32,000 characters of the same filler, a question that needs the right ones
+    put together, working allowed and one closing line scored."""
+    import random as _rnd
+    from . import benchhard
+    out = []
+    length = benchhard.CONTEXT_CHARS
+    for sp in benchhard.context_specs(top_level):
+        rnd = _rnd.Random(f"ctx-hay-{sp['kind']}-{sp['level']}-{sp['seed']}")
+        start = rnd.randrange(0, max(1, len(hay) - length - 1))
+        body = _plant(hay[start:start + length], sp["notes"])
+        out.append({
+            "id": f"NEEDLE-ctx-{sp['kind']}-L{sp['level']}-{sp['seed']}",
+            "task_id": sp["task"],
+            "tags": ["needle", "context", f"ctx-{sp['kind']}", f"chars:{len(body) // 1000 * 1000}",
+                     f"tier:{sp['tier']}", f"ladder:{sp['ladder']}", f"level:{sp['level']}",
+                     f"tokens:{int(len(body) / CHARS_PER_TOKEN) + 120}"],
+            "max_tokens": THINK_ROOM,
+            "messages": [
+                {"role": "system", "content": "You answer from the notes you are given."},
+                {"role": "user", "content": body + "\n\n" + sp["question"]},
+            ],
+            "reference": {"content": ", ".join(sp["want"]), "must_include": sp["want"],
+                          "must_exclude": sp["avoid"], "final": True},
+        })
+    return out
+
+
 def _hard_case(kind: str, hay: str, length: int, seq: int, body: str, question: str,
                want: list, avoid: list, task: str) -> dict:
-    tier = TIERS[min(3, TIERS.index(needle_tier(length)) + 1)]
+    tier = needle_tier(length)
     return {
         "id": f"NEEDLE-{length//1000}k-{kind}-{seq}",
         "task_id": task,
@@ -972,9 +1008,11 @@ def _paraphrase_case(hay: str, length: int, seq: int) -> dict:
 
 def build_needle(svc, name: str = "needle", per_cell: int = 3,
                  depths=NEEDLE_DEPTHS, lengths=NEEDLE_LENGTHS,
-                 decoys: int = NEEDLE_DECOYS, hard: bool = True) -> dict:
+                 decoys: int = NEEDLE_DECOYS, hard: bool = True,
+                 top_level: int = 0) -> dict:
     """Write a needle-in-a-haystack suite: `per_cell` cases at each depth and
-    length, plus `decoys` decoy cases per length. Returns {name, cases, path}."""
+    length, plus `decoys` decoy cases per length, plus (with `hard`) the
+    long-context ladders up to `top_level`. Returns {name, cases, path}."""
     lengths = sorted({int(n) for n in lengths})
     hay = _haystack_text(svc, max(lengths) if lengths else 0)
     out = []
@@ -992,6 +1030,16 @@ def build_needle(svc, name: str = "needle", per_cell: int = 3,
             out.append(_multi_case(hay, int(length), 0))
             out.append(_updated_case(hay, int(length), 0))
             out.append(_paraphrase_case(hay, int(length), 0))
+    tiers = {}
+    if hard:
+        # the ladders, last: a run climbs each one and stops (v0.181.224)
+        out += _context_cases(hay, top_level)
+        weights = tier_weights(out)
+        for c in out:
+            t = next((x.split(":", 1)[1] for x in c["tags"] if x.startswith("tier:")), "")
+            tiers[t] = tiers.get(t, 0) + 1
+            if weights:
+                c["weight"] = weights[t]
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
         for c in out:
@@ -999,10 +1047,13 @@ def build_needle(svc, name: str = "needle", per_cell: int = 3,
     try:
         svc.db.log_event("info", "bench",
                          f"built the {name} suite: {len(out)} cases, "
-                         f"{len(lengths)} length(s) x {len(depths)} depth(s)")
+                         f"{len(lengths)} length(s) x {len(depths)} depth(s)"
+                         + ("; " + ", ".join(f"{tiers[t]} {t}" for t in TIERS if t in tiers)
+                            if tiers else ""))
     except Exception:                                             # noqa: BLE001
         pass
-    return {"name": name, "cases": len(out), "path": str(f)}
+    return {"name": name, "cases": len(out), "path": str(f),
+            "tiers": {t: tiers[t] for t in TIERS if t in tiers}}
 
 
 def needle_breakdown(db, run_id: int) -> list:
@@ -1120,9 +1171,43 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
-def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
+_LOOKALIKE_SYSTEM = ("You choose tools. You are given every tool this system has, one per "
+                     "line as NAME - description. Pick the one tool that meets every part "
+                     "of the request. If no tool meets all of it, the answer is none.")
+
+
+def _lookalike_cases(top_level: int) -> list:
+    """benchhard's catalogues of near-identical tools (v0.181.224): the live
+    catalogue has few true twins, and both local models chose right 48 times
+    in 48. Here the description has to be read to the last clause."""
+    from . import benchhard
+    out = []
+    for sp in benchhard.pick_specs(top_level):
+        cat = "\n".join(f"{n} - {d}" for n, d in sp["tools"])
+        ask = (cat + "\n\n" + sp["need"] + "\nWhich single tool is it? Give its name, "
+               "copied exactly, or none. " + benchhard.FINAL_RULE)
+        out.append({
+            "id": f"PICK-{sp['kind']}-L{sp['level']}",
+            "task_id": f"lookalikes__{sp['kind']}",
+            "tags": ["toolpick", "tool_choice", "context", "lookalikes", f"pick-{sp['kind']}",
+                     f"catalogue:{len(sp['tools'])}", f"tier:{sp['tier']}",
+                     f"ladder:{sp['ladder']}", f"level:{sp['level']}",
+                     f"tokens:{int(len(ask) / 3.3) + 120}"]
+            + (["none-fits"] if sp["want"] == "none" else []),
+            "max_tokens": THINK_ROOM,
+            "messages": [{"role": "system", "content": _LOOKALIKE_SYSTEM},
+                         {"role": "user", "content": ask}],
+            "reference": {"content": sp["want"], "must_include": [sp["want"]],
+                          "must_exclude": sp["avoid"], "final": True},
+        })
+    return out
+
+
+def build_toolpick(svc, name: str = "toolpick", limit: int = 40,
+                   top_level: int = 0) -> dict:
     """Write a suite that asks which tool meets a stated need, with the whole
-    catalogue in the prompt as the distractor set."""
+    catalogue in the prompt as the distractor set - then the same question
+    over generated catalogues of look-alikes, up to `top_level`."""
     rows = _tool_rows(svc)
     if len(rows) < 5:
         raise ValueError("the tool registry has too few tools to build a suite "
@@ -1148,7 +1233,8 @@ def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
         out.append({
             "id": f"PICK-{len(out) + 1:03d}",
             "task_id": tool_name,
-            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}"]
+            # both local models: 48 of 48 on these (v0.181.224)
+            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}", "tier:easy"]
             + (["lookalike"] if _lookalikes(tool_name, [n for n, _d in rows]) else []),
             "messages": [
                 {"role": "system", "content": _PICK_SYSTEM},
@@ -1162,7 +1248,8 @@ def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
         out.append({
             "id": f"PICK-NONE-{i + 1:02d}",
             "task_id": "none",
-            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}", "none-fits"],
+            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}", "none-fits",
+                     "tier:easy"],
             "messages": [
                 {"role": "system", "content": _PICK_SYSTEM},
                 {"role": "user", "content": catalogue + "\n\n" +
@@ -1170,6 +1257,14 @@ def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
             ],
             "reference": {"content": "none", "must_include": ["none"]},
         })
+    out += _lookalike_cases(top_level)
+    weights = tier_weights(out)
+    tiers: dict = {}
+    for c in out:
+        t = next((x.split(":", 1)[1] for x in c["tags"] if x.startswith("tier:")), "")
+        tiers[t] = tiers.get(t, 0) + 1
+        if weights:
+            c["weight"] = weights[t]
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
         for c in out:
@@ -1183,7 +1278,8 @@ def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
         pass
     return {"name": name, "cases": len(out), "path": str(f),
             "catalogue": len(rows), "skipped": skipped,
-            "description_chars": desc_cap, "prompt_chars": len(catalogue)}
+            "description_chars": desc_cap, "prompt_chars": len(catalogue),
+            "tiers": {t: tiers[t] for t in TIERS if t in tiers}}
 
 
 # -- the finder suite: the ecosystem as it is actually run ---------------------------
@@ -1807,6 +1903,9 @@ def _hard_code_cases(top_level: int, refused: list) -> list:
     return out
 
 
+MIN_TIER = 4           # cases a tier needs before tiers are weighed against each other
+
+
 def tier_weights(cases_: list) -> dict:
     """{tier: weight per case} so every tier present counts the same in the
     suite's score: 70 easy cases must not outvote 9 expert ones (v0.181.223)."""
@@ -1816,6 +1915,10 @@ def tier_weights(cases_: list) -> dict:
                   if str(x).startswith("tier:")), "")
         count[t] = count.get(t, 0) + 1
     if len(count) < 2 or "" in count:
+        return {}
+    if min(count.values()) < MIN_TIER:
+        # v0.181.224: a tier of one case would carry a whole tier's share -
+        # tool picking has a single medium case, which would be half its score
         return {}
     return {t: round(len(cases_) / (len(count) * n), 6) for t, n in count.items()}
 
@@ -2328,7 +2431,12 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         # the suite is sized to the largest local model, and a 249k-token case
         # sent to a 65k model would fail and score 0 - a fact about the window,
         # which the card shows as the end of the grid, not about recall.
-        if "needle" in (case.get("tags") or []) and ctx_limit                 and case_tokens(case) + OUTPUT_ROOM > ctx_limit:
+        # ... and since v0.181.224 so is any case that says how long it is: a
+        # 48,000-token catalogue of look-alikes is the same kind of fact
+        sized = any(str(t).startswith("tokens:") for t in case.get("tags") or [])
+        room = int(case.get("max_tokens") or OUTPUT_ROOM)
+        if (sized or "needle" in (case.get("tags") or [])) and ctx_limit \
+                and case_tokens(case) + room > ctx_limit:
             got = {"content": "", "seconds": 0}
             s = {"score": None, "tools": 0.0, "code": None, "answer": None,
                  "exact": None, "error": "",

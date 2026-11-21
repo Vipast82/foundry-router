@@ -1053,3 +1053,386 @@ def code_specs(run, top_level: int = TOP_LEVEL) -> list:
                         "family": "trace" if ladder.startswith("trace:") else "search",
                         "ladder": ladder, "level": level})
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Long context: reason over what is there, not just find it                   #
+# --------------------------------------------------------------------------- #
+# Both local models found every single needle out to the end of their windows
+# (flash 141/141, the brain lane 122/123): finding one sentence is solved. These
+# put MANY notes in the same context and ask for something that needs all of
+# the right ones - follow a chain, pick the note in force on a date, work out
+# which sprints are blocked, add up a ledger. Generated from (kind, level,
+# seed); the level sets how many notes have to be put together.
+
+CONTEXT_KINDS = ("chain", "asof", "blocked", "ledger", "top")
+_PREFIXES = ("VR-AS", "LOB", "FIN", "MV2", "POL", "HK", "UI", "GF", "PT", "SH")   # none inside another
+_CONTEXT_SIZES = {
+    "chain": (2, 3, 4, 6, 8, 12, 16, 24),          # hops
+    "asof": (3, 5, 8, 12, 18, 27, 40, 60),         # dated notes for the sprint asked about
+    "blocked": (3, 5, 8, 12, 18, 26, 36, 50, 70, 100),   # sprints with a status history
+    "ledger": (4, 7, 12, 20, 32, 50, 80, 120, 180, 270),  # amounts to add up
+    "top": (4, 6, 9, 14, 20, 30, 45, 66, 96, 140),        # amounts, shared among sprints
+}
+
+
+def context_size(kind: str, level: int) -> int:
+    return _size(_CONTEXT_SIZES[kind], level)
+
+
+def _ids(rnd: random.Random, n: int) -> list:
+    pool = [f"{p}-{k}" for p in _PREFIXES for k in range(10, 100)]
+    return rnd.sample(pool, n)
+
+
+def _dates(rnd: random.Random, n: int) -> list:
+    """n different days of 2026, as ISO text, in random order."""
+    days = rnd.sample(range(1, 361), n)
+    return [f"2026-{(d - 1) // 30 + 1:02d}-{(d - 1) % 30 + 1:02d}" for d in days]
+
+
+def _spots(rnd: random.Random, notes: list) -> list:
+    """[(percent, note)] with the notes in random order through the context."""
+    rnd.shuffle(notes)
+    return [(rnd.uniform(1, 99), n) for n in notes]
+
+
+def _chain(rnd: random.Random, level: int) -> dict:
+    hops = context_size("chain", level)
+    chains = 1 + min(4, level)                       # the asked one plus decoys
+    ids = _ids(rnd, chains * (hops + 1))
+    notes, ends = [], []
+    for c in range(chains):
+        seq = ids[c * (hops + 1):(c + 1) * (hops + 1)]
+        code = rnd.randint(100000, 899999)
+        total = code
+        for a, b in zip(seq, seq[1:]):
+            if level >= 4 and rnd.random() < 0.5:
+                d = rnd.randint(2, 90)
+                total += d
+                notes.append(f"Operational note: the verification code for sprint {a} is "
+                             f"sprint {b}'s code plus {d}.")
+            else:
+                notes.append(f"Operational note: sprint {a} uses the same verification "
+                             f"code as sprint {b}.")
+        notes.append(f"Operational note: the verification code for sprint {seq[-1]} is "
+                     f"{code}. Quote it exactly when asked.")
+        ends.append((seq[0], total, code))
+    ask, want, _raw = ends[0]
+    avoid = sorted({str(t) for _a, t, _c in ends[1:]} | {str(c) for _a, _t, c in ends[1:]})
+    return {"notes": notes, "task": ask, "want": [str(want)],
+            "avoid": [x for x in avoid if x != str(want)],
+            "question": f"What is the verification code for sprint {ask}? Some notes give a "
+                        f"sprint's code in terms of another sprint's: follow them all the way."}
+
+
+def _asof(rnd: random.Random, level: int) -> dict:
+    n = context_size("asof", level)
+    ask, other = _ids(rnd, 2)
+    days = _dates(rnd, 2 * n + 1)
+    mine = sorted(days[:n])
+    codes = {d: str(rnd.randint(100000, 999999)) for d in mine}
+    notes = [f"Operational note dated {d}: the verification code for sprint {ask} was set "
+             f"to {codes[d]}." for d in mine]
+    wrong = []
+    for d in days[n:2 * n]:
+        c = str(rnd.randint(100000, 999999))
+        wrong.append(c)
+        notes.append(f"Operational note dated {d}: the verification code for sprint {other} "
+                     f"was set to {c}.")
+    k = rnd.randint(1, n - 1)                        # in force between two of its notes
+    lo, hi = mine[k - 1], mine[k]
+    between = [d for d in sorted(days) if lo < d < hi and d not in codes]
+    when = between[0] if between else hi             # the day itself counts: "on or before"
+    want = codes[hi] if when == hi else codes[lo]
+    return {"notes": notes, "task": ask, "want": [want],
+            "avoid": [c for c in list(codes.values()) + wrong if c != want],
+            "question": f"What was the verification code for sprint {ask} on {when}? It is "
+                        f"the one set by the latest note for that sprint dated on or before "
+                        f"{when}."}
+
+
+def _blocked(rnd: random.Random, level: int) -> dict:
+    m = context_size("blocked", level)
+    ids = _ids(rnd, m)
+    want_n = rnd.randint(max(1, m // 3), max(2, m * 2 // 3))
+    final = ["BLOCKED"] * want_n + [rnd.choice(("RUNNING", "DONE")) for _ in range(m - want_n)]
+    rnd.shuffle(final)
+    notes = []
+    for s, last in zip(ids, final):
+        k = rnd.randint(1, 4)
+        days = sorted(_dates(rnd, k))
+        for i, d in enumerate(days):
+            st = last if i == k - 1 else rnd.choice(("BLOCKED", "RUNNING", "DONE"))
+            notes.append(f"Status note dated {d}: sprint {s} is {st}.")
+    return {"notes": notes, "task": ids[0],
+            "want": [s for s, f in zip(ids, final) if f == "BLOCKED"],
+            "avoid": [s for s, f in zip(ids, final) if f != "BLOCKED"],
+            "question": "Which sprints are BLOCKED according to the latest dated status note "
+                        "about each of them? Give their ids, separated by commas."}
+
+
+def _ledger(rnd: random.Random, level: int) -> dict:
+    n = context_size("ledger", level)
+    ask, a, b = _ids(rnd, 3)
+    what = ("review", "gate runs", "asset imports", "playtests", "repairs", "captures")
+    notes, total = [], 0
+    for _ in range(n):
+        amt = rnd.randint(11, 480)
+        total += amt
+        notes.append(f"Ledger note: sprint {ask} spent {amt} credits on {rnd.choice(what)}.")
+    for _ in range(n):
+        notes.append(f"Ledger note: sprint {rnd.choice((a, b))} spent {rnd.randint(11, 480)} "
+                     f"credits on {rnd.choice(what)}.")
+    return {"notes": notes, "task": ask, "want": [str(total)], "avoid": [],
+            "question": f"How many credits did sprint {ask} spend in total, across every "
+                        f"ledger note about it? Give the number."}
+
+
+def _top(rnd: random.Random, level: int) -> dict:
+    """Which sprint spent the most: several totals, close enough that none can
+    be judged by eye."""
+    n = context_size("top", level)
+    k = max(2, min(12, 2 + level))                    # sprints sharing the notes
+    ids = _ids(rnd, k)
+    what = ("review", "gate runs", "asset imports", "playtests", "repairs", "captures")
+    for _try in range(50):
+        spent = {s: [] for s in ids}
+        for i in range(n):
+            spent[ids[i % k] if i < k else rnd.choice(ids)].append(rnd.randint(101, 399))
+        totals = sorted(((sum(v), s) for s, v in spent.items()), reverse=True)
+        if totals[0][0] != totals[1][0]:              # one winner, never a tie
+            break
+    notes = [f"Ledger note: sprint {s} spent {amt} credits on {rnd.choice(what)}."
+             for s, v in spent.items() for amt in v]
+    best_total, best = totals[0]
+    return {"notes": notes, "task": best, "want": [best, str(best_total)],
+            "avoid": [s for s in ids if s != best],
+            "question": "Which sprint spent the most credits in total across its ledger "
+                        "notes, and how many? Give the sprint id and the number."}
+
+
+_CONTEXT = {"chain": _chain, "asof": _asof, "blocked": _blocked, "ledger": _ledger,
+            "top": _top}
+
+
+def context_spec(kind: str, level: int, seed: int) -> dict:
+    """{notes: [(percent, text)], question, want, avoid, task} for one case."""
+    rnd = random.Random(f"context-{kind}-{level}-{seed}")
+    sp = _CONTEXT[kind](rnd, int(level))
+    sp["notes"] = _spots(rnd, sp["notes"])
+    sp["question"] = "Read the notes above. " + sp["question"] + " " + FINAL_RULE
+    return sp
+
+
+# --------------------------------------------------------------------------- #
+# Tool picking: a catalogue of look-alikes                                    #
+# --------------------------------------------------------------------------- #
+# Both local models chose the right tool from the live 162-tool catalogue 48
+# times in 48. That catalogue has few true twins, so naming the right area is
+# enough. These build a catalogue where every tool has near-identical siblings
+# and exactly one meets every constraint in the need (or none does), so the
+# descriptions have to be READ. Level sets the size of the catalogue and how
+# many siblings differ from the answer in a single respect.
+#   fit   one tool matches every constraint
+#   none  a sibling matches all but one, and nothing matches all: answer none
+#   best  several tools qualify; the cheapest that can take the file is wanted
+
+PICK_KINDS = ("fit", "none", "best")
+_PICK_SIZES = (40, 80, 150, 300, 600, 1200)             # tools; 1,200 is ~48k tokens
+_PICK_TWINS = (2, 4, 6, 8, 12, 18, 24)                  # siblings one step from the answer
+_PICK_RIVALS = (3, 4, 6, 8, 12, 24, 48, 96, 160)        # "best": tools that all qualify
+PICK_RATIO_FROM = 5                                     # "best": price per MB from here up
+
+# (value, how a description says it, how a person asking says it). The asking
+# phrase must fit ONE value only: "without touching the graphics card" fitted
+# the edge node as well as the CPU, and both Claude models correctly named a
+# tool where the key said none (calibration, 2026-11-21).
+_ACTIONS = (("convert", "Converts", "changed into another format"),
+            ("resize", "Resizes", "given a different width and height"),
+            ("compress", "Compresses", "squeezed down to take less space"),
+            ("merge", "Merges", "joined together into one"),
+            ("split", "Splits", "cut apart into pieces"),
+            ("trim", "Trims", "shortened by cutting off the ends"),
+            ("tag", "Tags", "labelled with keywords"),
+            ("scan", "Scans", "checked for problems"),
+            ("sign", "Signs", "stamped so its origin can be proven"),
+            ("encrypt", "Encrypts", "locked so only key holders can open it"))
+_OBJECTS = (("image", "images", "a picture"), ("video", "videos", "a film clip"),
+            ("audio", "audio files", "a sound recording"), ("pdf", "PDF documents", "a PDF"),
+            ("sheet", "spreadsheets", "a table of figures"), ("archive", "archives", "a zip bundle"),
+            ("subtitle", "subtitle files", "a captions file"), ("font", "font files", "a typeface"),
+            ("model", "3D models", "a 3D mesh"), ("log", "log files", "a server log"))
+_MODES = (("lossless", "in lossless mode", "without losing any quality"),
+          ("fast", "in fast mode", "as quickly as possible, quality second"),
+          ("batch", "in batch mode", "for a whole folder at once"),
+          ("stream", "in streaming mode", "while the data is still arriving"),
+          ("preview", "in preview mode", "as a rough draft to look at first"))
+_WHERE = (("gpu", "Runs on the GPU", "on the graphics card"),
+          ("cpu", "Runs on the CPU only", "on this machine's processor, not its graphics card"),
+          ("cloud", "Runs in the cloud", "on the hosted service, not this machine"),
+          ("sandbox", "Runs in an isolated sandbox", "inside the isolated sandbox"),
+          ("edge", "Runs on the edge node", "on the small box at the site"))
+_SINKS = (("disk", "Writes the result to disk", "saved as a file here"),
+          ("s3", "Uploads the result to S3", "put in the bucket"),
+          ("webhook", "Posts the result to a webhook", "sent to my callback address"),
+          ("mail", "Emails the result", "delivered to my inbox"),
+          ("clip", "Copies the result to the clipboard", "ready to paste"))
+_AXES = (_ACTIONS, _OBJECTS, _MODES, _WHERE, _SINKS)
+
+
+def _tool_line(rnd: random.Random, combo: tuple, used: set) -> tuple:
+    a, o, m, w, s = (axis[i] for axis, i in zip(_AXES, combo))
+    while True:
+        name = f"{a[0]}_{o[0]}_{''.join(rnd.choice('bcdfghjkmnpqrstvwxz23456789') for _ in range(4))}"
+        if name not in used:
+            used.add(name)
+            break
+    mb, cost = rnd.choice((50, 100, 200, 400, 800, 1600)), rnd.randint(2, 97)
+    desc = (f"{a[1]} {o[1]} {m[1]}. {w[1]}. {s[1]}. Files up to {mb} MB. "
+            f"{cost} credits a run.")
+    return name, desc, mb, cost
+
+
+def _need(combo: tuple) -> str:
+    a, o, m, w, s = (axis[i] for axis, i in zip(_AXES, combo))
+    return (f"I have {o[2]} that needs to be {a[2]}, {m[2]}. It has to run {w[2]}, and I "
+            f"want the result {s[2]}.")
+
+
+def pick_spec(kind: str, level: int, seed: int) -> dict:
+    """{tools: [(name, description)], need, want, avoid} for one case."""
+    rnd = random.Random(f"pick-{kind}-{level}-{seed}")
+    level = max(1, int(level))
+    size = _PICK_SIZES[min(level, len(_PICK_SIZES)) - 1]      # the window caps it
+    twins = _size(_PICK_TWINS, level)
+    target = tuple(rnd.randrange(len(axis)) for axis in _AXES)
+    one_off = []                                   # combos one step from the target
+    for i, axis in enumerate(_AXES):
+        for v in range(len(axis)):
+            if v != target[i]:
+                one_off.append(target[:i] + (v,) + target[i + 1:])
+    rnd.shuffle(one_off)
+    combos = set(one_off[:twins])
+    while len(combos) < size - 1:                  # the rest: anything but the target
+        c = tuple(rnd.randrange(len(axis)) for axis in _AXES)
+        if c != target:
+            combos.add(c)
+    used: set = set()
+    rows = [(c, *_tool_line(rnd, c, used)) for c in sorted(combos)]
+    want, avoid = "none", []
+    need = _need(target)
+    if kind == "fit":
+        row = (target, *_tool_line(rnd, target, used))
+        rows.append(row)
+        want = row[1]
+        avoid = [r[1] for r in rows if r[0] in set(one_off[:twins])]
+    elif kind == "best":
+        # several tools do exactly this; they differ in size limit and price
+        k = _size(_PICK_RIVALS, level)
+        ratio = level >= PICK_RATIO_FROM
+        file_mb = rnd.choice((150, 300, 600))
+
+        def value(r):
+            return r[4] / r[3] if ratio else r[4]
+        while True:                                # one winner, and at least one fits
+            cands = [(target, *_tool_line(rnd, target, used)) for _ in range(k)]
+            ok = sorted((r for r in cands if r[3] >= file_mb), key=value)
+            if ok and (len(ok) == 1 or value(ok[0]) < value(ok[1])):
+                break
+        rows += cands
+        want = ok[0][1]
+        avoid = [r[1] for r in cands if r[1] != want]
+        need += (f" The file is {file_mb} MB. Several tools may do this: of the ones that "
+                 f"can take a file that size, I want the one with the lowest price per "
+                 f"megabyte of its size limit (credits divided by the limit)." if ratio else
+                 f" The file is {file_mb} MB. Several tools may do this: I want the "
+                 f"cheapest one that can take a file that size.")
+    else:
+        avoid = [r[1] for r in rows if r[0] in set(one_off[:twins])]
+    rnd.shuffle(rows)
+    return {"tools": [(r[1], r[2]) for r in rows], "need": need, "want": want,
+            "avoid": avoid[:40]}
+
+
+# --------------------------------------------------------------------------- #
+# What goes in the recall and tool-picking suites                             #
+# --------------------------------------------------------------------------- #
+# Measured 2026-11-21, 32,000 characters of filler, reasoning allowed, 8,192
+# tokens (docs/BENCH_DIFFICULTY.md):
+#   flash        levels 1-4: 15 of 16. chain, asof to level 8: all right.
+#   Sonnet/Opus  levels 3, 5, 7: 23 of 24. top to level 10: all right.
+#                blocked, ledger level 8-9: right, 4k-8k tokens of working.
+#                level 10 (100 sprints / 270 amounts): Opus right, Sonnet over budget.
+#                levels 11-12: both wrong or over budget, 8 of 8.
+# Following a chain or finding the note in force on a date is solved at any
+# size tried; what is not is putting a great many notes together inside the
+# budget.
+
+CONTEXT_CHARS = 32000
+CONTEXT_TOP = 12
+# kind -> (levels below the climb, seeds on the climb, {level: tier}, tier above the table)
+CONTEXT_LADDERS = {
+    "chain": ((6, 10), 1, {6: "easy", 10: "easy"}, "medium"),
+    "asof": ((6, 10), 1, {6: "easy", 10: "easy"}, "medium"),
+    "top": ((6, 10), 1, {6: "easy", 10: "medium"}, "medium"),     # flash: 8 right, 10 not
+    "blocked": ((4, 6, 8, 9, 10, 11, 12), 2,
+                {4: "easy", 6: "easy", 8: "medium", 9: "medium", 10: "hard"}, "expert"),
+    "ledger": ((4, 6, 8, 9, 10, 11, 12), 2,
+               {4: "easy", 6: "easy", 8: "medium", 9: "medium", 10: "hard"}, "expert"),
+}
+
+
+def context_specs(top_level: int = CONTEXT_TOP) -> list:
+    """Every long-context reasoning case, each ladder lowest level first."""
+    top = max(4, int(top_level or CONTEXT_TOP))
+    out = []
+    for kind, (levels, seeds, tiers, above) in CONTEXT_LADDERS.items():
+        climb = seeds > 1
+        rungs = [n for n in levels if n <= top]
+        if climb:
+            rungs += list(range(max(levels) + 1, top + 1))
+        for seed in range(seeds):
+            for level in rungs:
+                if seed and level < 9:
+                    continue                       # two seeds only where it is decided
+                sp = context_spec(kind, level, seed)
+                sp.update({"kind": kind, "level": level, "seed": seed,
+                           "tier": tiers.get(level, above),
+                           "ladder": f"ctx:{kind}:{seed}"})
+                out.append(sp)
+    return out
+
+
+# Tool picking, measured the same day. Sonnet and Opus chose right in every
+# case sent (28 calls), to 1,200 tools and 160 rivals, in about a thousand
+# tokens each. flash chose right in 10 of 11: every fit and none to level 6,
+# best to level 8 (96 rivals), and missed best at level 9 (160 rivals, lowest
+# price per megabyte). So nothing here is hard for a frontier model, and one
+# rung separates the local one.
+PICK_TOP = 9
+# kind -> (levels in the suite, {level: tier}, tier above the table)
+PICK_LADDERS = {
+    "fit": ((2, 4, 6), {}, "easy"),
+    "none": ((2, 4, 6), {}, "easy"),
+    "best": ((2, 4, 6, 8, 9), {9: "medium"}, "medium"),
+}
+
+
+def pick_specs(top_level: int = PICK_TOP) -> list:
+    """Every look-alike case, each ladder lowest level first. `top_level`
+    moves the top of `best`, the one kind whose size is not capped by the
+    catalogue a context window can hold."""
+    top = max(2, int(top_level or PICK_TOP))
+    out = []
+    for kind, (levels, tiers, above) in PICK_LADDERS.items():
+        rungs = [n for n in levels if n <= top or kind != "best"]
+        if kind == "best":
+            rungs += list(range(max(levels) + 1, top + 1))
+        for level in rungs:
+            sp = pick_spec(kind, level, 0)
+            sp.update({"kind": kind, "level": level,
+                       "tier": tiers.get(level, above if level > max(levels) else "easy"),
+                       "ladder": f"pick:{kind}"})
+            out.append(sp)
+    return out

@@ -83,7 +83,8 @@ def test_the_harder_needles_hold_what_they_ask_for():
         ref = c["reference"]
         assert all(x in body for x in ref["must_include"] + ref["must_exclude"]), c["id"]
         assert not any(t.startswith("depth:") for t in c["tags"]), "kept out of the grid"
-        assert "tier:hard" in c["tags"], "one step harder than a plain 16k needle"
+        # v0.181.224: measured, not assumed - both local models pass these
+        assert "tier:easy" in c["tags"]
         assert any(t.startswith("tokens:") for t in c["tags"])
 
 
@@ -140,7 +141,8 @@ def test_some_needs_have_no_tool_and_the_answer_is_none(tmp_path):
     svc = _pick_svc(tmp_path)
     bench.build_toolpick(svc)
     cases = bench.cases(svc, "toolpick")
-    none = [c for c in cases if "none-fits" in c["tags"]]
+    # the live catalogue's own; v0.181.224's look-alike catalogues have theirs
+    none = [c for c in cases if "none-fits" in c["tags"] and "lookalikes" not in c["tags"]]
     assert len(none) == len(bench.NONE_NEEDS)
     assert "answer none" in none[0]["messages"][0]["content"]
     ref = none[0]["reference"]

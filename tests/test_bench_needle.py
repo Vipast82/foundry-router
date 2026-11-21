@@ -88,9 +88,12 @@ def test_every_cell_of_the_grid_is_built(svc):
     out = bench.build_needle(svc, per_cell=2)
     # v0.181.211 adds decoy cases per length, outside the depth grid, and
     # v0.181.218 one each of the three harder kinds per length
+    # ... and v0.181.224 the long-context ladders, which have tests of their own
+    from foundry_router import benchhard
     assert out["cases"] == (2 * len(bench.NEEDLE_DEPTHS) * len(bench.NEEDLE_LENGTHS)
                             + bench.NEEDLE_DECOYS * len(bench.NEEDLE_LENGTHS)
-                            + 3 * len(bench.NEEDLE_LENGTHS))
+                            + 3 * len(bench.NEEDLE_LENGTHS)
+                            + len(benchhard.context_specs()))
     cases = [c for c in bench.cases(svc, "needle")
              if any(t.startswith("depth:") for t in c["tags"])]
     cells = {(t for t in c["tags"]) and
@@ -102,6 +105,8 @@ def test_every_cell_of_the_grid_is_built(svc):
 def test_the_needle_is_actually_in_the_prompt(svc):
     for c in bench.cases(svc, "needle") or bench.cases(
             svc, bench.build_needle(svc, per_cell=1)["name"]):
+        if any(str(t).startswith("ladder:") for t in c["tags"]):
+            continue                  # a ladder's answer may be computed, not quoted
         code = c["reference"]["must_include"][0]
         assert code in c["messages"][1]["content"], c["id"]
 
@@ -118,6 +123,8 @@ def test_the_code_is_not_guessable_from_the_question(svc):
     """The question names the sprint, not the code."""
     bench.build_needle(svc, per_cell=1)
     for c in bench.cases(svc, "needle"):
+        if any(str(t).startswith("ladder:") for t in c["tags"]):
+            continue                  # ladders answer with ids and totals too
         code = c["reference"]["must_include"][0]
         question = c["messages"][1]["content"].rsplit("\n\n", 1)[-1]
         assert code not in question, c["id"]

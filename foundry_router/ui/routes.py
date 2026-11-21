@@ -3308,7 +3308,7 @@ async def bench_toolflow(request: Request):
 
 @router.post("/admin/api/bench/toolpick")
 async def bench_toolpick(request: Request):
-    """Build a tool-picking suite: {name?, limit?}.
+    """Build a tool-picking suite: {name?, limit?, top_level?}.
 
     Every tool this router offers goes in the prompt as the distractor set, and
     each case asks which one meets a stated need - the thing a model has to get
@@ -3320,7 +3320,8 @@ async def bench_toolpick(request: Request):
     try:
         out = await asyncio.to_thread(
             bench.build_toolpick, svc, str(body.get("name") or "toolpick"),
-            max(1, min(200, int(body.get("limit") or 40))))
+            max(1, min(200, int(body.get("limit") or 40))),
+            int(body.get("top_level") or 0))
     except Exception as e:                                        # noqa: BLE001
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
     return {"ok": True, **out}
@@ -3339,7 +3340,7 @@ async def bench_tags(request: Request, tiers: str = "verified"):
 
 @router.post("/admin/api/bench/needle")
 async def bench_needle(request: Request):
-    """Build a needle-in-a-haystack suite: {name?, per_cell?, depths?, lengths?}.
+    """Build a needle-in-a-haystack suite: {name?, per_cell?, depths?, lengths?, top_level?}.
 
     The haystack is this project's own writing, so the filler reads like the
     work; the needle is an unguessable code at a known depth."""
@@ -3358,7 +3359,7 @@ async def bench_needle(request: Request):
             str(body.get("name") or "needle"),
             max(1, min(10, int(body.get("per_cell") or 3))),
             [int(d) for d in (body.get("depths") or bench.NEEDLE_DEPTHS)],
-            lengths)
+            lengths, top_level=int(body.get("top_level") or 0))
     except Exception as e:                                        # noqa: BLE001
         from ..errors import describe_exception
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
