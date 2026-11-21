@@ -103,6 +103,17 @@ def _detail(row) -> dict:
 # How a case missed                                                           #
 # --------------------------------------------------------------------------- #
 
+def _gave_avoided(row) -> bool:
+    """Whether the answer names one of the codes the case marked as wrong."""
+    exp = str(row["expected"] or "")
+    ans = str(row["answer"] or "")
+    if "decoy " not in exp:
+        return False
+    tail = exp.split("decoy ", 1)[1]
+    import re as _re
+    return any(c in ans for c in _re.findall(r"\d{6}", tail))
+
+
 def miss_kind(suite: str, row) -> Optional[str]:
     """Why a case did not get full marks, in words; None when it did."""
     score = row["score"]
@@ -134,12 +145,22 @@ def miss_kind(suite: str, row) -> Optional[str]:
             if fake and fake in ans:
                 return "named the decoy"
         return "wrong or missing code"
+    if "multi" in tags:
+        return "missed some of the three codes"
+    if "updated" in tags:
+        return "gave the superseded code" if _gave_avoided(row) else "wrong or missing code"
+    if "paraphrase" in tags:
+        return "picked another note's code" if _gave_avoided(row) else "wrong or missing code"
     if suite == "needle" or "needle" in tags:
         return "wrong or missing code"
     if suite == "codereason" or "codereason" in tags:
         return "wrong exception" if "exception" in tags else "wrong value"
     if suite == "toolpick" or "toolpick" in tags:
-        return "named another tool"
+        if "none-fits" in tags:
+            return "named a tool where none fits"
+        if "none" in str(row["answer"] or "").lower().split():
+            return "said none where a tool fits"
+        return "named its look-alike or another tool" if "lookalike" in tags             else "named another tool"
     want = _list(row["tools_expected"])
     got = _list(row["tools_called"])
     if not want and got:
@@ -147,6 +168,9 @@ def miss_kind(suite: str, row) -> Optional[str]:
     if want and not got:
         return "answered in words where a tool was needed"
     if want and got and want[:1] != got[:1]:
+        # v0.181.218: a look where the session looked scores 0.9 (bench.move_kind)
+        if float(score) >= 85:
+            return "the same move with another tool"
         return "reached for a different tool first"
     if want and got:
         return "right first tool, different sequence"
@@ -204,21 +228,33 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Context size",
                     "rows": _group(rows, lambda r: _kchars(_tag(_tags(r), "chars")),
                                    [_kchars(n) for n in lengths])})
-        if any("decoy" in _tags(r) for r in rows):
-            out.append({"name": "With a decoy",
-                        "rows": _group(rows, lambda r: "with a decoy"
-                                       if "decoy" in _tags(r) else "one needle",
-                                       ("one needle", "with a decoy"))})
+        kinds = (("decoy", "beside a decoy"), ("multi", "three to collect"),
+                 ("updated", "corrected later"), ("paraphrase", "asked in other words"))
+
+        def _kind(r):
+            t = _tags(r)
+            return next((label for k, label in kinds if k in t), "one needle")
+        if any(k in _tags(r) for r in rows for k, _l in kinds):
+            out.append({"name": "Kind of needle",
+                        "rows": _group(rows, _kind,
+                                       ["one needle"] + [label for _k, label in kinds])})
     if suite == "toolflow" or any("finder" in _tags(r) for r in rows):
         out.append({"name": "Tool server",
                     "rows": _group(rows, lambda r: _tag(_tags(r), "server") or "?",
                                    limit=10)})
     if suite == "toolpick":
+        out.append({"name": "Kind of case",
+                    "rows": _group(rows, lambda r: "none of the tools fits"
+                                   if "none-fits" in _tags(r) else
+                                   ("the tool has a look-alike" if "lookalike" in _tags(r)
+                                    else "one tool clearly fits"),
+                                   ("one tool clearly fits", "the tool has a look-alike",
+                                    "none of the tools fits"))})
         out.append({"name": "Tool server",
-                    "rows": _group(rows, lambda r: (str(r["task_id"] or "")
-                                                    .split("__", 1)[0]
-                                                    if "__" in str(r["task_id"] or "")
-                                                    else "router"), limit=10)})
+                    "rows": _group([r for r in rows if "none-fits" not in _tags(r)],
+                                   lambda r: (str(r["task_id"] or "").split("__", 1)[0]
+                                              if "__" in str(r["task_id"] or "")
+                                              else "router"), limit=10)})
     if suite == "protocol":
         names = {"done": "DONE", "not_done": "NOT DONE", "product": "BLOCKED: product",
                  "tooling": "BLOCKED: tooling", "user_action": "BLOCKED: user_action",
@@ -445,6 +481,10 @@ def verdict(card: dict) -> dict:
             for row in f["rows"]:
                 if row["n"] < MIN_FACET_CASES:
                     continue
+                if p.get("ceiling") and row["score"] >= STRONG:
+                    # acing part of a suite everything aces says nothing
+                    # (v0.181.218: "Long-context recall: expert" was listed)
+                    continue
                 what = f"{title}: {row['label']}"
                 if row["score"] < WEAK:
                     bad.append({"what": what, "score": row["score"],
@@ -535,18 +575,29 @@ def live(svc, now: Optional[float] = None) -> dict:
         reps = int(p.get("repeats") or 1)
         rep = int(p.get("rep") or 1)
         remaining = names[idx + 1:] + names * (reps - rep)
-        # how this model's pace has compared with others' on what it has done
-        ratios = []
+        # How this model's pace has compared with others' on what it has done,
+        # suite by suite (v0.181.218). One ratio for everything was wrong: the
+        # brain lane was 13x slower than flash on the 60k-token replay and 2-4x
+        # on the short suites, and one median from the replay put a five-hour
+        # profile at fourteen. A suite still to come takes the ratio of the done
+        # suite whose per-case time (for the other models) is most like its own.
+        import math
+        pairs = []                               # (theirs per case, mine / theirs)
         for s in names[:idx]:
             mine = _per_case_history(db, s, model)
             theirs = _others_per_case(db, s, model)
             if mine and theirs:
-                ratios.append(mine / theirs)
+                pairs.append((theirs, mine / theirs))
         if per_case and cur:
             theirs = _others_per_case(db, cur, model)
             if theirs:
-                ratios.append(per_case / theirs)
-        factor = statistics.median(ratios) if ratios else None
+                pairs.append((theirs, per_case / theirs))
+
+        def factor_for(theirs_here):
+            if not pairs:
+                return None
+            return min(pairs, key=lambda p: abs(math.log(max(p[0], 0.1))
+                                                - math.log(max(theirs_here, 0.1))))[1]
         total, basis, unknown = run.get("eta_s") or 0.0, set(), []
         for s in remaining:
             n = _suite_cases(svc, s)
@@ -556,9 +607,11 @@ def live(svc, now: Optional[float] = None) -> dict:
                 basis.add("this model's past runs")
                 continue
             theirs = _others_per_case(db, s, model)
-            if theirs and factor:
-                total += n * theirs * factor
-                basis.add(f"other models' runs at this model's pace (×{factor:.1f})")
+            f_here = factor_for(theirs) if theirs else None
+            if theirs and f_here:
+                total += n * theirs * f_here
+                basis.add("other models' runs, scaled by this model's pace on the most "
+                          "similar suite done")
                 continue
             unknown.append(s)
         out["profile_eta"] = {

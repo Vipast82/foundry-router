@@ -43,7 +43,8 @@ def _svc(tmp_path, contexts=None):
 
 def test_the_haystack_is_as_long_as_the_longest_case(tmp_path):
     svc = _svc(tmp_path)
-    bench.build_needle(svc, per_cell=1, depths=[50], lengths=[4000, 420000], decoys=0)
+    bench.build_needle(svc, per_cell=1, depths=[50], lengths=[4000, 420000], decoys=0,
+                       hard=False)
     longest = max(bench.cases(svc, "needle"),
                   key=lambda c: len(c["messages"][1]["content"]))
     assert len(longest["messages"][1]["content"]) >= 420000
@@ -51,7 +52,7 @@ def test_the_haystack_is_as_long_as_the_longest_case(tmp_path):
 
 def test_long_lengths_get_one_case_per_depth_and_one_decoy(tmp_path):
     svc = _svc(tmp_path)
-    out = bench.build_needle(svc, per_cell=3, lengths=[4000, 200000], decoys=3)
+    out = bench.build_needle(svc, per_cell=3, lengths=[4000, 200000], decoys=3, hard=False)
     short = 5 * 3 + 3
     long = 5 * 1 + 1
     assert out["cases"] == short + long
@@ -69,7 +70,8 @@ def test_every_case_carries_its_token_estimate(tmp_path):
 
 def test_a_case_past_the_window_is_not_sent_and_not_a_miss(tmp_path, monkeypatch):
     svc = _svc(tmp_path, {"small": 8192})
-    bench.build_needle(svc, per_cell=1, depths=[50], lengths=[4000, 64000], decoys=0)
+    bench.build_needle(svc, per_cell=1, depths=[50], lengths=[4000, 64000], decoys=0,
+                       hard=False)
     sent = []
 
     async def fake_ask(svc_, model, case, *a, **k):
@@ -94,7 +96,8 @@ def test_a_case_past_the_window_is_not_sent_and_not_a_miss(tmp_path, monkeypatch
 
 def test_a_model_with_no_known_window_gets_every_case(tmp_path, monkeypatch):
     svc = _svc(tmp_path)
-    bench.build_needle(svc, per_cell=1, depths=[50], lengths=[4000, 64000], decoys=0)
+    bench.build_needle(svc, per_cell=1, depths=[50], lengths=[4000, 64000], decoys=0,
+                       hard=False)
     sent = []
 
     async def fake_ask(svc_, model, case, *a, **k):

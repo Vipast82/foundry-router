@@ -262,7 +262,10 @@ def test_cases_are_cut_where_the_model_reached_for_a_tool():
     assert [c["reference"]["tool_calls"][0]["name"] for c in cases] == ["tool_5", "tool_4"]
 
 
-def test_the_closing_answer_is_only_used_to_fill_up():
+def test_a_closing_answer_is_not_a_replay_case():
+    """v0.181.218: a words-only turn was an end-of-turn report, and cut to its
+    newest turns it had lost the context that made reporting right; those are
+    graded in the protocol suite. The tool turn is still the case."""
     one_call = {"messages": [{"role": "user", "content": "fix it"},
                              {"role": "assistant", "content": "", "tool_calls": [
                                  {"id": "1", "function": {"name": "read", "arguments": "{}"}}]},
@@ -270,9 +273,8 @@ def test_the_closing_answer_is_only_used_to_fill_up():
                              {"role": "assistant", "content": "Done."}],
                 "tools": [], "meta": {"task_id": "T", "session": "s"}}
     cases = bench.cases_from(one_call)
-    assert len(cases) == 2
-    assert cases[0]["reference"]["tool_calls"]          # the tool turn comes first
-    assert cases[1]["reference"]["content"] == "Done."  # the summary fills the second slot
+    assert len(cases) == 1
+    assert cases[0]["reference"]["tool_calls"]
 
 
 def test_a_session_far_too_long_to_send_still_yields_a_case():

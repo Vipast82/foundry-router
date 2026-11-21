@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 import threading
 import time
@@ -200,6 +201,15 @@ def cases_from(example: dict) -> list:
         if len(out) >= CASES_PER_CONVERSATION:
             break
         c = _case_at(example, at)
+        # v0.181.218: only a turn whose move was a TOOL CALL is a replay case.
+        # A words-only turn was an end-of-turn report, and cut to the newest
+        # turns that fit it had lost the context that made "report now" right:
+        # flash called a tool in 10 of 11 of them because it could not see the
+        # plan the session had read. Those turns are graded where they belong,
+        # with no tools offered and the coordinator's rules, in the protocol
+        # suite. A narration turn followed by its call is still a tool move.
+        if c and not c["reference"]["tool_calls"]:
+            continue
         if c and c["id"] not in seen:
             seen.add(c["id"])
             out.append(c)
@@ -347,20 +357,96 @@ def build(svc, name: str, limit: int = 60, tiers=("verified",), tags=(), log=pri
 
 # -- scoring ------------------------------------------------------------------------------
 
+# Looking is looking (v0.181.218). `read` a file, `glob` for it, `grep` it, a
+# `bash` that only cats or lists, an MCP call that only reports state: the
+# session's move and the model's are the same move, and scoring `bash cat x`
+# against `read x` as a different tool marked flash wrong 7 times in one run.
+_LOOK_TOOLS = {"read", "glob", "grep", "list", "ls", "view", "cat", "find", "search",
+               "read_file", "list_files", "list_dir", "file_search"}
+_LOOK_MCP = re.compile(r"(?:^|_)(get|list|read|search|inspect|query|describe|find)(?:_|$)"
+                       r"|_(info|status|snapshot|state|logs?)$", re.I)
+_READ_CMDS = {"cat", "ls", "dir", "head", "tail", "grep", "rg", "find", "wc", "stat", "pwd",
+              "tree", "type", "less", "more", "file", "get-content", "get-childitem",
+              "select-string", "which", "where"}
+_GIT_READ = {"status", "log", "diff", "show", "blame", "branch", "rev-parse", "ls-files"}
+_WRITE_MARKS = (">", "| tee", "rm ", "mv ", "cp ", "sed -i", "git commit", "git push",
+                "git add", "set-content", "out-file", "remove-item")
+
+
+def _call_args(call: dict) -> dict:
+    a = call.get("arguments")
+    if isinstance(a, str):
+        try:
+            a = json.loads(a)
+        except ValueError:
+            return {"command": a}
+    return a if isinstance(a, dict) else {}
+
+
+def move_kind(call: dict) -> str:
+    """"look" for a call that only inspects, else the tool's own name."""
+    name = str(call.get("name") or "")
+    low = name.lower()
+    if low in _LOOK_TOOLS:
+        return "look"
+    if low in ("bash", "shell", "run_command", "powershell", "terminal"):
+        cmd = str(_call_args(call).get("command") or "").strip()
+        low_cmd = cmd.lower()
+        if not cmd or any(m in low_cmd for m in _WRITE_MARKS):
+            return name
+        first = low_cmd.split()[0] if low_cmd.split() else ""
+        if first in _READ_CMDS:
+            return "look"
+        if first == "git" and len(low_cmd.split()) > 1 and low_cmd.split()[1] in _GIT_READ:
+            return "look"
+        if first == "sed" and " -n" in f" {low_cmd}":
+            return "look"
+        return name
+    # an MCP tool whose own name says it only reads (get_scene_info, list_jobs)
+    tail = re.split(r"__|-|\.", low)[-1]
+    if _LOOK_MCP.search(tail) and not re.search(r"(?:^|_)(set|create|delete|update|write|"
+                                                r"run|execute|edit|add|remove|generate|"
+                                                r"import|export|apply)(?:_|$)", tail):
+        return "look"
+    return name
+
+
 def tool_score(expected: list, called: list) -> float:
     """1.0 when the same tools were called in the same order; partial credit for
-    the same tools in another order; 0 when none of them were."""
-    e = [str(t.get("name") or "") for t in expected if t.get("name")]
-    c = [str(t.get("name") or "") for t in called if t.get("name")]
+    the same tools in another order; 0 when none of them were.
+
+    Inspection moves are one move (v0.181.218): a look where the session
+    looked earns 0.9 - nearly the same, not the same tool."""
+    e_calls = [t for t in expected if t.get("name")]
+    c_calls = [t for t in called if t.get("name")]
+    e = [str(t.get("name") or "") for t in e_calls]
+    c = [str(t.get("name") or "") for t in c_calls]
     if not e:
         return 1.0 if not c else 0.5          # nothing was needed; calling anyway is not wrong
     if not c:
         return 0.0
     if e == c:
         return 1.0
-    same = len(set(e) & set(c)) / len(set(e))
-    order = 1.0 if e[:1] == c[:1] else 0.0     # the first move counts for most
-    return round(0.7 * same + 0.3 * order, 3)
+    ek = [move_kind(t) for t in e_calls]
+    ck = [move_kind(t) for t in c_calls]
+    from collections import Counter
+    raw_same = len(set(e) & set(c)) / len(set(e))
+    # moves counted one by one, so making one look where the session made two
+    # still misses one; a matched kind is worth 0.9 of a matched tool
+    kind_same = sum((Counter(ek) & Counter(ck)).values()) / len(ek)
+    same = max(raw_same, 0.9 * kind_same)
+    if e[:1] == c[:1]:
+        order = 1.0                            # the first move counts for most
+    elif ek[:1] == ck[:1] == ["look"] and c[0] not in e:
+        # another tool for the same look; a reordering of the session's own
+        # tools is scored as a reordering, as it always was
+        order = 0.9
+    else:
+        order = 0.0
+    score = 0.7 * same + 0.3 * order
+    if ek == ck and e != c and set(e) != set(c):
+        score = min(score, 0.9)                # the same moves, other tools
+    return round(score, 3)
 
 
 async def code_score(svc, text: str) -> tuple:
@@ -743,9 +829,127 @@ def _decoy_case(hay: str, length: int, seq: int) -> dict:
     }
 
 
+def _plant(filler: str, sentences: list) -> str:
+    """`sentences` as [(percent, text)], each placed on a line boundary."""
+    body, last = "", 0
+    for pct, sentence in sorted(sentences):
+        at = int(len(filler) * pct / 100)
+        nl = filler.find("\n", at)
+        at = nl + 1 if 0 <= nl <= at + 400 else at
+        at = max(at, last)
+        body += filler[last:at] + "\n" + sentence + "\n"
+        last = at
+    return body + filler[last:]
+
+
+def _six(rnd) -> str:
+    return f"{rnd.randint(100000, 999999)}"
+
+
+def _sprint(rnd) -> str:
+    return f"{rnd.choice(('VR-AS', 'LOB', 'FIN', 'MV2', 'POL', 'HK', 'UI'))}-{rnd.randint(10, 99)}"
+
+
+def _hard_case(kind: str, hay: str, length: int, seq: int, body: str, question: str,
+               want: list, avoid: list, task: str) -> dict:
+    tier = TIERS[min(3, TIERS.index(needle_tier(length)) + 1)]
+    return {
+        "id": f"NEEDLE-{length//1000}k-{kind}-{seq}",
+        "task_id": task,
+        "tags": ["needle", "context", kind, f"chars:{length}", f"tier:{tier}",
+                 f"tokens:{int(len(body) / CHARS_PER_TOKEN) + 80}"],
+        "messages": [
+            {"role": "system", "content": "You answer from the notes you are given."},
+            {"role": "user", "content": body + "\n\n" + question},
+        ],
+        "reference": {"content": ", ".join(want), "must_include": want,
+                      "must_exclude": avoid},
+    }
+
+
+def _multi_case(hay: str, length: int, seq: int) -> dict:
+    """Three needles for three sprints, asked for together (v0.181.218): finding
+    one sentence that does not belong is not the same as collecting every one.
+    Scored by the share found, so two of three is partial credit."""
+    import random as _rnd
+    rnd = _rnd.Random(f"needle-multi-{length}-{seq}")
+    tasks, codes = [], []
+    while len(tasks) < 3:
+        t = _sprint(rnd)
+        if t not in tasks:
+            tasks.append(t)
+            codes.append(_six(rnd))
+    start = rnd.randrange(0, max(1, len(hay) - length - 1))
+    filler = hay[start:start + length]
+    spots = [rnd.randint(5, 30), rnd.randint(38, 62), rnd.randint(70, 95)]
+    rnd.shuffle(spots)
+    body = _plant(filler, [(spots[i], _NEEDLE_SENTENCE.format(task=tasks[i], code=codes[i]))
+                           for i in range(3)])
+    q = (f"Read the notes above. What are the verification codes for sprints "
+         f"{tasks[0]}, {tasks[1]} and {tasks[2]}? Answer with the three codes in that "
+         f"order, separated by commas, and nothing else.")
+    return _hard_case("multi", hay, length, seq, body, q, codes, [], tasks[0])
+
+
+def _updated_case(hay: str, length: int, seq: int) -> dict:
+    """A code that is corrected later in the same notes (v0.181.218): the
+    current value is wanted, and naming the superseded one scores 0. Tracking
+    what is true NOW across a long context is what a sprint log asks for."""
+    import random as _rnd
+    rnd = _rnd.Random(f"needle-updated-{length}-{seq}")
+    task, old, new = _sprint(rnd), _six(rnd), _six(rnd)
+    while new == old:
+        new = _six(rnd)
+    start = rnd.randrange(0, max(1, len(hay) - length - 1))
+    filler = hay[start:start + length]
+    body = _plant(filler, [
+        (rnd.randint(10, 40), _NEEDLE_SENTENCE.format(task=task, code=old)),
+        (rnd.randint(60, 90), f"Correction: the verification code for sprint {task} was "
+                              f"changed. It is now {new}; the earlier code no longer works."),
+    ])
+    q = (f"Read the notes above. What is the current verification code for sprint {task}? "
+         f"Answer with the code and nothing else.")
+    return _hard_case("updated", hay, length, seq, body, q, [new], [old], task)
+
+
+# (how the note says it, how the question asks for it): no shared content word,
+# so the needle cannot be found by matching the question's words
+_PARAPHRASES = (
+    ("adds the fishing minigame", "is about catching fish"),
+    ("rebuilds the pet shop interface", "redoes the screen where players buy animal companions"),
+    ("fixes the day-night lighting", "corrects how the sun and moon light the map"),
+    ("adds the weekly leaderboard", "ranks players by their score each week"),
+    ("ports the boat physics", "makes water vehicles move properly"),
+    ("adds trading between players", "lets two people swap items"),
+)
+
+
+def _paraphrase_case(hay: str, length: int, seq: int) -> dict:
+    """The needle described in other words than the question (v0.181.218, after
+    NoLiMa): every other needle here is found by its literal sprint id. Three
+    notes of the same shape for three different pieces of work; the question
+    names one only by what it does, so it has to be understood, not matched."""
+    import random as _rnd
+    rnd = _rnd.Random(f"needle-para-{length}-{seq}")
+    picks = rnd.sample(_PARAPHRASES, 3)
+    codes = [_six(rnd) for _ in picks]
+    start = rnd.randrange(0, max(1, len(hay) - length - 1))
+    filler = hay[start:start + length]
+    spots = [rnd.randint(5, 30), rnd.randint(38, 62), rnd.randint(70, 95)]
+    rnd.shuffle(spots)
+    body = _plant(filler, [
+        (spots[i], f"Operational note: the verification code for the sprint that "
+                   f"{picks[i][0]} is {codes[i]}. Quote it exactly when asked.")
+        for i in range(3)])
+    q = (f"Read the notes above. What is the verification code for the sprint that "
+         f"{picks[0][1]}? Answer with the code and nothing else.")
+    return _hard_case("paraphrase", hay, length, seq, body, q, [codes[0]], codes[1:],
+                      picks[0][0])
+
+
 def build_needle(svc, name: str = "needle", per_cell: int = 3,
                  depths=NEEDLE_DEPTHS, lengths=NEEDLE_LENGTHS,
-                 decoys: int = NEEDLE_DECOYS) -> dict:
+                 decoys: int = NEEDLE_DECOYS, hard: bool = True) -> dict:
     """Write a needle-in-a-haystack suite: `per_cell` cases at each depth and
     length, plus `decoys` decoy cases per length. Returns {name, cases, path}."""
     lengths = sorted({int(n) for n in lengths})
@@ -760,6 +964,11 @@ def build_needle(svc, name: str = "needle", per_cell: int = 3,
                 out.append(_needle_case(hay, int(length), int(depth), seq))
         for seq in range(min(1, int(decoys or 0)) if long else int(decoys or 0)):
             out.append(_decoy_case(hay, int(length), seq))
+        # the harder kinds (v0.181.218): one of each per length, out of the grid
+        if hard:
+            out.append(_multi_case(hay, int(length), 0))
+            out.append(_updated_case(hay, int(length), 0))
+            out.append(_paraphrase_case(hay, int(length), 0))
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
         for c in out:
@@ -805,7 +1014,38 @@ def needle_breakdown(db, run_id: int) -> list:
 
 _PICK_SYSTEM = ("You choose tools. You are given every tool this system has, one "
                 "per line as NAME - description. Answer with exactly one tool "
-                "name, copied character for character, and nothing else.")
+                "name, copied character for character, and nothing else. If none "
+                "of the tools can do it, answer none.")
+
+# Needs nothing in this ecosystem serves (v0.181.218). Every case used to have
+# an answer in the list, so a model that always names SOMETHING scored 100; a
+# model that names a tool for "book a flight" will call it for real one day.
+NONE_NEEDS = (
+    "send a text message to a phone number",
+    "book a flight to Denver for next Tuesday",
+    "set the living-room thermostat to 20 degrees",
+    "charge a customer's credit card",
+    "order a pizza for delivery",
+    "turn off the garage lights",
+    "transfer money between two bank accounts",
+    "phone someone and leave a voicemail",
+)
+
+
+def _lookalikes(name: str, names: list) -> list:
+    """Other tools close enough to be mistaken for this one: the same name
+    give or take a few letters (luau_global and luau_globals), or the same
+    action on the same server."""
+    from difflib import SequenceMatcher
+    short = name.rsplit("__", 1)[-1].lower()
+    out = []
+    for other in names:
+        if other == name:
+            continue
+        o = other.rsplit("__", 1)[-1].lower()
+        if SequenceMatcher(None, short, o).ratio() >= 0.8:
+            out.append(other)
+    return out
 _PICK_QUESTION = ("Which single tool would you use to {need}?\n"
                   "Answer with the tool name only.")
 
@@ -885,13 +1125,27 @@ def build_toolpick(svc, name: str = "toolpick", limit: int = 40) -> dict:
         out.append({
             "id": f"PICK-{len(out) + 1:03d}",
             "task_id": tool_name,
-            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}"],
+            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}"]
+            + (["lookalike"] if _lookalikes(tool_name, [n for n, _d in rows]) else []),
             "messages": [
                 {"role": "system", "content": _PICK_SYSTEM},
                 {"role": "user", "content": catalogue + "\n\n" +
                  _PICK_QUESTION.format(need=need)},
             ],
             "reference": {"content": tool_name, "must_include": [tool_name]},
+        })
+    # none of the tools fits these: the right answer is "none" (v0.181.218)
+    for i, need in enumerate(NONE_NEEDS):
+        out.append({
+            "id": f"PICK-NONE-{i + 1:02d}",
+            "task_id": "none",
+            "tags": ["toolpick", "tool_choice", "context", f"catalogue:{len(rows)}", "none-fits"],
+            "messages": [
+                {"role": "system", "content": _PICK_SYSTEM},
+                {"role": "user", "content": catalogue + "\n\n" +
+                 _PICK_QUESTION.format(need=need)},
+            ],
+            "reference": {"content": "none", "must_include": ["none"]},
         })
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
@@ -1789,9 +2043,16 @@ def answer_of(got: dict) -> str:
         if f.get("said"):
             parts.append("then said: " + f["said"].strip())
     else:
-        calls = [t.get("name") for t in got.get("tool_calls") or [] if t.get("name")]
+        calls = [t for t in got.get("tool_calls") or [] if t.get("name")]
         if calls:
-            parts.append("called " + ", ".join(calls))
+            # with what it was called with (v0.181.218): "bash" alone cannot say
+            # whether it looked at a file or rebuilt the project
+            def _one(t):
+                a = _call_args(t)
+                arg = a.get("command") or a.get("filePath") or a.get("path") or a.get("pattern")                     or (json.dumps(a, ensure_ascii=False) if a else "")
+                arg = " ".join(str(arg).split())[:160]
+                return f"{t['name']}({arg})" if arg else t["name"]
+            parts.append("called " + ", ".join(_one(t) for t in calls))
     text = (got.get("content") or "").strip()
     if text and not f:
         parts.append(text)

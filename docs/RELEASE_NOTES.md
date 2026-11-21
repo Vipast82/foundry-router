@@ -1,3 +1,71 @@
+## v0.181.218 - accurate, and not too easy
+
+Asked: go through what flash scored on the rebuilt suites (93.0) and make sure
+it is accurate and not too easy. Read case by case, with the prompts: the
+needle (90 of 90) and tool-picking (40 of 40) suites were at the ceiling and
+code (43 of 44) and the finder (38 of 40) close to it, so they could not tell
+flash from a better model; and of the real-work replay's 23 misses about 17
+were the test, not the model. The misses that were the model's are real: a
+space inserted into a decoded string, and two finder tasks it answered from
+its own knowledge after searching for the wrong thing.
+
+**The replay measures tool moves only.** Ten misses were turns where the
+verified session ended its turn with a report. Cut to the newest turns that fit,
+those cases had lost the plan the session had read, so flash checked first -
+careful, and scored wrong. Words-only turns are no longer replay cases; they are
+end-of-turn reports and are graded where that belongs, with no tools offered and
+the coordinator's own rules, in the protocol suite (v0.181.217). A narration
+turn followed by its call is still a tool move.
+
+**Looking is looking.** Seven misses were inspections scored as the wrong tool:
+`bash cat x` where the session used `read x`, `glob` for `bash ls`, a Blender
+`get_scene_info` where the session ran `bash`. A call is now classed as a look
+when it only inspects - read, glob, grep, a bash that only cats, lists, greps
+or runs a read-only git command (and writes nothing, no `>`, no `rm`, no
+`commit`), or an MCP tool whose name says it gets, lists, reads, searches or
+reports a status and nothing that sets, creates, runs, edits or generates. A
+look where the session looked earns 0.9 - nearly the same, not the same tool -
+and a missing move still costs: one look where the session made two is 0.65,
+and a reordering of the session's own tools is still scored as a reordering.
+The card calls it "the same move with another tool". Each replay answer now
+keeps what every call was called with ("called bash(cat src/a.lua),
+read(docs/PLAN.md)"), so a miss shows whether it looked or rebuilt.
+
+**Three harder needles.** Every needle so far was one sentence that does not
+belong, found by its literal sprint id, and a decoy only made it two. Each
+length now also has: **three to collect** - three codes for three sprints, asked
+for together, scored by the share found; **corrected later** - a code and, further
+on, a correction giving a new one, where the current value is wanted and naming
+the superseded one scores 0; and **asked in other words** (after NoLiMa) - three
+notes of the same shape for three pieces of work, the question naming one only
+by what it does ("the sprint that is about catching fish" for "the sprint that
+adds the fishing minigame"), so it has to be understood rather than matched.
+Each is one difficulty step above a plain needle at its length, kept out of the
+depth grid, and broken down on the card under "Kind of needle".
+
+**Sometimes no tool fits.** Every tool-picking case had its answer in the list,
+so a model that always names something scored 100. Eight needs nothing here
+serves ("book a flight", "set the thermostat", "charge a credit card") now have
+the answer "none", and the instructions say so. A case whose tool has a near
+twin (`roblox_get_luau_global` beside `roblox_get_luau_globals`) is marked, and
+the card breaks the suite down by "one tool clearly fits", "the tool has a
+look-alike" and "none of the tools fits".
+
+**Two fixes on the card and the strip.** A suite at its ceiling no longer has
+its parts listed under "Excels at" (the card listed "Long-context recall:
+expert" for a suite flash aced entirely). And the live ETA scales each suite
+still to come by this model's pace on the finished suite most like it, judged
+by how long the other models took a case: one ratio for everything took the
+brain lane's 13x on the 60k-token replay and applied it to short suites where it
+is about 2x, and put a five-hour profile at fourteen.
+
+To use it: build the real-work, needle and tool-picking suites again, then run
+a profile.
+
+15 tests; four older ones updated to the new shape (the replay no longer fills
+up with closing answers; the needle facet and counts) and one scoring test kept
+exactly as it was by keeping reorderings scored as reorderings.
+
 ## v0.181.217 - the coordinator protocol suite
 
 From the benchmark sweep: of everything open-source, nothing measures the one

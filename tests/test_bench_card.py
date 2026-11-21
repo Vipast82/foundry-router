@@ -331,7 +331,7 @@ def test_the_needle_is_broken_down_by_size_and_decoy():
     rows = [_row(score=100.0, tags='["needle","chars:4000","depth:0"]'),
             _row(score=0.0, tags='["needle","chars:96000","decoy"]')]
     names = [f["name"] for f in benchcard.facets("needle", rows)]
-    assert "Context size" in names and "With a decoy" in names
+    assert "Context size" in names and "Kind of needle" in names
 
 
 def test_speed_ignores_short_prompts_and_unreported_caches():

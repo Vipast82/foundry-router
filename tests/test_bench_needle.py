@@ -86,10 +86,13 @@ def test_an_ordinary_case_is_unaffected():
 
 def test_every_cell_of_the_grid_is_built(svc):
     out = bench.build_needle(svc, per_cell=2)
-    # v0.181.211 adds decoy cases per length, outside the depth grid
+    # v0.181.211 adds decoy cases per length, outside the depth grid, and
+    # v0.181.218 one each of the three harder kinds per length
     assert out["cases"] == (2 * len(bench.NEEDLE_DEPTHS) * len(bench.NEEDLE_LENGTHS)
-                            + bench.NEEDLE_DECOYS * len(bench.NEEDLE_LENGTHS))
-    cases = [c for c in bench.cases(svc, "needle") if "decoy" not in c["tags"]]
+                            + bench.NEEDLE_DECOYS * len(bench.NEEDLE_LENGTHS)
+                            + 3 * len(bench.NEEDLE_LENGTHS))
+    cases = [c for c in bench.cases(svc, "needle")
+             if any(t.startswith("depth:") for t in c["tags"])]
     cells = {(t for t in c["tags"]) and
              (next(t for t in c["tags"] if t.startswith("chars:")),
               next(t for t in c["tags"] if t.startswith("depth:"))) for c in cases}
@@ -126,8 +129,8 @@ def test_the_depth_puts_the_needle_where_it_says(svc):
     bench.build_needle(svc, per_cell=1, depths=[0, 100], lengths=[8000])
     where = {}
     for c in bench.cases(svc, "needle"):
-        if "decoy" in c["tags"]:
-            continue                 # a decoy case has two sentences and no depth
+        if not any(t.startswith("depth:") for t in c["tags"]):
+            continue                 # decoy and the harder kinds have no single depth
         body = c["messages"][1]["content"]
         depth = next(t for t in c["tags"] if t.startswith("depth:")).split(":")[1]
         where[depth] = body.index(c["reference"]["must_include"][0]) / len(body)
