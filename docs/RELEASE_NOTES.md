@@ -1,3 +1,26 @@
+## v0.181.221 - the finder breaks ties on the query
+
+Asked: fix the finder ranking that hid add_captions. In the brain lane's
+profile (6), FLOW-013 searched "video processing ffmpeg subtitles burned in srt
+vtt" and the eight tools it was shown were all *_video tools; add_captions, the
+one it needed, never came up.
+
+It had not lost on score. add_captions scored 4 - video, burned, srt and vtt
+are all in its description - and so did every *_video tool, for "video" in its
+name. Equal scores kept the registry order, and eight of those came first. A tie
+now goes to the tool that matched more of the query's words, then to the one
+whose matched words are rarer in the list being searched, and only then to
+registry order. A tie-break reorders equal scores and nothing else, so no tool
+ever passes one that scored higher: stitch_videos and add_audio_to_video say
+"ffmpeg" too and still come first.
+
+Measured on all 109 searches the two latest profiles made (40 cases, ties
+counted worst case, against the live catalogue), the wanted tool now comes up
+in the top 8 for 87 instead of 83 and first for 51 instead of 47; FLOW-013's
+moves from 15th to 5th. Weighting every word by rarity was tried first: it
+fixed FLOW-013 but moved other searches' tools out of the eight (86), because it
+changes who scores higher. 5 tests.
+
 ## v0.181.220 - a real protocol case says the turn is over
 
 Asked: fix how the coordinator protocol suite grades real coordinator turns.

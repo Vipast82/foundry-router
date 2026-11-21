@@ -20,6 +20,7 @@ direct mode, and the aggregator's /mcp/persona/<name> endpoint.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Awaitable, Callable, Optional
 
@@ -103,24 +104,38 @@ def _words(text: str) -> list[str]:
 
 def search(tools: list, query: str, limit: int = DEFAULT_LIMIT) -> list:
     """The best `limit` of `tools` for `query`: words in the tool name count 3, the server
-    name 2, the description 1; ties keep the registry order. No words: []."""
+    name 2, the description 1. No words: [].
+
+    Ties (v0.181.220) go to the tool that matched more of the query's words, then the
+    one whose matched words are rarer in this list, and only then to registry order.
+    Before, registry order alone decided them: "video processing ffmpeg subtitles
+    burned in srt vtt" scored add_captions 4 (video, burned, srt, vtt, all in its
+    description) and every *_video tool 4 too (video, in the name), and eight of
+    those came first - the brain lane's FLOW-013 search never showed the tool. A
+    tie-break only reorders equal scores, so no tool ever passes one that scored
+    higher; weighting every word by rarity instead fixed that case and lost others."""
     q = _words(query)
     if not q:
         return []
-    scored = []
-    for i, t in enumerate(tools):
+    rows = []
+    for t in tools:
         name = set(_words(t.mcp_tool or t.name) + _words(t.name))
-        server = set(_words(t.server or ""))
-        desc = _words(t.description or "")
-        dset = set(desc)
-        s = 0.0
+        rows.append((t, name, set(_words(t.server or "")), set(_words(t.description or ""))))
+    df = {w: sum(1 for _t, a, b, c in rows if w in a or w in b or w in c) for w in set(q)}
+    scored = []
+    for i, (t, name, server, dset) in enumerate(rows):
+        s, hit = 0.0, set()
         for w in q:
-            s += 3 * (w in name) + 2 * (w in server) + (w in dset)
-            s += 0.5 * any(w in n and w != n for n in name)       # partial name hit
+            p = 3 * (w in name) + 2 * (w in server) + (w in dset)
+            p += 0.5 * any(w in n and w != n for n in name)       # partial name hit
+            s += p
+            if p:
+                hit.add(w)
         if s > 0:
-            scored.append((-s, i, t))
-    scored.sort(key=lambda x: (x[0], x[1]))
-    return [t for _, _, t in scored[:limit]]
+            rare = sum(math.log((len(rows) + 1) / (df[w] + 0.5)) for w in hit)
+            scored.append((-s, -len(hit), -rare, i, t))
+    scored.sort(key=lambda x: x[:4])
+    return [x[4] for x in scored[:limit]]
 
 
 def _entry(t) -> dict:
