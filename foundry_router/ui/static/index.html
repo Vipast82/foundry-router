@@ -9585,8 +9585,61 @@ function pfCard(c, opts) {
     <div class="rc-tiles">${tiles}</div>
     ${o.grid !== false && c.needle && (c.needle.cells || []).length ? pfGrid(c.needle) : ""}
     ${c.note ? `<p class="hint" style="margin:10px 0 0"><b>Read this first:</b> ${esc(c.note)}</p>` : ""}
+    ${o.redo ? pfRedo(c) : ""}
     <div class="mx" id="mx-${c.profile_id}" hidden></div>
   </div>`;
+}
+
+// v0.181.222: rerun chosen suites into this card, or fold another profile's
+// suites into it - so a fixed suite costs its own run, not the whole profile's.
+function pfRedo(c) {
+  const mine = (c.parts || []).concat(c.unscored || []).map(p => p.suite);
+  const names = [...new Set(mine.concat(window._pfSuites || []))];
+  const others = (window._pfProfiles || []).filter(p => p.model === c.model
+    && p.id !== c.profile_id && p.status !== "running");
+  return `<div class="row tight" style="margin-top:12px;flex-wrap:wrap;gap:6px">
+      <span class="hint" style="margin:0">Rerun into this card:</span>
+      ${names.map(n => `<label class="nw"><input type="checkbox" class="pf-redo-s" value="${esc(n)}"> ${esc(n)}</label>`).join("")}
+      <button class="act" id="pf-redo-go" data-id="${c.profile_id}" data-model="${esc(c.model || "")}"
+        title="Run the ticked suites against ${esc(c.model || "")} and put each finished run on this card in place of that suite's run. The runs they replace are kept, not deleted. A run that is stopped or fails replaces nothing.">Rerun the ticked</button></div>
+    ${others.length ? `<div class="row tight" style="margin-top:6px;gap:6px">
+      <span class="hint" style="margin:0">Or take the suites another profile of this model already ran:</span>
+      <select id="pf-fold-src" aria-label="profile to fold in">${others.map(p => `<option value="${p.id}">#${p.id} ${esc((p.ts || "").slice(0, 16))} ${esc(p.label || "")}</option>`).join("")}</select>
+      <button class="act" id="pf-fold-go" data-id="${c.profile_id}"
+        title="Each suite that profile ran replaces this card's run of it; nothing is run again, and that profile, then empty, is removed. The replaced runs are kept.">Fold its suites in</button></div>` : ""}`;
+}
+
+function pfWireRedo(c) {
+  const go = $("#pf-redo-go");
+  if (go) go.onclick = async () => {
+    const picked = [...document.querySelectorAll(".pf-redo-s:checked")].map(x => x.value);
+    if (!picked.length) { toast("tick the suites to rerun", true); return; }
+    try {
+      await api("bench/profile/run", {method: "POST", body: {
+        into: +go.dataset.id, model: go.dataset.model, suites: picked}});
+      toast(`rerunning ${picked.join(", ")} into profile #${go.dataset.id}`);
+      pfRender();
+      pfPoll();
+    } catch (e) { toast(e.message, true); }
+  };
+  const fold = $("#pf-fold-go");
+  if (fold) fold.onclick = async () => {
+    const src = $("#pf-fold-src").value;
+    if (!confirm(`Fold profile #${src} into #${fold.dataset.id}?
+
+Each suite #${src} ran replaces that `
+        + `suite's run on #${fold.dataset.id}. The replaced runs are kept; #${src}, then empty, is removed.`)) return;
+    try {
+      const out = await api("bench/profile/fold", {method: "POST", body: {
+        source: +src, into: +fold.dataset.id}});
+      toast(`folded #${src} into #${out.into}: ${out.suites.join(", ")}; composite ${out.composite == null ? "—" : out.composite}`);
+      await pfRender();
+      const card = await api(`bench/profile?id=${out.into}`);
+      $("#pf-out").innerHTML = pfCard(card, {redo: true});
+      pfWireCards($("#pf-out"));
+      pfWireRedo(card);
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 // Where it stops finding things. A context benchmark answers WHERE, and one
@@ -9796,6 +9849,8 @@ function pfPoll() {
 async function pfRender() {
   const d = await api("bench/profiles");
   const r = d.run || {};
+  window._pfProfiles = d.profiles || [];
+  window._pfSuites = d.suites || window._pfSuites || [];
   const rows = (d.profiles || []).map(p => `<tr>
     <td><input type="checkbox" class="pf-pick" value="${p.id}" aria-label="pick profile ${p.id}"></td>
     <td class="mono nw">#${p.id}</td>
@@ -9818,8 +9873,9 @@ async function pfRender() {
   document.querySelectorAll(".pf-open").forEach(b => b.onclick = async () => {
     $("#pf-out").innerHTML = '<p class="hint">reading the card…</p>';
     const c = await api(`bench/profile?id=${b.dataset.id}`);
-    $("#pf-out").innerHTML = pfCard(c);
+    $("#pf-out").innerHTML = pfCard(c, {redo: true});
     pfWireCards($("#pf-out"));
+    pfWireRedo(c);
   });
   if ($("#pf-delete")) $("#pf-delete").onclick = async () => {
     const picked = [...document.querySelectorAll(".pf-pick:checked")];

@@ -697,6 +697,11 @@ class Database:
             # with harder cases, or a scorer that changed, is a different test,
             # and two runs of it must not be compared as if they were one
             ("bench_runs", "suite_hash", "TEXT DEFAULT ''"),
+            # v0.181.222: the run that replaced this one on its profile's card
+            # (a suite rerun into the profile, or a profile folded into it);
+            # NULL = on the card. Kept, never deleted, so the card can say what
+            # it replaced and deleting the profile still takes it along
+            ("bench_runs", "replaced_by", "INTEGER"),
             # media hand-back: a long-running tool job's text result
             ("media_jobs", "result_text", "TEXT"),
         ]

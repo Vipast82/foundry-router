@@ -3038,7 +3038,9 @@ async def bench_profile(request: Request, id: int):
 
 @router.post("/admin/api/bench/profile/run")
 async def bench_profile_run(request: Request):
-    """Run every suite against one model: {model, suites?, label?, repeats?}."""
+    """Run every suite against one model: {model, suites?, label?, repeats?} - or,
+    with {into: <profile id>, suites: [...]}, rerun those suites into that
+    profile's card, replacing their runs there (v0.181.222)."""
     from .. import benchprofile
     from ..errors import describe_exception
     svc = _svc(request)
@@ -3047,7 +3049,23 @@ async def bench_profile_run(request: Request):
         out = benchprofile.start(
             svc, str(b.get("model") or ""), list(b.get("suites") or ()),
             str(b.get("label") or ""), int(b.get("repeats") or 1),
-            int(b.get("limit") or 0))
+            int(b.get("limit") or 0), into=int(b.get("into") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.post("/admin/api/bench/profile/fold")
+async def bench_profile_fold(request: Request):
+    """Move a profile's suites onto an older card of the same model: {source, into}.
+    Each suite replaces that suite's run there; nothing is run again (v0.181.222)."""
+    from .. import benchprofile
+    from ..errors import describe_exception
+    svc = _svc(request)
+    b = await request.json()
+    try:
+        out = await asyncio.to_thread(benchprofile.fold, svc, int(b.get("source") or 0),
+                                      int(b.get("into") or 0))
     except Exception as e:                                        # noqa: BLE001
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
     return {"ok": True, **out}
@@ -3118,8 +3136,9 @@ async def bench_failures(request: Request, profile_id: int = 0, suite: str = "",
                 return {"error": f"there is no run {run_id}", "failures": []}
             return {"suite": r["suite"], "run_ids": [r["id"]],
                     "failures": benchcard.failures(svc, [r["id"]], r["suite"], limit)}
+        # the runs on the card: not ones a rerun replaced (v0.181.222)
         rows = svc.db.query("SELECT id FROM bench_runs WHERE profile_id=? AND suite=? "
-                            "ORDER BY id", (int(profile_id), suite))
+                            "AND replaced_by IS NULL ORDER BY id", (int(profile_id), suite))
         ids = [r["id"] for r in rows]
         if not ids:
             return {"error": f"profile {profile_id} has no {suite!r} run", "failures": []}

@@ -1,3 +1,35 @@
+## v0.181.222 - rerun suites into a card, or fold a profile into one
+
+Asked: can a rerun of some suites be added to the current card? It could not.
+Every profile run made a new profile, so rerunning protocol and toolflow after
+v0.181.220 made profiles 7 and 8 of their own, with a composite of those two
+suites only, while cards 5 and 6 - six scored suites each, 2 h 15 m and 3 h 45 m
+of runs - kept the old protocol and toolflow. A fixed suite cost the whole
+profile again.
+
+**Rerun into this card.** An opened card has a row of its suites to tick and
+"Rerun the ticked" (POST bench/profile/run with into and suites). It runs them
+against the card's own model with the card's own passes, and each run that
+finishes takes that suite's place on the card; the composite and the note are
+worked out again. A run that is stopped or fails replaces nothing, stays a run
+of its own, and nothing after it runs. The profile's status is left alone
+while it runs, so a restart mid-rerun cannot mark a whole card "interrupted".
+A rerun names its suites - all of them is a new profile, and says so by being
+one - and goes only into a card of the same model.
+
+**Fold its suites in.** For suites already run as a profile of their own, the
+card offers the same model's other profiles and "Fold its suites in" (POST
+bench/profile/fold): each suite the chosen profile ran replaces that suite's
+run on this card, nothing is run again, and the chosen profile, then empty, is
+removed. This is how profiles 7 and 8 go onto cards 5 and 6.
+
+Nothing is deleted either way: a replaced run gets bench_runs.replaced_by (the
+run that took its place) and keeps its cases. The card leaves it out, names it
+on the suite ("replaced": run, time, score), and its note says which suites
+were rerun when and what they scored before; the misses list reads only the
+runs on the card; deleting the profile takes the replaced runs with it.
+10 tests.
+
 ## v0.181.221 - the finder breaks ties on the query
 
 Asked: fix the finder ranking that hid add_captions. In the brain lane's

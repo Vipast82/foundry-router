@@ -144,43 +144,103 @@ def runnable_suites(svc) -> list:
             + [n for n in names if n in UNSCORED])
 
 
+def _into_profile(svc, into: int, model: str, suites) -> dict:
+    """The profile a rerun goes into, checked: it exists, it is that model's, and
+    the suites are named and built. Raises ValueError with what is wrong."""
+    p = svc.db.query_one("SELECT * FROM bench_profiles WHERE id=?", (int(into),))
+    if p is None:
+        raise ValueError(f"there is no profile {into}")
+    if model and model != p["model"]:
+        raise ValueError(f"profile {into} is {p['model']}, not {model}: a rerun goes "
+                         "into a card of the same model")
+    if not suites:
+        # rerunning every suite is a new profile, and says so by being one
+        raise ValueError(f"name the suites to rerun into profile {into}")
+    built = set(runnable_suites(svc))
+    missing = [s for s in suites if s not in built]
+    if missing:
+        raise ValueError(f"not built: {', '.join(missing)}")
+    return dict(p)
+
+
+def replace_runs(db, profile_id: int, suite: str, by_run: int, before: int = 0) -> int:
+    """Mark a profile's current runs of one suite as replaced by `by_run`.
+
+    Nothing is deleted: a replaced run keeps its cases and its profile, and is
+    left off the card (v0.181.222). `before` limits it to older runs, so a rerun
+    with repeats replaces what was there, not its own earlier passes."""
+    sql = ("UPDATE bench_runs SET replaced_by=? WHERE profile_id=? AND suite=? "
+           "AND replaced_by IS NULL AND id<>?")
+    args: list = [int(by_run), int(profile_id), suite, int(by_run)]
+    if before:
+        sql += " AND id<?"
+        args.append(int(before))
+    return int(db.execute_count(sql, tuple(args)) or 0)
+
+
+def _add_suites(db, profile_id: int, names) -> None:
+    row = db.query_one("SELECT suites FROM bench_profiles WHERE id=?", (int(profile_id),))
+    have = json.loads(row["suites"] or "[]") if row else []
+    db.execute("UPDATE bench_profiles SET suites=? WHERE id=?",
+               (json.dumps(have + [s for s in names if s not in have]), int(profile_id)))
+
+
 def start(svc, model: str, suites=(), label: str = "", repeats: int = 1,
-          limit: int = 0) -> dict:
+          limit: int = 0, into: int = 0) -> dict:
     """Run every named suite against one model, in sequence, as one profile.
 
     Sequential on purpose: these share one GPU, and two at once would measure
-    the contention rather than the model."""
+    the contention rather than the model.
+
+    `into` (v0.181.222) reruns the named suites into an existing profile of the
+    same model instead: each finished run replaces that suite's run on the card
+    and the composite is worked out again, so a fixed suite costs its own run
+    and not the whole profile's. A run that is stopped or fails replaces
+    nothing; it stays a run of its own and the card keeps what it had."""
     from . import bench
     if _state.get("state") == "running" or bench.state().get("state") == "running":
         return dict(_state)
-    names = [s for s in (suites or runnable_suites(svc))]
+    names = [s for s in (suites or ())] if into else \
+        [s for s in (suites or runnable_suites(svc))]
+    db = svc.db
+    target = _into_profile(svc, into, model, names) if into else None
     if not names:
         return {"state": "failed", "error": "no suites are built yet"}
     if not _lock.acquire(blocking=False):
         return dict(_state)
-    reps = max(1, min(10, int(repeats or 1)))
-    db = svc.db
-    db.execute("INSERT INTO bench_profiles (ts, model, label, suites, repeats, "
-               "status) VALUES (datetime('now'), ?, ?, ?, ?, 'running')",
-               (model, label, json.dumps(names), reps))
-    pid = db.query_one("SELECT MAX(id) AS id FROM bench_profiles")["id"]
+    if target:
+        # the card's own passes, so a rerun is averaged like the run it replaces
+        reps, model, pid = int(target["repeats"] or 1), target["model"], int(into)
+        # the status stays: the card is whole the whole time, and a restart
+        # mid-rerun must not mark a finished profile "interrupted"
+        _add_suites(db, pid, names)
+    else:
+        reps = max(1, min(10, int(repeats or 1)))
+        db.execute("INSERT INTO bench_profiles (ts, model, label, suites, repeats, "
+                   "status) VALUES (datetime('now'), ?, ?, ?, ?, 'running')",
+                   (model, label, json.dumps(names), reps))
+        pid = db.query_one("SELECT MAX(id) AS id FROM bench_profiles")["id"]
     _state.clear()
     _state.update({"state": "running", "profile_id": pid, "model": model,
                    "suites": names, "repeats": reps, "done": 0,
-                   "total": len(names) * reps, "started": time.time()})
+                   "total": len(names) * reps, "started": time.time(),
+                   "into": bool(target)})
 
     def go():
         import asyncio
         try:
             from .loopclient import run_on_own_loop
-            run_on_own_loop(svc, _run(svc, pid, model, names, label, reps, limit))
+            run_on_own_loop(svc, _run(svc, pid, model, names, label, reps, limit,
+                                      into=bool(target)))
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             msg = describe_exception(e)
             _state.update({"state": "failed", "error": msg,
                            "finished": time.time()})
-            db.execute("UPDATE bench_profiles SET status='failed', note=? "
-                       "WHERE id=?", (msg[:300], pid))
+            if not target:
+                # a rerun that fails leaves the card it was going into as it was
+                db.execute("UPDATE bench_profiles SET status='failed', note=? "
+                           "WHERE id=?", (msg[:300], pid))
         finally:
             _lock.release()
 
@@ -198,10 +258,11 @@ def stop() -> dict:
 
 
 async def _run(svc, pid: int, model: str, names: list, label: str,
-               reps: int, limit: int) -> dict:
+               reps: int, limit: int, into: bool = False) -> dict:
     from . import bench
     db = svc.db
     done = 0
+    halted = False
     for rep in range(1, reps + 1):
         for suite in names:
             if _state.get("stop"):
@@ -209,16 +270,35 @@ async def _run(svc, pid: int, model: str, names: list, label: str,
             _state.update({"suite": suite, "rep": rep})
             out = await bench._run(svc, suite, model,
                                    label or f"profile {pid}", limit)
-            db.execute("UPDATE bench_runs SET profile_id=? WHERE id=?",
-                       (pid, out["run_id"]))
+            if into:
+                ran = db.query_one("SELECT status FROM bench_runs WHERE id=?",
+                                   (out["run_id"],))
+                if _state.get("stop") or not ran or ran["status"] != "done":
+                    # replaces nothing, and nothing after it runs: the card
+                    # keeps the runs it had
+                    halted = True
+                    break
+                db.execute("UPDATE bench_runs SET profile_id=? WHERE id=?",
+                           (pid, out["run_id"]))
+                if rep == 1:
+                    # what was there before; a later pass sits beside this one
+                    replace_runs(db, pid, suite, out["run_id"], before=out["run_id"])
+            else:
+                db.execute("UPDATE bench_runs SET profile_id=? WHERE id=?",
+                           (pid, out["run_id"]))
             done += 1
             _state["done"] = done
-        if _state.get("stop"):
+        if _state.get("stop") or halted:
             break
     card = build_card(svc, pid)
-    db.execute("UPDATE bench_profiles SET status=?, score=?, note=? WHERE id=?",
-               ("stopped" if _state.get("stop") else "done",
-                card.get("composite"), (card.get("note") or "")[:600], pid))
+    if into:
+        # the profile's own status stands: it was whole before and still is
+        db.execute("UPDATE bench_profiles SET score=?, note=? WHERE id=?",
+                   (card.get("composite"), (card.get("note") or "")[:600], pid))
+    else:
+        db.execute("UPDATE bench_profiles SET status=?, score=?, note=? WHERE id=?",
+                   ("stopped" if _state.get("stop") else "done",
+                    card.get("composite"), (card.get("note") or "")[:600], pid))
     _state.update({"state": "done", "finished": time.time(),
                    "composite": card.get("composite")})
     return card
@@ -234,11 +314,19 @@ def build_card(svc, profile_id: int) -> dict:
     p = db.query_one("SELECT * FROM bench_profiles WHERE id=?", (int(profile_id),))
     if p is None:
         return {"error": f"there is no profile {profile_id}"}
-    runs = db.query("SELECT * FROM bench_runs WHERE profile_id=? ORDER BY id",
-                    (int(profile_id),))
+    runs = db.query("SELECT * FROM bench_runs WHERE profile_id=? AND replaced_by IS NULL "
+                    "ORDER BY id", (int(profile_id),))
     by_suite: dict = {}
     for r in runs:
         by_suite.setdefault(r["suite"], []).append(r)
+    # v0.181.222: runs a rerun replaced, kept and named on the card
+    gone: dict = {}
+    for r in db.query("SELECT id, ts, score, replaced_by, suite FROM bench_runs "
+                      "WHERE profile_id=? AND replaced_by IS NOT NULL ORDER BY id",
+                      (int(profile_id),)):
+        gone.setdefault(r["suite"], []).append(
+            {"run_id": r["id"], "ts": r["ts"], "score": r["score"],
+             "replaced_by": r["replaced_by"]})
     w = weights(svc, list(by_suite))
     parts, unscored = [], []
     for suite, rows in by_suite.items():
@@ -256,6 +344,8 @@ def build_card(svc, profile_id: int) -> dict:
             "sd": spread(db, suite, p["model"], before_id=0) if scores else None,
             "delivered": sum(int(r["cases"] or 0) for r in rows)
             if suite in UNSCORED else 0,
+            "ran": max((r["ts"] or "") for r in rows),
+            "replaced": gone.get(suite, []),
         }
         try:
             # the breakdown, the misses, the speed, the ceiling (v0.181.211)
@@ -341,6 +431,15 @@ def _notes(card: dict) -> list:
     out = []
     if card.get("stopped_note"):
         out.append(card["stopped_note"])
+    # a card whose suites ran at different times says so (v0.181.222)
+    redone = [p for p in (card.get("parts") or []) + (card.get("unscored") or [])
+              if p.get("replaced")]
+    if redone:
+        out.append("rerun into this card: " + ", ".join(
+            f"{p['suite']} on {(p.get('ran') or '')[:16]}"
+            + (f" (was {p['replaced'][-1]['score']:.1f})"
+               if p["replaced"][-1].get("score") is not None else "")
+            for p in redone) + "; the other suites are from the first run")
     if card.get("composite") is None:
         out.append("no suite in this profile produced a score")
         return out
@@ -539,6 +638,51 @@ def reconcile(svc) -> int:
         except Exception:                                         # noqa: BLE001
             pass
     return len(rows)
+
+
+def fold(svc, source: int, into: int) -> dict:
+    """Move a profile's suites onto an older card of the same model (v0.181.222).
+
+    For suites already run as a profile of their own: each suite `source` has
+    replaces that suite's run on `into`, the composite is worked out again, and
+    `source` - which then holds no runs - is removed. Nothing is run again and
+    no run is deleted; the runs it replaces stay, marked, as a rerun's do."""
+    db = svc.db
+    source, into = int(source), int(into)
+    if source == into:
+        raise ValueError("a profile cannot be folded into itself")
+    a = db.query_one("SELECT * FROM bench_profiles WHERE id=?", (source,))
+    b = db.query_one("SELECT * FROM bench_profiles WHERE id=?", (into,))
+    if a is None or b is None:
+        raise ValueError(f"there is no profile {source if a is None else into}")
+    if a["model"] != b["model"]:
+        raise ValueError(f"profile {source} is {a['model']} and {into} is {b['model']}: "
+                         "only a card of the same model can take its suites")
+    if _state.get("state") == "running" and int(_state.get("profile_id") or 0) in (source, into):
+        raise ValueError("that profile is running - wait for it to finish")
+    runs = db.query("SELECT id, suite FROM bench_runs WHERE profile_id=? AND "
+                    "replaced_by IS NULL ORDER BY id", (source,))
+    if not runs:
+        raise ValueError(f"profile {source} has no runs to fold")
+    by_suite: dict = {}
+    for r in runs:
+        by_suite.setdefault(r["suite"], []).append(r["id"])
+    replaced = 0
+    for suite, ids in by_suite.items():
+        replaced += replace_runs(db, into, suite, ids[0])
+    db.execute("UPDATE bench_runs SET profile_id=? WHERE profile_id=?", (into, source))
+    _add_suites(db, into, list(by_suite))
+    db.execute("DELETE FROM bench_profiles WHERE id=?", (source,))
+    card = build_card(svc, into)
+    db.execute("UPDATE bench_profiles SET score=?, note=? WHERE id=?",
+               (card.get("composite"), (card.get("note") or "")[:600], into))
+    try:
+        db.log_event("info", "bench", f"profile {source} folded into {into}: "
+                                      f"{', '.join(by_suite)} ({replaced} run(s) replaced)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"into": into, "source": source, "suites": list(by_suite),
+            "replaced": replaced, "composite": card.get("composite")}
 
 
 def profiles(db, limit: int = 40) -> list:
