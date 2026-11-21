@@ -502,6 +502,9 @@ def test_session_lock_left_behind_is_released_without_a_playtest_or_at_the_cap(e
         P.adapter.studio_in_play = lambda: asked.append(1) or answer.get(case, lambda: True)()
     if case in ("setting_0", "cap"):
         P.profile.automation["studio_lock_playtest_keep_minutes"] = 0 if case == "setting_0" else 1
+    # this test is about who asks Studio before a lock is released; the self-repair sweep's
+    # own question (a playtest nobody owns, v0.181.226) is switched off so it is not counted
+    P.profile.automation["self_heal_stale_playtest_minutes"] = 0
     (e.tmp / "locks" / "studio.lock").write_text("ses_x 2026-11-13T10:00:00Z T1 bot match\n")
     drive(e, lambda t: bool(sc(e).get("run")) or bool(sc(e).get("last")), limit=100)
     assert events(e, "studio_calls_lock_released")

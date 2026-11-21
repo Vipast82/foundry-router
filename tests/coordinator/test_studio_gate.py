@@ -1388,6 +1388,58 @@ def test_changed_since_diffs_only_the_paths_carry_reads(tmp_path):
     assert diff[diff.index("--") + 1:] == ["src", "tests", "default.project.json", "docs/progress"]
 
 
+def _prepared(g, sprint="POL-7"):
+    """What Gate.__init__ gives status(): enough to write status.json."""
+    g.sprint, g.mode, g.started, g.run_id, g._playing = sprint, "calls", 1.0, "r1", False
+    return g
+
+
+def test_the_carry_loops_keep_status_json_fresh(tmp_path, monkeypatch):
+    """2026-11-18 21:26 POL-7: between "starting" and "preflight" the runner diffed 134
+    stored verdicts and wrote nothing; the coordinator's no-progress stop killed it after
+    20 minutes (stale_status_minutes) although it was working. The carry and pre-existing
+    loops rewrite status.json: the same phase, where they are, a new `updated`."""
+    monkeypatch.setattr(G, "suite_reader", lambda repo, rev: (lambda f: ""))
+    passed = [_rc("regression.S45", "PASS", "SUITE S45 pass=12 fail=0 expect=12 VERDICT PASS")]
+    g = _prepared(_carry_gate(tmp_path, [], passed))
+    for i in range(3):                                   # four stored verdicts in all
+        h = f"{i}" * 40
+        (tmp_path / "gate" / f"{h[:12]}.sprint.json").write_text(json.dumps(
+            {"head": h, "finished": 2.0 + i, "checks": passed, "captures": []}))
+    sp = tmp_path / "gate" / "status.json"
+    g.BEAT_EVERY_S = 0
+    g.status("starting", "")
+    stale = json.loads(sp.read_text())
+    stale["updated"] = 1.0                               # as if written 20 minutes ago
+    sp.write_text(json.dumps(stale))
+    writes = []
+    real = g.status
+    g.status = lambda phase, progress="": (writes.append((phase, progress)), real(phase, progress))[1]
+    assert g.carry_plan("S45", "docs/progress/POL-7_gate.json")["suites"] == ["S45"]
+    st = json.loads(sp.read_text())
+    assert st["phase"] == "starting" and st["updated"] > time.time() - 60
+    assert ("starting", "carry 1/4") in writes and ("starting", "carry 4/4") in writes
+    assert st["pid"] == os.getpid() and st["mode"] == "calls" and st["playing"] is False
+
+
+def test_a_beat_is_throttled_and_silent_before_the_first_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(G, "suite_reader", lambda repo, rev: (lambda f: ""))
+    g = _carry_gate(tmp_path, [], [])                    # a bare Gate: status() never ran
+    g.beat("carry 1/9")
+    assert not (tmp_path / "gate" / "status.json").exists()
+    _prepared(g).status("starting", "")
+    writes = []
+    real = g.status
+    g.status = lambda phase, progress="": (writes.append(progress), real(phase, progress))[1]
+    for i in range(50):
+        g.beat(f"carry {i}/50")                          # inside BEAT_EVERY_S: nothing written
+    assert writes == []
+    g._beat_at -= g.BEAT_EVERY_S + 1
+    g.beat()                                             # None keeps the progress as it was
+    g.beat("carry 2/50")
+    assert writes == [""]
+
+
 def test_absent_at_lists_files_deleted_at_head(tmp_path):
     import subprocess as sp
     r = str(tmp_path)

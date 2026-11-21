@@ -64,6 +64,10 @@ def test_replay_dead_lead_session_while_the_store_says_created(lead_env):
     assert c.store.session(sid)["status"] == "created"
     with fake.lock:
         fake.sessions.pop(sid)                           # Kilo lost it
+    # the call's own stamps are wall time: on a loaded machine the setup above took more
+    # than the 10 s of slack below and the "quiet 2 min" sweep still saw a fresh call
+    # (2026-11-21, failed three runs in a row beside another session's work)
+    clk.t = time.time()
     assert selfheal.dead_sessions(c, P) == []            # touched just now: not asked
     clk.advance(130)
     assert selfheal.dead_sessions(c, P) == []            # quiet 2 min: first seen dead
@@ -361,6 +365,164 @@ def test_studio_gate_studio_lock_with_no_runner_is_released(tmp_path):
     assert released and act["action"] == "released the studio_gate studio.lock"
 
 
+# ------------------------------------------------------------------ 4b stale playtest
+
+def _studio(c, P, monkeypatch, play=True):
+    """A workstation Studio the test controls, and the stop requests made of it."""
+    studio = {"play": play, "asked": 0, "stops": []}
+
+    def in_play():
+        studio["asked"] += 1
+        return studio["play"]
+    P.adapter.studio_in_play = in_play
+    monkeypatch.setattr(selfheal, "_stop_playtest",
+                        lambda c_, P_: studio["stops"].append(c_.clock()) or "")
+    return studio
+
+
+def test_replay_pol7_a_playtest_a_dead_gate_left_is_stopped_and_the_outcome_logged(
+        tmp_path, monkeypatch):
+    """2026-11-18 13:18: POL-7's gate timed out, its runner died and the playtest it had
+    started ran until the operator stopped it two hours later. Nothing owns that playtest:
+    after self_heal_stale_playtest_minutes the sweep stops it, names the task whose run was
+    last in Studio, and the next sweep records that Studio is back in Edit."""
+    c, P, clk, *_ = game(tmp_path)
+    studio = _studio(c, P, monkeypatch)
+    c.store.event("game", "T1", "studio_calls_stopped", detail={"reason": "timeout"})
+    assert selfheal.sweep(c, P, force=True) == []           # first seen in Play
+    clk.advance(300)
+    assert selfheal.stale_playtests(c, P) == [] and not studio["stops"]     # 5 of 10 min
+    clk.advance(330)
+    [act] = selfheal.sweep(c, P, force=True)
+    assert act["rule"] == "stale_playtest" and act["task"] == "T1" and act["digest"] is True
+    assert act["action"] == "stopped a playtest nobody owns"
+    assert act["evidence"]["in_play_minutes"] == 10 and act["evidence"]["stop_request"] == 1
+    assert act["evidence"]["last_studio_run"]["event"] == "studio_calls_stopped"
+    assert len(studio["stops"]) == 1
+    with open(selfheal._stop_log(c, P), "w", encoding="utf-8") as f:
+        f.write("STOPPED: playtest stopped\n")
+    studio["play"] = False
+    clk.advance(60)
+    assert selfheal.stale_playtests(c, P) == []
+    [done] = events(c, "stale_playtest_stopped")
+    assert done["stop_requests"] == 1 and done["output"] == "STOPPED: playtest stopped"
+    assert len(studio["stops"]) == 1 and events(c, "operator_notice") == []
+    # Edit again: the next playtest nobody owns gets the full wait
+    studio["play"] = True
+    clk.advance(300)
+    assert selfheal.stale_playtests(c, P) == []
+    clk.advance(300)
+    assert selfheal.stale_playtests(c, P) == [] and len(studio["stops"]) == 1
+
+
+@pytest.mark.parametrize("owner", ["reservation", "runner", "studio_lock", "session_call",
+                                   "track_lease", "queued_run"])
+def test_a_playtest_somebody_owns_is_never_stopped(tmp_path, monkeypatch, owner):
+    from foundry_coordinator import studio_reserve
+    from foundry_coordinator.autoheal import runner_lock_path
+    c, P, clk, *_ = game(tmp_path)
+    studio = _studio(c, P, monkeypatch)
+    lock = runner_lock_path(P.profile.workspace)
+    if owner == "reservation":
+        studio_reserve.reserve(c, "game", 120, "playing a match")
+    elif owner == "runner":
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        with open(lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "sprint": "T1"}, f)
+    elif owner == "studio_lock":
+        P.adapter.studio_lock_holder = lambda: {"owner": "operator", "sprint": "",
+                                                "line": "operator x - live test", "age_s": 9}
+    elif owner == "track_lease":
+        c.store.set_meta("studio_lease:game", json.dumps({"owner": "track:ux"}))
+    elif owner == "queued_run":
+        c.store.merge_data("game", "T1", studio_calls={"pending": {"head": "x"}})
+    for _ in range(40):                                     # 40 minutes in Play
+        if owner == "session_call":
+            c.tracks.resources.note_studio_call(P, clk.t)   # the session keeps using Studio
+        assert selfheal.stale_playtests(c, P) == []
+        clk.advance(60)
+    assert studio["stops"] == [] and studio["asked"] == 0   # an owned Studio is not even asked
+    assert selfheal.studio_owner(c, P)
+    # the owner goes: the wait starts then, not 40 minutes ago
+    if owner == "reservation":
+        studio_reserve.release(c, "game")
+    elif owner == "runner":
+        os.remove(lock)
+    elif owner == "studio_lock":
+        P.adapter.studio_lock_holder = lambda: None
+    elif owner == "track_lease":
+        c.store.x("DELETE FROM meta WHERE key=?", ("studio_lease:game",))
+    elif owner == "queued_run":
+        c.store.merge_data("game", "T1", studio_calls={})
+    else:
+        clk.advance(600)                                    # studio_idle_minutes
+    assert selfheal.studio_owner(c, P) == ""
+    assert selfheal.stale_playtests(c, P) == []
+    clk.advance(540)
+    assert selfheal.stale_playtests(c, P) == [] and studio["stops"] == []
+    clk.advance(120)
+    assert len(selfheal.stale_playtests(c, P)) == 1 and len(studio["stops"]) == 1
+
+
+def test_a_playtest_that_will_not_stop_gets_three_requests_then_one_notice(
+        tmp_path, monkeypatch):
+    c, P, clk, *_ = game(tmp_path)
+    studio = _studio(c, P, monkeypatch)
+    selfheal.stale_playtests(c, P)
+    acts = []
+    for _ in range(30):
+        clk.advance(60)
+        acts += selfheal.stale_playtests(c, P)
+    assert len(acts) == 3 == len(studio["stops"])
+    assert [a["evidence"]["stop_request"] for a in acts] == [1, 2, 3]
+    [notice] = events(c, "operator_notice", "-")
+    assert notice["alert_class"] == "watch" and notice["kind"] == "stale_playtest"
+    assert notice["title"] == "a leftover playtest would not stop"
+    assert "3 stop requests" in notice["text"]
+
+
+def test_no_answer_off_or_no_probe_never_stops_a_playtest(tmp_path, monkeypatch):
+    c, P, clk, *_ = game(tmp_path)
+    studio = _studio(c, P, monkeypatch, play=None)          # Studio gives no answer
+    for _ in range(30):
+        assert selfheal.stale_playtests(c, P) == []
+        clk.advance(60)
+    assert studio["asked"] == 6 and not studio["stops"]     # asked every 5 min, never counted
+    studio["play"] = True
+    automation.set_live(P, "self_heal_stale_playtest_minutes", 0)
+    for _ in range(30):
+        assert selfheal.stale_playtests(c, P) == []
+        clk.advance(60)
+    assert studio["asked"] == 6 and not studio["stops"]     # off: not asked at all
+    automation.set_live(P, "self_heal_stale_playtest_minutes", 10)
+    del P.adapter.studio_in_play                            # a project with no Studio probe
+    assert selfheal.stale_playtests(c, P) == []
+
+
+def test_stop_playtest_writes_the_commands_answer_to_the_log(tmp_path, monkeypatch):
+    """The stop was a fire-and-forget process with its output dropped: nobody could say
+    whether Studio answered STOPPED, STOP FAILED or BUSY."""
+    from types import SimpleNamespace
+    from foundry_coordinator import autoheal, fast_lane
+    seen = {}
+
+    class Popen:
+        def __init__(self, argv, **kw):
+            seen.update(argv=argv, kw=kw)
+            if hasattr(kw["stdout"], "write"):
+                kw["stdout"].write("BUSY: another studio_gate runner is driving Studio\n")
+    monkeypatch.setattr(autoheal.subprocess, "Popen", Popen)
+    monkeypatch.setattr(fast_lane, "settings", lambda P: {"gate_module": "pkg.gate"})
+    P = SimpleNamespace(profile=SimpleNamespace(workspace=str(tmp_path)))
+    log = str(tmp_path / "state" / "stop.log")
+    assert autoheal.stop_playtest(P, log=log) == ""
+    assert seen["argv"][1:] == ["-m", "pkg.gate", "--repo", str(tmp_path), "stop-playtest"]
+    assert seen["kw"]["stderr"] == autoheal.subprocess.STDOUT
+    assert open(log, encoding="utf-8").read().startswith("BUSY:")
+    assert autoheal.stop_playtest(P) == ""                  # as before: output dropped
+    assert seen["kw"]["stdout"] == autoheal.subprocess.DEVNULL
+
+
 # ------------------------------------------------------------------ 5 holds
 
 def test_an_expired_hold_is_resumed_by_the_tick(tmp_path):
@@ -496,6 +658,7 @@ def test_every_setting_is_typed_in_the_schema():
     for k in ("self_heal", "self_heal_max_actions_per_task_per_day",
               "self_heal_dead_session_minutes", "self_heal_stuck_case_minutes",
               "self_heal_stale_lock_minutes", "self_heal_unowned_pause_hours",
+              "self_heal_stale_playtest_minutes",
               "self_heal_reverify_fixed"):
         f = schema.find_field(f"automation.{k}")
         assert f is not None and schema._AUTO_DESC.get(k), k

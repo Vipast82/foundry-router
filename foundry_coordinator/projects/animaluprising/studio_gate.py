@@ -1446,6 +1446,26 @@ class Gate:
                    {"sprint": self.sprint, "pid": os.getpid(), "started": self.started,
                     "phase": phase, "progress": progress, "updated": time.time(), "mode": self.mode,
                     "run_id": self.run_id, "playing": self._playing})
+        self._phase, self._progress, self._beat_at = phase, progress, time.monotonic()
+
+    # 2026-11-18 POL-7: between "starting" and "preflight" the runner reads every stored
+    # verdict and diffs each against HEAD (carry_plan, preexisting_plan) and wrote nothing;
+    # with 134 verdicts that outlasted the coordinator's no-progress stop
+    # ([studio_calls] stale_status_minutes), which killed a runner that was working. Those
+    # loops now say where they are. Every git call in them has its own timeout and the run
+    # its own limit, so a step that really hangs is still stopped.
+    BEAT_EVERY_S = 5.0
+
+    def beat(self, progress: Optional[str] = None) -> None:
+        """status.json again from inside a long preparation step: the same phase, `progress`
+        (None = as it was), at most every BEAT_EVERY_S. Nothing before the first status()."""
+        phase = getattr(self, "_phase", None)
+        if phase is None:
+            return
+        if time.monotonic() - getattr(self, "_beat_at", 0.0) < self.BEAT_EVERY_S:
+            return
+        with contextlib.suppress(Exception):
+            self.status(phase, getattr(self, "_progress", "") if progress is None else progress)
 
     def add(self, c: dict):
         self.checks.append(c)
@@ -2484,6 +2504,7 @@ class Gate:
         prev = str(v["head"])
         if prev in memo:
             return memo[prev]
+        self.beat()                               # a git call or three follow
         res: Optional[list] = None
         if prev == head:
             res = []
@@ -2571,7 +2592,9 @@ class Gate:
             return out
         root = os.path.dirname(self.gate_dir)
         found = []
-        for d in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        dirs = sorted(os.listdir(root)) if os.path.isdir(root) else []
+        for i, d in enumerate(dirs, 1):
+            self.beat(f"earlier runs {i}/{len(dirs)}")
             sub = os.path.join(root, d)
             # this sprint's own earlier red run is no baseline: it may be the sprint's doing
             if not os.path.isdir(sub) or d == self.sprint:
@@ -2599,7 +2622,8 @@ class Gate:
                 own_hits |= _direct_hits(f, index, reader)
         entries = {e.get("id"): e for e in index.get("entries") or [] if isinstance(e, dict)}
         decided: set = set()
-        for v in found:
+        for i, v in enumerate(found, 1):
+            self.beat(f"pre-existing rows {i}/{len(found)}")
             todo = [x for x in ids if x not in decided and isinstance(v["rows"].get(x), dict)
                     and v["rows"][x].get("fresh")
                     and v["rows"][x].get("verdict") in ("PASS", "FAIL", "UNKNOWN")]
@@ -2651,7 +2675,8 @@ class Gate:
         memo: dict = {}
         wanted = {e.get("id") for e in (select_entries(self.index or {}, selection) or [])}
         reader = suite_reader(self.repo, head)
-        for v in verdicts:
+        for i, v in enumerate(verdicts, 1):
+            self.beat(f"carry {i}/{len(verdicts)}")
             changed = self._changed_since(v, head, memo)
             if changed is None:
                 continue

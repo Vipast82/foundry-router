@@ -156,7 +156,7 @@ SCHEMA = [
 ]
 # coordinator event kinds (or detail.alert_class values) that raise their own
 # alert; the policy in alerts.py decides which of them are pushed
-EVENT_ALERT_CLASSES = ("self_repair_exhausted", "prep_failed", "pause_forgotten")
+EVENT_ALERT_CLASSES = ("self_repair_exhausted", "prep_failed", "pause_forgotten", "watch")
 
 
 def event_alert_class(kind: str, detail: dict) -> str:
@@ -1378,7 +1378,10 @@ class ControlCenter:
                       or detail.get("why"), 600)
             what = {"self_repair_exhausted": "self-repair exhausted",
                     "prep_failed": "a queued repo change did not land",
-                    "pause_forgotten": "a pause or hold looks forgotten"}[cls]
+                    "pause_forgotten": "a pause or hold looks forgotten",
+                    # the coordinator's own watch duties (selfheal and later rules): the
+                    # event names what it is in detail.title
+                    "watch": _s(detail.get("title"), 120) or "the coordinator needs a look"}[cls]
             return [("raise", f"{cls}:{eid}", cls, "high",
                      f"{o.get('task_id') or o.get('project_id') or 'coordinator'}: {what}",
                      text, {"project_id": o.get("project_id"), "task_id": o.get("task_id")})]

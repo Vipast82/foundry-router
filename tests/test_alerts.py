@@ -190,12 +190,21 @@ def test_coordinator_events_raise_their_alert_classes(env):
            {"type": "coord_event", "kind": "prep_failed", "event_id": "ev-3", "project_id": "au",
             "task_id": "", "detail": {"text": "hook refused the commit"}},
            {"type": "coord_event", "kind": "self_heal", "event_id": "ev-4", "project_id": "au",
-            "task_id": "T-9", "detail": {"alert_class": "pause_forgotten", "text": "16 h hold"}})
+            "task_id": "T-9", "detail": {"alert_class": "pause_forgotten", "text": "16 h hold"}},
+           # the coordinator's own watch duties (v0.181.226): one class, titled by the event
+           {"type": "coord_event", "kind": "operator_notice", "event_id": "ev-5",
+            "project_id": "au", "task_id": "POL-7",
+            "detail": {"alert_class": "watch", "kind": "stale_playtest",
+                       "title": "a leftover playtest would not stop",
+                       "text": "Studio has been in Play for 14 min"}})
     al.tick()
     assert sorted(r["cls"] for r in al.outbox()) == ["pause_forgotten", "prep_failed",
-                                                     "self_repair_exhausted"]
+                                                     "self_repair_exhausted", "watch"]
+    [w] = [a for a in cc.alerts([], "open") if a["kind"] == "watch"]
+    assert w["title"] == "POL-7: a leftover playtest would not stop"
+    assert "Studio has been in Play for 14 min" in json.dumps(w)
     # every event is kept for the digest, the plain repair too
-    assert env["db"].query_one("SELECT COUNT(*) AS n FROM cc_coord_events")["n"] == 4
+    assert env["db"].query_one("SELECT COUNT(*) AS n FROM cc_coord_events")["n"] == 5
 
 
 def test_decision_class_fallbacks():

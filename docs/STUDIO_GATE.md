@@ -486,6 +486,24 @@ READY`, or a `GATE <ID> STARTED|RUNNING|NONE|ERROR|BUSY ...` line.
   keeps the lock (event `studio_lock_kept`) for at most `[automation]
   studio_lock_playtest_keep_minutes` (default 120, 0 = off), then releases it
   (event `studio_lock_keep_cap`).
+- **A playtest nobody owns is stopped.** The self-repair sweep asks the
+  workstation Studio for its mode whenever nothing owns it: no live gate
+  runner, no `studio.lock`, no main session that called a Studio tool within
+  `[automation] studio_idle_minutes`, no track lease, no queued scripted run,
+  no write-access Lead call and no owner reservation (`studio-reserve`). In
+  Play that way for `[automation] self_heal_stale_playtest_minutes` (default
+  10, 0 = off), the playtest is stopped (`self_heal` event, rule
+  `stale_playtest`, naming the task whose run was last in Studio). The next
+  sweep records what came of it (`stale_playtest_stopped`, with the stop
+  command's own line); after three requests that did not end it, one alert
+  (class `watch`). To play in the TEST Studio yourself for longer than that,
+  reserve it first. A slot's Studio is not covered: a killed slot run always
+  stops its own playtest.
+- **Preparation counts as progress.** While the runner reads its stored
+  verdicts and diffs them against HEAD (before `preflight`), it rewrites
+  `status.json` every few seconds with where it is (`starting`, `carry
+  12/134`), so `[studio_calls] stale_status_minutes` does not stop a runner
+  that is working.
 - **`doctor` does not check** the Scene Analysis beta, display scaling or the
   viewport size.
 - The Roblox Assistant `playtest` subagent is advisory and never part of the

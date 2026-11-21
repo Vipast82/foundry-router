@@ -371,6 +371,7 @@ AUTOMATION_DEFAULTS: dict = {
     "self_heal_dead_session_minutes": 2,
     "self_heal_stuck_case_minutes": 30,
     "self_heal_stale_lock_minutes": 10,
+    "self_heal_stale_playtest_minutes": 10,
     "self_heal_unowned_pause_hours": 12,
     "self_heal_reverify_fixed": True,
 }
@@ -1068,6 +1069,12 @@ _AUTO_DESC = {
     "self_heal_stale_lock_minutes": "A lock (coordinator workspace/session lock, gate runner "
                                     "lock, studio_gate studio.lock) older than this whose "
                                     "holder has no live session, check or run is released.",
+    "self_heal_stale_playtest_minutes": "The workstation's Studio in Play this long with "
+                                        "nothing behind it (no gate runner, studio.lock, "
+                                        "session Studio call, track lease, queued run or "
+                                        "owner reservation) has its playtest stopped; the "
+                                        "outcome is logged, and a playtest that will not "
+                                        "stop raises one alert. 0 = never stop one.",
     "self_heal_unowned_pause_hours": "A task paused with no hold owner for this long gets "
                                      "one operator notice (alert class pause_forgotten); it "
                                      "is never resumed automatically.",

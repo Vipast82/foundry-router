@@ -12,7 +12,7 @@ Self-driving plan, parts 4 and 5 (reports/SELF_DRIVING_PLAN.md):
                      browser notification). Only these classes are PUSHED to
                      the webhook, each switchable in the UI: product_decision,
                      user_action, image_ask (2D asks), stack_down,
-                     self_repair_exhausted, prep_failed, pause_forgotten.
+                     self_repair_exhausted, prep_failed, pause_forgotten, watch.
                      Everything else waits for the digest.
   webhook            Optional alerts.webhook_url: an ntfy topic (text body,
                      Title / Priority / Tags headers) or any URL that takes
@@ -68,6 +68,7 @@ CLASS_LABELS = {
     "self_repair_exhausted": "Self-repair exhausted",
     "prep_failed": "Repo change did not land",
     "pause_forgotten": "Forgotten pause or hold",
+    "watch": "Coordinator watch: something it could not fix itself",
 }
 MAX_ATTEMPTS = 6
 RETRY_BASE_S = 30
@@ -247,7 +248,7 @@ class AlertService:
         kind = str(a.get("kind") or "")
         if kind in ("stack_down", "stack_recovered"):
             return "stack_down"
-        if kind in ("self_repair_exhausted", "prep_failed", "pause_forgotten"):
+        if kind in ("self_repair_exhausted", "prep_failed", "pause_forgotten", "watch"):
             return kind
         if kind == "approval":
             return "product_decision"

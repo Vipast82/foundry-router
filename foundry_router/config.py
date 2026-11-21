@@ -1245,7 +1245,7 @@ class OperatorChatConfig(BaseModel):
 
 # the classes that may push an alert (alerts.py); everything else is digest-only
 ALERT_CLASSES = ("product_decision", "user_action", "image_ask", "stack_down",
-                 "self_repair_exhausted", "prep_failed", "pause_forgotten")
+                 "self_repair_exhausted", "prep_failed", "pause_forgotten", "watch")
 
 
 class AlertsConfig(BaseModel):

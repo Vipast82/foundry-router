@@ -280,9 +280,12 @@ def clear_stale_runner_lock(workspace: str) -> dict:
     return {"cleared": cleared, "pid": pid, "playing": playing, "sprint": sprint}
 
 
-def stop_playtest(P) -> str:
+def stop_playtest(P, log: str = "") -> str:
     """`studio_gate stop-playtest` in the background (one community call) so Studio
-    is back in Edit mode after a dead runner. '' when started, else why not."""
+    is back in Edit mode after a dead runner. '' when started, else why not. `log`: a file
+    the command's own line goes to ("STOPPED: ...", "STOP FAILED: ...", "BUSY: ..."), so the
+    caller can say what came of it (selfheal.stale_playtests); without it the output is
+    dropped as before."""
     try:
         from .fast_lane import ROUTER_ROOT, settings
         gm = str(settings(P)["gate_module"]).strip()
@@ -290,13 +293,21 @@ def stop_playtest(P) -> str:
         return f"no gate module: {e}"[:200]
     if gm.endswith(".py"):
         return "custom gate script: no known stop-playtest command"
+    out = None
     try:
+        if log:
+            os.makedirs(os.path.dirname(os.path.abspath(log)), exist_ok=True)
+            out = open(log, "w", encoding="utf-8")
         subprocess.Popen([sys.executable, "-m", gm, "--repo", P.profile.workspace, "stop-playtest"],
-                         cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL,
+                         cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL,
+                         stdout=out or subprocess.DEVNULL,
+                         stderr=subprocess.STDOUT if out else subprocess.DEVNULL,
                          creationflags=0x08000000 if os.name == "nt" else 0)
     except OSError as e:
         return f"stop-playtest: {e}"[:200]
+    finally:
+        if out is not None:
+            out.close()                           # the child keeps its own handle
     return ""
 
 

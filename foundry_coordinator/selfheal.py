@@ -25,6 +25,11 @@ lists them). No model call is made here.
   4 stale_lock      the gate runner lock with a dead pid, a studio_gate studio.lock
                     with no live runner, coordinator locks held by a task that can
                     hold nothing (stopped, no Lead call / check / run): released
+    4b stale_playtest the workstation's Studio is in Play and nobody owns the playtest (no
+                    gate runner, studio.lock, session Studio call, track lease, queued run,
+                    Lead writer or owner reservation) for self_heal_stale_playtest_minutes:
+                    stopped, the outcome recorded by the next sweep (POL-7 2026-11-18: a
+                    timed-out gate's playtest ran for two hours)
   5 hold            a PAUSED task whose hold owner is gone or whose hold expired:
                     resumed. A PAUSED task with no owner for
                     self_heal_unowned_pause_hours: one operator notice (alert class
@@ -156,7 +161,7 @@ def sweep(c, P, force: bool = False) -> list[dict]:
     for name, fn in (("pending_abort", pending_aborts),
                      ("dead_session", dead_sessions), ("stuck_case", stuck_cases),
                      ("fixed_release", fixed_releases), ("stale_lock", stale_locks),
-                     ("hold", holds)):
+                     ("stale_playtest", stale_playtests), ("hold", holds)):
         try:
             out += fn(c, P) or []
         except Exception as e:                                   # noqa: BLE001
@@ -753,6 +758,167 @@ def stale_locks(c, P) -> list[dict]:
                            {"resources": res, "state": t["state"],
                             "why": "the task has no live session, check or run"}))
     return out
+
+
+# ------------------------------------------------------------------ 4b stale playtest
+# 2026-11-18 POL-7, twice: a gate that timed out left its playtest running for one to two
+# hours (13:18 until the operator stopped it at 15:3x). Every stop of a leftover playtest was
+# tied to something else happening: a gate being killed (and only if its last status.json
+# said `playing`, which is false while the playtest is still starting), or the next gate
+# finding it. A studio.lock kept "while Studio is in Play" was dropped at its cap and the
+# playtest played on. This rule asks Studio itself.
+
+STALE_PLAYTEST_PROBE_S = 300.0      # how often a Studio nobody owns is asked for its mode
+STALE_PLAYTEST_MAX_STOPS = 3        # stop requests for one leftover playtest, then a notice
+STALE_PLAYTEST_LEFT_BY = ("studio_calls_started", "studio_calls_stopped", "studio_lock_keep_cap",
+                          "studio_lock_released", "bot_matches_done", "bot_matches_error",
+                          "fast_lane_gate_started", "fast_lane_gate_stopped",
+                          "fast_lane_runner_dead")
+
+
+def studio_owner(c, P) -> str:
+    """Who may be running a playtest in the workstation's Studio right now ('' = nobody the
+    coordinator knows of): the owner's reservation, a live gate runner, a main session that
+    called a Studio tool within [automation] studio_idle_minutes, a studio.lock (whoever holds
+    it; the lock rules above release an orphaned one), a track's Studio lease, a scripted run
+    that is queued or running on the workstation, or a write-access Lead call in flight."""
+    from . import studio_reserve
+    r = studio_reserve.get(c.store, P.id, c.clock())
+    if r:
+        return studio_reserve.note(r)
+    res = getattr(getattr(c, "tracks", None), "resources", None)
+    if res is not None:
+        why = res.studio_in_use(P)
+        if why:
+            return why
+        lease = res.lease(P)
+        if lease:
+            return f"Studio is leased to {lease.get('owner') or 'a track'}"
+    holder_fn = getattr(P.adapter, "studio_lock_holder", None)
+    h = holder_fn() if callable(holder_fn) else None
+    if h:
+        return f"studio.lock is held: {str(h.get('line') or '')[:160]}"
+    for t in c.store.tasks(P.id):
+        tid = t["task_id"]
+        if t["state"] in S.TERMINAL:
+            continue
+        try:
+            from . import slots
+            if slots.slot_for(c, c.tracks.project_for(P, t)) is not None:
+                continue                 # its Studio is its slot's, never the workstation's
+        except Exception:                                         # noqa: BLE001
+            pass
+        if c.studio_calls.active(P, tid):
+            return f"{tid} has a scripted Studio run queued or running"
+        if (t.get("data") or {}).get("recovery_case") and c._lead_writer_open(P, tid):
+            return f"{tid}'s Lead has a write-access call in flight"
+    return ""
+
+
+def _stop_log(c, P) -> str:
+    return os.path.join(str(getattr(c, "state_dir", "") or "."), f"stop-playtest-{P.id}.log")
+
+
+def _stop_output(c, P) -> str:
+    try:
+        with open(_stop_log(c, P), encoding="utf-8", errors="replace") as f:
+            return " ".join(f.read().split())[-300:]
+    except OSError:
+        return ""
+
+
+def _stop_playtest(c, P) -> str:
+    """Ask Studio to stop its playtest ('' = asked; the command's line goes to _stop_log)."""
+    from .autoheal import stop_playtest
+    return stop_playtest(P, log=_stop_log(c, P))
+
+
+def stale_playtests(c, P) -> list[dict]:
+    """The workstation's Studio is in Play and nobody owns the playtest (studio_owner) for
+    [automation] self_heal_stale_playtest_minutes (0 = off): it is stopped, with a
+    `self_heal` event naming the task whose run most likely left it. The next sweep asks
+    Studio again and records what came of the stop (`stale_playtest_stopped`); a playtest
+    still running after STALE_PLAYTEST_MAX_STOPS requests raises one operator notice (alert
+    class watch). An owner showing up at any point ends the watch: the playtest is theirs.
+    Studio is asked every STALE_PLAYTEST_PROBE_S while nobody owns it, and every sweep once
+    it was seen in Play. The times live in memory: a restart starts them again."""
+    mem = c.__dict__.setdefault("_stale_playtest", {})
+    mins = float(_setting(P, "self_heal_stale_playtest_minutes") or 0)
+    probe = getattr(P.adapter, "studio_in_play", None)
+    if mins <= 0 or not callable(probe):
+        mem.pop(P.id, None)
+        return []
+    try:
+        from . import slots
+        if slots.slot_for(c, P) is not None:
+            return []                    # [studio] main_slot: the main Studio is a slot's
+    except Exception:                                             # noqa: BLE001
+        pass
+    st = mem.setdefault(P.id, {})
+    now = c.clock()
+    owner = studio_owner(c, P)
+    if owner:
+        st.clear()
+        st["owner"] = owner
+        return []
+    st.pop("owner", None)
+    if st.get("first") is None and now - st.get("probed", -1e18) < STALE_PLAYTEST_PROBE_S:
+        return []
+    st["probed"] = now
+    try:
+        playing = probe()
+    except Exception:                                             # noqa: BLE001
+        playing = None
+    if playing is not True:
+        if playing is False:
+            if st.get("stops"):
+                c.store.event(P.id, st.get("tid") or "-", "stale_playtest_stopped", detail={
+                    "task": st.get("tid") or "-", "stop_requests": st["stops"], "digest": True,
+                    "output": _stop_output(c, P),
+                    "in_play_minutes": int((now - st["first"]) / 60)})
+            st.clear()
+            st["probed"] = now
+        return []                        # None: Studio gave no answer; ask again next sweep
+    if st.get("first") is None:
+        st.update(first=now, stops=0)
+        return []
+    if not st["stops"] and now - st["first"] < mins * 60:
+        return []
+    kept = int((now - st["first"]) / 60)
+    if st["stops"] >= STALE_PLAYTEST_MAX_STOPS:
+        if not st.get("noticed"):
+            st["noticed"] = True
+            tid = st.get("tid") or "-"
+            text = (f"Studio has been in Play for {kept} min with no gate, session or "
+                    f"reservation behind it, and {st['stops']} stop requests did not end it"
+                    + (f" (last answer: {_stop_output(c, P)})" if _stop_output(c, P) else "")
+                    + ". Stop the playtest in Studio; gates on the workstation will fail "
+                      "until then.")
+            c.store.event(P.id, tid, "operator_notice", detail={
+                "text": text, "kind": "stale_playtest", "alert_class": "watch",
+                "title": "a leftover playtest would not stop", "task_id": tid})
+        return []
+    if "tid" not in st:
+        q = ",".join("?" * len(STALE_PLAYTEST_LEFT_BY))
+        last = c.store.q(f"SELECT task_id, kind, ts FROM events WHERE project_id=? AND kind IN "
+                         f"({q}) AND task_id<>'' ORDER BY id DESC LIMIT 1",
+                         (P.id,) + STALE_PLAYTEST_LEFT_BY)
+        st["tid"] = str(last[0]["task_id"]) if last else "-"
+        st["left_by"] = ({"task": st["tid"], "event": last[0]["kind"],
+                          "minutes_ago": int((now - float(last[0]["ts"] or now)) / 60)}
+                         if last else {})
+    tid = st["tid"]
+    if not _allowed(c, P, tid):
+        return []
+    why = _stop_playtest(c, P)
+    st["stops"] += 1
+    return [_record(c, P, tid, "stale_playtest",
+                    "stopped a playtest nobody owns" if not why
+                    else "could not ask Studio to stop a playtest nobody owns",
+                    {"in_play_minutes": kept, "stop_request": st["stops"],
+                     "last_studio_run": st.get("left_by") or {}, "error": why,
+                     "why": "Studio is in Play with no gate runner, studio.lock, session "
+                            "Studio call, lease, queued run or reservation"})]
 
 
 # ------------------------------------------------------------------ 5 holds

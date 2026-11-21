@@ -1,3 +1,66 @@
+## v0.181.226 - a playtest nobody owns is stopped; a preparing gate is not "stale"
+
+First release of the work in `COORDINATOR_AUTOMATION_NEEDS.md`: the things a
+chat session has been watching for and cleaning up by hand, moved into the
+coordinator. This one is items 1 and 5.
+
+**A dead gate left Studio in Play (item 1).** On 2026-11-18 POL-7's gate timed
+out at 13:18, its runner died, and the playtest it had started ran until the
+operator stopped it after 15:30. Every stop of a leftover playtest was tied to
+something else happening: a gate being killed (and only when its last
+`status.json` said `playing`, which is still false while the playtest is
+starting), or the next gate finding it. A `studio.lock` kept "while Studio is
+in Play" was dropped at its 120-minute cap and the playtest played on.
+
+The self-repair sweep now asks Studio itself. When nothing owns the
+workstation Studio - no live gate runner, no `studio.lock`, no main session
+that called a Studio tool within `studio_idle_minutes`, no track lease, no
+queued scripted run, no write-access Lead call, no owner reservation - it asks
+for the mode every 5 minutes. In Play that way for `[automation]
+self_heal_stale_playtest_minutes` (new, default 10, 0 = off; Automation page,
+with the other self-repair settings), the playtest is stopped: a `self_heal`
+event with rule `stale_playtest`, on the task whose run was last in Studio. An
+owner turning up at any point ends the watch, and an owned Studio is not asked
+at all.
+
+The stop used to be a process started with its output thrown away, so nobody
+could say whether Studio answered. Its line (`STOPPED: ...`, `STOP FAILED:
+...`, `BUSY: ...`) now goes to a log, the next sweep asks Studio again and
+records the outcome (`stale_playtest_stopped`), and a playtest still running
+after three requests raises one alert.
+
+That alert is a new class, **`watch`** ("Coordinator watch: something it could
+not fix itself"), switchable with the others under Alerts. It is one class for
+every watch duty that follows in this series; the event's `title` says which.
+
+Not covered: a slot's Studio (the probe reads the workstation's; a killed slot
+run always stops its own playtest). If you play in the TEST Studio by hand for
+more than ten minutes without `studio-reserve`, this will stop your playtest -
+the next gate would have done the same.
+
+**The gate stalled in "starting" (item 5).** Between `starting` and
+`preflight` the runner reads every stored verdict and diffs each against HEAD,
+and wrote nothing while it did. With 134 verdicts that outlasted `[studio_calls]
+stale_status_minutes` (20 for AU) and the coordinator killed a runner that was
+working (POL-7, 21:26 on 11-18; commit 58387c0 made the diff itself fast). The
+carry and pre-existing-row loops now rewrite `status.json` at most every 5
+seconds - same phase, where they are (`carry 12/134`), a new `updated`. Each
+git call in them keeps its own timeout and the run its own limit, so a step
+that really hangs is still stopped.
+
+**A test that depended on the machine being quiet.**
+`test_replay_dead_lead_session_while_the_store_says_created` started its test
+clock before a setup that runs in wall time and allowed it 10 seconds; beside
+another session's test run it failed three times in a row. The clock is set
+after the setup.
+
+Files: `foundry_coordinator/selfheal.py` (`studio_owner`, `stale_playtests`),
+`autoheal.py` (`stop_playtest(log=)`), `projects/animaluprising/studio_gate.py`
+(`Gate.beat`), `foundry_automation/schema.py`, `foundry_router/alerts.py`,
+`config.py`, `control_center.py`, `docs/STUDIO_GATE.md`. 12 tests.
+
+Deploy: coordinator and router both changed. The setting defaults to on.
+
 ## v0.181.225 - the last three suites, and four faults found by reading misses
 
 Third part of going through the benchmarks. Sonnet 5.5 was run on the router
