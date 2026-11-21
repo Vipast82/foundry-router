@@ -257,10 +257,44 @@ def scenario_cases() -> list:
     return out
 
 
+# v0.181.220: what a real case ends on. Cut where the verified session wrote its
+# report, the transcript ends on a tool result or on "Continue task X ... then
+# report" - and nothing in it said the turn was over, so a reply that looked
+# once more could not be told from one that never ends. Flash's first run: 15
+# of its 19 misses on the 20 real turns were one more read or git command,
+# written as tool-call text because no tools were offered. And the
+# coordinator's first prompt, where the report format is spelled out, is often
+# cut away to fit the newest turns (Kilo's own system prompt does not have it),
+# so the note carries the instructions whole. Replayed with this note - and
+# with it in the system turn instead - flash still called a tool in 4 of 4:
+# the miss is the model's, and now the case says so fairly.
+END_OF_TURN = ("[coordinator] This is the end of your turn: no more tools can run. "
+               "Write your final message now, from what you have already seen in this "
+               "session.\n\n" + report_instructions())
+
+
+def end_the_turn(prefix: list) -> list:
+    """The prefix with the end-of-turn note: added to a closing user message, or
+    as one after a tool result (never a second user turn in a row)."""
+    msgs = [dict(m) for m in prefix]
+    last = msgs[-1] if msgs else {}
+    if last.get("role") == "user" and isinstance(last.get("content"), str):
+        last["content"] = last["content"].rstrip() + "\n\n" + END_OF_TURN
+    else:
+        msgs.append({"role": "user", "content": END_OF_TURN})
+    return msgs
+
+
+def wrote_a_call(text: str) -> bool:
+    """A reply that is a tool call written out as text: the model kept working."""
+    return any(m in (text or "") for m in ("<tool_call>", "<function="))
+
+
 def real_cases(svc, limit: int = 20) -> list:
     """Real coordinator turns where the verified session ended with a report,
-    keyed on that session's own status. The tools are not offered: the case is
-    the end of a turn, and a reply that reaches for one has not ended it."""
+    keyed on that session's own status. The tools are not offered and the case
+    says the turn is over (END_OF_TURN): it grades the report the session wrote
+    then, not whether the model would have looked once more first."""
     from foundry_training import sessions
     from foundry_training.store import TrainingStore
 
@@ -298,7 +332,7 @@ def real_cases(svc, limit: int = 20) -> list:
                 "id": cid, "task_id": meta.get("task_id") or "",
                 "tags": ["protocol", "real", f"want:{key}", "tier:medium"]
                 + [t for t in meta.get("tags") or [] if ":" not in str(t)],
-                "messages": prefix, "tools": [],
+                "messages": end_the_turn(prefix), "tools": [],
                 "reference": {"protocol": want, "content": (m.get("content") or "")[-4000:]},
             })
             break                                  # one per conversation
@@ -344,6 +378,7 @@ CHECK_WORDS = {
     "kind": "wrong blocker_kind",
     "options": "options rule broken",
     "scope": "no SCOPE_REQUEST for the file",
+    "wrote_call": "wrote a tool call as text instead of ending the turn",
 }
 
 
@@ -400,7 +435,10 @@ def protocol_score(text: str, want: dict) -> dict:
             "failed": failed,
             "detail": ("failed=" + ",".join(failed) if failed else "all checks passed")
             + (f" status={st or '-'}" if parses else "")
-            + (f" kind={blocker_kind(r)}" if st == "BLOCKED" else "")}
+            + (f" kind={blocker_kind(r)}" if st == "BLOCKED" else "")
+            # not a check (it would score the same miss twice), but what the card
+            # names: no report because it was still calling tools
+            + (" wrote_call=1" if rep is None and wrote_a_call(text) else "")}
 
 
 def expected_text(want: dict) -> str:

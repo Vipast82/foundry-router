@@ -1,3 +1,27 @@
+## v0.181.220 - a real protocol case says the turn is over
+
+Asked: fix how the coordinator protocol suite grades real coordinator turns.
+Flash's profile (5) scored 55.2 on the suite: 95.5 on the hard scenarios and
+16.3 on the 20 real turns, and 15 of its 19 misses were one more read or git
+command, written out as tool-call text because the case offers no tools.
+
+A real case is cut where the verified session wrote its report, so it ends on
+a tool result or on "Continue task X ... then report" - and nothing in it said
+the turn was over. A reply that wanted one more look could not be told from
+one that never ends. The coordinator's first prompt, where the report format
+is spelled out, was often cut away too, to fit the newest turns, and Kilo's own
+system prompt does not carry it. Each real case now ends with the coordinator
+saying this is the end of the turn and no more tools can run, with the report
+instructions whole: added to a closing user message, or as one after a tool
+result. Scenarios are unchanged; their system turn already says it.
+
+This makes the case fair, not easier. Two of flash's zero cases replayed with
+the note, and with the same words in the system turn instead, still called a
+tool 4 times in 4: the misses are the model's. A reply that is still a tool
+call written as text is now named on the card for that - "wrote a tool call as
+text instead of ending the turn" - rather than "no coordinator-report block".
+Rebuild the protocol suite (Build protocol suite) for the new cases. 6 tests.
+
 ## v0.181.219 - what the brain lane lost to the router and the budget
 
 Asked: read the brain lane's finished profile against flash's. It scored 83.9

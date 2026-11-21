@@ -130,6 +130,8 @@ def miss_kind(suite: str, row) -> Optional[str]:
     tags = _tags(row)
     if suite == "protocol" or "protocol" in tags:
         from .protocolbench import CHECK_WORDS
+        if _detail(row).get("wrote_call"):
+            return CHECK_WORDS["wrote_call"]            # v0.181.220
         failed = _detail(row).get("failed", "")
         first = failed.split(",")[0] if failed else ""
         return CHECK_WORDS.get(first, "report scored low")
