@@ -266,8 +266,11 @@ def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
     if url:
         if not _TASK_RE.fullmatch(task or ""):
             return False, f"bad task id {task!r}"
+        # 2026-11-21: a lane's FIRST push to a slot's 36 GB copy sends every evidence frame
+        # committed since the slot's last lane; FIN-4a's (slot-3) and BAL-2e3's (slot-1) ran
+        # far past the 300 s default, and the gate died before it reached Studio
         r = _git(worktree, "push", "-q", "--force", url, f"{head}:refs/heads/slot/{task}",
-                 env=git_ssh_env(slot))
+                 env=git_ssh_env(slot), timeout=SLOT_PUSH_TIMEOUT_S)
         if r.returncode != 0:
             return False, "AU push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
         done.append(f"AU {head[:12]} -> slot/{task}")
@@ -291,6 +294,7 @@ def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
 
 
 _TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+SLOT_PUSH_TIMEOUT_S = 3600     # the gate's own 75-minute limit still bounds the whole run
 
 
 def copy_back(slot, slot_repo: str, worktree: str, task: str) -> list:
