@@ -243,11 +243,17 @@ def ladder_reach(rows: list) -> list:
             lvl = int(lvl)
         except (TypeError, ValueError):
             continue
-        b = by.setdefault(lad, {"levels": [], "passed": [], "sum": 0.0})
+        b = by.setdefault(lad, {"levels": [], "passed": [], "sum": 0.0, "rungs": []})
         b["levels"].append(lvl)
         b["sum"] += float(r["score"])
         if float(r["score"]) >= 100:
             b["passed"].append(lvl)
+        # one rung, for the page to draw (v0.181.227): passed, missed, or not
+        # sent because the two below it were missed
+        d = str(r["code_detail"] or "") if "code_detail" in r.keys() else ""
+        b["rungs"].append({"level": lvl, "tier": _tag(t, "tier") or "",
+                           "state": "pass" if float(r["score"]) >= 100
+                           else "skipped" if "not_sent=1" in d else "miss"})
     out = []
     for lad in sorted(by):
         b = by[lad]
@@ -260,7 +266,9 @@ def ladder_reach(rows: list) -> list:
         out.append({"label": f"{name}: level {top} of {max(b['levels'])}" if top
                     else f"{name}: none of {max(b['levels'])}",
                     "n": len(b["levels"]), "passed": len(b["passed"]),
-                    "score": round(b["sum"] / len(b["levels"]), 1)})
+                    "score": round(b["sum"] / len(b["levels"]), 1),
+                    "name": name, "top": top,
+                    "rungs": sorted(b["rungs"], key=lambda x: x["level"])})
     return out
 
 
@@ -616,6 +624,8 @@ def verdict(card: dict) -> dict:
         elif p.get("score") is not None and p["score"] < WEAK:
             bad.append({"what": title, "score": p["score"]})
         for f in p.get("facets") or []:
+            if f["name"] == "How far up each ladder":
+                continue         # one ladder is not a group: the tier rows say it
             for row in f["rows"]:
                 if row["n"] < MIN_FACET_CASES:
                     continue

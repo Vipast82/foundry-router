@@ -96,6 +96,81 @@ table.pf-grid td.cell { color: #111; font-weight: 600; border-radius: 3px; }
 .st-speed b { color: var(--fg); font: 600 12px var(--num-font); }
 .st-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
 
+/* v0.181.227: the card reads as a proof - loaded until it gives. Suites down,
+   tiers across, each cell filled to its pass rate, so the eye finds where a
+   model stops before it finds a number. */
+.rc-big b { font-size: 40px; letter-spacing: -.5px; }
+.proof { margin: 18px 0 4px; }
+.proof-h { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline;
+           gap: 4px 16px; margin-bottom: 8px; }
+.proof-h h4 { margin: 0; font: 600 15px var(--ui-font); }
+.proof-h span { color: var(--dim); font-size: 12px; }
+.proof-grid { display: grid; gap: 6px 8px; align-items: center;
+              grid-template-columns: minmax(140px, 1.4fr) repeat(4, minmax(58px, 1fr)) 48px; }
+.proof-grid .ph { color: var(--dim); font-size: 12px; padding-bottom: 2px; }
+.proof-grid .ph.r, .proof-grid .ps { text-align: right; }
+.proof-grid .pn { font: 600 13px var(--ui-font); overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
+.proof-grid .ps { font: 700 15px var(--num-font); }
+.proof-grid .rule { grid-column: 1 / -1; border-top: 1px solid var(--line); height: 0; margin: 2px 0; }
+.proof-grid .pn.tot { font-weight: 400; color: var(--dim); }
+.cellbar { position: relative; height: 26px; border-radius: 4px; background: var(--panel-2);
+           overflow: hidden; }
+.cellbar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--c); }
+.cellbar b { position: relative; display: block; padding: 0 8px; font: 600 12px/26px var(--num-font);
+             color: var(--fg); white-space: nowrap; }
+.cellbar.lit b { color: #14110d; }
+.cellbar.none { background: none; border: 1px dashed var(--line); }
+.proof-key { color: var(--dim); font-size: 12px; margin: 8px 0 0; line-height: 1.5; max-width: 78ch; }
+.rc-ctxd { margin-top: 8px; }
+.rc-ctxd > summary, .st details > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+.rc-ctxd > summary:hover, .st details > summary:hover { color: var(--fg); }
+
+/* tiles: one shape, breakdowns folded, feet aligned */
+.rc-tiles { grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); align-items: stretch; }
+.st { display: flex; flex-direction: column; padding: 14px 16px 12px; }
+.st::before { display: none; }
+.st-score { font-size: 28px; }
+.st details { margin-top: 8px; }
+.st details[open] > summary { margin-bottom: 4px; }
+.st-speed { margin-top: auto; }
+.st .ladder { margin: 10px 0 4px; }
+.ladder > div { padding: 4px 6px; }
+.ladder b { font-size: 14px; }
+
+/* a ladder, drawn: one square a rung, lowest on the left */
+.rungs { display: grid; grid-template-columns: minmax(64px, max-content) 1fr max-content;
+         gap: 4px 10px; align-items: center; margin: 10px 0 2px; font-size: 12px; }
+.rungs .rn { color: var(--fg); }
+.rungs .rt { color: var(--dim); font-family: var(--num-font); }
+.pips { display: flex; flex-wrap: wrap; gap: 3px; }
+.pip { box-sizing: border-box; width: 20px; height: 20px; border-radius: 3px;
+       border: 1px solid var(--line); font: 600 10px/18px var(--num-font); text-align: center;
+       color: var(--dim); }
+.pip.pass { background: var(--ok); border-color: var(--ok); color: #14110d; }
+.pip.miss { border-color: var(--bad); color: transparent;
+            background: linear-gradient(to top right, transparent 46%, var(--bad) 47%, var(--bad) 53%, transparent 54%); }
+.pip.skipped { border-style: dashed; opacity: .55; }
+.pip.far { box-shadow: 0 3px 0 -1px var(--accent); }
+.rung-key { color: var(--dim); font-size: 11px; margin: 4px 0 0; }
+
+/* the suites, as things you can read before you build them */
+.suites { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(290px, 100%), 1fr)); gap: 10px; }
+.suite { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line);
+         border-radius: 8px; padding: 12px 14px; background: var(--bg); }
+.suite h5 { margin: 0; display: flex; justify-content: space-between; align-items: baseline;
+            gap: 8px; font: 600 14px var(--ui-font); }
+.suite h5 span { font: 400 12px var(--num-font); color: var(--dim); white-space: nowrap; }
+.suite p { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.45; }
+.suite .row { margin-top: auto; padding-top: 6px; }
+.suite.wide { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .proof-grid { grid-template-columns: minmax(92px, 1.2fr) repeat(4, minmax(40px, 1fr)) 36px; gap: 5px; }
+  .cellbar b { padding: 0 4px; font-size: 11px; }
+  .rc { padding: 14px 12px; }
+  .st { padding: 12px 12px 10px; }
+}
+
 /* the misses, opened */
 .mx { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
 .mx-kinds { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
@@ -9462,7 +9537,7 @@ const PF_TIERS = ["easy", "medium", "hard", "expert"];
 // The difficulty ladder: the one shape that says whether a model is an
 // upgrade, since two models can share an average and differ entirely here.
 function pfLadder(p) {
-  const f = (p.facets || []).find(x => x.name === "Difficulty");
+  const f = pfTierFacet(p);
   if (!f) return "";
   return `<div class="ladder" role="list" aria-label="score by difficulty">${PF_TIERS.map(t => {
     const r = f.rows.find(x => x.label === t);
@@ -9472,8 +9547,66 @@ function pfLadder(p) {
   }).join("")}</div>`;
 }
 
+// v0.181.227. A suite's tier rows, whichever way it got them: its own tiers, or
+// (the replay suite) tiers taken from what every model run on it did.
+const pfTierFacet = p => (p.facets || []).find(x => x.name.startsWith("Difficulty"));
+const PF_LADDER = "How far up each ladder";
+const PF_TIER_MEANS = {
+  easy: "the local models pass it", medium: "local models miss it, frontier models do not",
+  hard: "frontier models miss some of it", expert: "frontier models fail it inside the token budget"};
+
+// Where it stops: suites down, tiers across. The composite is one number; this
+// is the shape behind it, and two models with one average differ here.
+function pfProof(c) {
+  const rows = (c.parts || []).map(p => ({p, f: pfTierFacet(p)})).filter(x => x.f);
+  if (!rows.length) return "";
+  const cell = (r, extra) => !r
+    ? `<div class="cellbar none ${extra || ""}" title="this suite has no cases in this tier"></div>`
+    : `<div class="cellbar ${r.score >= 50 ? "lit" : ""} ${extra || ""}" style="--c:${pfColor(r.score)}"
+        title="${r.passed} of ${r.n} at full marks, ${pfN(r.score)} average"><i style="width:${
+          Math.max(3, Math.min(100, r.score))}%"></i><b>${r.passed}/${r.n}</b></div>`;
+  const total = t => {
+    const rs = rows.map(x => x.f.rows.find(r => r.label === t)).filter(Boolean);
+    if (!rs.length) return null;
+    const n = rs.reduce((a, r) => a + r.n, 0), passed = rs.reduce((a, r) => a + r.passed, 0);
+    return {n, passed, score: rs.reduce((a, r) => a + r.score * r.n, 0) / Math.max(1, n)};
+  };
+  const tiers = PF_TIERS.filter(t => total(t));
+  return `<div class="proof">
+    <div class="proof-h"><h4>Where it stops</h4>
+      <span>cases at full marks in each tier; a bar is the tier's average score</span></div>
+    <div class="proof-grid" role="table" aria-label="score by suite and tier">
+      <span class="ph"></span>${PF_TIERS.map(t => `<span class="ph" title="${t}: ${PF_TIER_MEANS[t]}">${t}</span>`).join("")}
+      <span class="ph r">score</span>
+      ${rows.map(({p, f}) => `<span class="pn" title="${esc(p.asks || "")}">${esc(p.title || p.suite)}</span>${
+        PF_TIERS.map(t => cell(f.rows.find(r => r.label === t))).join("")}
+        <span class="ps" style="color:${pfColor(p.score)}">${pfN(p.score)}</span>`).join("")}
+      ${rows.length > 1 ? `<span class="rule"></span><span class="pn tot">every suite</span>${
+        PF_TIERS.map(t => cell(total(t))).join("")}<span class="ps"></span>` : ""}
+    </div>
+    <p class="proof-key">${tiers.map(t => `<b>${t}</b>: ${PF_TIER_MEANS[t]}`).join(". ")}.
+      Tiers are measured, not assigned.</p>
+  </div>`;
+}
+
+// A suite's ladders, drawn: one square a rung, lowest first.
+function pfRungs(p) {
+  const f = (p.facets || []).find(x => x.name === PF_LADDER);
+  const rows = ((f || {}).rows || []).filter(r => (r.rungs || []).length);
+  if (!rows.length) return "";
+  const what = {pass: "passed", miss: "missed", skipped: "not sent: the two rungs below were missed"};
+  return `<div class="rungs" aria-label="how far up each ladder">${rows.map(r => `
+      <span class="rn">${esc(r.name || r.label)}</span>
+      <span class="pips">${r.rungs.map(g => `<span class="pip ${g.state}${
+        g.tier === "hard" || g.tier === "expert" ? " far" : ""}" title="level ${g.level}, ${g.tier || "untiered"}: ${
+        what[g.state] || g.state}">${g.level}</span>`).join("")}</span>
+      <span class="rt">${r.top ? `to ${r.top}` : "none"}</span>`).join("")}</div>
+    <p class="rung-key">One square a level, each twice the size of the one before. Filled passed,
+      struck missed, dashed not sent. An underline marks a hard or expert rung.</p>`;
+}
+
 function pfFacets(p) {
-  return (p.facets || []).filter(f => f.name !== "Difficulty").map(f => `
+  return (p.facets || []).filter(f => !f.name.startsWith("Difficulty") && f.name !== PF_LADDER).map(f => `
     <div class="fc"><h5>${esc(f.name)}</h5>${f.rows.map(r => `
       <div class="fc-row" title="${esc(r.label)}: ${r.passed} of ${r.n} at full marks, ${r.score} average">
         <span>${esc(r.label)}</span>${pfBar(r.score)}
@@ -9509,9 +9642,10 @@ function pfTile(p, pid, unscored) {
       : `<div><span class="st-pass">${p.passed ?? "—"} of ${p.total ?? p.cases} at full marks</span>${
           p.ceiling ? `<span class="st-flag" title="Every case passed. A suite this model aces cannot tell it apart from a better one, so this is not evidence of strength.">at the ceiling</span>` : ""}${
           p.runs > 1 && p.low !== p.high ? `<span class="hint" style="margin-left:8px">${p.low}–${p.high} over ${p.runs} runs</span>` : ""}</div>
-         ${pfLadder(p)}${pfFacets(p)}
+         ${pfRungs(p)}
          ${(p.misses || []).length ? `<div class="miss"><h5 style="margin:0 0 2px;font:600 11px var(--ui-font);color:var(--dim)">How it missed</h5>${
-           p.misses.map(m => `<div><span>${esc(m.kind)}</span><b>${m.n}</b></div>`).join("")}</div>` : ""}`}
+           p.misses.map(m => `<div><span>${esc(m.kind)}</span><b>${m.n}</b></div>`).join("")}</div>` : ""}
+         ${pfFacets(p) ? `<details><summary>Breakdown</summary>${pfFacets(p)}</details>` : ""}`}
     ${pfSpeedLine(p.speed, p.cases)}
     ${!unscored && misses ? `<div class="st-foot"><button class="act pf-miss" data-pid="${pid}"
         data-suite="${esc(p.suite)}">Open the ${misses} miss${misses === 1 ? "" : "es"}</button></div>` : ""}
@@ -9548,7 +9682,8 @@ function pfSpeed(s) {
       ${o.spec_accept_pct != null ? k("Draft accepted", pfN(o.spec_accept_pct, 0), "%", "Speculative decoding: share of drafted tokens the model kept") : ""}
       ${k("Calls", o.samples, "", `${o.measured} with server timings`)}
     </div>
-    ${ctx.length ? `<div class="rc-ctx"><span class="h">context (calls)</span><span class="h">decode speed</span>
+    ${ctx.length ? `<details class="rc-ctxd"><summary>Speed as the context fills</summary>
+      <div class="rc-ctx"><span class="h">context (calls)</span><span class="h">decode speed</span>
         <span class="h pf-num">t/s</span><span class="h pf-num">prefill t/s</span><span class="h pf-num">1st token</span>
       ${ctx.map(c => `<span>${esc(c.context)} <span class="pf-dim">(${c.samples})</span></span>
         <span class="pf-bar"><i style="width:${Math.round(100 * (c.decode_tps || 0) / maxDec)}%;background:var(--info)"></i></span>
@@ -9556,8 +9691,8 @@ function pfSpeed(s) {
         <span class="pf-num">${pfN(c.prefill_tps, 0)}</span>
         <span class="pf-num">${c.first_token_ms == null ? "—" : pfDur(c.first_token_ms / 1000)}</span>`).join("")}
       </div>
-      <p class="hint" style="margin:4px 0 0">How speed changes as the context fills. Prefill is rated only over
-        prompts of 512 tokens or more; a short cached prompt still shows its real first-token time.</p>` : ""}`;
+      <p class="hint" style="margin:4px 0 0">Prefill is rated only over prompts of 512 tokens or
+        more; a short cached prompt still shows its real first-token time.</p></details>` : ""}`;
 }
 
 function pfCard(c, opts) {
@@ -9580,11 +9715,12 @@ function pfCard(c, opts) {
         <b style="color:${pfColor(c.composite)}">${pfN(c.composite)}</b>
         <span>${w} suite${w === 1 ? "" : "s"}, ${(c.weighted || []).every(x => x.weight === 1) ? "equal weight" : "your weights"}</span></div>
     </div>
+    ${c.note ? `<p class="hint" style="margin:10px 0 0;max-width:110ch"><b>Read this first:</b> ${esc(c.note)}</p>` : ""}
+    ${pfProof(c)}
     ${pfRead(c.verdict)}
     ${pfSpeed(c.speed)}
     <div class="rc-tiles">${tiles}</div>
     ${o.grid !== false && c.needle && (c.needle.cells || []).length ? pfGrid(c.needle) : ""}
-    ${c.note ? `<p class="hint" style="margin:10px 0 0"><b>Read this first:</b> ${esc(c.note)}</p>` : ""}
     ${o.redo ? pfRedo(c) : ""}
     <div class="mx" id="mx-${c.profile_id}" hidden></div>
   </div>`;
@@ -9935,34 +10071,22 @@ async function tabBench() {
              class="bench-del" value="${x.id}" data-what="${esc(x.model)} ${esc(x.suite)}${
                x.label ? " / " + esc(x.label) : ""}"> remove</label></td>
     </tr>`).join("");
+  // "44 cases, built Nov 21" for a suite plate, or that it is not built yet
+  const suiteNote = name => {
+    const x = suites.find(s => s.name === name);
+    if (!x) return "not built";
+    const d = x.built ? new Date(x.built * 1000).toLocaleDateString([], {month: "short", day: "numeric"}) : "";
+    return `${x.cases} cases${d ? ", built " + d : ""}`;
+  };
   $("#main").innerHTML = `
     <h2>Benchmark — does a model do <i>your</i> work?</h2>
     <div id="pf-live" class="bl" hidden aria-live="polite"></div>
-    <p class="hint">Cases are cut from conversations this router captured and a gate or a review passed:
-      the conversation up to the point where the model had to act, the tools it was offered, and what it
-      actually did then. A run sends every case to one model and scores what comes back on what can be
-      measured — the tools it reached for, whether its code passes this router's code checks, and whether
-      it answered sensibly. Public benchmarks say nothing about your Luau; this does.</p>
-    <div class="card">
-      <div class="card-h">Make a suite</div>
-      <div class="row tight">
-        <label>name</label><input id="bs-name" size="18" value="verified-60">
-        <label title="How many cases. Each one costs a model call when the suite runs.">cases</label>
-        <input id="bs-limit" type="number" min="1" max="500" value="60" style="width:70px">
-        <label title="Which conversations to cut cases from. verified = a gate pass, a review approval or a vision approval.">quality</label>
-        <select id="bs-tier"><option value="verified">verified only</option><option value="verified,ok">verified and ok</option></select>
-        <label title="Only conversations with one of these tags. Empty = all of them.">tags</label>
-        <input id="bs-tags" data-multi="comma" data-options="benchTags" size="22"
-               placeholder="luau, blender…">
-        <button class="act primary" id="bs-build">Build the suite</button>
-        <span class="hint" id="bs-msg"></span></div>
-      <p class="hint" style="margin:6px 0 0">Built from the router's prepared store, newest work first.
-        ${suites.length ? "Suites: " + suites.map(s => `<b>${esc(s.name)}</b> (${s.cases})`).join(", ") : "None yet."}</p>
-    </div>
+    <p class="hint" style="max-width:96ch">Every suite against one model gives a report card: where it
+      stops, how it fails and how fast it is. Tiers are measured against the models run here, so
+      "hard" means a frontier model misses some of it. Public benchmarks say nothing about your
+      Luau; this does.</p>
     <div class="card">
       <div class="card-h">Model report card: every suite, one model <span id="pf-state"></span></div>
-      <p class="hint">Runs every built suite against one model, one after another, and gives
-        one card: where it excels, where it fails and how, and how fast it is at each kind of work.</p>
       <details class="hint" style="margin:0 0 10px"><summary>How the score is made</summary>
         <p>The composite is a weighted average and the weights decide the answer, so they are
         equal per <i>suite</i> by default (not per case,
@@ -9984,6 +10108,93 @@ async function tabBench() {
       <div id="pf-out" style="margin-top:10px"></div>
     </div>
     <div class="card">
+      <div class="card-h">Suites <span class="hint" id="suite-msg" style="margin-left:8px"></span></div>
+      <p class="hint" style="max-width:96ch">What a card is made of. A rebuilt suite is a different test:
+        its runs are not compared with runs of the one before. "top level" is the highest rung of a
+        suite's generated ladders; raise it when a model clears the top.</p>
+      <div class="suites">
+        <div class="suite wide"><h5>Real work replay<span>${suiteNote("baseline")}</span></h5>
+          <p>Cases cut from conversations this router captured and a gate or a review passed: the
+            conversation up to where the model had to act, the tools it had, and the move it made.
+            Tiered on the card by what every model run on it did.
+            ${suites.length ? "Built: " + suites.map(s => `<b>${esc(s.name)}</b> (${s.cases})`).join(", ") + "." : ""}</p>
+          <div class="row tight">
+        <label>name</label><input id="bs-name" size="18" value="verified-60">
+        <label title="How many cases. Each one costs a model call when the suite runs.">cases</label>
+        <input id="bs-limit" type="number" min="1" max="500" value="60" style="width:70px">
+        <label title="Which conversations to cut cases from. verified = a gate pass, a review approval or a vision approval.">quality</label>
+        <select id="bs-tier"><option value="verified">verified only</option><option value="verified,ok">verified and ok</option></select>
+        <label title="Only conversations with one of these tags. Empty = all of them.">tags</label>
+        <input id="bs-tags" data-multi="comma" data-options="benchTags" size="22"
+               placeholder="luau, blender…">
+        <button class="act primary" id="bs-build">Build the suite</button>
+        <span class="hint" id="bs-msg"></span></div></div>
+        <div class="suite"><h5>Code reasoning<span>${suiteNote("codereason")}</span></h5>
+          <p>What a Python program does, every answer computed by running it. Short snippets,
+            then generated ladders that double in size with each level.</p>
+          <div class="row tight"><button class="act" id="bench-codereason" title="Build the code-reasoning suite:
+                what does this snippet do. The expected value is computed by running each
+                snippet when the suite is built, so an answer key cannot be wrong — and
+                nothing a model writes is ever run. Code checks only compile Python, which
+                every model passes, so they cannot score this."
+        >Build the code suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of each generated ladder in the code suite. Every level doubles the size of the problem. Tiers are measured: easy = the local models pass it, medium = they miss and frontier models do not, hard = frontier models miss some, expert = frontier models fail inside the 8,192-token budget. At 6, Sonnet 5.5 and Opus 5.5 fail the top rung of most ladders (2026-11-21). Raise it when a model clears the top.">top level
+          <input type="number" id="bench-code-top" min="1" max="9" value="6" style="width:52px"></label></div></div>
+        <div class="suite"><h5>Long-context recall<span>${suiteNote("needle")}</span></h5>
+          <p>Find one note in a long context, out to the end of each local model's window. Then put
+            many notes together: add up a ledger, work out which sprints are blocked.</p>
+          <div class="row tight"><button class="act" id="bench-needle" title="Build a needle-in-a-haystack suite
+                from this project's own writing: an unguessable code placed at 0, 25, 50,
+                75 and 100% through contexts from 4k characters out to each local
+                model's own context window (half of it and nearly all of it), plus
+                decoy cases. A case longer than a model's window is not sent to it.
+                It measures where a model stops finding things, which one number
+                cannot say. The longest cases take minutes each."
+        >Build the needle suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of the long-context ladders (many notes to put together: add up a ledger, the status of many sprints). At 10, Opus 5.5 passes and Sonnet 5.5 runs over the budget; at 11 and 12 both fail (2026-11-21). Raise it when a model clears the top.">top level
+          <input type="number" id="bench-needle-top" min="4" max="20" value="12" style="width:52px"></label></div></div>
+        <div class="suite"><h5>Pick the right tool<span>${suiteNote("toolpick")}</span></h5>
+          <p>Every tool on the page, one right answer. Then generated catalogues of near-identical
+            tools, where the description has to be read to its last clause.</p>
+          <div class="row tight"><button class="act" id="bench-toolpick" title="Build a tool-picking suite: every
+                tool this router offers goes in the prompt, and each case asks which one
+                meets a stated need. Picking the right tool out of all of them is what a
+                model has to do before it can do anything else."
+        >Build the tool-picking suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of the 'best value' look-alike ladder: several generated tools qualify and the cheapest that can take the file is wanted. Level 9 is 160 qualifying tools among 1,200. Sonnet 5.5 and Opus 5.5 pass every level and qwen3.8-flash misses only level 9 (2026-11-21): this separates smaller models, not frontier ones.">top level
+          <input type="number" id="bench-pick-top" min="2" max="14" value="9" style="width:52px"></label></div></div>
+        <div class="suite"><h5>Find and use tools<span>${suiteNote("toolflow")}</span></h5>
+          <p>Tasks done through the finder, the way finder personas run. Searches really happen; the
+            tool it chooses is recorded and never run, and its arguments are checked.</p>
+          <div class="row tight"><button class="act" id="bench-toolflow" title="Build the finder suite: tasks
+                done THROUGH foundry_find_tools and foundry_call_tool, the way these personas
+                actually run. The searches really happen against the live registry; the tool
+                the model chooses is recorded and never executed. Half the marks for a search
+                that surfaced the right tool, half for then choosing it."
+        >Build the finder suite</button></div></div>
+        <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
+          <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
+            a scope request in place of an edit outside the task's files.</p>
+          <div class="row tight"><button class="act" id="bench-protocol" title="Build the coordinator protocol suite:
+                does a model end a sprint turn the way the coordinator reads it - a valid
+                coordinator-report block, the right status, the BLOCKED rules (product with
+                options, tooling and user_action without), a SCOPE_REQUEST for a file outside
+                the task. Scenarios with one right answer, plus real coordinator turns from
+                your corpus graded against the verified session's own report."
+        >Build the protocol suite</button></div></div>
+        <div class="suite"><h5>Agent deliverables<span>${suiteNote("agent")}</span></h5>
+          <p>Ten things to build from this ecosystem's own work. There is no answer key, so they are
+            never scored: two models' work is compared blind under Evals.</p>
+          <div class="row tight"><button class="act" id="bench-agent" title="Build the agent-task suite: deliverables
+                from the work this ecosystem does — Luau and Roblox server code, Blender
+                scripting, this router's own asyncio and SQLite, and operating the sprint
+                system. These are NOT scored: a deliverable has no answer key, and the
+                length heuristic would hand every one of them a confident 100. Run two
+                models on it, then compare the runs under Evals → Pairwise."
+        >Build the agent tasks</button></div></div>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-h">Run one${running ? ` <span class="pill warn">running: ${r.done || 0} of ${r.cases || 0}${r.score != null ? `, ${n(r.score)} so far` : ""}</span>` : ""}</div>
       <div class="row tight">
         <label>suite</label><select id="br-suite">${suiteOpts}</select>
@@ -10001,51 +10212,6 @@ async function tabBench() {
       <th>per case</th><th>state</th><th></th></tr>${runRows}</table>
       <div class="row tight" style="margin-top:8px"><button class="act" id="bench-compare">Compare the two ticked</button>
         <button class="act bad" id="bench-delete">Delete the ticked runs</button>
-        <button class="act" id="bench-needle" title="Build a needle-in-a-haystack suite
-                from this project's own writing: an unguessable code placed at 0, 25, 50,
-                75 and 100% through contexts from 4k characters out to each local
-                model's own context window (half of it and nearly all of it), plus
-                decoy cases. A case longer than a model's window is not sent to it.
-                It measures where a model stops finding things, which one number
-                cannot say. The longest cases take minutes each."
-        >Build the needle suite</button>
-        <label class="nw hint" style="margin:0" title="The highest rung of the long-context ladders (many notes to put together: add up a ledger, the status of many sprints). At 10, Opus 5.5 passes and Sonnet 5.5 runs over the budget; at 11 and 12 both fail (2026-11-21). Raise it when a model clears the top.">top level
-          <input type="number" id="bench-needle-top" min="4" max="20" value="12" style="width:52px"></label>
-        <button class="act" id="bench-toolpick" title="Build a tool-picking suite: every
-                tool this router offers goes in the prompt, and each case asks which one
-                meets a stated need. Picking the right tool out of all of them is what a
-                model has to do before it can do anything else."
-        >Build the tool-picking suite</button>
-        <label class="nw hint" style="margin:0" title="The highest rung of the 'best value' look-alike ladder: several generated tools qualify and the cheapest that can take the file is wanted. Level 9 is 160 qualifying tools among 1,200. Sonnet 5.5 and Opus 5.5 pass every level and qwen3.8-flash misses only level 9 (2026-11-21): this separates smaller models, not frontier ones.">top level
-          <input type="number" id="bench-pick-top" min="2" max="14" value="9" style="width:52px"></label>
-        <button class="act primary" id="bench-toolflow" title="Build the finder suite: tasks
-                done THROUGH foundry_find_tools and foundry_call_tool, the way these personas
-                actually run. The searches really happen against the live registry; the tool
-                the model chooses is recorded and never executed. Half the marks for a search
-                that surfaced the right tool, half for then choosing it."
-        >Build the finder suite</button>
-        <button class="act" id="bench-codereason" title="Build the code-reasoning suite:
-                what does this snippet do. The expected value is computed by running each
-                snippet when the suite is built, so an answer key cannot be wrong — and
-                nothing a model writes is ever run. Code checks only compile Python, which
-                every model passes, so they cannot score this."
-        >Build the code suite</button>
-        <label class="nw hint" style="margin:0" title="The highest rung of each generated ladder in the code suite. Every level doubles the size of the problem. Tiers are measured: easy = the local models pass it, medium = they miss and frontier models do not, hard = frontier models miss some, expert = frontier models fail inside the 8,192-token budget. At 6, Sonnet 5.5 and Opus 5.5 fail the top rung of most ladders (2026-11-21). Raise it when a model clears the top.">top level
-          <input type="number" id="bench-code-top" min="1" max="9" value="6" style="width:52px"></label>
-        <button class="act" id="bench-protocol" title="Build the coordinator protocol suite:
-                does a model end a sprint turn the way the coordinator reads it - a valid
-                coordinator-report block, the right status, the BLOCKED rules (product with
-                options, tooling and user_action without), a SCOPE_REQUEST for a file outside
-                the task. Scenarios with one right answer, plus real coordinator turns from
-                your corpus graded against the verified session's own report."
-        >Build the protocol suite</button>
-        <button class="act" id="bench-agent" title="Build the agent-task suite: deliverables
-                from the work this ecosystem does — Luau and Roblox server code, Blender
-                scripting, this router's own asyncio and SQLite, and operating the sprint
-                system. These are NOT scored: a deliverable has no answer key, and the
-                length heuristic would hand every one of them a confident 100. Run two
-                models on it, then compare the runs under Evals → Pairwise."
-        >Build the agent tasks</button>
         <span class="hint" id="bench-cmp-msg"></span></div>`
       : '<p class="hint">No runs yet.</p>'}
     <div id="bench-detail"></div>`;
@@ -10122,7 +10288,7 @@ async function tabBench() {
       toast(`built "${out.name}": ${out.cases} deliverable task(s) — not scored, ` +
             `run two models and compare them`);
       render();
-    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+    } catch (e) { $("#suite-msg").textContent = e.message; }
   };
   if ($("#bench-codereason")) $("#bench-codereason").onclick = async () => {
     try {
@@ -10132,7 +10298,7 @@ async function tabBench() {
       toast(`built "${out.name}": ${out.cases} cases` + (tiers ? ` (${tiers}; ladders to level ${out.top_level})` : "") +
             ((out.refused || []).length ? `, ${out.refused.length} refused` : ""));
       render();
-    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+    } catch (e) { $("#suite-msg").textContent = e.message; }
   };
   if ($("#bench-protocol")) $("#bench-protocol").onclick = async () => {
     try {
@@ -10141,14 +10307,14 @@ async function tabBench() {
       $("#bench-cmp-msg").textContent = "";
       toast(`built "${out.name}": ${out.scenarios} scenario(s), ${out.real} real coordinator turn(s)`);
       render();
-    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+    } catch (e) { $("#suite-msg").textContent = e.message; }
   };
   if ($("#bench-toolflow")) $("#bench-toolflow").onclick = async () => {
     try {
       const out = await api("bench/toolflow", {method: "POST", body: {limit: 40}});
       toast(`built "${out.name}": ${out.cases} task(s) over ${out.granted} granted tools`);
       render();
-    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+    } catch (e) { $("#suite-msg").textContent = e.message; }
   };
   if ($("#bench-toolpick")) $("#bench-toolpick").onclick = async () => {
     try {
@@ -10158,7 +10324,7 @@ async function tabBench() {
             pfTiers(out) +
             (out.skipped ? ` (${out.skipped} skipped: the need named its own answer)` : ""));
       render();
-    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+    } catch (e) { $("#suite-msg").textContent = e.message; }
   };
   if ($("#bench-needle")) $("#bench-needle").onclick = async () => {
     try {
@@ -10166,7 +10332,7 @@ async function tabBench() {
         top_level: +($("#bench-needle-top") || {}).value || 0}});
       toast(`built "${out.name}": ${out.cases} cases` + pfTiers(out));
       render();
-    } catch (e) { $("#bench-cmp-msg").textContent = e.message; }
+    } catch (e) { $("#suite-msg").textContent = e.message; }
   };
   if ($("#bench-delete")) $("#bench-delete").onclick = async () => {
     const ticked = [...document.querySelectorAll(".bench-del:checked")];

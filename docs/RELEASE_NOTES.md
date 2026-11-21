@@ -1,3 +1,46 @@
+## v0.181.227 - the Benchmark tab leads with where a model stops
+
+Asked: before the rebuild, go over Eval and Benchmark for gaps against the
+ecosystem plan, and go over the layout and the cards.
+
+**The card.** It led with one number. Now that tiers are measured, the picture
+is which tiers of which suites a model passes, so the card opens on "Where it
+stops": suites down, the four tiers across, each cell filled to its average
+score with the cases at full marks written in it, and a row for every suite
+together. The eye finds where the colour runs out before it finds the
+composite, which is smaller. The note that says "Read this first" is now
+first, not last. Each ladder is drawn: one square a level, filled when
+passed, struck when missed, dashed when not sent, underlined when the rung is
+hard or expert, with the level it reached beside it. The four tier boxes in
+each tile repeated the grid and are gone; a tile's other breakdowns fold
+under "Breakdown" and the speed-by-context table under its own line, so the
+tiles are one height and the card is about a third as long. "Fails at" no
+longer lists single ladders beside the tier rows that already say it.
+
+**The page.** It opened on building a suite and put the results last. Report
+cards are first. Suites have a section of their own: one plate each, saying
+what it tests, how many cases it has, when it was built, with its build
+button and "top level" box. Those buttons sat in the runs toolbar and were
+only drawn once a run existed, so on a fresh router there was no way to
+build the code, recall, tool or protocol suites from the page. A build that
+fails says so beside the suites. Nothing overflows at phone width.
+
+**The gaps.** docs/BENCH_GAPS.md sets the plan's uses against what is
+measured. Both harnesses are built around the sprint system; the plan adds
+uses neither touches. In order: grounded answers over tiered documents (2
+eval prompts today), instructions that arrive as data and tools left alone
+(nothing), tool work that takes several calls such as queue-check-use
+(first call only), output to a schema (two string arguments), a rule held
+across a conversation (3 single-turn prompts), summaries that invent
+nothing, pictures, code that runs (needs the workspace server or a
+decision), and the plan's all-local ladder report. It also lists what to fix
+in how things are measured: one run per suite, thin calibration, thinking as
+an axis, suites that never reseed, 30 eval prompts. It is a review; nothing
+in it is built.
+
+7 tests. Checked in the browser against live data and against a card built
+from the new suites.
+
 ## v0.181.226 - a playtest nobody owns is stopped; a preparing gate is not "stale"
 
 First release of the work in `COORDINATOR_AUTOMATION_NEEDS.md`: the things a
