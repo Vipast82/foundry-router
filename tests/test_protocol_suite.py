@@ -140,7 +140,10 @@ def test_real_turns_are_keyed_on_the_verified_sessions_own_report(tmp_path, monk
     monkeypatch.setattr(fts, "TrainingStore", lambda *a, **k: object())
     ex = {"messages": [
         {"role": "system", "content": "you are kilo"},
-        {"role": "user", "content": "Continue task VR-MAP2 ... " + pb.report_pointer()},
+        # v0.181.225: the conversation says what kind of session it is, as the
+        # coordinator's first prompt does; one that never says is not used
+        {"role": "user", "content": "REPAIR session for sprint VR-MAP2 — map pass.\n"
+                                    "Continue task VR-MAP2 ... " + pb.report_pointer()},
         {"role": "assistant", "content": "Gate passed.\n\n" + _rep(
             {"status": "DONE", "summary": "gate PASS", "next": ""})},
         {"role": "user", "content": "Continue task VR-MAP2 again"},

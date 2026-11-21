@@ -273,15 +273,63 @@ END_OF_TURN = ("[coordinator] This is the end of your turn: no more tools can ru
                "session.\n\n" + report_instructions())
 
 
-def end_the_turn(prefix: list) -> list:
+# v0.181.225: what the session was asked to do. Sonnet 5.5 scored 18 of 18 on
+# the scenarios and missed 9 of the 20 real turns, every one a "wrong status",
+# seven of them NOT DONE where the session had said DONE - the same miss flash
+# makes. The session was right and so, on what it was shown, was the model: the
+# coordinator's first prompt says "BUILD session for sprint X ... This
+# session's job: the plan's remaining BUILD steps ... then the gate", so its job
+# is DONE at the gate and closeout is a CLOSE session's. Cut to the newest
+# turns, the case had lost that prompt, and "closeout remains, NOT DONE" is a
+# fair reading of what was left. A real case now says which kind of session it
+# is and quotes its job; a conversation that never says is not used.
+_PHASE_RE = re.compile(r"(?m)^\s*(BUILD|REPAIR|CLOSE) session for (?:fast-lane )?sprint\b")
+_JOB_RE = re.compile(r"(This (?:repair )?session's job: .+?)(?:\n\s*\n|\n\s*pwsh |\Z)", re.S)
+_PHASE_NOTE = {
+    "BUILD": "This is a BUILD session. Its job ends when the plan's BUILD steps are committed "
+             "and the gate has passed or been asked for. Closeout (the summary, the STATE row, "
+             "done_check) is a separate CLOSE session's work: closeout still to do does not "
+             "make this session NOT DONE.",
+    "REPAIR": "This is a REPAIR session. Its job ends when the findings it was given are fixed "
+              "and committed and the checks they affect have been rerun or asked for. Closeout "
+              "is a separate CLOSE session's work.",
+    "CLOSE": "This is a CLOSE session. Its job is the closeout: the summary, the STATE row, the "
+             "closeout commit and done_check.",
+}
+
+
+def session_job(msgs: list) -> tuple:
+    """(phase, the job as the coordinator put it) from a conversation's own
+    prompts, the latest that says: ("", "") when none does."""
+    phase, job = "", ""
+    for m in msgs or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        text = m.get("content") if isinstance(m.get("content"), str) else ""
+        hit = None
+        for hit in _PHASE_RE.finditer(text):
+            pass
+        if hit:
+            phase = hit.group(1)
+            found = _JOB_RE.search(text)
+            job = " ".join(found.group(1).split())[:500] if found else ""
+    return phase, job
+
+
+def end_the_turn(prefix: list, phase: str = "", job: str = "") -> list:
     """The prefix with the end-of-turn note: added to a closing user message, or
     as one after a tool result (never a second user turn in a row)."""
+    note = END_OF_TURN
+    if phase in _PHASE_NOTE:
+        note += ("\nWhat this session was asked to do: " + _PHASE_NOTE[phase]
+                 + (f' Its first prompt said: "{job}"' if job else "")
+                 + " Report against that job.\n")
     msgs = [dict(m) for m in prefix]
     last = msgs[-1] if msgs else {}
     if last.get("role") == "user" and isinstance(last.get("content"), str):
-        last["content"] = last["content"].rstrip() + "\n\n" + END_OF_TURN
+        last["content"] = last["content"].rstrip() + "\n\n" + note
     else:
-        msgs.append({"role": "user", "content": END_OF_TURN})
+        msgs.append({"role": "user", "content": note})
     return msgs
 
 
@@ -317,6 +365,11 @@ def real_cases(svc, limit: int = 20) -> list:
             prefix = bench._fit(msgs, at)
             if not prefix or prefix[-1].get("role") not in ("user", "tool"):
                 continue
+            # what the session was asked to do, from the WHOLE conversation up
+            # to here - the cut prefix has usually lost it (v0.181.225)
+            phase, job = session_job(msgs[:at])
+            if not phase:
+                break                              # never says: its status cannot be keyed
             cid = f"PROTO-real-{meta.get('task_id') or 'case'}-{at}"
             if cid in seen:
                 continue
@@ -332,7 +385,7 @@ def real_cases(svc, limit: int = 20) -> list:
                 "id": cid, "task_id": meta.get("task_id") or "",
                 "tags": ["protocol", "real", f"want:{key}", "tier:medium"]
                 + [t for t in meta.get("tags") or [] if ":" not in str(t)],
-                "messages": end_the_turn(prefix), "tools": [],
+                "messages": end_the_turn(prefix, phase, job), "tools": [],
                 "reference": {"protocol": want, "content": (m.get("content") or "")[-4000:]},
             })
             break                                  # one per conversation

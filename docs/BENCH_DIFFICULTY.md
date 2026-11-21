@@ -1,9 +1,8 @@
 # Benchmark difficulty: what the tiers mean and how to raise them
 
-Written for v0.181.223 and v0.181.224 (2026-11-21). Code:
-`foundry_router/benchhard.py`, `foundry_router/bench.py`. Covers code
-reasoning, long-context recall and tool picking; the other suites are listed
-at the end with where they stand.
+Written for v0.181.223 to v0.181.225 (2026-11-21). Code:
+`foundry_router/benchhard.py`, `foundry_router/bench.py`,
+`foundry_router/protocolbench.py`. Covers every suite.
 
 ## What a tier means
 
@@ -180,12 +179,49 @@ one medium case; everything else in tool picking is easy. The ladder is there
 for a smaller model than the ones run today, and "top level" beside *Build the
 tool-picking suite* raises *best*.
 
-## The other suites
+## Find and use tools, coordinator protocol, real work replay (v0.181.225)
 
-Not changed yet. Where they stand on the two local profiles:
+Sonnet 5.5 was run on the router against all three (2026-11-21). None of them
+has a tier that is hard for a frontier model, and for the replay suite none
+can: its answer key is a frontier session's own move. What reading the misses
+found was four faults in the cases and the scoring.
 
-| Suite | flash | brain lane | Note |
-|---|---|---|---|
-| Find and use tools | 93.8 | 86.2 | near the ceiling: needs paraphrased tasks and argument checks |
-| Coordinator protocol | 86.5 | 59.0 | separates the local models; frontier not measured |
-| Real work replay | 79.9 | 68.3 | separates the local models; frontier not measured |
+| Suite | flash | brain lane | Sonnet 5.5 | What its misses were |
+|---|---|---|---|---|
+| Find and use tools | 93.8 | 86.2 | 96.2 | 2 of 40, both the cases' fault |
+| Coordinator protocol | 86.5 | 59.0 | 91.8 | 18 of 18 scenarios; 9 real turns, all the key's fault |
+| Real work replay (30 cases) | 79.9 | 68.3 | - | of the 20 that ran: 14 matched, 1 same move with another tool, 3 cases with no task in them, 2 misses; 10 calls failed (backend away) |
+
+**Find and use tools.** Two cases every model misses: asked for "the FastFlag
+prefix types" a model answers from what it knows and calls nothing, and "wait
+for text or time" gives nothing to wait for, so it asks. The request now says
+the answer has to come from a tool, and a tool with no required input is given
+one. `found` was judged on the finder's first eight results while the model
+was shown the twenty it asked for; it is now judged on what was shown. Added:
+six cases over the look-alike catalogues (300 to 1,200 tools) reached through
+the finder, with the request in other words than the descriptions and the
+call's arguments checked (0.3 found, 0.4 chosen, 0.3 called with the inputs
+given). flash got 6 of 6 in two to nine searches, Sonnet and Opus 4 of 4 each
+in one: every rung is easy.
+
+**Coordinator protocol.** All nine of Sonnet's misses were "wrong status" on
+real turns, seven of them NOT DONE where the session had said DONE - the miss
+flash makes too. The coordinator's first prompt tells a session "BUILD session
+for sprint X ... This session's job: the plan's remaining BUILD steps ... then
+the gate", so it is DONE at the gate and closeout belongs to a CLOSE session.
+Cut to the newest turns, the case had lost that prompt. A real case now says
+which kind of session it is and quotes its job; a conversation that never says
+is not used. The 18 scenarios are unchanged: flash 97.0, the brain lane 69.7,
+Sonnet 18 of 18.
+
+**Real work replay.** A case could open on "Attached media from tool result:"
+with the picture gone and nothing else in it; three of Sonnet's misses were
+those, answered "no task came through". A case never opens on one now. The
+suite has no tiers of its own, so the card tiers each case from what every
+model run on that version of the suite did: easy when every local model
+passed, medium when one missed and no frontier model did, hard when a frontier
+model missed, expert when two or more frontier models ran it and all missed. A
+call that failed is not a miss.
+
+Rebuild all three suites to use this. Sonnet's protocol and replay numbers
+above are from the cases before these fixes.

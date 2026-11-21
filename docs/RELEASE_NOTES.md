@@ -1,3 +1,51 @@
+## v0.181.225 - the last three suites, and four faults found by reading misses
+
+Third part of going through the benchmarks. Sonnet 5.5 was run on the router
+against find-and-use-tools (96.2), the coordinator protocol (91.8) and half
+the replay suite. None of the three has a tier that is hard for a frontier
+model - the replay suite's key is a frontier session's own move - so this
+release does not add one. Read case by case, what Sonnet missed was the cases.
+
+**Find and use tools.** Its two misses of forty are the two every model
+misses. Asked for "the FastFlag prefix types" it answered from what it knows,
+which is a fine answer and no tool call; asked to "wait for text or time" with
+nothing to wait for, it asked what to wait for. The request now says the
+answer has to come from a tool, and a tool with no required input is given
+one. `found` was judged on the finder's first eight results while the model
+was shown the twenty it asked for, so a tool it was shown and used could count
+as "never came up": it is judged on what was shown. Added: six cases over
+generated catalogues of look-alike tools reached through the finder, the
+request worded differently from the descriptions, with the call's arguments
+checked (0.3 found, 0.4 chosen, 0.3 called with the inputs given; "right tool,
+wrong arguments" on the card). flash got 6 of 6, Sonnet and Opus 4 of 4 each.
+
+**Coordinator protocol.** Sonnet got 18 of 18 scenarios and missed 9 of the
+20 real turns, every one a "wrong status", seven of them NOT DONE where the
+session had said DONE - the same miss flash makes. The session was right: the
+coordinator's first prompt says "BUILD session for sprint X ... This
+session's job: the plan's remaining BUILD steps ... then the gate", so it is
+DONE at the gate and closeout is a CLOSE session's. Cut to the newest turns,
+the case had lost that prompt, and "closeout remains, NOT DONE" was a fair
+reading. A real case now says which kind of session it is and quotes its job
+from the conversation's own first prompt; a conversation that never says is
+not used.
+
+**Real work replay.** A case could open on "Attached media from tool result:"
+with the picture gone and nothing else in it. Three of Sonnet's misses were
+those, answered "no task came through". A case never opens on one. The suite
+has no tiers of its own, so the card now tiers each case from what every model
+run on that version of the suite did - easy when every local model passed,
+medium when one missed and no frontier model did, hard when a frontier model
+missed, expert when two or more ran it and all missed - and a call that failed
+is not a miss. Ten of Sonnet's thirty replay calls failed: the Claude backend
+answered "Claude Code can't use your Claude subscription" three times and was
+then away for seven. Of the twenty that ran, fourteen matched the recorded
+move, one made the same move with another tool, three were the empty cases
+and two were misses.
+
+Rebuild the finder, protocol and replay suites to use this.
+docs/BENCH_DIFFICULTY.md now covers every suite. 12 tests.
+
 ## v0.181.224 - recall and tool picking: tiers that are measured
 
 Second part of raising the benchmarks' difficulty (v0.181.223 did code

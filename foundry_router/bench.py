@@ -126,6 +126,20 @@ def case_view(svc, suite: str, case_id: str, last: int = 8) -> dict:
                      "rebuilt since this run"}
 
 
+def media_stub(m: dict) -> bool:
+    """A "user" turn that is only the header of a picture a tool handed back.
+
+    The store keeps the header and not the picture. Cut to the newest turns, a
+    replay case could open on one: system prompt, then "Attached media from
+    tool result:" and nothing else. Sonnet 5.5 answered three of those "no task
+    came through", correctly, and scored 37.5 each (v0.181.225)."""
+    if m.get("role") != "user":
+        return False
+    text = m.get("content") if isinstance(m.get("content"), str) else ""
+    t = text.strip().lower()
+    return t.startswith("attached media from tool result") and len(t) < 80
+
+
 def _fit(msgs: list, upto: int) -> Optional[list]:
     """As much of the conversation before `upto` as fits in a prompt, kept whole:
     the system turn, then the newest turns, never starting in the middle of a
@@ -142,6 +156,8 @@ def _fit(msgs: list, upto: int) -> Optional[list]:
             continue                           # never open on an orphaned tool result
         if body[start].get("role") == "assistant" and body[start].get("tool_calls"):
             continue                           # ... nor on a call whose result follows
+        if media_stub(body[start]):
+            continue                           # ... nor on a picture that is not there
         trial = head + body[start:]
         if len(trial) < MIN_CONTEXT:
             return None
@@ -1288,6 +1304,14 @@ TOOLFLOW_ROUNDS = 8            # searches + the call, before a case is given up 
 _FLOW_SYSTEM = ("You are an assistant with tools. You cannot see the tools directly: "
                 "use foundry_find_tools to search for what you need, then "
                 "foundry_call_tool to use it. Do the task you are given.")
+# v0.181.225. Sonnet 5.5 missed two of forty, the same two flash and the brain
+# lane miss, and both were the cases: asked for "the FastFlag prefix types" it
+# answered from what it knows, which is a fine answer and no tool call; asked
+# to "wait for text or time" with nothing to wait for, it asked what to wait
+# for. The request now says the answer has to come from a tool, and a tool
+# with no required input is given one to use.
+_FLOW_RULE = (" Use a tool for this even if you think you know the answer: what is wanted is "
+              "what the tool returns.")
 
 
 def _task_from(name: str, desc: str) -> str:
@@ -1390,6 +1414,11 @@ def task_inputs(parameters: dict, limit: int = 4) -> dict:
     out = {}
     for name in (p.get("required") or [])[:limit]:
         out[name] = _example_arg(str(name), props.get(name) or {})
+    if not out and props:
+        # nothing is required, so nothing was given and the model had to ask
+        # (v0.181.225): hand it the first input the tool takes
+        first = next(iter(props))
+        out[first] = _example_arg(str(first), props.get(first) or {})
     return out
 
 
@@ -1404,6 +1433,31 @@ def toolflow_task(desc: str, parameters: dict) -> str:
         ask += "\nUse these inputs: " + "; ".join(
             f"{k} = {json.dumps(v, ensure_ascii=False)}" for k, v in inputs.items())
     return ask
+
+
+def _flow_ladder_cases() -> list:
+    """benchhard's look-alike catalogues, reached through the finder
+    (v0.181.225): the request is in other words than the descriptions, eight
+    results come back a search, and the call has to carry the inputs."""
+    from . import benchhard
+    out = []
+    for sp in benchhard.flow_specs():
+        out.append({
+            "id": f"FLOW-lookalike-L{sp['level']}-{sp['seed']}",
+            "task_id": "lookalikes",
+            "tags": ["toolflow", "finder", "tool_use", "lookalikes", "server:lookalikes",
+                     f"tier:{sp['tier']}", f"ladder:{sp['ladder']}:{sp['seed']}",
+                     f"level:{sp['level']}"],
+            "catalogue": sp["tools"], "catalogue_parameters": benchhard.FLOW_PARAMS,
+            "messages": [
+                {"role": "system", "content": _FLOW_SYSTEM},
+                {"role": "user", "content": sp["task"]},
+            ],
+            "reference": {"finder_tool": sp["want"], "content": sp["want"],
+                          "finder_args": sp["args"],
+                          "tool_calls": [{"name": "foundry_call_tool"}]},
+        })
+    return out
 
 
 def build_toolflow(svc, name: str = "toolflow", limit: int = 40,
@@ -1431,15 +1485,18 @@ def build_toolflow(svc, name: str = "toolflow", limit: int = 40,
         out.append({
             "id": f"FLOW-{len(out) + 1:03d}",
             "task_id": t.name,
-            "tags": ["toolflow", "finder", "tool_use", f"server:{t.server or '?'}"],
+            # flash 38 of 40 and Sonnet 5.5 38 of 40, the two misses the cases' own
+            "tags": ["toolflow", "finder", "tool_use", f"server:{t.server or '?'}",
+                     "tier:easy"],
             "messages": [
                 {"role": "system", "content": _FLOW_SYSTEM},
-                {"role": "user", "content": task},
+                {"role": "user", "content": task + _FLOW_RULE},
             ],
             # the finder is the test; the target tool is never run
             "reference": {"finder_tool": t.name, "content": t.name,
                           "tool_calls": [{"name": "foundry_call_tool"}]},
         })
+    out += _flow_ladder_cases()
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
         for c in out:
@@ -1537,8 +1594,9 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
 
     Searches really run; the chosen tool is recorded and never executed."""
     from . import tool_finder
-    tools = _granted_tools(svc, persona)
+    tools = _catalogue_tools(case) or _granted_tools(svc, persona)
     want = str((case.get("reference") or {}).get("finder_tool") or "")
+    want_args: dict = {}               # the arguments of the call that used it
     specs = [{"type": "function",
               "function": {"name": td.name, "description": td.description,
                            "parameters": td.parameters}}
@@ -1584,9 +1642,16 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             if tname == tool_finder.FIND_TOOL:
                 searched += 1
                 queries.append(str(args.get("query") or "")[:200])
-                hits = tool_finder.search(
-                    tools, str(args.get("query") or ""),
-                    tool_finder.DEFAULT_LIMIT)
+                # as many as the model asked to see (v0.181.225): `found` was
+                # judged on the first 8 while find_text showed it the 20 it
+                # asked for, so a tool it was shown and then used counted as
+                # "never came up" and cost half the case
+                try:
+                    shown_n = max(1, min(tool_finder.MAX_LIMIT,
+                                         int(args.get("limit") or tool_finder.DEFAULT_LIMIT)))
+                except (TypeError, ValueError):
+                    shown_n = tool_finder.DEFAULT_LIMIT
+                hits = tool_finder.search(tools, str(args.get("query") or ""), shown_n)
                 if want and any(h.name == want for h in hits):
                     found = True
                 # what this search showed it (v0.181.219): "never came up" is
@@ -1600,6 +1665,8 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
                     used.append(name)
                 if want and tool_finder_match(name, want):
                     picked = name
+                    inner = args.get("arguments")
+                    want_args = inner if isinstance(inner, dict) else {}
                 # recorded, never run: a benchmark must not generate a video
                 text = ("[bench] the call was recorded and not executed.")
             else:
@@ -1621,7 +1688,7 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             "finder": {"searched": searched, "found": found,
                        "picked": picked or first, "want": want,
                        "used": used, "hit": bool(picked), "queries": queries,
-                       "shown": shown, "tools": len(tools),
+                       "shown": shown, "tools": len(tools), "args": want_args,
                        # what it said instead, when it ended without the tool:
                        # "which URL?" is a different miss from a wrong pick
                        "said": ((result.content or "") if result else "")[:600]
@@ -1632,17 +1699,43 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             "seconds": round(time.monotonic() - t0, 2)}
 
 
-def finder_score(got: dict, want: str) -> dict:
+def _catalogue_tools(case: dict) -> list:
+    """The tools a case brings with it, as the finder sees tools (v0.181.225):
+    a ladder case searches a generated catalogue, not the live registry."""
+    rows = case.get("catalogue") or []
+    if not rows:
+        return []
+    from types import SimpleNamespace
+    params = case.get("catalogue_parameters") or {"type": "object", "properties": {}}
+    return [SimpleNamespace(name=n, mcp_tool=n, server="catalogue", description=d,
+                            kind="mcp", parameters=params) for n, d in rows]
+
+
+def finder_score(got: dict, want: str, want_args: Optional[dict] = None) -> dict:
     """found / picked / the case score.
 
     Half the marks for a search that surfaced the right tool and half for then
     choosing it, because a model that searches well and picks wrongly has failed
-    differently from one that never found it, and one number hides which."""
+    differently from one that never found it, and one number hides which.
+
+    A case that names the arguments (v0.181.225) is marked in three: 0.3 found,
+    0.4 picked, 0.3 for calling it with the inputs it was given - the right
+    tool run on the wrong file has not done the task."""
     f = (got or {}).get("finder") or {}
     found = 1.0 if f.get("found") else 0.0
     used = [str(u) for u in (f.get("used") or []) if u] or (
         [str(f.get("picked"))] if f.get("picked") else [])
     picked = 1.0 if want and any(tool_finder_match(u, want) for u in used) else 0.0
+    if want_args:
+        sent = f.get("args") if isinstance(f.get("args"), dict) else {}
+        args = 1.0 if picked and all(str(sent.get(k)) == str(v)
+                                     for k, v in want_args.items()) else 0.0
+        return {"found": found, "picked": picked, "args": args,
+                "score": round(100 * (0.3 * found + 0.4 * picked + 0.3 * args), 1),
+                "searched": int(f.get("searched") or 0), "used": used,
+                "detours": (next((i for i, u in enumerate(used)
+                                  if tool_finder_match(u, want)), len(used))
+                            if picked else len(used))}
     return {"found": found, "picked": picked,
             "score": round(100 * (0.5 * found + 0.5 * picked), 1),
             "searched": int(f.get("searched") or 0),
@@ -2244,9 +2337,10 @@ async def score_one(svc, case: dict, got: dict) -> dict:
         return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
                 "exact": None, "code_detail": ps["detail"], "error": ""}
     if ref.get("finder_tool"):
-        fs = finder_score(got, str(ref.get("finder_tool")))
+        fs = finder_score(got, str(ref.get("finder_tool")), ref.get("finder_args"))
         return {"score": fs["score"], "tools": fs["picked"], "code": None,
                 "answer": fs["found"], "exact": None, "code_detail":
+                    (f"args={bool(fs['args'])} " if "args" in fs else "") +
                     f"found={bool(fs['found'])} picked={(got.get('finder') or {}).get('picked') or '-'} "
                     f"searches={fs['searched']} used={','.join(fs['used']) or '-'} "
                     f"detours={fs['detours']}",

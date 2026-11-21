@@ -212,7 +212,8 @@ def test_the_suite_is_built_from_the_live_registry(tmp_path):
     svc = _svc(tmp_path, [])
     out = bench.build_toolflow(svc, limit=10)
     assert out["granted"] == len(TOOLS)
-    cases = bench.cases(svc, "toolflow")
+    # the live registry's cases; v0.181.225's look-alike ladder has its own tests
+    cases = [c for c in bench.cases(svc, "toolflow") if "lookalikes" not in c["tags"]]
     assert {c["reference"]["finder_tool"] for c in cases} <= {t.name for t in TOOLS}
     for c in cases:
         # v0.181.215: a clean request with its inputs, not "Please <docstring>"

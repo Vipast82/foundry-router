@@ -100,7 +100,8 @@ def test_the_rebuilt_suite_tests_the_same_tools_in_the_same_order(tmp_path):
     import random
     svc = _svc(tmp_path)
     bench.build_toolflow(svc, limit=8)
-    got = [c["task_id"] for c in bench.cases(svc, "toolflow")]
+    got = [c["task_id"] for c in bench.cases(svc, "toolflow")
+           if "lookalikes" not in c["tags"]]
     order = sorted(TOOLS, key=lambda t: t.name)
     random.Random("toolflow-v1").shuffle(order)
     assert got == [t.name for t in order][:8]

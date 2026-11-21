@@ -1436,3 +1436,47 @@ def pick_specs(top_level: int = PICK_TOP) -> list:
                        "ladder": f"pick:{kind}"})
             out.append(sp)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Find and use tools: the same look-alikes, reached through the finder        #
+# --------------------------------------------------------------------------- #
+# In the tool-picking suite the whole catalogue is on the page. Here it is
+# behind foundry_find_tools, eight results a search: the request is worded
+# differently from the descriptions, so the model has to search, read what
+# comes back, search again in the catalogue's own words, tell the one tool that
+# fits from its siblings, and call it with the inputs it was given.
+
+FLOW_PARAMS = {"type": "object",
+               "properties": {"file": {"type": "string", "description": "Path of the file to work on."},
+                              "label": {"type": "string", "description": "A label for this job."}},
+               "required": ["file", "label"]}
+# Measured 2026-11-21 through the real finder: flash found, chose and called
+# the right tool with the right inputs in 6 of 6 (levels 2 to 8, two to nine
+# searches), Sonnet 5.5 and Opus 5.5 in 4 of 4 each (levels 4 to 8), in one
+# search. Every rung is easy for the models run today; it is here for a
+# smaller one, and to check the arguments, which the live cases cannot.
+FLOW_LEVELS = (4, 6, 8)
+FLOW_SEEDS = (0, 1)
+
+
+def flow_spec(level: int, seed: int = 0) -> dict:
+    """{tools: [(name, description)], task, want, args} for one finder case."""
+    sp = pick_spec("fit", level, seed + 500)          # not the tool-picking suite's catalogues
+    rnd = random.Random(f"flow-{level}-{seed}")
+    args = {"file": f"jobs/{rnd.randint(100, 999)}/input.dat",
+            "label": f"run-{rnd.randint(1000, 9999)}"}
+    task = (sp["need"] + f" The file is {args['file']}. Label the job {args['label']}."
+            " Find the one tool that meets every part of this and run it.")
+    return {"tools": sp["tools"], "task": task, "want": sp["want"], "args": args,
+            "avoid": sp["avoid"]}
+
+
+def flow_specs() -> list:
+    out = []
+    for seed in FLOW_SEEDS:
+        for level in FLOW_LEVELS:
+            sp = flow_spec(level, seed)
+            sp.update({"level": level, "seed": seed, "ladder": "flow:fit", "tier": "easy"})
+            out.append(sp)
+    return out

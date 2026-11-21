@@ -44,7 +44,8 @@ def _report(d):
 def test_a_case_ending_on_continue_says_the_turn_is_over_in_that_message(monkeypatch, tmp_path):
     ex = {"messages": [
         {"role": "system", "content": "You are Kilo, a highly skilled software engineer"},
-        {"role": "user", "content": "Continue task GF-FIX1 where you stopped (the scripted "
+        {"role": "user", "content": "BUILD session for sprint GF-FIX1 — fixes.\n"
+                                    "Continue task GF-FIX1 where you stopped (the scripted "
                                     "Studio gate PASS at e04a7acb92d7). Same scope."},
         {"role": "assistant", "content": _report({"status": "DONE", "summary": "BUILD done"})}],
         "meta": {"task_id": "GF-FIX1"}}
@@ -52,7 +53,7 @@ def test_a_case_ending_on_continue_says_the_turn_is_over_in_that_message(monkeyp
     roles = [m["role"] for m in c["messages"]]
     assert roles == ["system", "user"], "no second user turn in a row"
     last = c["messages"][-1]["content"]
-    assert last.startswith("Continue task GF-FIX1")
+    assert last.startswith("BUILD session for sprint GF-FIX1")
     assert "end of your turn: no more tools can run" in last
     # the whole format, not "the same block as before" - before may be cut away
     assert '"blocker_kind": "product | tooling | user_action"' in last
@@ -63,7 +64,7 @@ def test_a_case_ending_on_continue_says_the_turn_is_over_in_that_message(monkeyp
 def test_a_case_ending_on_a_tool_result_gets_the_note_after_it(monkeypatch, tmp_path):
     ex = {"messages": [
         {"role": "system", "content": "You are Kilo"},
-        {"role": "user", "content": "Continue task UI-D1"},
+        {"role": "user", "content": "BUILD session for sprint UI-D1 — gallery.\nContinue task UI-D1"},
         {"role": "assistant", "content": "", "tool_calls": [
             {"id": "1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "1", "content": "[master 887adb0] UI-D1: evidence"},
@@ -71,7 +72,8 @@ def test_a_case_ending_on_a_tool_result_gets_the_note_after_it(monkeypatch, tmp_
         "meta": {"task_id": "UI-D1"}}
     c = _real(monkeypatch, tmp_path, ex)[0]
     assert [m["role"] for m in c["messages"]][-2:] == ["tool", "user"]
-    assert c["messages"][-1]["content"] == pb.END_OF_TURN
+    assert c["messages"][-1]["content"].startswith(pb.END_OF_TURN)
+    assert "This is a BUILD session" in c["messages"][-1]["content"]      # v0.181.225
 
 
 def test_scenarios_are_unchanged():

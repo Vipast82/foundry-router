@@ -148,6 +148,8 @@ def miss_kind(suite: str, row) -> Optional[str]:
         used = [u for u in (d.get("used") or "").split(",") if u and u != "-"]
         if not used and d.get("picked") in (None, "", "-"):
             return "found it, then used no tool"
+        if d.get("args") == "False" and d.get("picked") not in (None, "", "-")                 and float(row["score"] or 0) >= 70:
+            return "right tool, wrong arguments"          # v0.181.225
         return "found it, used another tool"
     if "decoy" in tags:
         exp = str(row["expected"] or "")
@@ -496,6 +498,67 @@ def by_context(samples: list) -> list:
 # The card, per suite and overall                                             #
 # --------------------------------------------------------------------------- #
 
+MEASURED_PASS = 90.0   # a replay move scored as the recorded one, or one look away
+
+
+def _frontier(svc, model: str) -> bool:
+    """Whether a model is served by a paid backend (a frontier model here)."""
+    try:
+        from .budget import is_paid
+        for st in (getattr(getattr(svc, "pool", None), "backends", None) or {}).values():
+            names = list(getattr(st, "models", None) or []) + list(
+                getattr(getattr(st, "config", None), "models", None) or [])
+            if model in names:
+                return bool(is_paid(st.config))
+    except Exception:                                             # noqa: BLE001
+        pass
+    return False
+
+
+def measured_tiers(svc, suite: str, hashes: list) -> dict:
+    """{case_id: tier} from what every model has done on this version of a suite
+    (v0.181.225) - for a suite whose cases are cut from real work and carry no
+    tier of their own. The same rule as benchhard's: easy = every local model
+    passed it, medium = a local model missed and no frontier model did, hard =
+    a frontier model missed, expert = two or more frontier models ran it and
+    all missed. A case one model alone has run is not tiered, and a call that
+    failed is not a miss: ten of Sonnet 5.5's thirty replay results were the
+    backend being away."""
+    hs = [h for h in (hashes or []) if h]
+    if not hs:
+        return {}
+    marks = ",".join("?" for _ in hs)
+    rows = svc.db.query(
+        "SELECT r.case_id, r.score, r.error, b.model FROM bench_results r "
+        "JOIN bench_runs b ON b.id = r.run_id WHERE b.suite=? AND b.suite_hash IN "
+        f"({marks}) AND r.score IS NOT NULL ORDER BY b.id", (suite, *hs))
+    latest: dict = {}
+    for r in rows:
+        if r["error"]:
+            continue
+        latest[(r["case_id"], r["model"])] = float(r["score"]) >= MEASURED_PASS
+    paid: dict = {}
+    by: dict = {}
+    for (case, model), ok in latest.items():
+        if model not in paid:
+            paid[model] = _frontier(svc, model)
+        by.setdefault(case, {True: [], False: []})[paid[model]].append(ok)
+    out = {}
+    for case, got in by.items():
+        front, local = got[True], got[False]
+        if len(front) + len(local) < 2:
+            continue
+        if front and not any(front):
+            out[case] = "expert" if len(front) >= 2 else "hard"
+        elif front and not all(front):
+            out[case] = "hard"
+        elif local and not all(local):
+            out[case] = "medium"
+        else:
+            out[case] = "easy"
+    return out
+
+
 def enrich_part(svc, part: dict, runs: list) -> dict:
     """Add the breakdown, the misses, the speed and the ceiling to one suite."""
     from .bench import run_label
@@ -516,6 +579,17 @@ def enrich_part(svc, part: dict, runs: list) -> dict:
     part["speed"] = speed(samples_for(svc.db, labels))
     part["suite_hash"] = sorted({r["suite_hash"] or "" for r in runs
                                  if "suite_hash" in r.keys()})
+    if not any(_tag(_tags(r), "tier") for r in rows):
+        # no tiers of its own (the replay suite): tier it from what was measured
+        try:
+            tiers = measured_tiers(svc, suite, part["suite_hash"])
+        except Exception:                                         # noqa: BLE001
+            tiers = {}
+        if tiers:
+            part["facets"].insert(0, {
+                "name": "Difficulty, from every model run on these cases",
+                "rows": _group([r for r in rows if r["case_id"] in tiers],
+                               lambda r: tiers.get(r["case_id"]), TIER_ORDER)})
     return part
 
 
