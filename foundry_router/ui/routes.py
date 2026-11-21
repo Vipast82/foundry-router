@@ -3266,11 +3266,12 @@ async def bench_protocol(request: Request):
 
 @router.post("/admin/api/bench/codereason")
 async def bench_codereason(request: Request):
-    """Build the code-reasoning suite: {name?, limit?}.
+    """Build the code-reasoning suite: {name?, limit?, top_level?}.
 
     Asks what a snippet does. Every expected value is computed by running the
     snippet when the suite is built — this module's own fixed table, never a
-    model's code — so an answer key here cannot be wrong."""
+    model's code — so an answer key here cannot be wrong. `top_level` is the
+    highest rung of each generated ladder (v0.181.223)."""
     from .. import bench
     from ..errors import describe_exception
     svc = _svc(request)
@@ -3278,7 +3279,7 @@ async def bench_codereason(request: Request):
     try:
         out = await asyncio.to_thread(
             bench.build_codereason, svc, str(body.get("name") or "codereason"),
-            int(body.get("limit") or 0))
+            int(body.get("limit") or 0), int(body.get("top_level") or 0))
     except Exception as e:                                        # noqa: BLE001
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
     return {"ok": True, **out}

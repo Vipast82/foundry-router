@@ -582,6 +582,29 @@ def value_score(text: str, want_repr: str) -> Optional[float]:
     return 0.0
 
 
+_FINAL_RE = re.compile(r"(?im)^[^\w\n]*answer\s*:\s*(.*)$")
+
+
+def final_answer(text: str) -> str:
+    """What a reply settled on: the text after its last `ANSWER:` line, or its
+    last line when it wrote none (v0.181.223).
+
+    A hard case lets the model work in the open and asks for one closing line.
+    Scoring the whole reply would accept a value it only passed through on the
+    way, and would fail it for naming a decoy it then ruled out."""
+    t = (text or "").strip()
+    hits = list(_FINAL_RE.finditer(t))
+    if hits:
+        return _bare(hits[-1].group(1))
+    lines = [x for x in t.splitlines() if x.strip()]
+    return _bare(lines[-1]) if lines else ""
+
+
+def _bare(line: str) -> str:
+    """A closing line without its markdown: backticks, bold marks, spaces."""
+    return (line or "").strip("`* \t\r")
+
+
 def combine(tools: Optional[float], code: Optional[float], answer: Optional[float],
             exact: Optional[float] = None) -> float:
     """0-100 for one case.
@@ -1346,6 +1369,18 @@ def _granted_tools(svc, persona: Optional[dict] = None) -> list:
 
 
 THINK_ROOM = 8192      # the budget a case gets again when thinking used it all
+# v0.181.223. The Claude subscription backend does not honour max_tokens: asked
+# for at most 16,000 tokens, one Sonnet 5.5 reply ran to 84,485 over eleven
+# minutes. A local backend is cut off at the budget, so a reply that went past
+# it is held to the same rule here - it counts as out of room, whatever it
+# said - and a case with its own budget is given this long and no longer.
+OVER_BUDGET = 1.1      # tolerance: tokenizers and stop sequences differ a little
+CASE_SECONDS = 300     # 8,192 tokens at the slowest lane measured (46 t/s) is ~180 s
+
+
+def over_budget(result, budget: int) -> bool:
+    used = int(getattr(result, "completion_tokens", 0) or 0)
+    return used > max(int(budget), THINK_ROOM) * OVER_BUDGET
 
 
 def out_of_room(result, max_tokens: int) -> bool:
@@ -1384,6 +1419,10 @@ async def _chat(svc, model: str, convo, tools, max_tokens: int, label: str = "",
                                           max_tokens=max_tokens, options=dict(SAMPLING))
     _record(svc, model, backend, result, (time.monotonic() - t0) * 1000.0,
             max_tokens, label, persona)
+    if over_budget(result, max_tokens):
+        # a backend that ignored the cap (v0.181.223): out of room, as it
+        # would have been anywhere the cap is honoured
+        return result, backend, max(int(max_tokens), THINK_ROOM), True
     budget = max_tokens
     if max_tokens < THINK_ROOM and out_of_room(result, max_tokens):
         budget = THINK_ROOM
@@ -1392,7 +1431,8 @@ async def _chat(svc, model: str, convo, tools, max_tokens: int, label: str = "",
                                               max_tokens=budget, options=dict(SAMPLING))
         _record(svc, model, backend, result, (time.monotonic() - t0) * 1000.0,
                 budget, label, persona)
-    return result, backend, budget, out_of_room(result, budget)
+    return result, backend, budget, (out_of_room(result, budget)
+                                     or over_budget(result, budget))
 
 
 async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048,
@@ -1670,11 +1710,18 @@ _CODE_MEDIUM = {"modulo_negative", "empty_is_falsy", "late_binding",
 
 
 def code_tier(key: str) -> str:
+    """The tier of one of the original snippets, as MEASURED (v0.181.223).
+
+    They were labelled easy to expert by how they looked. On two finished
+    profiles both local models, at three bits a weight, passed every one named
+    easy, medium and hard (36 of 36 each) and 6 and 7 of the 8 named expert -
+    so "hard" was not hard for anything, and a frontier model was never going
+    to miss one. A tier now says who misses it (benchhard): these are easy,
+    and the eight traced programs are medium, the one place a local model
+    slips. Hard and expert are the upper rungs of benchhard's ladders."""
     if any(k == key for k, _s, _e in _CODE_EXPERT):
-        return "expert"
-    if any(k == key for k, _s, _e in _CODE_HARD):
-        return "hard"
-    return "medium" if key in _CODE_MEDIUM else "easy"
+        return "medium"
+    return "easy"
 
 _CODE_EXC = [
     ("dict_mutation",
@@ -1726,9 +1773,59 @@ def _raised_by(src: str) -> str:
     return ""
 
 
-def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
+_HARD_Q = ("What is the value of `result` after this runs?\n\n```python\n{src}\n```"
+           "\n\nGive the value in Python notation. {rule}")
+
+
+def _hard_code_cases(top_level: int, refused: list) -> list:
+    """benchhard's programs as cases: reasoning allowed, one closing line
+    scored, THINK_ROOM tokens, ladders lowest level first (v0.181.223)."""
+    from . import benchhard
+    out = []
+    try:
+        specs = benchhard.code_specs(lambda src: _run_snippet(src, "result"), top_level)
+    except Exception as e:                                        # noqa: BLE001
+        refused.append(f"hard cases: {type(e).__name__}: {e}")
+        return out
+    for sp in specs:
+        tags = ["codereason", "python", "code", f"tier:{sp['tier']}", f"family:{sp['family']}"]
+        if sp["ladder"]:
+            tags += [f"ladder:{sp['ladder']}", f"level:{sp['level']}"]
+        out.append({
+            "id": f"CODE-{sp['key']}",
+            "task_id": sp["key"],
+            "tags": tags,
+            "max_tokens": THINK_ROOM,
+            "messages": [
+                {"role": "system", "content": "You reason about code precisely."},
+                {"role": "user", "content": _HARD_Q.format(src=sp["src"],
+                                                         rule=benchhard.FINAL_RULE)},
+            ],
+            "reference": {"content": repr(sp["value"]), "py_value": repr(sp["value"]),
+                          "final": True},
+        })
+    return out
+
+
+def tier_weights(cases_: list) -> dict:
+    """{tier: weight per case} so every tier present counts the same in the
+    suite's score: 70 easy cases must not outvote 9 expert ones (v0.181.223)."""
+    count: dict = {}
+    for c in cases_:
+        t = next((str(x).split(":", 1)[1] for x in c.get("tags") or []
+                  if str(x).startswith("tier:")), "")
+        count[t] = count.get(t, 0) + 1
+    if len(count) < 2 or "" in count:
+        return {}
+    return {t: round(len(cases_) / (len(count) * n), 6) for t, n in count.items()}
+
+
+def build_codereason(svc, name: str = "codereason", limit: int = 0,
+                     top_level: int = 0) -> dict:
     """A suite that asks what code does, with every answer computed by running
-    the snippet here rather than recalled."""
+    the snippet here rather than recalled. `top_level` is the highest rung of
+    each generated ladder (benchhard.TOP_LEVEL when 0): raise it when the top
+    one stops separating the models you are comparing."""
     out, refused = [], []
     for key, src, expr in _CODE_SNIPPETS + _CODE_HARD + _CODE_EXPERT:
         try:
@@ -1763,8 +1860,19 @@ def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
             ],
             "reference": {"content": got, "must_include": [got]},
         })
+    from . import benchhard
+    top = int(top_level or benchhard.TOP_LEVEL)
+    out += _hard_code_cases(top, refused)
     if limit:
         out = out[:int(limit)]
+    # each tier counts the same, whatever its size
+    weights = tier_weights(out)
+    tiers: dict = {}
+    for c in out:
+        t = next((x.split(":", 1)[1] for x in c["tags"] if x.startswith("tier:")), "")
+        tiers[t] = tiers.get(t, 0) + 1
+        if weights:
+            c["weight"] = weights[t]
     f = _dir(svc) / f"{name}.jsonl"
     with f.open("w", encoding="utf-8", newline="\n") as fh:
         for c in out:
@@ -1772,11 +1880,14 @@ def build_codereason(svc, name: str = "codereason", limit: int = 0) -> dict:
     try:
         svc.db.log_event("info", "bench",
                          f"built the {name} suite: {len(out)} case(s), every answer "
-                         f"computed by running the snippet"
+                         f"computed by running the snippet; "
+                         + ", ".join(f"{tiers[t]} {t}" for t in TIERS if t in tiers)
+                         + f"; ladders to level {top}"
                          + (f"; {len(refused)} refused" if refused else ""))
     except Exception:                                             # noqa: BLE001
         pass
-    return {"name": name, "cases": len(out), "path": str(f), "refused": refused}
+    return {"name": name, "cases": len(out), "path": str(f), "refused": refused,
+            "tiers": {t: tiers[t] for t in TIERS if t in tiers}, "top_level": top}
 
 
 # -- running a suite ----------------------------------------------------------------------
@@ -1976,15 +2087,28 @@ async def ask(svc, model: str, case: dict, max_tokens: int = 2048,
               persona: str = "", label: str = "") -> dict:
     """One case through one model, with the tools that case was offered."""
     t0 = time.monotonic()
+    own = int(case.get("max_tokens") or 0)       # a hard case names its budget
     try:
-        result, backend, budget, room_out = await _chat(
-            svc, model, wire(case.get("messages") or []),
-            wire_tools(case.get("tools") or []) or None, max_tokens, label, persona)
+        convo = wire(case.get("messages") or [])
+        tools = wire_tools(case.get("tools") or []) or None
+        if own:
+            # ... and gets CASE_SECONDS for it: past its time is past its budget
+            result, backend, budget, room_out = await asyncio.wait_for(
+                _chat(svc, model, convo, tools, own, label, persona), CASE_SECONDS)
+        else:
+            result, backend, budget, room_out = await _chat(
+                svc, model, convo, tools, max_tokens, label, persona)
+    except asyncio.TimeoutError:
+        return {"content": "", "backend": "", "budget": own, "out_of_room": own,
+                "tool_calls": [], "prompt_tokens": 0, "completion_tokens": 0,
+                "timed_out": CASE_SECONDS, "seconds": round(time.monotonic() - t0, 2)}
     except Exception as e:                                        # noqa: BLE001
         from .errors import describe_exception
         return {"error": describe_exception(e), "seconds": round(time.monotonic() - t0, 2)}
     from .brain import prompts
     _think, clean = prompts.split_think(result.content or "")
+    if room_out:
+        clean = ""                 # out of room or over budget: nothing it said counts
     return {"content": clean.strip(), "backend": backend, "budget": budget,
             "out_of_room": budget if room_out else 0,
             "tool_calls": [{"name": tc.get("name"), "arguments": tc.get("arguments")}
@@ -2028,10 +2152,12 @@ async def score_one(svc, case: dict, got: dict) -> dict:
     code, detail = await code_score(svc, got.get("content") or "")
     answer = (answer_score(got.get("content") or "", ref.get("content") or "")
               if not (ref.get("tool_calls") or []) else None)
-    exact = value_score(got.get("content") or "", str(ref.get("py_value") or "")) \
+    said = got.get("content") or ""
+    if ref.get("final"):
+        said = final_answer(said)         # only the closing line is the answer
+    exact = value_score(said, str(ref.get("py_value") or "")) \
         if ref.get("py_value") else \
-        exact_score(got.get("content") or "", ref.get("must_include"),
-                    ref.get("must_exclude"))
+        exact_score(said, ref.get("must_include"), ref.get("must_exclude"))
     return {"score": combine(tools, code, answer, exact), "tools": tools, "code": code,
             "answer": answer, "exact": exact, "code_detail": detail, "error": ""}
 
@@ -2119,6 +2245,24 @@ def answer_of(got: dict) -> str:
     return "\n".join(parts)[:KEEP_ANSWER]
 
 
+LADDER_STOP = 2        # levels of one ladder failed in a row before it is closed
+
+
+def ladder_of(case: dict) -> tuple:
+    """(ladder, level) for a case on a generated ladder, else ("", 0)."""
+    lad, lvl = "", 0
+    for t in case.get("tags") or []:
+        t = str(t)
+        if t.startswith("ladder:"):
+            lad = t.split(":", 1)[1]
+        elif t.startswith("level:"):
+            try:
+                lvl = int(t.split(":", 1)[1])
+            except ValueError:
+                pass
+    return lad, lvl
+
+
 async def _run(svc, suite: str, model: str, label: str, limit: int,
                use_recall: bool = False, use_lessons: bool = False) -> dict:
     db = svc.db
@@ -2162,6 +2306,12 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
               # for a suite with no deliverable in it this is the same number
               "score_n": 0, "delivered": 0, "beyond": 0}
     ctx_limit = model_context(svc, model)
+    # v0.181.223: a ladder is climbed until two levels in a row are missed.
+    # Every level is twice the one below, so the levels above are not sent -
+    # they score 0 and say so - instead of costing a small model five minutes
+    # a case to fail them. One miss does not close a ladder: these runs move.
+    streak: dict = {}
+    closed: dict = {}
     for i, case in enumerate(items, start=1):
         if _state.get("stop"):
             break
@@ -2184,6 +2334,12 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
                  "exact": None, "error": "",
                  "code_detail": f"beyond this model's context: ~{case_tokens(case):,} "
                                 f"tokens > {ctx_limit:,}"}
+        elif ladder_of(case)[0] in closed:
+            got = {"content": "", "seconds": 0}
+            s = {"score": 0.0, "tools": 0.0, "code": None, "answer": None,
+                 "exact": 0.0, "error": "",
+                 "code_detail": f"not_sent=1 stopped_at={closed[ladder_of(case)[0]]} "
+                                f"({LADDER_STOP} levels of this ladder missed in a row)"}
         # a case that names a finder_tool is run THROUGH the finder: the search
         # really happens, the chosen tool is recorded and never executed
         elif (case.get("reference") or {}).get("finder_tool"):
@@ -2192,6 +2348,14 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         else:
             got = await ask(svc, model, case, label=rlabel)
             s = await score_one(svc, case, got)
+        lad, lvl = ladder_of(case)
+        if lad and lad not in closed and s.get("score") is not None:
+            streak[lad] = 0 if s["score"] >= 100 else streak.get(lad, 0) + 1
+            if streak[lad] >= LADDER_STOP:
+                closed[lad] = lvl
+        if got.get("timed_out"):
+            s["code_detail"] = (f"timed_out={int(got['timed_out'])} "
+                                + str(s.get("code_detail") or "")).strip()
         if got.get("out_of_room") and s.get("score") is not None and s["score"] < 100:
             # it thought through the whole budget, twice, and said nothing: the
             # card calls that "ran out of tokens before answering", not wrong
@@ -2217,8 +2381,10 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         elif s["score"] is None:
             totals["delivered"] += 1
         else:
-            totals["score"] += s["score"]
-            totals["score_n"] += 1
+            # a case's weight (tier_weights): every tier counts the same
+            w = float(case.get("weight") or 1.0)
+            totals["score"] += s["score"] * w
+            totals["score_n"] += w
         totals["tools"] += s["tools"]
         if s["code"] is not None:
             totals["code"] += s["code"]

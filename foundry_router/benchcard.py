@@ -123,9 +123,15 @@ def miss_kind(suite: str, row) -> Optional[str]:
         return "the call failed"
     if score >= 100:
         return None
+    if _detail(row).get("not_sent"):
+        # above the two levels of its ladder it missed in a row - v0.181.223
+        return "above the level it stopped passing (not sent)"
+    if _detail(row).get("timed_out"):
+        return "ran out of time before answering"
     if _detail(row).get("out_of_room"):
         # thought through the whole budget (8,192 tokens after one retry) and
-        # gave no answer - v0.181.219
+        # gave no answer - v0.181.219; or went past it on a backend that does
+        # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
     if suite == "protocol" or "protocol" in tags:
@@ -221,6 +227,37 @@ def _kchars(n) -> str:
     return f"{n // 1000}k chars (~{max(1, round(n / 3500))}k tokens)"
 
 
+def ladder_reach(rows: list) -> list:
+    """One row per generated ladder: the highest level passed, out of the levels
+    in the suite (v0.181.223). The share of levels passed is the bar; the label
+    says where it got to, which is the number that moves as models improve."""
+    by: dict = {}
+    for r in rows:
+        t = _tags(r)
+        lad, lvl = _tag(t, "ladder"), _tag(t, "level")
+        if not lad or r["score"] is None:
+            continue
+        try:
+            lvl = int(lvl)
+        except (TypeError, ValueError):
+            continue
+        b = by.setdefault(lad, {"levels": [], "passed": [], "sum": 0.0})
+        b["levels"].append(lvl)
+        b["sum"] += float(r["score"])
+        if float(r["score"]) >= 100:
+            b["passed"].append(lvl)
+    out = []
+    for lad in sorted(by):
+        b = by[lad]
+        top = max(b["passed"]) if b["passed"] else 0
+        name = lad.split(":", 1)[-1]
+        out.append({"label": f"{name}: level {top} of {max(b['levels'])}" if top
+                    else f"{name}: none of {max(b['levels'])}",
+                    "n": len(b["levels"]), "passed": len(b["passed"]),
+                    "score": round(b["sum"] / len(b["levels"]), 1)})
+    return out
+
+
 def facets(suite: str, rows: list) -> list:
     """The breakdowns this suite is read by, most telling first."""
     out = []
@@ -272,6 +309,16 @@ def facets(suite: str, rows: list) -> list:
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
     if suite == "codereason":
+        families = {"stacked": "several rules at once", "lying": "names that lie",
+                    "trace": "long traces", "search": "too big to trace"}
+        if any(_tag(_tags(r), "family") for r in rows):
+            out.append({"name": "Kind of problem",
+                        "rows": _group(rows, lambda r: families.get(
+                            _tag(_tags(r), "family") or "", "short snippets"),
+                            ["short snippets"] + list(families.values()))})
+        reach = ladder_reach(rows)
+        if reach:
+            out.append({"name": "How far up each ladder", "rows": reach})
         out.append({"name": "Question",
                     "rows": _group(rows, lambda r: "what it raises"
                                    if "exception" in _tags(r) else "what it returns")})

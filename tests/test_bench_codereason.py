@@ -60,6 +60,8 @@ def test_a_snippet_that_stopped_raising_is_refused_not_shipped(svc, monkeypatch)
     # v0.181.211: the traced tiers are tables of their own
     monkeypatch.setattr(bench, "_CODE_HARD", [])
     monkeypatch.setattr(bench, "_CODE_EXPERT", [])
+    # v0.181.223: and so are benchhard's generated programs
+    monkeypatch.setattr(bench, "_hard_code_cases", lambda top, refused: [])
     out = bench.build_codereason(svc)
     assert out["cases"] == 0
     assert any("raised nothing" in r for r in out["refused"])
@@ -70,6 +72,7 @@ def test_a_snippet_that_will_not_run_is_refused(svc, monkeypatch):
     monkeypatch.setattr(bench, "_CODE_EXC", [])
     monkeypatch.setattr(bench, "_CODE_HARD", [])
     monkeypatch.setattr(bench, "_CODE_EXPERT", [])
+    monkeypatch.setattr(bench, "_hard_code_cases", lambda top, refused: [])
     out = bench.build_codereason(svc)
     assert out["cases"] == 0 and out["refused"]
 

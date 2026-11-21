@@ -10020,6 +10020,8 @@ async function tabBench() {
                 nothing a model writes is ever run. Code checks only compile Python, which
                 every model passes, so they cannot score this."
         >Build the code suite</button>
+        <label class="nw hint" style="margin:0" title="The highest rung of each generated ladder in the code suite. Every level doubles the size of the problem. Tiers are measured: easy = the local models pass it, medium = they miss and frontier models do not, hard = frontier models miss some, expert = frontier models fail inside the 8,192-token budget. At 6, Sonnet 5.5 and Opus 5.5 fail the top rung of most ladders (2026-11-21). Raise it when a model clears the top.">top level
+          <input type="number" id="bench-code-top" min="1" max="9" value="6" style="width:52px"></label>
         <button class="act" id="bench-protocol" title="Build the coordinator protocol suite:
                 does a model end a sprint turn the way the coordinator reads it - a valid
                 coordinator-report block, the right status, the BLOCKED rules (product with
@@ -10114,8 +10116,10 @@ async function tabBench() {
   };
   if ($("#bench-codereason")) $("#bench-codereason").onclick = async () => {
     try {
-      const out = await api("bench/codereason", {method: "POST", body: {}});
-      toast(`built "${out.name}": ${out.cases} cases` +
+      const out = await api("bench/codereason", {method: "POST", body: {
+        top_level: +($("#bench-code-top") || {}).value || 0}});
+      const tiers = Object.entries(out.tiers || {}).map(([t, n]) => `${n} ${t}`).join(", ");
+      toast(`built "${out.name}": ${out.cases} cases` + (tiers ? ` (${tiers}; ladders to level ${out.top_level})` : "") +
             ((out.refused || []).length ? `, ${out.refused.length} refused` : ""));
       render();
     } catch (e) { $("#bench-cmp-msg").textContent = e.message; }

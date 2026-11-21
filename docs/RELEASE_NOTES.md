@@ -1,3 +1,58 @@
+## v0.181.223 - code reasoning: tiers that are measured, difficulty as a dial
+
+Asked: go through the benchmarks and raise the difficulty as models improve, so
+hard is hard for a frontier model and expert is hard even for one to pass.
+This release does the code-reasoning suite and the mechanics every suite will
+use; docs/BENCH_DIFFICULTY.md has the method, the numbers and how to raise it.
+
+**The tiers said nothing.** On the two finished profiles both local models, at
+three bits a weight, passed every code case named easy, medium and hard and
+75-88% of those named expert. Candidates were then sent to qwen3.8-flash and to
+Sonnet 5.5 and Opus 5.5 with reasoning allowed. Sixteen programs stacking
+several Python rules and fourteen whose names and comments lie came back
+almost all right (flash 24 of 24 sent, Sonnet 29 of 30, Opus 14 of 14), and so
+did traces of up to 64 steps from Sonnet (39 of 40); the two Claude models
+also worked counting, table and search problems to level 4 by hand (71 of 72),
+an 8-city tour and a count over 80,000 numbers among them. What they miss
+is size inside a fixed budget: 128-256-step traces (Sonnet 9/10, Opus 6/10), a
+count of orderings of 9 items on a random allowed list (both timed out), a
+10-stop route with random one-way costs (both failed), random 3-term rules over
+15 variables (Opus right in 6.2k tokens, Sonnet over budget).
+
+**A tier now says who misses the case.** easy: the local models pass it.
+medium: they miss, frontier models do not. hard: frontier models miss some.
+expert: frontier models fail inside the budget. The 44 original snippets are
+relabelled by that (36 easy, 8 medium). Hard and expert are the upper rungs of
+eleven generated ladders (foundry_router/benchhard.py): four kinds of trace and
+seven kinds of problem too big to trace, each built from (kind, level, seed)
+with the answer computed by running it at build time. Every level doubles the
+problem. The suite is 119 cases: 70 easy, 26 medium, 14 hard, 9 expert.
+
+**When a model clears the top, raise one number.** "top level" beside Build the
+code suite (default 6) adds a rung to every ladder. The card shows "How far up
+each ladder" and "Kind of problem".
+
+**One set of conditions for every model.** A hard case allows working and asks
+for one closing line, `ANSWER: <value>`; only that line is scored
+(bench.final_answer), so a model that thinks out of sight and one that writes
+its working are on the same footing. It gets 8,192 tokens and 300 seconds. The
+Claude backend does not honour max_tokens - one Sonnet reply to a 16,000-token
+case ran to 84,485 tokens - so a reply past the budget counts as out of room
+whatever it says (bench.over_budget), as it would on a backend that cuts it
+off.
+
+**The score weights each tier the same**, so 70 easy cases cannot outvote 9
+expert ones (bench.tier_weights; suites without tiers are scored as before).
+
+**A ladder stops being climbed** after two levels in a row are missed: the
+levels above score 0 and say "above the level it stopped passing (not sent)",
+instead of costing a local model five minutes a case.
+
+Not changed: the other suites. Long-context recall and tool picking are at the
+ceiling for both local models and are next. GPT was not used to calibrate (its
+weekly usage was at 93% of a 95% cutoff). Rebuild the code suite to use this;
+scores are not comparable with runs of the old one. 20 tests.
+
 ## v0.181.222 - rerun suites into a card, or fold a profile into one
 
 Asked: can a rerun of some suites be added to the current card? It could not.
