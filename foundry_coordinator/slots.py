@@ -285,7 +285,9 @@ def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
     furl, fdir = slot.get("foundry_push_url") or "", slot.get("foundry_host_dir") or ""
     if furl and fdir:
         try:
-            r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, "HEAD:refs/heads/deploy",
+            # the files that are running, not only the last commit (foundry_snapshot)
+            snap, snap_note = foundry_snapshot(FOUNDRY_ROOT)
+            r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, f"{snap}:refs/heads/deploy",
                      env=git_ssh_env(slot))
         except subprocess.TimeoutExpired:
             return False, "Foundry push: timed out after 300 s"
@@ -307,8 +309,72 @@ def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
             return False, f"Foundry checkout on the host: {type(e).__name__}: {e}"[:300]
         if r.returncode != 0:
             return False, "Foundry checkout on the host: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
-        done.append("Foundry " + (r.stdout or b"").decode("utf-8", "replace").strip()[-12:])
+        done.append("Foundry " + (r.stdout or b"").decode("utf-8", "replace").strip()[-12:]
+                    + (f" (snapshot: {snap_note})" if snap_note else ""))
     return True, "; ".join(done) or "nothing to push"
+
+
+def foundry_snapshot(root: str) -> tuple:
+    """(what to push, note). 2026-11: a deploy by copy leaves the deploy checkout's files
+    ahead of its HEAD, and the slots ran the old commit until somebody committed a "deploy
+    snapshot" by hand. A clean checkout gives ("HEAD" commit, ""). Otherwise a commit is
+    made of the files as they are on disk - every change to a tracked file, and new files
+    inside the code packages (top-level folders with an __init__.py) - with a throwaway
+    index, so HEAD, the branch, the real index and the files stay exactly as they are. New
+    files anywhere else (state, notes) are not sent; the note counts them. Any failure
+    falls back to HEAD."""
+    import tempfile
+
+    def git(*args, env=None):
+        r = _git(root, *args, timeout=120, env=env)
+        return r.returncode, (r.stdout or b"").decode("utf-8", "replace")
+    rc, head = git("rev-parse", "HEAD")
+    head = head.strip()
+    if rc != 0:
+        return "HEAD", ""
+    rc, status = git("status", "--porcelain", "--untracked-files=all")
+    if rc != 0 or not status.strip():
+        return head, ""
+    try:
+        packages = sorted(d for d in os.listdir(root)
+                          if os.path.isfile(os.path.join(root, d, "__init__.py")))
+    except OSError:
+        packages = []
+    fd, index = tempfile.mkstemp(prefix="foundry-snapshot-", suffix=".index")
+    os.close(fd)
+    os.unlink(index)
+    env = {**os.environ, "GIT_INDEX_FILE": index,
+           "GIT_AUTHOR_NAME": "foundry", "GIT_AUTHOR_EMAIL": "foundry@localhost",
+           "GIT_COMMITTER_NAME": "foundry", "GIT_COMMITTER_EMAIL": "foundry@localhost"}
+    try:
+        for step in (["read-tree", "HEAD"], ["add", "-u"],
+                     *([["add", "--"] + packages] if packages else [])):
+            rc, out = git(*step, env=env)
+            if rc != 0:
+                return head, f"not made ({step[0]}: {out.strip()[-80:]})"
+        rc, tree = git("write-tree", env=env)
+        if rc != 0:
+            return head, "not made (write-tree)"
+        rc, names = git("diff", "--name-status", "--no-renames", head, tree.strip())
+        changed = [l for l in names.splitlines() if l.strip()]
+        if rc != 0 or not changed:
+            return head, ""
+        rc, sha = git("commit-tree", tree.strip(), "-p", head, "-m",
+                      "the files running on the workstation (made for the slot push)", env=env)
+        if rc != 0 or not sha.strip():
+            return head, "not made (commit-tree)"
+        new = len([l for l in changed if l.startswith("A")])
+        left = [l[3:].strip() for l in status.splitlines() if l.startswith("??")
+                and not any(l[3:].strip().startswith(p + "/") for p in packages)]
+        note = f"{len(changed) - new} changed, {new} new"
+        if left:
+            note += f"; not sent: {len(left)} new file(s) outside the code packages ({', '.join(left[:3])})"
+        return sha.strip(), note
+    finally:
+        try:
+            os.unlink(index)
+        except OSError:
+            pass
 
 
 _TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")

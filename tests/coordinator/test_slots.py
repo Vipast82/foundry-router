@@ -243,6 +243,8 @@ def test_a_remote_run_pushes_the_track_commit_and_the_deployed_foundry_before_ch
     monkeypatch.setattr(SL.subprocess, "run", fake_run)
     monkeypatch.setattr(SL.subprocess, "Popen", P)
     monkeypatch.setattr(SL, "copy_back", lambda *a, **k: [])
+    # the Foundry push sends the files that are running (foundry_snapshot), not only HEAD
+    monkeypatch.setattr(SL, "foundry_snapshot", lambda root: ("cafe1234", "1 changed, 0 new"))
     argv = SL.wrap_pipeline(REMOTE, ["pipeline", "--repo", "C:/t"], "C:/t", "AS-J05", "abc123")
     assert SL.main(argv[argv.index("run"):]) == 0
     flat = [" ".join(c) for c in calls]
@@ -250,7 +252,7 @@ def test_a_remote_run_pushes_the_track_commit_and_the_deployed_foundry_before_ch
     fd = next(i for i, c in enumerate(flat) if "foundry.git" in c and "push" in c)
     co = next(i for i, c in enumerate(flat) if "slot-checkout" in c)
     assert au < co and fd < co
-    assert "abc123:refs/heads/slot/AS-J05" in flat[au] and "HEAD:refs/heads/deploy" in flat[fd]
+    assert "abc123:refs/heads/slot/AS-J05" in flat[au] and "cafe1234:refs/heads/deploy" in flat[fd]
     assert any("checkout -q --force --detach FETCH_HEAD" in c and c.startswith("ssh") for c in flat)
 
 

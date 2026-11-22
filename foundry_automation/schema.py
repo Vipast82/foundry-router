@@ -297,6 +297,9 @@ AUTOMATION_DEFAULTS: dict = {
     # modelwatch.py: which model serves the sprints, and the pause when the paid ones are out
     "served_model_alert": True,
     "pause_when_paid_models_out": False,
+    # slotkeep.py: the slots' copies, disks and versions
+    "slot_keep_fresh_hours": 4,
+    "slot_disk_alert_pct": 80,
     # slotfill.py: a free slot starts ready work by itself (both switches ship off)
     "slot_auto_fill": False,
     "slot_auto_fill_minutes": 5,
@@ -1000,6 +1003,12 @@ _AUTO_DESC = {
                                 "per day. The extra belongs to that sprint and ends with it; "
                                 "the limit here is not changed. Off = it stops and asks, with "
                                 "the suggested amount.",
+    "slot_keep_fresh_hours": "While a remote Studio slot is idle (no lane bound, its lock "
+                             "free), the main branch is pushed to its bare copy this often, "
+                             "in the background, so a lane's first push only sends what the "
+                             "lane added. 0 = never.",
+    "slot_disk_alert_pct": "Alert (once a day per slot) when a Studio slot's disk is this "
+                           "full. Read every ten minutes in the background. 0 = no alert.",
     "slot_auto_fill": "A free Studio slot starts work by itself: the next approved sprint "
                       "that never started and whose dependencies are complete, or a "
                       "started sprint that waits READY behind the main checkout, on a lane "

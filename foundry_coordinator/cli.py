@@ -377,6 +377,69 @@ _WRITING = {("unblock", None), ("extend-time", None), ("approve", None), ("rejec
             ("orders", "add"), ("orders", "cancel")}
 
 
+def _slot_keep_cmd(c, a) -> int:
+    """slot-keep PROJECT status | push | save-dirty | sparse | repack [--slot ID] [--yes]:
+    the slot upkeep of slotkeep.py by hand. `sparse` and `repack` change files on the slot
+    and need --yes; `sparse` saves each checkout's dirty files to the workstation first."""
+    from . import slotkeep as K
+    from . import slots as SL
+    P = c.projects.get(a.project)
+    if P is None:
+        print(f"unknown project {a.project}")
+        return 2
+    configured = SL.configured(P.profile)
+    ids = [a.slot] if getattr(a, "slot", "") else sorted(configured)
+    missing = [s for s in ids if s not in configured]
+    if missing or not ids:
+        print(f"no enabled slot {', '.join(missing) or '(none configured)'}")
+        return 2
+    if a.kcmd in ("sparse", "repack") and not getattr(a, "yes", False):
+        print(f"{a.kcmd} changes files on {', '.join(ids)}; add --yes to run it")
+        return 2
+    rc = 0
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for sid in ids:
+        slot = {**configured[sid], "id": sid}
+        try:
+            if a.kcmd == "status":
+                row = {}
+                d, f = K.read_disk(slot), K.read_foundry(slot)
+                if d.get("pct") is not None:
+                    row.update(disk_pct=d["pct"], free_gb=d.get("free_gb"))
+                if f.get("version") or f.get("head"):
+                    row["foundry"] = f.get("version") or f.get("head")
+                print(f"{sid}: {K.words(row) or 'no reading'}"
+                      + (f" ({d.get('free_gb')} GB free)" if d.get("pct") is not None else "")
+                      + "".join(f"; {k} not read: {v['error']}" for k, v in
+                                (("disk", d), ("Foundry", f)) if v.get("error")))
+            elif a.kcmd == "push":
+                got = K.keep_fresh(slot, P.profile.workspace, P.profile.branch)
+                print(f"{sid}: " + (f"{P.profile.branch} {got['head'][:12]} pushed in "
+                                    f"{got['seconds']} s" if got["ok"] and got["head"] else
+                                    got["detail"] or "nothing to push"))
+                rc = rc or (0 if got["ok"] else 1)
+            elif a.kcmd in ("save-dirty", "sparse"):
+                dest = os.path.join(c.state_dir, "slot-saves", sid, stamp)
+                cos = K.checkouts(slot)
+                if a.kcmd == "sparse":
+                    cos = [co for co in cos if os.path.basename(co).startswith("blender")]
+                    if not cos:
+                        print(f"{sid}: no Blender checkout")
+                for co in cos:
+                    got = K.save_dirty(slot, co, dest)
+                    print(f"{sid}: {co}: {got['files']} file(s) saved"
+                          + (f" to {got['tar']}" if got["tar"] else "")
+                          + f"; list {got['list']}")
+                    if a.kcmd == "sparse":
+                        print(f"{sid}: {co}: sparse without docs/evidence, now {K.sparse(slot, co)}")
+            elif a.kcmd == "repack":
+                print(f"{sid}: bare copy repacked, now {K.repack(slot)}")
+        except Exception as e:                                    # noqa: BLE001
+            print(f"{sid}: {a.kcmd} failed: {type(e).__name__}: {e}")
+            rc = 1
+    return rc
+
+
 def _orders_cmd(c, a) -> int:
     from . import orders as O
     try:
@@ -971,6 +1034,13 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x = osub.add_parser("cancel"); x.add_argument("order_id")
     x.add_argument("--by", default="operator"); x.add_argument("--why", default="")
     x = sub.add_parser("log", help="the watch log"); x.add_argument("--lines", type=int, default=60)
+    x = sub.add_parser("slot-keep", help="slot upkeep by hand: disk and version, push the main "
+                                         "branch, save a slot's dirty files, sparse Blender "
+                                         "checkouts, repack the bare copy")
+    x.add_argument("project")
+    x.add_argument("kcmd", choices=["status", "push", "save-dirty", "sparse", "repack"])
+    x.add_argument("--slot", default="", help="one slot (default: every enabled slot)")
+    x.add_argument("--yes", action="store_true", help="sparse / repack: really change the slot")
     pqp = sub.add_parser("prep", help="pending repo changes (self-driving part 3): patches, "
                                       "branches and scripts that land on the main checkout at a "
                                       "safe point, all or nothing")
@@ -1330,6 +1400,8 @@ def _dispatch(a, c: Coordinator) -> int:
         return _prep_cmd(c, a)
     if a.cmd == "orders":
         return _orders_cmd(c, a)
+    if a.cmd == "slot-keep":
+        return _slot_keep_cmd(c, a)
     if a.cmd == "log":
         from . import watchlog
         watchlog.tick(c, force=True)

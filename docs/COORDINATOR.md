@@ -278,6 +278,8 @@ Victor decided on 2026-10-21.
 | `budget_renewals_per_day` | `1` | A sprint out of sessions, attempts or review calls gets every counter back to its base room by itself this many times a rolling day, only if a plan step was ticked since its last renewal (`budget_policy.py`; ledger rows `renewal:<counter>:<key>`, notice `budget_renewed`). Otherwise the stop goes to the Lead and the owner as before. `0` = never. |
 | `task_minutes_auto_extend` | `true` | A sprint over `limits.max_task_minutes` that ticked a plan step since its last extension gets minutes of its own: what its open steps need at its own pace, at most the limit again per day (task data `task_minutes_extra`, notice `time_extended`). The project limit is not changed. `extend-time PROJECT TASK --minutes N` is the owner's own grant, live. |
 | `kilo_restart_drain_minutes` | `60` | While the Foundry Client has a Kilo restart pending for a safe point (its resource watch found Kilo over `resources.kilo_restart_gb` with free RAM under `resources.kilo_restart_free_gb`, or a config reload), no new implementer session starts, for at most this long, so the running ones end and the restart happens. `0` = never hold starts. |
+| `slot_keep_fresh_hours` | `4` | While a remote Studio slot is idle, the main branch is pushed to its bare copy this often, in the background, so a lane's first push only sends what the lane added. `0` = never. |
+| `slot_disk_alert_pct` | `80` | Alert once a day per slot when its disk is this full (read every ten minutes, in the background). `0` = no alert. |
 | `slot_auto_fill` | `false` | A free Studio slot starts work by itself (see "Keeping the slots busy"). Off = the status board only says what would start. |
 | `slot_auto_fill_minutes` | `5` | A slot must have been free this long before something is started on it. |
 | `order_deps_early` | `false` | With `slot_auto_fill`: a sprint may start before a dependency its plan marks `(order)`, when nothing else is ready and the two plans share no file. |
@@ -367,6 +369,44 @@ answers again, every project is swept at once and again after the dead-session g
 a session the outage killed is restarted within a few minutes. One notice (`router_back`)
 then says how long the router was away, each live session with what Kilo reports for it,
 what was restarted, and what is still not right.
+
+### Slot upkeep (`slotkeep.py`)
+
+Three things a watch session did around the Studio slots. None of them runs on the tick
+thread (a slot behind ssh can take 15 s to refuse, a push an hour): the tick starts one
+worker per slot at a time, the worker only runs commands, and the next tick writes the
+events.
+
+- **The copy stays fresh.** While a remote slot is idle (no live lane bound to it, its lock
+  free) the main branch is pushed to its bare copy as `slot/_keep` every
+  `slot_keep_fresh_hours`. A lane's first push then sends only what the lane added, not
+  every evidence frame committed since the slot's last lane. Events `slot_kept_fresh` and
+  `slot_keep_failed` (a failed push is tried again at the next check).
+- **Disk.** Each slot's disk is read every ten minutes; at `slot_disk_alert_pct` one alert a
+  day names the slot, the percent and what is free.
+- **Version.** Each slot's Foundry version and commit are read with the disk. The status
+  board shows disk, version and the last refresh under each slot, and marks a slot that runs
+  another version than the coordinator.
+
+**The slot gets the files that are running.** Before a gate run the deployed Foundry is
+pushed to the slot's host. When the deploy checkout's files are ahead of its last commit (a
+deploy by copy), the push now sends a commit made of the files as they are on disk: every
+change to a tracked file, and new files inside the code packages. It is made with a
+throwaway index, so the checkout's HEAD, branch, index and files are untouched. New files
+outside the code packages (state, notes) are never sent; the gate's push line counts them.
+
+**By hand** (`python -m foundry_coordinator slot-keep <project> <command> [--slot ID]`):
+
+| Command | What it does |
+|---|---|
+| `status` | each slot's disk and Foundry version, read now |
+| `push` | push the main branch to the slot's copy now |
+| `save-dirty` | list each checkout's modified and untracked files and copy them to `<state>/slot-saves/<slot>/<time>/` on the workstation; changes nothing on the slot |
+| `sparse --yes` | `save-dirty` for the Blender checkouts, then set them to a sparse checkout without `docs/evidence` |
+| `repack --yes` | `git gc` on the slot's bare copy |
+
+`sparse` and `repack` change files on the slot, so they are commands and not automatic
+steps: watch the first run on one slot.
 
 ### Keeping the slots busy (`slotfill.py`)
 

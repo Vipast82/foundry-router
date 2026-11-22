@@ -167,6 +167,16 @@ def seats(c, P) -> list:
         if str((r.get("data") or {}).get("slot") or "") in configured:
             continue
         out.append(lane_seat(f"lane {r['name']}", "lane", r))
+    try:
+        from . import slotkeep
+        kept = slotkeep.view(c, P)
+        for seat in out:
+            if seat.get("kind") == "slot" and kept.get(seat["seat"]):
+                seat["upkeep"] = slotkeep.words(kept[seat["seat"]])
+                if kept[seat["seat"]].get("behind"):
+                    seat["behind"] = kept[seat["seat"]]["behind"]
+    except Exception:                                            # noqa: BLE001
+        pass
     return out
 
 
@@ -312,6 +322,8 @@ def text(b: dict, last_check: Optional[float] = None, models: Optional[dict] = N
             L.append(f"  {s['seat']:13} idle: {s.get('why') or ''}")
             if s.get("auto"):
                 L.append(f"  {'':13} {s['auto']}")
+        if s.get("upkeep"):
+            L.append(f"  {'':13} {s['upkeep']}")
         else:
             L.append(f"  {s['seat']:13} {s.get('sprint')}  {s.get('state')}"
                      + (f"/{s['phase']}" if s.get("phase") else "")

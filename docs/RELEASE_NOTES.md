@@ -1,3 +1,46 @@
+## v0.181.237 - slot upkeep: fresh copies, disk alerts, versions
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 17, 18 and 19.
+
+- **A lane's first push stays small (17).** FIN-4a (slot-3) and BAL-2e3
+  (slot-1) took over 30 minutes to push because the slot's copy had nothing
+  committed since its last lane. While a remote slot is idle the main branch
+  is now pushed to its bare copy every `[automation] slot_keep_fresh_hours`
+  (default 4, 0 = never), in a background thread.
+- **Disk (18).** The slots stood at 84% / 80% / 77% on 11-21 and nothing said
+  so. Each slot's disk is read every ten minutes; at `slot_disk_alert_pct`
+  (default 80, 0 = no alert) one alert a day names the slot, the percent and
+  what is free.
+- **Version (19).** Each slot's Foundry version is read with the disk; the
+  status board shows disk, version and last refresh under each slot and marks
+  a slot that runs another version than the coordinator.
+- **The slot gets the files that are running (19).** A deploy by copy left the
+  deploy checkout's files ahead of its HEAD, and the slots ran the old commit
+  until a "deploy snapshot" was committed by hand. The gate's Foundry push now
+  sends a commit of the files as they are on disk (changes to tracked files,
+  and new files inside the code packages), made with a throwaway index: the
+  checkout's HEAD, branch, index and files are not touched. New files outside
+  the code packages are never sent.
+
+None of the readings or pushes runs on the tick thread.
+
+Three commands for what changes files on a slot, to run by hand and watch the
+first time (`python -m foundry_coordinator slot-keep <project> ...`):
+`save-dirty` (copy each checkout's modified and untracked files to the
+workstation, change nothing), `sparse --yes` (save, then Blender checkouts
+without `docs/evidence`), `repack --yes` (`git gc` on the bare copy). Also
+`status` and `push`.
+
+Not covered: sparse checkout and repack are not automatic; the Studio checkout
+keeps `docs/evidence` (its gate reads frames there); none of this was run
+against a real slot from here, only against recorded command output.
+
+Files: `foundry_coordinator/slotkeep.py` (new), `slots.py`, `engine.py`,
+`board.py`, `cli.py`, `foundry_automation/schema.py`,
+`foundry_router/ui/static/automation.html`, `docs/COORDINATOR.md`. 11 tests.
+
+Deploy: coordinator. The router only for the board's extra line.
+
 ## v0.181.236 - a free slot starts ready work by itself (off until switched on)
 
 Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 12 (the start
