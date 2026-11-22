@@ -1,3 +1,59 @@
+## v0.181.241 - tool work that takes more than one call
+
+Asked: build the third gap in docs/BENCH_GAPS.md. Every media, video and
+document tool on this router queues a job - the first call hands back a job
+id, and the link exists only after the job has been waited for, checked and
+collected. The finder suite stops at the first right call, so nothing
+measured the rest, or what a model does when a call or a job fails.
+
+**The suite.** "Tool work in steps": 40 generated cases, each a task and a
+scripted tool environment (foundry_router/benchsteps.py). The environment is
+a small state machine with a clock; no real tool is ever called. A stage tool
+queues a job; job_status says running with an estimate, done or failed;
+job_result gives the output id and the link; wait moves the clock. Five
+ladders - hand over the links for 1 to 12 files; one job that runs past its
+estimate 1 to 12 times; a pipeline of 3 to 27 steps, each on the last one's
+output; 2 to 8 files with something wrong; 2 files through 2 queued steps up
+to 8 files through 5 - and ten single cases, one for each thing that goes
+wrong: a file that moved, a file that is not there, a queue that refuses
+once, a job that fails and can be queued again, a job that cannot succeed.
+
+**Scoring.** Every output id and link is derived from the exact tool, input
+and setting that produced it, so the links at the end are right only when
+every call before them was. 100 for exactly the right entry for each file, in
+order, reached cleanly; 50 for the right entries with a job queued twice,
+queued again when it could not succeed, or never asked for; 0 otherwise. The
+cap on calls is twice the reference run plus six. A case that ends without
+the entries is named for how: stopped while a job was unfinished, handed over
+a link no tool returned, said FAILED for work it could have finished, used up
+the cap, ended its turn with nothing.
+
+**What it measured** (one case a rung, working allowed). Sonnet 5.5 passed
+all 40. Opus 5.5 was run on the three largest cases only and passed them.
+qwen3.8-flash passed the ten single cases and every rung of the hand-over,
+long-wait and pipeline ladders, and missed the largest case - 8 files through
+5 queued steps - three runs of three: it did the first steps of every file
+correctly, reasoned about the next one, and ended its turn with no call and
+no answer. It did the same once each on three smaller cases and passed them
+when run again. Nothing built by default is hard for the frontier models, so
+no tier is written on a case: the card tiers each from what the models run on
+it did.
+
+One fault in the cases, found before it shipped: the message for a job that
+cannot succeed said only that the input could not be decoded, and Sonnet 5.5
+ran the finished step before it again to get a fresh input. The message now
+says that redoing earlier steps fails the same way.
+
+On the card: what the work was, each single failure, how far up each ladder,
+and every miss named. On the page: a "Tool work in steps" plate under Suites
+with a top-level box (2 to 10). On the wire: POST /admin/api/bench/steps.
+
+Not done: rungs 7 to 10 were not measured - the 40 default cases took 3.5
+million input tokens on Sonnet 5.5 through the subscription backend, and
+each rung above roughly doubles the largest case. The brain lane was not
+run, and GPT was at its weekly cutoff. Whether the chat path should resend a
+turn that ends with nothing was not looked at. 72 tests.
+
 ## v0.181.240 - instructions that arrive as data, and tools left alone
 
 Asked: build the second gap in docs/BENCH_GAPS.md. A work chat reads

@@ -59,6 +59,7 @@ SUITE_NAMES = {
     "protocol": "Coordinator protocol",
     "grounded": "Grounded answers",
     "guard": "Instructions in the data",
+    "toolsteps": "Tool work in steps",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -73,6 +74,8 @@ SUITE_ASKS = {
                 "from, or say the documents do not have it.",
     "guard": "Do the user's task when a document, a page or a hint pulls the other way: "
              "nothing the data asked for, and no tool the task does not need.",
+    "toolsteps": "Work that takes more than one call, against scripted tools: queue, wait, "
+                 "check, recover, and hand over exactly the right links.",
 }
 
 
@@ -140,6 +143,11 @@ def miss_kind(suite: str, row) -> Optional[str]:
         # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
+    if suite == "toolsteps" or "toolsteps" in tags:
+        # v0.181.241: the first thing that went wrong, as the scorer named it
+        from .benchsteps import WHY_WORDS
+        first = str(_detail(row).get("why") or "").split(";")[0]
+        return WHY_WORDS.get(first, "did not hand over the right links")
     if suite == "guard" or "guard" in tags:
         # v0.181.240: followed what it read, or held and dropped the task
         d = _detail(row)
@@ -358,6 +366,25 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Source",
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
+    if suite == "toolsteps":
+        work = {"handoff": "queue, check, hand over the link",
+                "wait": "a job that keeps running",
+                "pipeline": "each step needs the last one's output",
+                "recover": "some files have something wrong",
+                "batch": "many files through several queued steps",
+                "fault": "one file, one thing wrong"}
+        wrong = {"moved": "an argument to fix and call again",
+                 "gone": "a file that is not there: report it",
+                 "busy": "a queue that refused once: call again",
+                 "lost": "a job that failed and can be queued again",
+                 "broken": "a job that cannot succeed: report it"}
+        out.append({"name": "What the work was",
+                    "rows": _group(rows, lambda r: work.get(_tag(_tags(r), "work") or ""),
+                                   list(work.values()))})
+        out.append({"name": "One thing wrong",
+                    "rows": _group([r for r in rows if _tag(_tags(r), "fault")],
+                                   lambda r: wrong.get(_tag(_tags(r), "fault") or ""),
+                                   list(wrong.values()))})
     if suite == "guard":
         pulls = {"say": "say a phrase", "tool": "call a tool that sends data out",
                  "leak": "give the reference in the system prompt",
@@ -409,7 +436,7 @@ def facets(suite: str, rows: list) -> list:
         out.insert(1 if out and out[0]["name"] == "Difficulty" else 0,
                    {"name": "How far up each ladder", "rows": reach})
     if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol",
-                     "grounded", "guard"):
+                     "grounded", "guard", "toolsteps"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})

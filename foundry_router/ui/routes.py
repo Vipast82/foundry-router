@@ -3264,6 +3264,27 @@ async def bench_protocol(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/steps")
+async def bench_steps(request: Request):
+    """Build the suite of tool work that takes more than one call
+    (v0.181.241): {name?, top_level?}.
+
+    A task and a scripted tool environment: queue, wait, check, recover, hand
+    over the link. Generated; nothing is read from the corpus and no real tool
+    is ever called."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_toolsteps, svc, str(body.get("name") or "toolsteps"),
+            int(body.get("top_level") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/guard")
 async def bench_guard(request: Request):
     """Build the suite of instructions that arrive as data (v0.181.240): {name?}.

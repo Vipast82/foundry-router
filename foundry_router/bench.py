@@ -1187,6 +1187,43 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
+def build_toolsteps(svc, name: str = "toolsteps", top_level: int = 0) -> dict:
+    """The suite of tool work that takes more than one call (v0.181.241): a
+    task and a scripted tool environment (benchsteps.StepEnv) - queue a job,
+    wait, check, hand over the link; a job that runs on; a call that fails
+    once; a pipeline where each step needs the last one's output. Every case
+    is generated and each ladder climbs to `top_level`. Run by
+    ask_through_steps, scored by benchsteps.steps_score. No real tool is ever
+    called, and no tier is assigned: the card tiers each case from what the
+    models run on it did. Returns {name, cases, path}."""
+    from . import benchsteps
+    out = []
+    for sp in benchsteps.steps_specs(top_level):
+        tags = ["toolsteps", "tool_use", f"work:{sp['kind']}",
+                f"files:{sp['files']}", f"calls:{sp['needed']}"]
+        if sp["fault"]:
+            tags.append(f"fault:{sp['fault']}")
+        if sp["ladder"]:
+            tags += [f"ladder:{sp['ladder']}", f"level:{sp['level']}"]
+        out.append({
+            "id": f"STEPS-{sp['task']}",
+            "task_id": sp["task"],
+            "tags": tags,
+            "messages": sp["messages"], "tools": sp["tools"],
+            "reference": {"steps": sp["env"], "want": sp["want"],
+                          "content": ", ".join(sp["want"])},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench", f"built the {name} suite: {len(out)} case(s)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f)}
+
+
 def build_guard(svc, name: str = "guard") -> dict:
     """The suite of instructions that arrive as data (v0.181.240): a user task
     with one right answer, and a document, a fetched page or a hint that pulls
@@ -1779,6 +1816,85 @@ async def ask_through_finder(svc, model: str, case: dict, max_tokens: int = 2048
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
             "out_of_room": ran_out,
             "seconds": round(time.monotonic() - t0, 2)}
+
+
+async def ask_through_steps(svc, model: str, case: dict, max_tokens: int = 2048,
+                            label: str = "", persona: str = "") -> dict:
+    """One task done against scripted tools (v0.181.241).
+
+    The model is called round after round; every tool call it makes is
+    answered by the case's own environment (benchsteps.StepEnv), from the state
+    the calls before it left, and nothing real is run. It ends when the model
+    answers without a call, when the cap on calls is used up, or when the
+    case's time is. Every round is a model call and is recorded like one."""
+    from . import benchsteps
+    from .brain import prompts
+    ref = case.get("reference") or {}
+    env = benchsteps.StepEnv(ref.get("steps") or {})
+    convo = wire(case.get("messages") or [])
+    tools = wire_tools(case.get("tools") or []) or None
+    t0 = time.monotonic()
+    wall = benchsteps.wall_seconds(env.cap)
+    names: list = []
+    prompt_tokens = completion_tokens = rounds = 0
+    backend, text = "", ""
+    capped = timed = False
+    ran_out = 0
+    while True:
+        left = wall - (time.monotonic() - t0)
+        if left <= 0:
+            timed = True
+            break
+        try:
+            result, backend, budget, room_out = await asyncio.wait_for(
+                _chat(svc, model, convo, tools, max_tokens, label, persona),
+                min(left, CASE_SECONDS))
+        except asyncio.TimeoutError:
+            timed = True
+            break
+        except Exception as e:                                    # noqa: BLE001
+            from .errors import describe_exception
+            return {"error": describe_exception(e),
+                    "seconds": round(time.monotonic() - t0, 2)}
+        rounds += 1
+        ran_out = budget if room_out else 0         # only the LAST round's counts
+        prompt_tokens += result.prompt_tokens or 0
+        completion_tokens += result.completion_tokens or 0
+        tcs = result.tool_calls or []
+        text = "" if room_out else (result.content or "")
+        if not tcs:
+            break                                    # it answered: the work is over
+        convo = convo + [{"role": "assistant", "content": result.content or "",
+                          "tool_calls": [{"id": tc.get("id") or f"c{i}",
+                                          "type": "function",
+                                          "function": {
+                                              "name": tc.get("name"),
+                                              "arguments": json.dumps(
+                                                  tc.get("arguments") or {})}}
+                                         for i, tc in enumerate(tcs)]}]
+        for i, tc in enumerate(tcs):
+            tname = str(tc.get("name") or "")
+            if env.n >= env.cap:
+                capped = True
+                shown = "[bench] the cap on calls for this task is used up."
+            else:
+                names.append(tname)
+                shown = env.call(tname, tc.get("arguments"))
+            convo.append({"role": "tool", "tool_call_id": tc.get("id") or f"c{i}",
+                          "name": tname, "content": shown})
+        if capped:
+            break
+    rep = env.report()
+    rep.update({"capped": capped, "timed_out": timed, "rounds": rounds})
+    _think, clean = prompts.split_think(text)
+    out = {"content": "" if (capped or timed) else clean.strip(), "backend": backend,
+           "tool_calls": [{"name": n, "arguments": {}} for n in names],
+           "steps": rep, "prompt_tokens": prompt_tokens,
+           "completion_tokens": completion_tokens, "out_of_room": ran_out,
+           "seconds": round(time.monotonic() - t0, 2)}
+    if timed:
+        out["timed_out"] = max(1, int(wall))
+    return out
 
 
 def guard_score(got: dict, ref: dict) -> dict:
@@ -2455,6 +2571,14 @@ async def score_one(svc, case: dict, got: dict) -> dict:
             ps["detail"] += " (reached for " + ", ".join(called) + " instead of ending the turn)"
         return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
                 "exact": None, "code_detail": ps["detail"], "error": ""}
+    if ref.get("steps"):
+        # the links at the end, exactly, and no job run twice (v0.181.241)
+        from . import benchsteps
+        ss = benchsteps.steps_score(got.get("content") or "", got.get("steps") or {},
+                                    ref.get("want") or [])
+        return {"score": ss["score"], "tools": ss["clean"], "code": None,
+                "answer": ss["result"], "exact": None, "error": "",
+                "code_detail": ss["detail"]}
     if ref.get("guard"):
         gs = guard_score(got, ref)
         return {"score": gs["score"], "tools": 1.0 if gs["held"] else 0.0, "code": None,
@@ -2510,6 +2634,10 @@ def expected_of(case: dict) -> str:
     ref = case.get("reference") or {}
     if ref.get("deliverable"):
         return "a deliverable (no answer key)"
+    if ref.get("steps"):
+        return ("hand over " + ", ".join(str(x) for x in ref.get("want") or [])
+                + f" (at most {int((ref['steps'] or {}).get('cap') or 0)} calls, "
+                  f"nothing queued twice)")
     if ref.get("guard"):
         s = "answer " + " and ".join(str(x) for x in ref.get("must_include") or [])
         if ref.get("forbid_tools"):
@@ -2542,6 +2670,26 @@ def answer_of(got: dict) -> str:
     """What the model did, kept for reading a failure: its text, and the tools
     it called when it called any."""
     parts = []
+    st = got.get("steps") or {}
+    if st:
+        # the calls in order, the middle cut out of a long run, then how it ended
+        said = " → ".join(f"{n}({a})" + ("" if r in ("ok", "queued") else f"={r}")
+                          for n, a, r in st.get("log") or [])
+        if len(said) > 1100:
+            said = said[:600] + " … " + said[-450:]
+        parts.append(f"{st.get('calls', 0)} call(s) of {st.get('cap', 0)} allowed: " + said)
+        if st.get("flags"):
+            from .benchsteps import WHY_WORDS
+            parts.append("; ".join(WHY_WORDS.get(x, x) for x in st["flags"]))
+        if st.get("capped"):
+            parts.append("stopped: the cap on calls was used up")
+        if st.get("timed_out"):
+            parts.append("stopped: out of time")
+        if (got.get("content") or "").strip():
+            parts.append(got["content"].strip()[-600:])
+        if got.get("error"):
+            parts.append("error: " + str(got["error"]))
+        return "\n".join(parts)[:KEEP_ANSWER]
     f = got.get("finder") or {}
     if f:
         if f.get("used"):
@@ -2682,6 +2830,11 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
         # really happens, the chosen tool is recorded and never executed
         elif (case.get("reference") or {}).get("finder_tool"):
             got = await ask_through_finder(svc, model, case, label=rlabel)
+            s = await score_one(svc, case, got)
+        # ... and one that brings a scripted environment is run against it,
+        # call after call, until it answers (v0.181.241)
+        elif (case.get("reference") or {}).get("steps"):
+            got = await ask_through_steps(svc, model, case, label=rlabel)
             s = await score_one(svc, case, got)
         else:
             got = await ask(svc, model, case, label=rlabel)

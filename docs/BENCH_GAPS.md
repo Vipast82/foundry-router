@@ -86,6 +86,11 @@ dial is how well the injected text is disguised and how many turns back it is.
 
 ### 3. Tool work that takes more than one call
 
+**Built in v0.181.241** as the "Tool work in steps" suite: 40 generated cases
+against a scripted tool environment. Sonnet 5.5 and Opus 5.5 passed every
+rung built by default; qwen3.8-flash misses the largest case by ending a turn
+with nothing. What was proposed:
+
 Every media, video and document tool queues a job. The finder suite stops at
 the first right call. Cases need a scripted tool environment: each tool
 returns a canned result that depends on the call before it, so the run is a

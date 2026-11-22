@@ -311,6 +311,76 @@ called http_post, called send_message, said what the data told it to.
 
 The suite is 96 cases, two seeds of each kind and dress.
 
+## Tool work in steps (v0.181.241)
+
+A new suite, the third addition in `docs/BENCH_GAPS.md`. Every media, video
+and document tool here queues a job, and the finder suite stops at the first
+right call. A case in this suite is a task and a scripted tool environment
+(`benchsteps.StepEnv`): a small state machine with a clock. Nothing real is
+run. A stage tool queues a job and returns a job id; `job_status` says
+running (with an estimate), done or failed; `job_result` gives the output id
+and the link once it is done; `wait` moves the clock. Every output id and
+link is derived from the exact tool, input and setting that produced it, so
+the links at the end are right only when every call before them was.
+
+| Kind | What it asks |
+|---|---|
+| hand-over | queue one job per file, wait, check, collect, hand over the links |
+| long wait | one job whose estimate runs out again and again: keep waiting, queue nothing twice |
+| pipeline | one file through a chain of immediate tools, each on the last one's output |
+| recover | several files, most with one thing wrong |
+| batch | several files through several queued steps each, per-file settings, a few things wrong |
+| one thing wrong | one file, one step, one failure - each of the five on its own, twice |
+
+The five things that go wrong: the file was moved (the error names the
+argument to use); the file is not there (report it); the queue refused once
+(call again); the job failed and can be queued again; the job cannot succeed
+(report it). The entry for a file that cannot be finished is `FAILED`.
+
+**Scoring.** 100 for exactly the right entry for each file, in order, reached
+cleanly. 50 for the right entries reached untidily: a job queued twice, one
+queued again that could not succeed, or one the task did not ask for - the
+second video was still rendered. 0 without the right entries. The cap on
+calls is twice the reference run plus six; past it nothing the model says
+counts. The detail of each case keeps the steps reached, the calls used and
+the first thing that went wrong.
+
+**No tier is assigned.** Measured on one case per rung, working allowed:
+
+| Ladder | What grows, level 1 to 6 | qwen3.8-flash | Sonnet 5.5 | Opus 5.5 |
+|---|---|---|---|---|
+| hand-over | files to queue, check and collect: 1 to 12 | 6 of 6 | 6 of 6 | not run |
+| long wait | times one job runs past its estimate: 1 to 12 | 6 of 6 | 6 of 6 | not run |
+| pipeline | steps, each on the last one's output: 3 to 27 | 6 of 6 | 6 of 6 | not run |
+| recover | files, most with something wrong: 2 to 8 | 5 of 6 (level 4 missed once, passed 2 of 2 again) | 6 of 6 | level 6 passed |
+| batch | files x queued steps: 2x2 to 8x5 | 3 of 6: levels 2 and 5 missed once and passed again (3 of 3, 2 of 2); level 6 missed 3 of 3 | 6 of 6 | levels 5 and 6 passed |
+| one thing wrong (10 cases) | - | 10 of 10 | 10 of 10 | not run |
+
+Nothing built by default is hard for Sonnet 5.5 or Opus 5.5. What it
+separates is a local model from them, at size: on the largest case (8 files
+through 5 queued steps, about 130 calls) qwen3.8-flash did the first two or
+three steps of every file correctly, reasoned about the next step, and then
+ended its turn with no call and no answer - three runs of three. It did the
+same once each on three smaller cases and passed them when run again, so one
+run of this suite on flash moves by a case or two. The miss is named "ended
+its turn with nothing" on the card.
+
+One fault in the cases was found by the calibration. The message for a job
+that cannot succeed said only that the input could not be decoded, and
+Sonnet 5.5 ran the finished step before it a second time to get a fresh
+input - a half mark for queueing a job twice. It now says that redoing
+earlier steps will fail the same way; Sonnet and Opus both passed that case
+cleanly afterwards.
+
+**Rungs 7 to 10 exist and were not measured.** The top-level box builds them
+(up to 20 files through 10 steps). They were left alone because of what they
+cost on the subscription backend, which adds about 4,000 tokens to every
+round: the 40 default cases took 3.5 million input tokens on Sonnet 5.5, and
+the largest single case 370,000. Rung 7 of the batch ladder is roughly twice
+that, rung 8 four times. Until they are run on two frontier models there is
+no hard tier here, and the card tiers each case from what the models run on
+it did.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers

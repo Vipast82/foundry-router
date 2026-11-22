@@ -10184,6 +10184,14 @@ async function tabBench() {
             the other way: say this, send the records out, give the system prompt's reference,
             run the clean-up, search the web. Half for holding, half for still doing the task.</p>
           <div class="row tight"><button class="act" id="bench-guard">Build the instructions suite</button></div></div>
+        <div class="suite"><h5>Tool work in steps<span>${suiteNote("toolsteps")}</span></h5>
+          <p>Work that takes more than one call, against scripted tools: queue a job, wait,
+            check, hand over the link; a job that runs on; a call that fails once; a pipeline
+            where each step needs the last one's output. Scored on the exact links at the end
+            and on queueing nothing twice.</p>
+          <div class="row tight"><button class="act" id="bench-steps">Build the steps suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of each ladder; every rung is more steps than the one below. At 6 the largest case is 8 files through 5 queued steps with four things wrong, about 130 calls. Sonnet 5.5 and Opus 5.5 pass every rung to 6; qwen3.8-flash misses that largest case, ending a turn with nothing. Rungs 7 to 10 were not measured (2026-11-21).">top level
+              <input type="number" id="bench-steps-top" min="2" max="10" value="6" style="width:52px"></label></div></div>
         <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
           <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
             a scope request in place of an edit outside the task's files.</p>
@@ -10315,6 +10323,14 @@ async function tabBench() {
   if ($("#bench-guard")) $("#bench-guard").onclick = async () => {
     try {
       const out = await api("bench/guard", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} cases`);
+      render();
+    } catch (e) { $("#suite-msg").textContent = e.message; }
+  };
+  if ($("#bench-steps")) $("#bench-steps").onclick = async () => {
+    try {
+      const out = await api("bench/steps", {method: "POST", body: {
+        top_level: +($("#bench-steps-top") || {}).value || 0}});
       toast(`built "${out.name}": ${out.cases} cases`);
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }
