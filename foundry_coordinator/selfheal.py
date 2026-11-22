@@ -1150,6 +1150,82 @@ def stale_playtests(c, P) -> list[dict]:
                             "Studio call, lease, queued run or reservation"})]
 
 
+# ------------------------------------------------------------------ after an outage
+
+def live_sessions(c, P) -> list[dict]:
+    """Every session the store records as running for the project, with what Kilo says
+    about it now: [{task, session, role, kilo}] (kilo: busy / idle / retry / stalled /
+    missing / error / unreachable)."""
+    q = ",".join("?" * len(LIVE_SESSION_STATUSES))
+    rows = c.store.q(f"SELECT session_id, task_id, role, prompt_ts FROM sessions WHERE "
+                     f"project_id=? AND ended_ts IS NULL AND role IN ('implementer','lead') AND "
+                     f"status IN ({q})", (P.id, *LIVE_SESSION_STATUSES))
+    out = []
+    for r in rows:
+        t = c.store.task(P.id, r["task_id"])
+        if t is None or t["state"] in S.TERMINAL:
+            continue
+        try:
+            directory = c.tracks.project_for(P, t).profile.workspace
+            st = P.client.state(r["session_id"], directory=directory,
+                                since_ts=float(r.get("prompt_ts") or 0))
+            kilo = "stalled" if getattr(st, "stalled", False) else str(st.status)
+        except Exception:                                        # noqa: BLE001
+            kilo = "unreachable"
+        out.append({"task": r["task_id"], "session": r["session_id"], "role": r["role"],
+                    "kilo": kilo})
+    return out
+
+
+def after_router_back(c) -> Optional[dict]:
+    """The router answered again after an outage (control._router_seen set `_router_back`).
+    Every project is swept at once, and again once the dead-session grace has passed (a
+    dead session is ended on its second sighting), so anything the outage killed is
+    restarted within a few minutes instead of at the sweep's ordinary pace. Then one
+    report: how long the router was away, each live session and what Kilo says about it,
+    and what was restarted. Returns the report when it was written."""
+    rb = c.__dict__.get("_router_back")
+    if not isinstance(rb, dict):
+        return None
+    now = c.clock()
+    grace = max((float(_setting(P, "self_heal_dead_session_minutes") or 0) * 60
+                 for P in c.projects.values()), default=120.0)
+    due = float(rb["ts"]) if int(rb.get("stage") or 0) == 0 else float(rb["ts"]) + grace + 15
+    if now < due:
+        return None
+    for P in list(c.projects.values()):
+        for act in sweep(c, P, force=True):
+            if act.get("rule") in ("dead_session", "pending_abort"):
+                rb.setdefault("restarted", []).append(
+                    {"task": act.get("task"), "action": str(act.get("action"))[:160]})
+    rb["stage"] = int(rb.get("stage") or 0) + 1
+    if rb["stage"] < 2:
+        return None
+    c.__dict__.pop("_router_back", None)
+    sessions = []
+    for P in c.projects.values():
+        try:
+            sessions += live_sessions(c, P)
+        except Exception as e:                                   # noqa: BLE001
+            _log(c, f"{P.id}: live session check failed: {type(e).__name__}: {e}")
+    going = [s for s in sessions if s["kilo"] in ("busy", "idle")]
+    odd = [s for s in sessions if s["kilo"] not in ("busy", "idle")]
+    restarted = rb.get("restarted") or []
+    text = (f"The router was unreachable for {int(rb.get('down_s') or 0)} s and answers again. "
+            f"{len(sessions)} live session(s) checked: {len(going)} going on"
+            + (f" ({', '.join(s['task'] for s in going[:8])})" if going else "")
+            + (f"; restarted: {', '.join(str(r['task']) for r in restarted[:8])}" if restarted
+               else "; none had to be restarted")
+            + (f"; still not right: " + ", ".join(f"{s['task']} ({s['kilo']})" for s in odd[:8])
+               + " (the session rules take them from here)" if odd else "") + ".")
+    home = sorted(c.projects)[0] if c.projects else ""
+    report = {"text": text[:900], "kind": "router_back", "digest": True,
+              "down_s": int(rb.get("down_s") or 0), "sessions": sessions[:40],
+              "restarted": restarted[:20]}
+    c.store.event(home, "", "operator_notice", detail=report)
+    return report
+
+
 # ------------------------------------------------------------------ 5 holds
 
 def owner_alive(c, owner: str) -> Optional[bool]:

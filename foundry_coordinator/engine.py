@@ -27,6 +27,7 @@ from . import training_hook
 from . import handoff
 from . import selfheal
 from . import studio_reserve  # noqa: F401  (registers the studio_reserve hold owner)
+from . import crashguard
 from . import build_journal, skills_install
 from .adapters import Project
 from .adapters.base import (FAIL, PASS, UNKNOWN, SessionState, VerificationResult,
@@ -126,6 +127,8 @@ class Coordinator:
     # ceiling of the heartbeat cover over one verify / closeout check run
     # (keepalive.busy); past it a stuck check lets the heartbeat go stale
     VERIFY_COVER_S = 5400            # two 30-min Lune runs + done_check (AU)
+
+    crashguard.register()        # the crash_guard hold owner (released by another release)
 
     def __init__(self, store: Store, projects: list[Project], state_dir: str,
                  max_writers: Optional[int] = None, clock: Callable[[], float] = time.time,
@@ -411,7 +414,8 @@ class Coordinator:
             self.lead.retry_aborts()
         except Exception as e:                                    # noqa: BLE001
             self.log(f"lead abort retry failed: {type(e).__name__}: {e}")
-        __import__(f"{__package__}.prep_queue", fromlist=["tick"]).tick(self)  # SD part 3
+        with crashguard.step("prep queue"):
+            __import__(f"{__package__}.prep_queue", fromlist=["tick"]).tick(self)  # SD part 3
         rr = int(self.store.meta("rr") or 0) % len(ids)
         order = ids[rr:] + ids[:rr]
         self.store.set_meta("rr", str(rr + 1))
@@ -423,7 +427,8 @@ class Coordinator:
                 continue          # another workstation holds this project (workstation_gate.py)
             self._queue_approved_followups(P)
             try:
-                self.tracks.tick(P)                          # track lifecycle + merges
+                with crashguard.step("tracks", pid):
+                    self.tracks.tick(P)                      # track lifecycle + merges
             except Exception as e:                            # noqa: BLE001
                 self.log(f"{pid}: tracks tick failed: {type(e).__name__}: {e}")
             try:
@@ -434,7 +439,8 @@ class Coordinator:
                 self._orphan_studio_lock(P)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: studio lock sweep failed: {type(e).__name__}: {e}")
-            selfheal.sweep(self, P)          # self-repair sweep (never raises; once a minute)
+            with crashguard.step("self-repair sweep", pid):
+                selfheal.sweep(self, P)      # self-repair sweep (never raises; once a minute)
             # standing orders (orders.py): an owner's order runs as a rule until its end
             # condition is met, then reports (never raises; every 30 s)
             __import__(f"{__package__}.orders", fromlist=["tick"]).tick(self, P)
@@ -461,7 +467,9 @@ class Coordinator:
                 before = (t["state"], t["updated_ts"])
                 try:
                     # a sprint queued on a track runs with the track's worktree
-                    self._step(self.tracks.project_for(P, t), t)
+                    # (crashguard: the step a hung tick was in is named at the next start)
+                    with crashguard.step("task", pid, t["task_id"], t["state"]):
+                        self._step(self.tracks.project_for(P, t), t)
                 except Exception as e:                            # noqa: BLE001
                     self.store.update_task(pid, t["task_id"],
                                            next_action=f"error: {type(e).__name__}: {e}"[:500])
@@ -501,6 +509,11 @@ class Coordinator:
                 training_hook.launch_auto(self.store, P_, t_, self.state_dir)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{P_.id}: training auto run failed to start: {e}")
+        # after a router outage: every live session checked at once, and reported
+        try:
+            selfheal.after_router_back(self)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"check after the router came back failed: {type(e).__name__}: {e}")
         # the watch log (watchlog.py): what was done by itself and why, once a minute
         __import__(f"{__package__}.watchlog", fromlist=["tick"]).tick(self)
         self.flush()
@@ -537,7 +550,9 @@ class Coordinator:
                 self.log(a)
             for hook in list(self.after_tick):
                 try:
-                    hook()
+                    name = getattr(hook, "__qualname__", "") or type(hook).__name__
+                    with crashguard.step(f"after-tick {name}"[:80]):
+                        hook()
                 except Exception as e:                            # noqa: BLE001
                     self.log(f"after-tick hook failed: {type(e).__name__}: {e}")
             if owner:

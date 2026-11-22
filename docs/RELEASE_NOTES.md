@@ -1,3 +1,57 @@
+## v0.181.233 - a crash loop names its step and ends itself; an outage ends with a report
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 4 and 8.
+
+**Crash loops (item 4).** On 11-16 and 11-18 the coordinator restarted every
+~6.5 minutes: one step of a tick ran past the heartbeat limit (an evidence
+rewrite; one git call per commit over 10,573 commits), the Foundry Client
+restarted the "unhealthy" coordinator after 90 + 300 seconds, and the new
+process walked into the same step. Nothing counted the restarts or remembered
+what was running: the new process's first heartbeat overwrote the old one, and
+the client's own note of it lives in memory. Both causes were fixed at the
+time; the next one would loop the same way.
+
+- The engine now names each step it enters: a task's step (project, task,
+  state) or one of its own passes (tracks, the self-repair sweep, the prep
+  queue, each after-tick hook). The workspace's git runner names its command.
+- Once a step has run 30 seconds, the keep-alive thread writes
+  `current-step.json` in the state folder every 15 seconds: the step, how long,
+  the keep-alive label covering it, how long it has gone without cover, and
+  the last command. The file is removed when the step ends.
+- At the next start, a leftover file is the step the last process died in. It
+  counts only when the step had gone 90 seconds without keep-alive cover: that
+  is the hang the client restarts. A covered ten-minute verify that a deploy
+  cut short does not count.
+- The same step twice in a row: one alert (class `watch`) that names the step,
+  its label and its last command, for example "POL-7's VERIFYING, running 420 s
+  with no keep-alive cover; last command: git -C ... log --merges ...". If it
+  is a task's step, the task is held, so the loop ends by itself. The hold is
+  released when another release runs (the fix), or when you resume it.
+- A pass of the coordinator's own (telemetry, tracks) cannot be skipped. For
+  those the alert is the whole answer, and it says so.
+
+**After a router or network outage (item 8).** On 11-21 at 14:00 the network
+router was rebooted; the coordinator lost the Foundry router for a minute and
+recovered by itself, but somebody then had to look at each session to see
+that. The existing rules already restart a dead session within about five
+minutes; what was missing was doing it at once and saying what was found.
+When the router stops answering the control channel for 20 seconds or more
+and then answers again, every project is swept immediately and again after
+the dead-session grace, and one notice follows: "The router was unreachable
+for 70 s and answers again. 3 live session(s) checked: 3 going on (FIN-4,
+BAL-2e1, CR-2); none had to be restarted." A session that is not right
+(retrying, stalled, gone) is named.
+
+Not done: a session that Kilo reports as busy while its stream is hung is still
+only caught by the session time limit; there is no evidence yet that this
+happens, so no rule was added for it.
+
+Files: `foundry_coordinator/crashguard.py` (new), `engine.py`, `cli.py`,
+`adapters/git.py`, `control.py`, `selfheal.py` (`after_router_back`,
+`live_sessions`), `watchlog.py`, `docs/COORDINATOR.md`. 10 tests.
+
+Deploy: coordinator only.
+
 ## v0.181.232 - one status board: every seat, what is stopped, what it holds up
 
 Fifth release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: item 26 (status on

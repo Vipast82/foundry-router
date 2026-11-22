@@ -32,6 +32,7 @@ from . import states as S
 from .adapters.foundry import FoundryClient, FoundryError
 
 RETRY_UNRECORDED_S = 120      # wait this long for the engine to record a Kilo question
+ROUTER_DOWN_MIN_S = 20        # a router unreachable this long was "down" (selfheal.after_router_back)
 # project-scoped actions (task_id may be empty): pause / resume a whole project
 # for an operator upgrade (payload {mode: "safe" | "now", note})
 PROJECT_KINDS = ("project_pause", "project_resume")
@@ -103,6 +104,7 @@ class ControlChannel:
         self.heartbeat_every_s = heartbeat_every_s
         self._last_beat = 0.0
         self._waiting: dict[str, float] = {}     # action id -> first seen (question not recorded yet)
+        self._router_down: Optional[dict] = None  # {since, why} while the router does not answer
         self.started = clock()
         self.ticks = 0
         # a project paused with resume_after_upgrade is resumed once, at the
@@ -131,9 +133,11 @@ class ControlChannel:
                 self.log(f"control: heartbeat failed: {e}")
         try:
             actions = self.foundry.claim_actions(self.source_id, sorted(self.c.projects))
+            self._router_seen(True)
         except FoundryError as e:
             self.log(f"control: claim failed: {e}")
             actions = []
+            self._router_seen(False, str(e))
         for a in actions:
             try:
                 self.handle(a)
@@ -306,6 +310,29 @@ class ControlChannel:
                 "sessions_tracked": sum(1 for t in tasks if t["state"] in S.WRITING)}
 
     # ------------------------------------------------------------------ reporting
+
+    def _router_seen(self, ok: bool, why: str = "") -> None:
+        """The router answered a claim, or did not. When it answers again after
+        ROUTER_DOWN_MIN_S or more, the engine checks every live session at once and again
+        after the dead-session grace (selfheal.after_router_back) and reports what it found:
+        2026-11-21 14:00 the network router was rebooted and nothing said afterwards which
+        sessions had gone on and which had not."""
+        now = self.clock()
+        if not ok:
+            if self._router_down is None:
+                self._router_down = {"since": now, "why": why[:200]}
+            return
+        down, self._router_down = self._router_down, None
+        if down is None or now - float(down["since"]) < ROUTER_DOWN_MIN_S:
+            return
+        back = {"ts": now, "down_s": int(now - float(down["since"])), "why": down["why"],
+                "stage": 0, "restarted": []}
+        self.c.__dict__["_router_back"] = back
+        home = sorted(self.c.projects)[0] if self.c.projects else ""
+        self.store.event(home, "", "router_back", detail={
+            "down_s": back["down_s"], "why": back["why"], "digest": True})
+        self.log(f"control: the router answers again after {back['down_s']} s; checking every "
+                 f"live session")
 
     def _report(self, a: dict, status: str, detail: str, result: Optional[dict] = None) -> None:
         key = f"control:{a['action_id']}"

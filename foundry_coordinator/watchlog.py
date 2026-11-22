@@ -93,6 +93,11 @@ FORMAT = {
     "budget_renewal_skipped": lambda d: f"budget not renewed by itself ({d.get('counter')}): {_s(d.get('why'))}",
     "time_extension_skipped": lambda d: f"time not extended by itself: {_s(d.get('why'))}",
     "error": lambda d: f"coordinator error: {_s(d.get('error'), 300)}",
+    "router_back": lambda d: f"the router answers again after {d.get('down_s')} s ({_s(d.get('why'), 160)})",
+    "crash_guard_seen": lambda d: (f"the last coordinator process died inside {_s(d.get('what'), 120)} "
+                                   f"({d.get('seconds')} s, restart {d.get('n')} in a row"
+                                   + (f"; last command: {_s(d.get('command'), 160)}" if d.get("command")
+                                      else "") + ")"),
 }
 
 

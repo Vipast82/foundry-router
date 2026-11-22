@@ -125,6 +125,10 @@ class _ProcessFiles:
         # be all the client sees, and it would start a second coordinator)
         self._last_beat: dict = {}
         self._hb_lock = threading.Lock()
+        self.state_dir = state_dir
+        # crashguard: the step the last process died in, before anything overwrites it
+        from . import crashguard
+        self.crash = crashguard.on_start(coordinator, state_dir)
         self._beat({"ok": True, "errors": [], "lead_ready": None, "lead_detail": "",
                     "starting": True})
         self._stop_keepalive = threading.Event()
@@ -156,8 +160,11 @@ class _ProcessFiles:
         """Refresh the heartbeat while the engine is inside a declared long step
         (keepalive.busy); silent otherwise, so a hung tick still goes stale."""
         from . import keepalive
+        from . import crashguard
         while not self._stop_keepalive.wait(self.KEEPALIVE_S):
-            self.keepalive_once(keepalive.current())
+            cover = keepalive.current()
+            crashguard.write(self.state_dir, cover)      # what is running, for the next start
+            self.keepalive_once(cover)
 
     def keepalive_once(self, step) -> bool:
         """One keep-alive beat for `step` ({label, elapsed_s} or None)."""

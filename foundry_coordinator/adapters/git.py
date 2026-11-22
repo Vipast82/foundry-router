@@ -20,6 +20,11 @@ class Workspace:
             env: Optional[dict] = None) -> str:
         env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", **(env or {}))
         try:
+            from ..crashguard import note_command
+            note_command(["git", "-C", self.path, *args])
+        except Exception:                                        # noqa: BLE001
+            pass
+        try:
             r = subprocess.run(["git", "-C", self.path, *args], capture_output=True, text=True,
                                timeout=timeout, env=env, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:

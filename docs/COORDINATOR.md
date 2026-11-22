@@ -333,6 +333,30 @@ heartbeat from the coordinator's store:
 The page adds the models the router served in its last 100 requests and how many of those
 fell to a later route. Read-only; a part that cannot be read is listed under "not read".
 
+### The crash-loop guard and the check after an outage (`crashguard.py`, `selfheal.py`)
+
+The Foundry Client restarts a coordinator whose heartbeat goes quiet. When one step of a
+tick hangs, every new process walks into the same step. The engine names each step it
+enters (a task's step with its project, task and state; its own passes: tracks, the
+self-repair sweep, the prep queue, each after-tick hook), and the workspace's git runner
+names the command it is in. The keep-alive thread writes `<state dir>/current-step.json`
+once a step has run 30 seconds: the step, how long, the keep-alive label covering it, how
+long it has gone without cover, the last command. The file goes when the step ends.
+
+At the next start a leftover file is the step the last process died in. It counts only if
+it had gone 90 seconds without keep-alive cover (a hang the client restarts; a covered long
+verify cut short by a deploy does not count). The same step twice in a row raises one
+alert (class `watch`) with the step, the label and the command, and a task's step is
+skipped: the task is held (owner `crash_guard:<release>`) until another release runs or it
+is resumed by hand. A pass of the coordinator's own cannot be skipped; the alert says so.
+Events: `crash_guard_seen`, notice `crash_loop`.
+
+When the router stops answering the control channel for 20 seconds or more and then
+answers again, every project is swept at once and again after the dead-session grace, so
+a session the outage killed is restarted within a few minutes. One notice (`router_back`)
+then says how long the router was away, each live session with what Kilo reports for it,
+what was restarted, and what is still not right.
+
 ### Needs and services (`services.py`, Team Lead piece 5)
 
 A sprint may declare `needs` (`studio`, `blender`, `audio`, `images`, `gpu`, `backend`, `none`): a
