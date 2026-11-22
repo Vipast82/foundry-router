@@ -2056,7 +2056,7 @@ async function loadBoard() {
 }
 function bdMins(m) { return m === null || m === undefined ? "?" : m < 120 ? m + " min" : (Math.round(m / 6) / 10) + " h"; }
 function seatRow(s) {
-  if (s.idle) return `<tr><td><b>${esc(s.seat)}</b></td><td><span class="pill warn">idle</span></td><td colspan="2">${esc(s.why || "")}</td></tr>`;
+  if (s.idle) return `<tr><td><b>${esc(s.seat)}</b></td><td><span class="pill warn">idle</span></td><td colspan="2">${esc(s.why || "")}${s.auto ? `<div class="hint" style="margin:0">${esc(s.auto)}</div>` : ""}</td></tr>`;
   return `<tr><td><b>${esc(s.seat)}</b>${s.lane ? ` <span class="hint" style="margin:0">lane ${esc(s.lane)}</span>` : ""}</td><td><span class="mono">${esc(s.sprint || "")}</span> ${sprintPill(s.state)}${s.phase ? ` <span class="hint" style="margin:0">${esc(s.phase)}</span>` : ""}</td><td style="white-space:nowrap">${esc(bdMins(s.minutes))}</td><td>${esc(s.doing || "")}</td></tr>`;
 }
 async function renderBoard() {

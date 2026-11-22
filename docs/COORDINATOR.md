@@ -278,6 +278,9 @@ Victor decided on 2026-10-21.
 | `budget_renewals_per_day` | `1` | A sprint out of sessions, attempts or review calls gets every counter back to its base room by itself this many times a rolling day, only if a plan step was ticked since its last renewal (`budget_policy.py`; ledger rows `renewal:<counter>:<key>`, notice `budget_renewed`). Otherwise the stop goes to the Lead and the owner as before. `0` = never. |
 | `task_minutes_auto_extend` | `true` | A sprint over `limits.max_task_minutes` that ticked a plan step since its last extension gets minutes of its own: what its open steps need at its own pace, at most the limit again per day (task data `task_minutes_extra`, notice `time_extended`). The project limit is not changed. `extend-time PROJECT TASK --minutes N` is the owner's own grant, live. |
 | `kilo_restart_drain_minutes` | `60` | While the Foundry Client has a Kilo restart pending for a safe point (its resource watch found Kilo over `resources.kilo_restart_gb` with free RAM under `resources.kilo_restart_free_gb`, or a config reload), no new implementer session starts, for at most this long, so the running ones end and the restart happens. `0` = never hold starts. |
+| `slot_auto_fill` | `false` | A free Studio slot starts work by itself (see "Keeping the slots busy"). Off = the status board only says what would start. |
+| `slot_auto_fill_minutes` | `5` | A slot must have been free this long before something is started on it. |
+| `order_deps_early` | `false` | With `slot_auto_fill`: a sprint may start before a dependency its plan marks `(order)`, when nothing else is ready and the two plans share no file. |
 | `served_model_alert` | `true` | Alert (class `watch`) when a working sprint session is served by a route that is not the first of its persona, with which route of how many and what the router says about the routes above it. One alert per session and route. In a saving budget mode a fall that the mode's cutoff caused is logged, not alerted. |
 | `pause_when_paid_models_out` | `false` | When every paid route of a sprint's persona is out (each account unavailable or at the backend's cutoff), the sprint waits for the earliest reset the router reports instead of running on the local model; no attempt is used. Off = it falls through to the local model as before. |
 | `budget_mode` | `normal` | `normal`, `save_claude` or `save_all`: one switch over the agent caps and the usage cutoffs (see "Model watch and the budget mode"). |
@@ -364,6 +367,32 @@ answers again, every project is swept at once and again after the dead-session g
 a session the outage killed is restarted within a few minutes. One notice (`router_back`)
 then says how long the router was away, each live session with what Kilo reports for it,
 what was restarted, and what is still not right.
+
+### Keeping the slots busy (`slotfill.py`)
+
+With `slot_auto_fill` on, once a minute a slot that has been free for
+`slot_auto_fill_minutes` (an enabled `[slots]` entry with no live lane bound to it), with a
+seat left under `max_agents` and the project not paused, starts one sprint on a lane named
+after it. In queue order, the first of:
+
+| Rule | Which sprint |
+|---|---|
+| ready | approved, never started, on no lane, every dependency complete. When nothing holds the main checkout, the first such sprint is the workstation's and is left to it. |
+| moved | a main-line sprint that already ran sessions and waits READY with its last session ended, while another sprint holds the main checkout (what `tracks start --move-started` did by hand). |
+| early | only with `order_deps_early`, and only when neither of the above exists: a sprint whose every unmet dependency is marked order-only in its plan. The dependency is taken off its queue entry (as `queue set-deps` did) and stays off. |
+
+A sprint is never picked when it is workstation-only (`workstation_only_sprints`), when its
+plan has no file list, or when its plan shares a file with any other open sprint (the
+append-safe ledgers aside), except sprints that wait for it anyway. A refused lane is an
+event (`slot_fill_refused`) and the sprint is left alone for half an hour. Every start is an
+event (`slot_auto_filled`) that names the rule, and a line in the watch log.
+
+**Marking a dependency.** In a plan, `**Depends on:** FIN-5 (order), FIN-4a (files), BAL-2e`
+says FIN-5 is there for scheduling only. `(files)` or no mark is a real dependency: the
+sprint builds on that sprint's files and always waits for it.
+
+Both switches ship off. With them off the status board still says, for each free slot, what
+would start and by which rule, or why nothing would.
 
 ### Model watch and the budget mode (`modelwatch.py`, `budget_mode.py`, router `budget_caps.py`)
 

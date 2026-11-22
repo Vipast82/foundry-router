@@ -1,3 +1,50 @@
+## v0.181.236 - a free slot starts ready work by itself (off until switched on)
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 12 (the start
+part), 13 and 14.
+
+Slots sat idle with ready work on the queue until somebody typed
+`tracks start ... --slot`. FIN-4a waited READY behind FIN-2c for the one main
+checkout while two slots were free, and moving it took `--move-started`.
+REL-1a and REL-1b waited on FIN-5 for scheduling only, and dropping that took
+`queue set-deps`.
+
+With `[automation] slot_auto_fill` on, once a minute a slot that has been
+free for `slot_auto_fill_minutes` (default 5), with a seat left under
+`max_agents` and the project not paused, starts one sprint on a lane bound to
+it. In queue order, the first of:
+
+- **ready**: approved, never started, on no lane, every dependency complete.
+  When nothing holds the main checkout, the first such sprint is left to it.
+- **moved** (13): a main-line sprint that already ran sessions and waits READY
+  with its last session ended while another sprint holds the main checkout.
+- **early** (14): only with `order_deps_early` on and only when nothing else
+  is ready: a sprint whose every unmet dependency its plan marks order-only.
+  That dependency is taken off its queue entry and stays off.
+
+Never a workstation-only sprint, never one without a plan file list, never
+one whose plan shares a file with another open sprint (append-safe ledgers
+aside; sprints that wait for it anyway do not count). A refused lane is an
+event and that sprint is left alone for half an hour. Every start is an event
+that names the rule and a line in the watch log.
+
+Plans can now say what a dependency is for:
+`**Depends on:** FIN-5 (order), FIN-4a (files)`. No mark means files.
+
+Both switches ship OFF, as agreed for anything that starts or moves sprints by
+itself. With them off the status board says, for each free slot, what would
+start and by which rule, or why nothing would.
+
+Not covered: only single-sprint lanes are started (a follow-on sprint gets its
+own lane when a slot is free again); advisory work for a slot with nothing
+ready is the prework job, a later release.
+
+Files: `foundry_coordinator/slotfill.py` (new), `tracks/analysis.py`,
+`engine.py`, `board.py`, `foundry_automation/schema.py`,
+`foundry_router/ui/static/automation.html`, `docs/COORDINATOR.md`. 10 tests.
+
+Deploy: coordinator. The router only for the board's extra line.
+
 ## v0.181.235 - which model serves the sprints, and one budget mode switch
 
 Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 7b, 7c and 16.

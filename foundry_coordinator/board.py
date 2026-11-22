@@ -120,6 +120,20 @@ def seats(c, P) -> list:
     live = [r for r in c.store.tracks(pid) if r["state"] in LIVE_STATES]
     bound = {str((r.get("data") or {}).get("slot") or ""): r for r in live}
     candidates, none_why = _slot_candidates(c, P, tasks, queue)
+    auto = ""
+    if any(sid not in bound for sid in configured):
+        try:
+            from . import slotfill
+            st = slotfill.state(c, P)
+            nxt = st.get("next") or {}
+            if nxt.get("sprint"):
+                what = f"{nxt['sprint']} ({slotfill.RULE_WORDS[nxt['rule']]})"
+                auto = (f"starts {what} by itself" if st["on"] else
+                        f"automatic start is off (slot_auto_fill); it would start {what}")
+            elif st.get("why"):
+                auto = "nothing starts by itself: " + st["why"]
+        except Exception:                                        # noqa: BLE001
+            auto = ""
 
     def lane_seat(name: str, kind: str, r: dict) -> dict:
         cur = r.get("current_sprint") or next(
@@ -148,7 +162,7 @@ def seats(c, P) -> list:
                     "why": "no lane is bound to it; " + (
                         "ready to start on a slot: " + ", ".join(candidates[:6]) if candidates
                         else "nothing is ready: " + none_why),
-                    "could_run": candidates[:6]})
+                    "could_run": candidates[:6], "auto": auto})
     for r in live:
         if str((r.get("data") or {}).get("slot") or "") in configured:
             continue
@@ -296,6 +310,8 @@ def text(b: dict, last_check: Optional[float] = None, models: Optional[dict] = N
     for s in b.get("seats") or []:
         if s.get("idle"):
             L.append(f"  {s['seat']:13} idle: {s.get('why') or ''}")
+            if s.get("auto"):
+                L.append(f"  {'':13} {s['auto']}")
         else:
             L.append(f"  {s['seat']:13} {s.get('sprint')}  {s.get('state')}"
                      + (f"/{s['phase']}" if s.get("phase") else "")

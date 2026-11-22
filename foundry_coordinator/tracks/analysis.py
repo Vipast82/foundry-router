@@ -90,6 +90,7 @@ class PlanInfo:
     suites: list = field(default_factory=list)
     stories: list = field(default_factory=list)
     deps: list = field(default_factory=list)             # ids named by the plan
+    order_deps: list = field(default_factory=list)       # those marked "(order)": scheduling only
     needs: list = field(default_factory=list)
     needs_source: str = "inferred"                       # block | mcp_line | inferred | task
     done: bool = False
@@ -98,6 +99,7 @@ class PlanInfo:
         return {"task_id": self.task_id, "path": self.path, "title": self.title,
                 "tier": self.tier, "files": list(self.files), "suites": list(self.suites),
                 "stories": list(self.stories), "deps": list(self.deps),
+                "order_deps": list(self.order_deps),
                 "needs": list(self.needs), "needs_source": self.needs_source,
                 "done": self.done}
 
@@ -175,10 +177,8 @@ def plan_suites(text: str) -> list[str]:
     return out
 
 
-def plan_deps(text: str, task_id: str, has_plan=lambda _id: False) -> list[str]:
-    """Ids named by '**Depends on:**' lines and 'Depends on X' prose, without
-    MASTER_ORDER phase labels (see drop_phase_labels)."""
-    out: list[str] = []
+def _dep_segments(text: str) -> list[str]:
+    """The text after each 'Depends on', up to the end of its sentence."""
     # prose wraps: fold each paragraph (lines up to a blank line or heading) first
     folded, para = [], []
     for line in _lines(text):
@@ -189,13 +189,36 @@ def plan_deps(text: str, task_id: str, has_plan=lambda _id: False) -> list[str]:
         else:
             para.append(line.strip())
     folded.append(" ".join(para))
+    out = []
     for m in re.finditer(r"\bDepends on:?\**\s*([^\n]+)", "\n".join(folded)):
         seg = m.group(1).split("**")[0]
-        seg = re.split(r"[.;]\s|\s·\s", seg)[0]
+        out.append(re.split(r"[.;]\s|\s·\s", seg)[0])
+    return out
+
+
+def plan_deps(text: str, task_id: str, has_plan=lambda _id: False) -> list[str]:
+    """Ids named by '**Depends on:**' lines and 'Depends on X' prose, without
+    MASTER_ORDER phase labels (see drop_phase_labels)."""
+    out: list[str] = []
+    for seg in _dep_segments(text):
         for d in ID_RE.findall(seg):
             if d != task_id and d not in out:
                 out.append(d)
     return drop_phase_labels(out, has_plan)
+
+
+def plan_order_deps(text: str, task_id: str) -> list[str]:
+    """The dependencies a plan marks as there for scheduling only: 'Depends on: FIN-5
+    (order)'. An unmarked one, or '(files)', is a real one: the sprint builds on its files.
+    slotfill.py may start a sprint before an order-only dependency is done."""
+    out: list[str] = []
+    for seg in _dep_segments(text):
+        for m in ID_RE.finditer(seg):
+            d = m.group(1)
+            if d != task_id and d not in out and re.match(r"\s*\(\s*order\b[^)]*\)",
+                                                          seg[m.end():], re.I):
+                out.append(d)
+    return out
 
 
 def parse_needs_block(text: str) -> Optional[list[str]]:
@@ -296,6 +319,7 @@ def parse_plan(task_id: str, text: str, path: str = "", done: bool = False) -> P
                     files=files, suites=plan_suites(text), stories=stories,
                     deps=plan_deps(text, task_id, has_plan=lambda d: bool(plan_dir) and
                                    os.path.isfile(os.path.join(plan_dir, f"{d}_PLAN.md"))),
+                    order_deps=plan_order_deps(text, task_id),
                     needs=needs, needs_source=src, done=done)
 
 

@@ -447,6 +447,8 @@ class Coordinator:
             # which model serves each working session (modelwatch.py; every 5 min)
             __import__(f"{__package__}.modelwatch", fromlist=["sweep"]).sweep(self, P)
             __import__(f"{__package__}.budget_mode", fromlist=["tick"]).tick(self, P)
+            # a free slot starts ready work (slotfill.py; off unless slot_auto_fill)
+            __import__(f"{__package__}.slotfill", fromlist=["step"]).step(self, P)
             try:
                 # build replay: finished tasks' Blender journals by age and count (hourly)
                 build_journal.sweep(self, P)

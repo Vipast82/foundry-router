@@ -297,7 +297,11 @@ AUTOMATION_DEFAULTS: dict = {
     # modelwatch.py: which model serves the sprints, and the pause when the paid ones are out
     "served_model_alert": True,
     "pause_when_paid_models_out": False,
-    # budget_mode.py: one switch over the agent caps and the start cutoffs
+    # slotfill.py: a free slot starts ready work by itself (both switches ship off)
+    "slot_auto_fill": False,
+    "slot_auto_fill_minutes": 5,
+    "order_deps_early": False,
+    # budget_mode.py: one switch over the agent caps and the cutoffs
     "budget_mode": "normal",
     "save_claude_agents": 1,
     "save_claude_cutoff_pct": 75,
@@ -996,6 +1000,18 @@ _AUTO_DESC = {
                                 "per day. The extra belongs to that sprint and ends with it; "
                                 "the limit here is not changed. Off = it stops and asks, with "
                                 "the suggested amount.",
+    "slot_auto_fill": "A free Studio slot starts work by itself: the next approved sprint "
+                      "that never started and whose dependencies are complete, or a "
+                      "started sprint that waits READY behind the main checkout, on a lane "
+                      "bound to the slot. Never a workstation-only sprint, never one whose "
+                      "plan shares a file with another open sprint, never over max_agents. "
+                      "Off = the status board only says what would start.",
+    "slot_auto_fill_minutes": "A slot must have been free this long before slot_auto_fill "
+                              "starts something on it.",
+    "order_deps_early": "With slot_auto_fill: when nothing else is ready for a free slot, a "
+                        "sprint may start before a dependency its plan marks as order-only "
+                        "(\"Depends on: FIN-5 (order)\"), if the two plans share no file. "
+                        "The dependency is removed from its queue entry and that is logged.",
     "budget_mode": "One switch for how hard the sprints lean on the paid models. normal: "
                    "the caps and cutoffs apply as set. save_claude: at most "
                    "save_claude_agents Claude sprint sessions at once, and Claude's usage "
