@@ -10192,6 +10192,14 @@ async function tabBench() {
           <div class="row tight"><button class="act" id="bench-steps">Build the steps suite</button>
             <label class="nw hint" style="margin:0" title="The highest rung of each ladder; every rung is more steps than the one below. At 6 the largest case is 8 files through 5 queued steps with four things wrong, about 130 calls. Sonnet 5.5 and Opus 5.5 pass every rung to 6; qwen3.8-flash misses that largest case, ending a turn with nothing. Rungs 7 to 10 were not measured (2026-11-21).">top level
               <input type="number" id="bench-steps-top" min="2" max="10" value="6" style="width:52px"></label></div></div>
+        <div class="suite"><h5>Output a program reads<span>${suiteNote("structured")}</span></h5>
+          <p>A JSON schema and notes in plain prose: times in words, lengths to turn into
+            minutes, coded values, a default stated once, a correction, an instruction at the
+            end for every record. The object is handed over as the whole reply or as one tool
+            call, and scored on being valid and on every value.</p>
+          <div class="row tight"><button class="act" id="bench-structured">Build the structured suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of each ladder (the wide one stops at 6). At 8 the largest object has about 570 values and takes about 6,800 of the 8,192 tokens a case gets. Opus 5.5 got 79 of 80 and Sonnet 5.5 76, their misses single values at any size; qwen3.8-flash 72, cut off at the budget on the three largest (2026-11-21).">top level
+              <input type="number" id="bench-structured-top" min="2" max="8" value="8" style="width:52px"></label></div></div>
         <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
           <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
             a scope request in place of an edit outside the task's files.</p>
@@ -10323,6 +10331,14 @@ async function tabBench() {
   if ($("#bench-guard")) $("#bench-guard").onclick = async () => {
     try {
       const out = await api("bench/guard", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} cases`);
+      render();
+    } catch (e) { $("#suite-msg").textContent = e.message; }
+  };
+  if ($("#bench-structured")) $("#bench-structured").onclick = async () => {
+    try {
+      const out = await api("bench/structured", {method: "POST", body: {
+        top_level: +($("#bench-structured-top") || {}).value || 0}});
       toast(`built "${out.name}": ${out.cases} cases`);
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }

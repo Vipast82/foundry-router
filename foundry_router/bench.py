@@ -1187,6 +1187,46 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
+def build_structured(svc, name: str = "structured", top_level: int = 0) -> dict:
+    """The suite of output a program will read (v0.181.242): a JSON Schema and
+    notes in prose, and the object handed over as the whole reply or as one
+    tool call (benchschema.schema_spec). Every case is generated with its key
+    and each ladder climbs to `top_level`. Scored by benchschema.schema_score:
+    valid against the schema, and every value the one the notes give. No tier
+    is assigned: the card tiers each case from what the models run on it did.
+    Returns {name, cases, path}."""
+    from . import benchschema
+    out = []
+    for sp in benchschema.schema_specs(top_level):
+        asked = sum(len(str(m.get("content") or "")) for m in sp["messages"])
+        tags = ["structured", f"shape:{sp['shape']}", f"mode:{sp['mode']}",
+                f"values:{sp['values']}",
+                f"tokens:{int((asked + len(json.dumps(sp['tools']))) / CHARS_PER_TOKEN) + 120}"]
+        if sp["value"]:
+            tags.append(f"value:{sp['value']}")
+        if sp["ladder"]:
+            tags += [f"ladder:{sp['ladder']}", f"level:{sp['level']}"]
+        out.append({
+            "id": f"STRUCT-{sp['task']}",
+            "task_id": sp["task"],
+            "tags": tags,
+            "max_tokens": THINK_ROOM,
+            "messages": sp["messages"], "tools": sp["tools"],
+            "reference": {"structured": {"mode": sp["mode"], "schema": sp["schema"],
+                                         "key": sp["key"], "kinds": sp["kinds"]},
+                          "content": json.dumps(sp["key"], ensure_ascii=False)[:400]},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench", f"built the {name} suite: {len(out)} case(s)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f)}
+
+
 def build_toolsteps(svc, name: str = "toolsteps", top_level: int = 0) -> dict:
     """The suite of tool work that takes more than one call (v0.181.241): a
     task and a scripted tool environment (benchsteps.StepEnv) - queue a job,
@@ -2571,6 +2611,15 @@ async def score_one(svc, case: dict, got: dict) -> dict:
             ps["detail"] += " (reached for " + ", ".join(called) + " instead of ending the turn)"
         return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
                 "exact": None, "code_detail": ps["detail"], "error": ""}
+    if ref.get("structured"):
+        # valid against the schema, and every value the notes' (v0.181.242).
+        # Past the budget nothing counts, a call included.
+        from . import benchschema
+        seen = {"content": "", "tool_calls": []} if got.get("out_of_room") else got
+        ss = benchschema.schema_score(seen, ref["structured"])
+        return {"score": ss["score"], "tools": ss["accepted"], "code": None,
+                "answer": round(ss["right"] / ss["total"], 4) if ss["total"] else 0.0,
+                "exact": None, "error": "", "code_detail": ss["detail"]}
     if ref.get("steps"):
         # the links at the end, exactly, and no job run twice (v0.181.241)
         from . import benchsteps
@@ -2634,6 +2683,13 @@ def expected_of(case: dict) -> str:
     ref = case.get("reference") or {}
     if ref.get("deliverable"):
         return "a deliverable (no answer key)"
+    if ref.get("structured"):
+        from . import benchschema
+        st = ref["structured"]
+        return (("one call to " + benchschema.TOOL_NAME if st.get("mode") == "tool"
+                 else "the JSON object as the whole reply")
+                + f", valid against the schema, {len(benchschema.flatten(st.get('key')))} "
+                  "value(s): " + json.dumps(st.get("key"), ensure_ascii=False)[:1200])
     if ref.get("steps"):
         return ("hand over " + ", ".join(str(x) for x in ref.get("want") or [])
                 + f" (at most {int((ref['steps'] or {}).get('cap') or 0)} calls, "
@@ -2714,6 +2770,9 @@ def answer_of(got: dict) -> str:
             # whether it looked at a file or rebuilt the project
             def _one(t):
                 a = _call_args(t)
+                if t.get("name") == "file_record":
+                    # the object itself is the answer (v0.181.242): keep it
+                    return "file_record(" + json.dumps(a, ensure_ascii=False)[:1700] + ")"
                 arg = a.get("command") or a.get("filePath") or a.get("path") or a.get("pattern")                     or (json.dumps(a, ensure_ascii=False) if a else "")
                 arg = " ".join(str(arg).split())[:160]
                 return f"{t['name']}({arg})" if arg else t["name"]

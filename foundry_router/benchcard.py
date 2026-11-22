@@ -60,6 +60,7 @@ SUITE_NAMES = {
     "grounded": "Grounded answers",
     "guard": "Instructions in the data",
     "toolsteps": "Tool work in steps",
+    "structured": "Output a program reads",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -76,6 +77,8 @@ SUITE_ASKS = {
              "nothing the data asked for, and no tool the task does not need.",
     "toolsteps": "Work that takes more than one call, against scripted tools: queue, wait, "
                  "check, recover, and hand over exactly the right links.",
+    "structured": "Fill a JSON Schema from notes in prose: valid against the schema, and "
+                  "every value the one the notes give.",
 }
 
 
@@ -143,6 +146,11 @@ def miss_kind(suite: str, row) -> Optional[str]:
         # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
+    if suite == "structured" or "structured" in tags:
+        # v0.181.242: the first thing that went wrong, as the scorer named it
+        from .benchschema import WHY_WORDS as _words
+        first = str(_detail(row).get("why") or "").split(";")[0]
+        return _words.get(first, "not the object the notes describe")
     if suite == "toolsteps" or "toolsteps" in tags:
         # v0.181.241: the first thing that went wrong, as the scorer named it
         from .benchsteps import WHY_WORDS
@@ -366,6 +374,29 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Source",
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
+    if suite == "structured":
+        shapes = {"flat": "one record, many fields", "list": "many records",
+                  "nested": "records inside records",
+                  "sparse": "defaults, corrections, a last instruction",
+                  "value": "one kind of value"}
+        values = {"time": "a time written in words", "duration": "a length of time, in minutes",
+                  "code": "a coded value", "days": "days, in week order",
+                  "money": "an amount of money", "date": "a date written out",
+                  "optional": "optional fields the notes never mention",
+                  "default": "a default stated once", "correction": "a value corrected",
+                  "late": "an instruction at the end for every record"}
+        out.append({"name": "What the notes held",
+                    "rows": _group(rows, lambda r: shapes.get(_tag(_tags(r), "shape") or ""),
+                                   list(shapes.values()))})
+        out.append({"name": "How it was handed over",
+                    "rows": _group(rows, lambda r: {"text": "as the whole reply",
+                                                    "tool": "as one tool call"}.get(
+                        _tag(_tags(r), "mode") or ""),
+                        ["as the whole reply", "as one tool call"])})
+        out.append({"name": "One kind of value",
+                    "rows": _group([r for r in rows if _tag(_tags(r), "value")],
+                                   lambda r: values.get(_tag(_tags(r), "value") or ""),
+                                   list(values.values()))})
     if suite == "toolsteps":
         work = {"handoff": "queue, check, hand over the link",
                 "wait": "a job that keeps running",
@@ -436,7 +467,7 @@ def facets(suite: str, rows: list) -> list:
         out.insert(1 if out and out[0]["name"] == "Difficulty" else 0,
                    {"name": "How far up each ladder", "rows": reach})
     if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol",
-                     "grounded", "guard", "toolsteps"):
+                     "grounded", "guard", "toolsteps", "structured"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})

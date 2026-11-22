@@ -1,3 +1,59 @@
+## v0.181.242 - output a program reads
+
+Asked: build the next gap in docs/BENCH_GAPS.md, the fourth. Scheduled jobs,
+the Document MCP and the jobs list all take structured input, and what fills
+it in is a model reading somebody's notes. The only thing that measured it
+was two string arguments in the finder ladder.
+
+**The suite.** "Output a program reads": 80 generated cases, each a JSON
+Schema and notes in plain prose (foundry_router/benchschema.py). The object
+comes back as the whole reply or as the arguments of one tool call - four
+shapes each way: one record with more fields each level, a list of 1 to 64
+records, a runbook four levels deep, and jobs that lean on what was said
+elsewhere (defaults stated once, a time corrected mid-sentence, one
+instruction at the end for every job). Twenty small cases take one hard kind
+of value each: a time in words, a length of time to turn into minutes, a
+coded value whose meaning is in the schema, days to put in week order, money,
+a date written out, a default, a correction, a last instruction, optional
+fields the notes never mention.
+
+**Scoring.** A small validator checks the object against the schema (type,
+enum, pattern, range, required, no added fields) and every value is compared
+with the key. 100 for an object handed over as asked, valid, every value
+right and nothing added; 50 for a right and valid object a program would
+still trip on - a code fence, prose around it, written out when a call was
+asked for; 0 otherwise. Each miss is named for the first thing wrong: "a
+value outside the allowed list", "wrong value: one the notes corrected",
+"the JSON was cut off before it ended".
+
+**What it measured** (every case, one run each). Opus 5.5 79 of 80: one
+metric wrong in a 342-value runbook. Sonnet 5.5 76 and a half mark: one
+priority code, one default kept over the job's own line, "a quarter to three
+in the afternoon" read as 15:45, and one right object with second thoughts
+written around it. qwen3.8-flash 72 and two half marks: every single-value
+case and every shape to about 170 values, then the budget - it reasons first
+and writes indented JSON, so the three largest text cases were cut off - plus
+a boolean sent as the string "True" in a tool call and two objects written
+out as text when a call was asked for. There is no hard tier: the frontier
+models' misses are single values at any size, about 1 and 3 in 7,600, so no
+tier is written on a case and the card tiers each from what the models run
+on it did.
+
+Two faults in the cases, found before it shipped: "It runs at weekends" was
+read by Sonnet, twice, as every day with weekends included (now "only at
+weekends"); and the top list rung was 128 records, 13,000 tokens of JSON
+that nobody can hand over inside 8,192 (now 64 records).
+
+On the card: what the notes held, how it was handed over, each kind of
+value, how far up each ladder, and every miss named. On the page: an "Output
+a program reads" plate under Suites with a top-level box (2 to 8). On the
+wire: POST /admin/api/bench/structured.
+
+Not done: one run a model, and the frontier misses are too few to rank two
+models on one run. The brain lane was not run and GPT was at its weekly
+cutoff. Constrained output (a grammar from the schema) was not tried: this
+measures what a model writes unaided. 176 tests.
+
 ## v0.181.241 - tool work that takes more than one call
 
 Asked: build the third gap in docs/BENCH_GAPS.md. Every media, video and

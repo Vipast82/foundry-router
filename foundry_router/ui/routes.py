@@ -3264,6 +3264,26 @@ async def bench_protocol(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/structured")
+async def bench_structured(request: Request):
+    """Build the suite of output a program will read (v0.181.242):
+    {name?, top_level?}.
+
+    A JSON Schema and notes in prose; the object is handed over as the whole
+    reply or as one tool call. Generated; nothing is read from the corpus."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_structured, svc, str(body.get("name") or "structured"),
+            int(body.get("top_level") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/steps")
 async def bench_steps(request: Request):
     """Build the suite of tool work that takes more than one call

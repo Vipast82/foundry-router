@@ -101,8 +101,9 @@ def test_the_page_leads_with_report_cards_and_every_suite_can_always_be_built():
         assert control in plates, control
         assert control not in tab[runs:], "not in the runs toolbar, which needs a run to exist"
     # eight since v0.181.228 added the grounded suite, nine since v0.181.240 the guard suite,
-    # ten since v0.181.241 the steps suite
-    assert plates.count('<div class="suite">') + plates.count('<div class="suite wide">') == 10
+    # ten since v0.181.241 the steps suite, eleven since v0.181.242 the structured suite
+    assert plates.count('<div class="suite">') + plates.count('<div class="suite wide">') == 11
+    assert 'id="bench-structured"' in plates
     assert 'id="bench-steps"' in plates
     assert 'id="bench-guard"' in plates
     assert 'id="bench-grounded"' in plates and 'id="bench-grounded-top"' in plates

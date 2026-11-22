@@ -103,6 +103,11 @@ the number of steps.
 
 ### 4. Output a program will read
 
+**Built in v0.181.242** as the "Output a program reads" suite: 80 generated
+cases, a JSON Schema and notes in prose, handed over as text or as one tool
+call. Opus 5.5 got 79 of 80, Sonnet 5.5 76 and a half mark, qwen3.8-flash 72
+and two half marks. What was proposed:
+
 Scheduled jobs, the Document MCP and the jobs list all take structured input.
 Cases: fill a JSON object to a schema (enums, nested objects, arrays, a number
 range, a required field easy to forget), from a paragraph that states the

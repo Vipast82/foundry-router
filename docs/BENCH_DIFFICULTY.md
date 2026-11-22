@@ -381,6 +381,76 @@ that, rung 8 four times. Until they are run on two frontier models there is
 no hard tier here, and the card tiers each case from what the models run on
 it did.
 
+## Output a program reads (v0.181.242)
+
+A new suite, the fourth addition in `docs/BENCH_GAPS.md`. Scheduled jobs, the
+Document MCP and the jobs list all take structured input, and what fills it
+in is a model reading somebody's notes. A case is a JSON Schema and notes in
+plain prose; the object comes back as the whole reply (text) or as the
+arguments of one call to `file_record` (a call). Every case is generated
+with its key (`benchschema.schema_spec`).
+
+| Shape | The notes |
+|---|---|
+| wide | one job, more fields each level: owner, time, priority, days, timeout, retries, notify, target, budget, first run, tags, an optional note and dependency |
+| many | a list of jobs, six fields each, sentences in any order |
+| deep | a runbook: sections, steps, and checks on each step |
+| defaults | jobs that lean on what was said elsewhere: defaults stated once at the top, a time corrected mid-sentence, one instruction at the end that sets `enabled` for every job, optional fields only some jobs have |
+| one kind of value | twenty small cases, two for each thing that makes a value hard |
+
+What the notes make hard: a time in words ("a quarter to six in the
+afternoon" is 17:45), a length of time to turn into minutes, a coded value
+whose meaning is in the schema (P1 to P4), days to put in week order, money
+and its currency, a date written out, a default, a correction, a last
+instruction, and optional fields the notes never mention.
+
+**Scoring** (`benchschema.schema_score`). A small validator checks the object
+against the schema - type, enum, pattern, range, required, no added fields -
+and every value is compared with the key: 90 and 90.0 are the same, `true`
+and 1 are not, "P1" and "p1" are not. 100 for an object handed over as asked,
+valid, every value right and nothing added. 50 for a right and valid object a
+program would still trip on: a code fence, prose around it, written out when
+a call was asked for, the tool called more than once. 0 otherwise. The detail
+keeps how many values were right and the first thing that went wrong, named
+for what made that value hard.
+
+**No tier is assigned.** Measured on every case, one run each:
+
+| Ladder | What grows, level 1 to the top | qwen3.8-flash | Sonnet 5.5 | Opus 5.5 |
+|---|---|---|---|---|
+| wide, as text | one record: 4 to 15 fields (6 levels) | 6 of 6 | 6 of 6 | 6 of 6 |
+| wide, as a call | the same | 5 of 6: level 6 sent `"True"` for a boolean | 6 of 6 | 6 of 6 |
+| many, as text | 1 to 64 records, 7 to 572 values | 6 of 8: 48 and 64 records cut off at the budget | 7 of 8: level 4, one priority code | 8 of 8 |
+| many, as a call | the same | 7 of 8: 64 records out of budget | 8 of 8 | 8 of 8 |
+| deep, as text | a runbook: 14 to 512 values, four levels down | 8 of 8 | 8 of 8 | 8 of 8 |
+| deep, as a call | the same | 6 of 8: levels 6 and 8 right but written out, not called (half) | 8 of 8 | 7 of 8: level 7, one metric of 342 values |
+| defaults, as text | 2 to 40 jobs leaning on a default, a correction, a last instruction | 7 of 8: 40 jobs cut off at the budget | 7 of 8: level 1 right, with prose around it (half) | 8 of 8 |
+| defaults, as a call | the same | 7 of 8: 40 jobs out of budget | 6 of 8: level 2 kept the default over the job's own line; level 7 read "a quarter to three in the afternoon" as 15:45 | 8 of 8 |
+| one kind of value (20 cases) | - | 20 of 20 | 20 of 20 | 20 of 20 |
+| **all 80** | | **72 full, 2 half: 91.3** | **76 full, 1 half: 95.6** | **79 full: 98.8** |
+
+There is no hard tier. Opus 5.5 and Sonnet 5.5 are right about nearly every
+value at every size, and their misses do not follow size: they are single
+values in objects of any length. What the suite gives a frontier model is a
+slip rate - about 7,600 values across the 80 cases, 1 wrong for Opus and 3
+for Sonnet - and one run of it will not separate two models that close.
+
+For qwen3.8-flash it is the budget. It reasons before it writes and writes
+indented JSON, so 173 values took 8,027 of the 8,192 tokens a case gets; the
+three largest text cases were cut off mid-object. The other things it did
+that a program would trip on: a boolean sent as the string `"True"` in a tool
+call, and two large objects written out as text when a call was asked for.
+
+Two faults in the cases were found by the calibration:
+- "It runs at weekends" was read by Sonnet 5.5, twice, as every day with the
+  weekends included. It now says "only at weekends" and "only on weekdays".
+- The top of the many-records ladder was 128 records, which is about 13,000
+  tokens of JSON: nobody can hand that over inside 8,192. It is now 64
+  records, about 6,800 tokens, which Sonnet and Opus both did.
+
+The whole suite on a frontier model through the subscription backend is one
+call a case: about 375,000 input and 125,000 output tokens.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers
