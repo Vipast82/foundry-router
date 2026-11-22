@@ -168,15 +168,20 @@ def test_a_persona_takes_the_first_rung_of_its_own_chain_that_is_good_enough(tmp
     _persona(svc, "Chat", [FLASH, BRAIN, SONNET, OPUS])
     p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
     assert p["ladder"] == [FLASH, BRAIN] and p["cloud"] == [SONNET, OPUS]
+    # v0.181.251: flash holds only the easy tier of grounded answers and Sonnet the
+    # medium one too, so Sonnet is needed there; before, flash's mean covered it
     assert [(f["suite"], f["rung"], f["cloud"]) for f in p["families"]] == [
-        ("grounded", FLASH, ""), ("summaries", BRAIN, ""), ("heldrule", "", OPUS)]
-    assert p["families"][0]["sentence"] == ("Grounded answers: qwen3.8-flash passes at 75, "
-                                            "threshold 70")
+        ("grounded", FLASH, SONNET), ("summaries", BRAIN, ""), ("heldrule", "", OPUS)]
+    assert p["families"][0]["sentence"] == (
+        "Grounded answers: qwen3.8-flash passes at 75, through easy, threshold 70; "
+        "medium needs claude-sonnet-5-5")
     assert p["families"][2]["sentence"] == (
         "A rule held over a conversation: no local rung passes (qwen3.8-flash reaches 30, "
         "threshold 70); claude-opus-5-5 passes at 90")
-    assert p["could_go"] == [SONNET] and p["verdict"] == (
-        "needed: claude-opus-5-5; not needed for any kind of work: claude-sonnet-5-5")
+    assert p["could_go"] == [] and p["verdict"] == (
+        "every cloud rung is still needed for some kind of work: claude-sonnet-5-5 "
+        "(Grounded answers), claude-opus-5-5 (A rule held over a conversation)")
+    assert p["needed"] == {SONNET: ["grounded"], OPUS: ["heldrule"]}
 
 
 def test_an_unmeasured_kind_of_work_means_no_cloud_rung_is_called_unneeded(tmp_path):
@@ -203,12 +208,17 @@ def test_the_operator_can_set_a_ladder_and_the_thresholds_move_the_answer(tmp_pa
     assert p["ladder"] == [BRAIN, FLASH] and p["ladder_set"]
     assert [(f["suite"], f["rung"], f["cloud"]) for f in p["families"]] == [
         ("grounded", "", SONNET), ("summaries", BRAIN, "")]
-    assert p["verdict"] == "every cloud rung is still needed for some kind of work"
+    assert p["verdict"] == ("every cloud rung is still needed for some kind of work: "
+                            "claude-sonnet-5-5 (Grounded answers)")
 
 
 def test_a_persona_whose_local_rungs_pass_everything_can_do_without_its_cloud(tmp_path):
     svc = _svc(tmp_path, ladder_families={"general_chat": ["grounded", "summaries"]})
-    _measured(svc)
+    for s in ("grounded", "summaries"):
+        _suite(svc, s)
+        for _ in range(3):
+            _run(svc, s, FLASH, {"easy": [100], "medium": [90]})
+            _run(svc, s, SONNET, {"easy": [100], "medium": [100]})
     _persona(svc, "Chat", [FLASH, BRAIN, SONNET])
     _persona(svc, "Local", [FLASH, BRAIN])
     by = {p["persona"]: p for p in bl.report(svc)["personas"]}
@@ -279,3 +289,110 @@ def test_the_page_has_the_ladder_card_and_saves_its_settings():
     for want in ('api("bench/ladder")', 'api("config/bench"', "ladder_thresholds",
                  "local_ladders", "ladder_families"):
         assert want in fn, want
+
+
+# -- v0.181.251: what "could go" may claim ----------------------------------------------------
+
+def _two_suites(svc, flash, sonnet, runs=1):
+    for s in ("grounded", "summaries"):
+        _suite(svc, s)
+        for _ in range(runs):
+            _run(svc, s, FLASH, flash[s])
+            if s in sonnet:
+                _run(svc, s, SONNET, sonnet[s])
+
+
+def test_a_cloud_rung_never_run_is_not_called_unneeded(tmp_path):
+    svc = _svc(tmp_path, ladder_families={"general_chat": ["grounded", "summaries"]})
+    ok = {"easy": [100], "medium": [100]}
+    _two_suites(svc, {"grounded": ok, "summaries": ok}, {"grounded": ok, "summaries": ok}, 3)
+    _persona(svc, "Chat", [FLASH, SONNET, OPUS])
+    p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
+    assert p["could_go"] == [SONNET], "measured everywhere and never better"
+    assert p["not_run"] == {OPUS: ["grounded", "summaries"]}
+    assert p["verdict"] == ("not run on every kind of work, so not judged: claude-opus-5-5; "
+                            "not needed for any kind of work: claude-sonnet-5-5")
+
+
+def test_a_kind_of_work_nothing_passes_still_needs_the_cloud_rung_that_gets_further(tmp_path):
+    svc = _svc(tmp_path, ladder_families={"general_chat": ["grounded"]})
+    _suite(svc, "grounded")
+    _run(svc, "grounded", FLASH, {"easy": [100], "medium": [0], "hard": [0], "expert": [0]})
+    _run(svc, "grounded", SONNET, {"easy": [100], "medium": [100], "hard": [0],
+                                   "expert": [0]})
+    _persona(svc, "Chat", [FLASH, SONNET])
+    p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
+    assert p["could_go"] == [] and p["needed"] == {SONNET: ["grounded"]}
+    assert p["families"][0]["sentence"] == (
+        "Grounded answers: no local rung passes (qwen3.8-flash reaches 25, threshold 70); "
+        "no model in the chain passes, claude-sonnet-5-5 gets furthest (through medium)")
+
+
+def test_a_kind_of_work_nothing_passes_and_the_cloud_does_no_better_needs_no_cloud(tmp_path):
+    svc = _svc(tmp_path, ladder_families={"general_chat": ["grounded"]})
+    _suite(svc, "grounded")
+    _run(svc, "grounded", FLASH, {"easy": [100], "medium": [0], "hard": [0]})
+    _run(svc, "grounded", SONNET, {"easy": [100], "medium": [20], "hard": [0]})
+    _persona(svc, "Chat", [FLASH, SONNET])
+    p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
+    assert p["could_go"] == [SONNET] and p["needed"] == {}
+    f = bl.report(svc)["families"][0]
+    assert "no cloud model passes either; claude-sonnet-5-5 misses at 40" in f["sentence"]
+
+
+def test_could_go_on_one_run_says_it_is_a_lead_not_a_result(tmp_path):
+    svc = _svc(tmp_path, ladder_families={"general_chat": ["grounded", "summaries"]})
+    ok = {"easy": [100], "medium": [100]}
+    _two_suites(svc, {"grounded": ok, "summaries": ok}, {"grounded": ok, "summaries": ok}, 1)
+    _persona(svc, "Chat", [FLASH, SONNET])
+    p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
+    assert p["could_go"] == [SONNET]
+    assert p["verdict"].endswith("so a lead to check, not a result")
+
+
+def _untiered(svc, suite, model, scores):
+    """A run of a suite whose cases carry no tier: the card tiers them from the runs."""
+    db = svc.db
+    h = bench.suite_hash(svc, suite)
+    db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, score, "
+               "seconds, suite_hash) VALUES (datetime('now'), ?, ?, '', ?, ?, 'done', ?, 9, ?)",
+               (suite, model, len(scores), len(scores), round(sum(scores) / len(scores), 1), h))
+    rid = db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]
+    for i, s in enumerate(scores):
+        db.execute("INSERT INTO bench_results (run_id, case_id, task_id, tags, score) "
+                   "VALUES (?,?,?,?,?)", (rid, f"c{i}", "t", "[]", s))
+
+
+def test_tiers_made_from_the_runs_are_not_compared_between_models(tmp_path):
+    """Live, 2026-11-22: on the held-rule suite flash scored 99.4 and Sonnet 91,
+    and with the tiers made from which model missed what, Sonnet "held medium"
+    (the one case flash missed) and flash only easy - so "medium needs Sonnet"."""
+    svc = _svc(tmp_path, ladder_families={"general_chat": ["heldrule"]})
+    _suite(svc, "heldrule")
+    flash = [100.0] * 20
+    flash[3] = 0.0
+    sonnet = [100.0] * 20
+    for i in (10, 11, 12):
+        sonnet[i] = 0.0
+    _untiered(svc, "heldrule", FLASH, flash)
+    _untiered(svc, "heldrule", SONNET, sonnet)
+    ev = bl.evidence(svc)["heldrule"]
+    assert ev[FLASH]["tiers_from"] == "runs"
+    _persona(svc, "Chat", [FLASH, SONNET])
+    p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
+    assert p["needed"] == {} and p["could_go"] == [SONNET]
+    f = bl.report(svc)["families"][0]
+    assert "needs" not in f["sentence"]
+
+
+def test_a_cloud_rung_more_than_the_noise_higher_is_needed_without_tiers(tmp_path):
+    svc = _svc(tmp_path, ladder_families={"general_chat": ["heldrule"]})
+    _suite(svc, "heldrule")
+    _untiered(svc, "heldrule", FLASH, [100.0] * 8 + [0.0] * 2)      # 80
+    _untiered(svc, "heldrule", SONNET, [100.0] * 10)                # 100
+    _persona(svc, "Chat", [FLASH, SONNET])
+    p = next(x for x in bl.report(svc)["personas"] if x["persona"] == "Chat")
+    assert p["needed"] == {SONNET: ["heldrule"]}
+    assert p["families"][0]["sentence"].endswith("; claude-sonnet-5-5 does better at 100")
+    f = bl.report(svc)["families"][0]
+    assert f["sentence"].endswith("claude-sonnet-5-5 does better at 100")

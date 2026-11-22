@@ -663,6 +663,18 @@ case gets, since flash reasons first. The frontier models wrote 215-line
 strict modules that passed first time. A frontier run is about 110,000 input
 tokens.
 
+## The ladder's "could go", tightened (v0.181.251)
+
+After the first real runs (Sonnet 5.5 and qwen3.8-flash, one pass each on all
+thirteen suites) the ladder's per-persona "could go" listed nearly every cloud
+rung, including models never run. A cloud rung is now needed for a kind of work
+when it does better than the local rung covering it - passes where that
+misses, holds a harder tier where the cases carry tiers, or scores more than 5
+points higher where the tiers come from the runs (those are made from which
+model missed what, so they cannot be compared between the models that made
+them). It can go only when it was run on every kind of work and never did
+better; on fewer than three runs the verdict calls that a lead, not a result.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers

@@ -1,3 +1,39 @@
+## v0.181.251 - the ladder says what one pass can and cannot show
+
+Asked: tighten the Local ladder's "could go" after the first real runs. With
+Sonnet 5.5 and qwen3.8-flash run once on all thirteen suites, the card said
+nearly every persona could drop every cloud rung, including models never run.
+
+**What was wrong.** Three things. A local rung whose mean reached the threshold
+covered the whole kind of work, even where it held only the easy tier and the
+cloud rung a harder one. A kind of work nothing passed (grounded answers) needed
+no cloud rung at all. A cloud rung that was never run (GPT, Haiku, Opus) could
+go. And on suites whose cases carry no tier of their own, the tiers are made
+from which model missed what, so each model's own misses were a tier the other
+one "held": on the held-rule suite flash scored 99.4 and Sonnet 91, and the card
+said "medium needs Sonnet".
+
+**The rule now** (benchladder.persona). A cloud rung is needed for a kind of
+work when it does better there than the local rung that covers it: it passes
+where that misses; or, on a suite whose cases carry their own tiers, it holds a
+harder one; or, on one tiered from the runs, it scores more than 5 points higher
+(the noise of one run). It "could go" only when it was run on every kind of work
+the persona is judged on and never did better. A cloud rung not run everywhere
+is named as not judged. When "could go" rests on fewer than three runs a model,
+the verdict says it is a lead to check, not a result. Each persona gets
+`needed` (cloud rung: kinds of work) and `not_run`. "Through" a tier and "needs"
+a tier are said only for tiers the cases carry; for the rest the sentence says
+the cloud model "does better at" its score. A kind of work nothing passes says
+"no cloud model passes either" with the best of them.
+
+On the live runs this turns "could go" for Foundry-Chat from Haiku, Sonnet and
+GPT to none (Sonnet needed for instructions in the data, 100 against 82.6; the
+others never run), and leaves one lead: the Implementer may not need Sonnet,
+on one run each.
+
+Not done: run more passes, and the cloud models not yet run, before any chain
+changes. Nothing in the report changes a route. 6 new tests, 3 updated.
+
 ## v0.181.250 - resume an interrupted benchmark
 
 Asked: "when it shows interrupted, can it have a resume function". A rebuild

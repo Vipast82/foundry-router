@@ -66,15 +66,24 @@ def _backend_of(svc, model: str) -> tuple:
     return "", False
 
 
-def _tier_scores(svc, suite: str, run_ids: list, hashes: list) -> dict:
+# One run of this router's benchmark moves about five points (bench noise
+# floor), so a score this much higher is the least that says a model did better.
+NOISE = 5.0
+
+
+def _tier_scores(svc, suite: str, run_ids: list, hashes: list, source: Optional[list] = None
+                 ) -> dict:
     """{tier: mean case score} over these runs: from the cases' own tier tags,
-    or for a suite with none, from what every model run on it did."""
+    or for a suite with none, from what every model run on it did. `source`, when
+    given, gets "cases" or "runs" appended: which of the two it was."""
     from .benchcard import _tag, _tags, measured_tiers
     rows = []
     for rid in run_ids:
         rows += svc.db.query("SELECT case_id, score, error, tags FROM bench_results "
                              "WHERE run_id=? AND score IS NOT NULL", (rid,))
     own = {r["case_id"]: _tag(_tags(r), "tier") for r in rows}
+    if source is not None:
+        source.append("cases" if any(own.values()) else "runs")
     if not any(own.values()):
         try:
             own = measured_tiers(svc, suite, hashes)
@@ -130,14 +139,19 @@ def evidence(svc) -> dict:
             scores = [float(x["score"]) for x in runs]
             secs = [float(x["seconds"]) for x in runs if x["seconds"] is not None]
             backend, paid = _backend_of(svc, m)
+            src: list = []
             tiers = _tier_scores(svc, s, [x["id"] for x in runs],
-                                 sorted({x["suite_hash"] or "" for x in runs}))
+                                 sorted({x["suite_hash"] or "" for x in runs}), src)
             score = round(sum(scores) / len(scores), 1)
             out.setdefault(s, {})[m] = {
                 "model": m, "backend": backend, "local": not paid, "score": score,
                 "runs": len(runs), "low": round(min(scores), 1), "high": round(max(scores), 1),
                 "seconds": round(sum(secs) / len(secs), 1) if secs else None,
                 "tiers": tiers, "through": through(tiers, bar), "passes": score >= bar,
+                # v0.181.251: tiers the cases carry can be compared between
+                # models; tiers made from which model missed what cannot - each
+                # model's own misses would be a tier the other one "holds"
+                "tiers_from": src[0] if src else "runs",
                 "last": max(x["ts"] or "" for x in runs)}
     for s, ms in older.items():
         for m in ms:
@@ -152,7 +166,8 @@ def _title(suite: str) -> str:
 
 def _rung_words(r: dict, bar: float) -> str:
     s = f"{r['model']} {'passes' if r['passes'] else 'misses'} at {r['score']:g}"
-    if r["through"]:
+    # a tier made from which model missed what says nothing on its own (v0.181.251)
+    if r["through"] and r.get("tiers_from", "cases") == "cases":
         s += f", through {r['through']}"
     if r["seconds"] is not None:
         s += f", {r['seconds']:g} s a case"
@@ -172,20 +187,46 @@ def family(svc, suite: str, rungs: dict) -> dict:
     words = [_rung_words(r, bar) for r in passing]
     top_local = max((TIER_ORDER.index(r["through"]) for r in passing if r["through"]),
                     default=-1)
+    # a harder tier is only "needed" where the cases carry their tiers (v0.181.251)
     top_cloud = max(((TIER_ORDER.index(r["through"]), r) for r in cloud
-                     if r["passes"] and r["through"]), default=(-1, None), key=lambda x: x[0])
+                     if r["passes"] and r["through"] and r.get("tiers_from") == "cases"),
+                    default=(-1, None), key=lambda x: x[0])
     if not passing:
         words.append("no local model passes" + (
             "; " + ", ".join(_rung_words(r, bar) for r in local) if local else
             " (none measured)"))
         if cloud and cloud[0]["passes"]:
             words.append(_rung_words(cloud[0], bar))
-    elif top_cloud[1] is not None and top_cloud[0] > top_local:
+        elif cloud:
+            # v0.181.251: no cloud model passes either - say so, with the best
+            words.append("no cloud model passes either; " + _rung_words(cloud[0], bar))
+    elif top_cloud[1] is not None and top_cloud[0] > top_local and             all(r.get("tiers_from") == "cases" for r in passing):
         words.append(f"{TIER_ORDER[top_local + 1]} needs {top_cloud[1]['model']}")
+    elif cloud and cloud[0]["score"] - passing[0]["score"] > NOISE:
+        words.append(f"{cloud[0]['model']} does better at {cloud[0]['score']:g}")
     sentence = f"{_title(suite)} (threshold {bar:g}): " + "; ".join(words)
     return {"suite": suite, "title": _title(suite), "threshold": bar,
             "rungs": local + cloud, "good_enough": [r["model"] for r in passing],
             "stale": stale, "sentence": sentence}
+
+
+def _tier_index(r: Optional[dict]) -> int:
+    """How far up the tiers a rung holds: -1 for none."""
+    return TIER_ORDER.index(r["through"]) if r and r.get("through") in TIER_ORDER else -1
+
+
+def _beats(cloud: dict, local: Optional[dict]) -> bool:
+    """A cloud rung does better on a kind of work than the local rung covering
+    it (v0.181.251): it passes where that misses; or, on a suite whose cases
+    carry their own tiers, it holds a harder tier; or, on one tiered from the
+    runs, it scores more than the noise of one run higher."""
+    if local is None:
+        return True
+    if cloud["passes"] and not local["passes"]:
+        return True
+    if cloud.get("tiers_from") == "cases" and local.get("tiers_from") == "cases":
+        return _tier_index(cloud) > _tier_index(local)
+    return cloud["score"] - local["score"] > NOISE
 
 
 def persona(svc, p: dict, fams: dict) -> Optional[dict]:
@@ -205,37 +246,65 @@ def persona(svc, p: dict, fams: dict) -> Optional[dict]:
     ladder = [str(m) for m in own] if own else [m for m in chain if not paid[m]]
     cloud = [m for m in chain if paid[m] and m not in ladder]
     wanted = families_for(svc, p.get("benchmark_category") or "") or sorted(fams)
-    rows, needed, unmeasured = [], set(), []
+    # v0.181.251: a cloud rung is needed for a kind of work when it does better
+    # there than the local rung that covers it - passes where the local rung
+    # misses, or holds a harder tier - and it can go only when it was measured
+    # on every kind of work and never did better. Before, a local rung whose
+    # mean reached the threshold covered the whole kind of work even when it
+    # held only the easy tier and the cloud rung the hard one, a kind of work
+    # nothing passed needed no cloud rung, and a cloud rung never run at all
+    # "could go".
+    rows, unmeasured = [], []
+    needed: dict = {}
+    unknown: dict = {}
+    runs_seen: list = []
     for s in wanted:
         rungs = {m: r for m, r in (fams.get(s) or {}).items() if r}
         bar = threshold(svc, s)
-        local = next((rungs[m] for m in ladder if m in rungs and rungs[m]["passes"]), None)
-        if local:
-            rows.append({"suite": s, "title": _title(s), "threshold": bar, "rung": local["model"],
-                         "score": local["score"], "through": local["through"], "cloud": "",
-                         "sentence": f"{_title(s)}: {local['model']} passes at "
-                                     f"{local['score']:g}, threshold {bar:g}"})
-            continue
         if not any(m in rungs for m in ladder + cloud):
             unmeasured.append(s)
             rows.append({"suite": s, "title": _title(s), "threshold": bar, "rung": "",
-                         "score": None, "through": "", "cloud": "",
+                         "score": None, "through": "", "cloud": "", "beaten_by": [],
                          "sentence": f"{_title(s)}: not measured on this persona's models"})
             continue
-        up = next((rungs[m] for m in cloud if m in rungs and rungs[m]["passes"]), None)
-        best = max((rungs[m] for m in ladder if m in rungs), key=lambda r: r["score"],
-                   default=None)
-        said = (f"{best['model']} reaches {best['score']:g}" if best
-                else "no local rung measured")
-        if up:
-            needed.add(up["model"])
-        rows.append({"suite": s, "title": _title(s), "threshold": bar, "rung": "",
-                     "score": best["score"] if best else None, "through": "",
-                     "cloud": up["model"] if up else "",
-                     "sentence": f"{_title(s)}: no local rung passes ({said}, threshold "
-                                 f"{bar:g})" + (f"; {up['model']} passes at {up['score']:g}"
-                                                if up else "; no model in the chain passes")})
-    could_go = [] if unmeasured else [m for m in cloud if m not in needed]
+        local = next((rungs[m] for m in ladder if m in rungs and rungs[m]["passes"]), None)
+        best = local or max((rungs[m] for m in ladder if m in rungs),
+                            key=lambda r: (_tier_index(r), r["score"]), default=None)
+        beat = [m for m in cloud if m in rungs and _beats(rungs[m], best)]
+        for m in cloud:
+            if m not in rungs:
+                unknown.setdefault(m, []).append(s)
+        for m in beat:
+            needed.setdefault(m, []).append(s)
+        runs_seen += [rungs[m]["runs"] for m in ladder + cloud if m in rungs]
+        if local:
+            text = (f"{_title(s)}: {local['model']} passes at {local['score']:g}"
+                    + (f", through {local['through']}" if local["through"]
+                       and local.get("tiers_from") == "cases" else "")
+                    + f", threshold {bar:g}")
+            if beat:
+                r = rungs[beat[0]]
+                if _tier_index(r) > _tier_index(local) and r.get("tiers_from") == "cases":
+                    text += f"; {TIER_ORDER[_tier_index(local) + 1]} needs {beat[0]}"
+                else:
+                    text += f"; {beat[0]} does better at {r['score']:g}"
+        else:
+            said = (f"{best['model']} reaches {best['score']:g}" if best
+                    else "no local rung measured")
+            up = next((rungs[m] for m in cloud if m in rungs and rungs[m]["passes"]), None)
+            text = (f"{_title(s)}: no local rung passes ({said}, threshold {bar:g})"
+                    + (f"; {up['model']} passes at {up['score']:g}" if up
+                       else "; no model in the chain passes"))
+            if not up and beat:
+                r = rungs[beat[0]]
+                text += (f", {beat[0]} gets furthest" + (f" (through {r['through']})"
+                                                         if r["through"] else ""))
+        rows.append({"suite": s, "title": _title(s), "threshold": bar,
+                     "rung": local["model"] if local else "",
+                     "score": best["score"] if best else None,
+                     "through": local["through"] if local else "",
+                     "cloud": beat[0] if beat else "", "beaten_by": beat, "sentence": text})
+    could_go = [] if unmeasured else [m for m in cloud if m not in needed and m not in unknown]
     if unmeasured:
         verdict = (f"not every kind of work is measured ({', '.join(_title(s) for s in unmeasured)}),"
                    " so no cloud rung can be called unneeded")
@@ -244,14 +313,29 @@ def persona(svc, p: dict, fams: dict) -> Optional[dict]:
     elif could_go and len(could_go) == len(cloud):
         verdict = "a local rung is good enough for every kind of work; the cloud rungs " \
                   + ", ".join(could_go) + " are not needed for it"
-    elif could_go:
-        verdict = "needed: " + ", ".join(sorted(needed)) + "; not needed for any kind of " \
-                  "work: " + ", ".join(could_go)
+    elif all(m in needed for m in cloud):
+        verdict = "every cloud rung is still needed for some kind of work: " + ", ".join(
+            f"{m} ({', '.join(_title(s) for s in needed[m])})" for m in cloud)
     else:
-        verdict = "every cloud rung is still needed for some kind of work"
+        bits = []
+        if needed:
+            bits.append("needed: " + ", ".join(
+                f"{m} ({', '.join(_title(s) for s in needed[m])})" for m in cloud if m in needed))
+        late = [m for m in cloud if m in unknown and m not in needed]
+        if late:
+            bits.append("not run on every kind of work, so not judged: " + ", ".join(late))
+        if could_go:
+            bits.append("not needed for any kind of work: " + ", ".join(could_go))
+        verdict = "; ".join(bits)
+    if could_go and runs_seen and min(runs_seen) < RUNS_PER_RUNG:
+        verdict += (f" - on fewer than {RUNS_PER_RUNG} runs a model, and one run moves about "
+                    "5 points, so a lead to check, not a result")
     return {"persona": name, "category": p.get("benchmark_category") or "",
             "ladder": ladder, "ladder_set": bool(own), "cloud": cloud, "families": rows,
-            "could_go": could_go, "unmeasured": unmeasured, "verdict": verdict}
+            "could_go": could_go, "unmeasured": unmeasured,
+            "needed": {m: needed[m] for m in cloud if m in needed},
+            "not_run": {m: unknown[m] for m in cloud if m in unknown},
+            "verdict": verdict}
 
 
 def report(svc) -> dict:
