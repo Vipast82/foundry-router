@@ -1,3 +1,42 @@
+## v0.181.246 - code that compiles
+
+Asked: build the eighth gap in docs/BENCH_GAPS.md, code that runs, the
+second way - a syntax and type check now, before the workspace server exists.
+Every code case in the bench asked what code does; none asked for code.
+
+**The suite.** "Code that compiles": 40 generated cases
+(foundry_router/benchwrite.py), each a module to write to an exact spec of
+names, parameters and types. Roblox ModuleScripts in strict Luau that use the
+engine (players, parts, tweens, raycasts, leaderstats, DataStores, remotes,
+attributes) and typed Python modules: a ladder of 1 to 24 functions in each
+language, and each of the 24 Roblox functions alone.
+
+**Scoring.** Nothing a model writes is run. Luau goes to the operator's own
+Code checks rule that runs an analyzer - here luau-lsp analyze with Roblox's
+type definitions in the code-checks container; a formatter is not used, and
+without an analyzer rule a Luau case is not scored and the run says why.
+Python is compiled and read: every function, its parameters, annotations,
+standard library only. 0 when it does not compile or type check, or is not in
+strict mode; 50 when it checks but is not the module asked for; 100 both.
+
+**What it measured** (every case, one run each). Sonnet 5.5 and Opus 5.5 40
+of 40: 215-line strict modules that passed first time. qwen3.8-flash 37:
+`FindFirstChildOfClass("HumanoidRootPart")` (a part's name, not a class), an
+`Instance` passed where a `Model` is wanted and nil not handled in the
+24-function module, and the 24-function Python module cut off at the 8,192-token
+budget. No tier is written on a case; the card tiers each from what the models
+run on it did. Every spec's reference module was checked with the router's
+own checker before shipping.
+
+On the card: the language, the size of the module, each Roblox function
+alone, and every miss named (does not type check, does not compile, not in
+strict mode, not the module asked for, no code). On the page: a "Code that
+compiles" plate under Suites. On the wire: POST /admin/api/bench/codewrite.
+
+Not done: whether the code is right - that needs tests run in the workspace
+server. One run a model; the brain lane was not run and GPT was at its weekly
+cutoff. 54 tests.
+
 ## v0.181.245 - the all-local ladder report
 
 Asked: build the ninth gap in docs/BENCH_GAPS.md, plan A9 - a rule on top of

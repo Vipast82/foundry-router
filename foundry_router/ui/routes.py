@@ -3276,6 +3276,26 @@ async def bench_protocol(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/codewrite")
+async def bench_codewrite(request: Request):
+    """Build the suite of code that compiles (v0.181.246): {name?, top_level?}.
+
+    A strict-Luau ModuleScript or a Python module to an exact spec. Nothing a
+    model writes is run: Luau goes to the Code checks type check, Python is
+    compiled and read."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_codewrite, svc, str(body.get("name") or "codewrite"),
+            int(body.get("top_level") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/summaries")
 async def bench_summaries(request: Request):
     """Build the suite of summaries that invent nothing (v0.181.244):

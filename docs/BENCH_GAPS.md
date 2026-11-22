@@ -154,6 +154,13 @@ image and a vision model to run against; no point building it before both.
 
 ### 8. Code that runs
 
+**Built in v0.181.246, the second way** (the owner's choice), as the "Code that
+compiles" suite: 40 modules to an exact spec, strict Luau through the Code
+checks type check (luau-lsp with Roblox's definitions) and Python through its
+compiler, never run. Sonnet 5.5 and Opus 5.5 40 of 40, qwen3.8-flash 37.
+Scoring against hidden tests still waits for the workspace server. What was
+proposed:
+
 The largest use and the least measured: every code case asks what code does,
 never for code. Scoring written code means running it, and the bench has a
 rule that nothing a model writes is ever run. Two ways forward, both a

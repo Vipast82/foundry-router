@@ -614,6 +614,55 @@ measure, so "could go" is evidence for a decision and not the decision.
 On 0.181.245's release the live router held no finished runs, so the card read
 "nothing measured yet". It fills in as suites are run on the Benchmark tab.
 
+## Code that compiles (v0.181.246)
+
+A new suite, the eighth addition in `docs/BENCH_GAPS.md`, built the way the
+owner chose: a syntax and type check now, tests in the workspace server later.
+A case is a module to write to an exact spec - function names, parameters and
+types given, what each does said in a line (`benchwrite.write_spec`). Luau
+cases are Roblox ModuleScripts in strict mode that use the engine: players,
+parts, tweens, raycasts, leaderstats, DataStores, remotes, attributes. Python
+cases are typed modules from the standard library.
+
+Nothing a model writes is run. Luau goes to the operator's own Code checks
+rule - the first enabled rule for luau whose command runs an analyzer, on
+this router `luau-lsp analyze` with Roblox's type definitions in the
+code-checks container. A formatter (`stylua --check`) is not used: formatting
+says nothing about whether code is right. Without such a rule a Luau case is
+not scored and the run says why. Python is compiled with Python's own
+compiler and read with its parser: every function there with its parameters,
+every parameter and return annotated, nothing imported from outside the
+standard library.
+
+**Scoring** (`benchwrite.write_score`): 0 when there is no code in the
+language, it does not compile or type check, or it is not in strict mode
+(`--!strict` first, no `--!nocheck`); 50 when it checks but is not the module
+asked for (a function missing, renamed or with other parameters); 100 when it
+is both. It says whether a model can write the language, not whether the
+code is right.
+
+Two ladders, a module of 1 to 24 functions in each language, and each of the
+24 Roblox functions alone. Every spec has a reference module, and all 40 were
+checked with the router's own checker before the suite shipped.
+
+**No tier is assigned.** Measured on every case, one run each:
+
+| Cases | qwen3.8-flash | Sonnet 5.5 | Opus 5.5 |
+|---|---|---|---|
+| strict Luau module, 1 to 24 functions | 7 of 8: type errors at 24 | 8 of 8 | 8 of 8 |
+| Python module, 1 to 24 functions | 7 of 8: out of tokens at 24 | 8 of 8 | 8 of 8 |
+| each Roblox function alone (24) | 23 of 24: `FindFirstChildOfClass("HumanoidRootPart")` | 24 of 24 | 24 of 24 |
+| **all 40** | **37: 92.5** | **40: 100** | **40: 100** |
+
+Each of flash's misses was read against its code and is the model's:
+`FindFirstChildOfClass("HumanoidRootPart")` names a part, not a class, and
+would find nothing in a game; the 24-function module passed an `Instance`
+where a `Model` is wanted and used values that may be nil; the 24-function
+Python module was right as far as it went and ran out of the 8,192 tokens a
+case gets, since flash reasons first. The frontier models wrote 215-line
+strict modules that passed first time. A frontier run is about 110,000 input
+tokens.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers

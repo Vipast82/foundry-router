@@ -1187,6 +1187,41 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
+def build_codewrite(svc, name: str = "codewrite", top_level: int = 0) -> dict:
+    """The suite of code that compiles (v0.181.246): a Roblox ModuleScript in
+    strict Luau or a Python module, to a spec of exact names and types
+    (benchwrite.write_spec). Nothing written is ever run: Luau is type checked
+    by the operator's Code checks rule (luau-lsp analyze), Python compiled and
+    read. No tier is assigned: the card tiers each case from what the models
+    run on it did. Returns {name, cases, path}."""
+    from . import benchwrite
+    out = []
+    for sp in benchwrite.write_specs(top_level):
+        tags = ["codewrite", f"lang:{sp['lang']}", f"funcs:{len(sp['funcs'])}"]
+        if sp["single"]:
+            tags.append(f"func:{sp['single']}")
+        if sp["ladder"]:
+            tags += [f"ladder:{sp['ladder']}", f"level:{sp['level']}"]
+        out.append({
+            "id": f"WRITE-{sp['task']}",
+            "task_id": sp["task"],
+            "tags": tags,
+            "max_tokens": THINK_ROOM,
+            "messages": sp["messages"],
+            "reference": {"codewrite": {"lang": sp["lang"], "funcs": sp["funcs"]},
+                          "content": sp["ideal"][:400]},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench", f"built the {name} suite: {len(out)} case(s)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f)}
+
+
 def build_summaries(svc, name: str = "summaries", top_level: int = 0) -> dict:
     """The suite of summaries that invent nothing (v0.181.244): a service log
     or a call transcript, one subject in it and look-alikes beside it
@@ -2687,6 +2722,36 @@ async def score_one(svc, case: dict, got: dict) -> dict:
             ps["detail"] += " (reached for " + ", ".join(called) + " instead of ending the turn)"
         return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
                 "exact": None, "code_detail": ps["detail"], "error": ""}
+    if ref.get("codewrite"):
+        # compiled or type checked, never run (v0.181.246). Luau goes to the
+        # operator's own type check; without one the case is not scored.
+        from . import benchwrite, code_checks
+        cw = ref["codewrite"]
+        text = "" if got.get("out_of_room") else (got.get("content") or "")
+        checker = None
+        if cw.get("lang") == "luau":
+            rule = benchwrite.luau_rule(getattr(svc.config_store.config, "code_checks", None))
+            if rule is None:
+                return {"score": None, "tools": 0.0, "code": None, "answer": None,
+                        "exact": None, "code_detail": "why=unchecked",
+                        "error": "no Luau type check is set up (Routing -> Code checks: a "
+                                 "rule for luau that runs luau-lsp analyze)"}
+            code = benchwrite.code_of(text, "luau")
+            said = ""
+            if code:
+                try:
+                    said = await code_checks.run_one(rule, code, "luau")
+                except code_checks.Unavailable as e:
+                    return {"score": None, "tools": 0.0, "code": None, "answer": None,
+                            "exact": None, "code_detail": "why=unchecked",
+                            "error": f"the Luau type check could not run: {e}"}
+
+            def checker(_code, said=said):
+                return said
+        ws = benchwrite.write_score(text, cw, checker)
+        return {"score": ws["score"], "tools": 0.0,
+                "code": 0.0 if ws["why"] in ("none", "syntax", "check", "loose") else 1.0,
+                "answer": None, "exact": None, "error": "", "code_detail": ws["detail"]}
     if ref.get("summary"):
         # every figure the subject's, nothing invented, inside the word limit
         # (v0.181.244). A reply past the budget counts for nothing.
@@ -2777,6 +2842,12 @@ def expected_of(case: dict) -> str:
     ref = case.get("reference") or {}
     if ref.get("deliverable"):
         return "a deliverable (no answer key)"
+    if ref.get("codewrite"):
+        cw = ref["codewrite"]
+        sigs = "; ".join(f"{f[0]}({f[1]})" for f in cw.get("funcs") or [])
+        return ((f"a strict Luau ModuleScript that passes the type check, defining " if
+                 cw.get("lang") == "luau" else "a Python module that compiles, defining ")
+                + sigs)
     if ref.get("summary"):
         sm = ref["summary"]
         facts = "; ".join(f"{f['label']} {str((f.get('any') or [''])[0]).split(':', 1)[-1]}"
@@ -3035,6 +3106,9 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
              answer_of(got), expected_of(case)))
         if s["score"] is None and str(s.get("code_detail") or "").startswith("beyond"):
             totals["beyond"] += 1
+        elif s["score"] is None and "why=unchecked" in str(s.get("code_detail") or ""):
+            # no checker to run (v0.181.246): neither the model's miss nor a deliverable
+            totals["unchecked"] = totals.get("unchecked", 0) + 1
         elif s["score"] is None:
             totals["delivered"] += 1
         else:
@@ -3070,7 +3144,7 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
     sn = totals["score_n"]
     out = {"run_id": run_id, "suite": suite, "model": model, "cases": len(items),
            "scored": _state["done"], "delivered": totals["delivered"],
-           "beyond": totals["beyond"],
+           "beyond": totals["beyond"], "unchecked": totals.get("unchecked", 0),
            "score": round(totals["score"] / sn, 1) if sn else None,
            "tools": round(100 * totals["tools"] / n, 1),
            "code": round(100 * totals["code"] / totals["code_n"], 1) if totals["code_n"] else None,

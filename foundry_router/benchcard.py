@@ -63,6 +63,7 @@ SUITE_NAMES = {
     "structured": "Output a program reads",
     "heldrule": "A rule held over a conversation",
     "summaries": "Summaries that invent nothing",
+    "codewrite": "Code that compiles",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -85,6 +86,8 @@ SUITE_ASKS = {
                 "it: is the rule still kept, and the answer still right?",
     "summaries": "Summarise one service in a log, or one item on a call, beside look-alikes: "
                  "every fact about it kept, nothing about the others, nothing invented.",
+    "codewrite": "Write a strict-Luau ModuleScript or a Python module to an exact spec: does "
+                 "it pass the type checker or compiler? Never run, so not whether it is right.",
 }
 
 
@@ -152,6 +155,10 @@ def miss_kind(suite: str, row) -> Optional[str]:
         # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
+    if suite == "codewrite" or "codewrite" in tags:
+        # v0.181.246: the first thing wrong, as the scorer named it
+        from .benchwrite import WHY_WORDS as _why
+        return _why.get(str(_detail(row).get("why") or ""), "missed")
     if suite == "summaries" or "summaries" in tags:
         # v0.181.244: the first thing wrong, as the scorer named it
         from .benchsumm import WHY_WORDS as _why
@@ -393,6 +400,25 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Source",
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
+    if suite == "codewrite":
+        out.append({"name": "The language",
+                    "rows": _group(rows, lambda r: {"luau": "strict Luau (Roblox)",
+                                                    "python": "Python"}.get(
+                        _tag(_tags(r), "lang") or ""), ["strict Luau (Roblox)", "Python"])})
+
+        def _size(r):
+            try:
+                n = int(_tag(_tags(r), "funcs") or 0)
+            except ValueError:
+                return None
+            return ("one function" if n == 1 else "2 to 6 functions" if n <= 6
+                    else "9 to 24 functions")
+        out.append({"name": "Size of the module",
+                    "rows": _group(rows, _size, ["one function", "2 to 6 functions",
+                                                 "9 to 24 functions"])})
+        out.append({"name": "Each Roblox function alone",
+                    "rows": _group([r for r in rows if _tag(_tags(r), "func")],
+                                   lambda r: _tag(_tags(r), "func"))})
     if suite == "summaries":
         from .benchsumm import KIND_NAMES as _kinds, LADDER_NAMES as _lads
         from .benchsumm import SINGLE_NAMES as _singles
@@ -532,7 +558,7 @@ def facets(suite: str, rows: list) -> list:
                    {"name": "How far up each ladder", "rows": reach})
     if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol",
                      "grounded", "guard", "toolsteps", "structured", "heldrule",
-                     "summaries"):
+                     "summaries", "codewrite"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})
