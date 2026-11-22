@@ -10019,7 +10019,8 @@ async function pfRender() {
     <td>${esc(p.label || "")}</td>
     <td class="nw">${p.repeats || 1}×</td>
     <td class="nw"><b class="pf-num" style="color:${pfColor(p.score)};font-size:15px">${p.score == null ? "—" : (+p.score).toFixed(1)}</b></td>
-    <td class="nw">${esc(p.status || "")}</td>
+    <td class="nw">${esc(p.status || "")}${p.status === "interrupted" || p.status === "stopped"
+      ? ` <button class="act pf-resume" data-id="${p.id}" title="Run what this profile did not finish: the suites it finished stay on the card, the suite it was in carries on at the case it stopped, and the suites it never reached run.">Resume</button>` : ""}</td>
     <td><button class="act pf-open" data-id="${p.id}">Open the card</button></td></tr>`).join("");
   $("#pf-list").innerHTML = rows
     ? `<table><tr><th></th><th>#</th><th>when (UTC)</th><th>model</th><th>trying</th>
@@ -10030,6 +10031,15 @@ async function pfRender() {
          <span class="hint" style="margin:0">tick two or more; the one highest in the list is the baseline</span></div>`
     : '<p class="hint">No profile yet. Pick a model above and run every suite.</p>';
   $("#pf-state").innerHTML = r.state === "failed" ? `<span class="pill bad">${esc(r.error || "failed")}</span>` : "";
+  document.querySelectorAll(".pf-resume").forEach(b => b.onclick = async () => {
+    try {
+      const out = await api("bench/profile/resume", {method: "POST", body: {id: +b.dataset.id}});
+      toast(out.state === "done" ? `profile #${b.dataset.id} had nothing left to run: marked done`
+        : `resuming profile #${b.dataset.id}: ${(out.suites || []).join(", ")}`);
+      pfRender();
+      pfPoll();
+    } catch (e) { toast(e.message, true); }
+  });
   document.querySelectorAll(".pf-open").forEach(b => b.onclick = async () => {
     $("#pf-out").innerHTML = '<p class="hint">reading the card…</p>';
     const c = await api(`bench/profile?id=${b.dataset.id}`);
@@ -10121,7 +10131,8 @@ async function tabBench() {
     <td class="nw">${n(x.tools_score)}</td>
     <td class="nw">${x.code_score == null ? "—" : n(x.code_score)}</td>
     <td class="nw">${x.seconds == null ? "—" : (+x.seconds).toFixed(1) + " s"}</td>
-    <td><span class="pill ${x.status === "done" ? "ok" : x.status === "failed" ? "bad" : "warn"}">${esc(x.status)}</span>${x.note ? ` <span class="hint">${esc(x.note)}</span>` : ""}</td>
+    <td><span class="pill ${x.status === "done" ? "ok" : x.status === "failed" ? "bad" : "warn"}">${esc(x.status)}</span>${x.note ? ` <span class="hint">${esc(x.note)}</span>` : ""}${(x.status === "interrupted" || x.status === "stopped") && !x.profile_id
+      ? ` <button class="act bench-resume" data-id="${x.id}" title="Carry on at the case this run stopped: the cases it finished stay and only the rest are sent.">Resume</button>` : ""}</td>
     <td class="nw"><button class="act" onclick="showBenchResults(${x.id})">cases</button>
       <label class="hint"><input type="checkbox" class="bench-cmp" value="${x.id}"> compare</label>
       <label class="hint" title="Tick to delete this run. Its cases go with it, and the
@@ -10514,6 +10525,13 @@ async function tabBench() {
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }
   };
+  document.querySelectorAll(".bench-resume").forEach(btn => btn.onclick = async () => {
+    try {
+      await api("bench/run", {method: "POST", body: {resume: +btn.dataset.id}});
+      toast(`resuming run #${btn.dataset.id} at the case it stopped`);
+      render();
+    } catch (e) { toast(e.message, true); }
+  });
   if ($("#bench-delete")) $("#bench-delete").onclick = async () => {
     const ticked = [...document.querySelectorAll(".bench-del:checked")];
     if (!ticked.length) { $("#bench-cmp-msg").textContent = "tick the runs to remove"; return; }

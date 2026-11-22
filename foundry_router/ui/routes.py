@@ -3040,6 +3040,12 @@ async def bench_run(request: Request):
     body = await request.json()
     if body.get("stop"):
         return {"ok": True, "run": bench.stop()}
+    if body.get("resume"):
+        # v0.181.250: an interrupted or stopped run carries on where it stopped
+        out = await asyncio.to_thread(bench.resume, svc, int(body.get("resume") or 0))
+        if out.get("state") == "refused":
+            return JSONResponse({"error": out.get("error")}, status_code=409)
+        return {"ok": True, "run": out}
     suite, model = str(body.get("suite") or ""), str(body.get("model") or "")
     if not suite or not model:
         return JSONResponse({"error": "pick a suite and a model"}, status_code=400)
@@ -3114,6 +3120,19 @@ async def bench_profile_run(request: Request):
             int(b.get("limit") or 0), into=int(b.get("into") or 0))
     except Exception as e:                                        # noqa: BLE001
         return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
+@router.post("/admin/api/bench/profile/resume")
+async def bench_profile_resume(request: Request):
+    """Carry on an interrupted or stopped profile: {id} (v0.181.250). The suites
+    it finished stay; the one it was in carries on at its case; the rest run."""
+    from .. import benchprofile
+    svc = _svc(request)
+    b = await request.json()
+    out = await asyncio.to_thread(benchprofile.resume, svc, int(b.get("id") or 0))
+    if out.get("state") == "refused":
+        return JSONResponse({"error": out.get("error")}, status_code=409)
     return {"ok": True, **out}
 
 

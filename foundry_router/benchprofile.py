@@ -257,19 +257,109 @@ def stop() -> dict:
     return dict(_state)
 
 
+def missing(svc, pid: int) -> list:
+    """The suites a profile still has to run, once for every pass it lacks, in
+    the profile's own order (v0.181.250)."""
+    db = svc.db
+    p = db.query_one("SELECT suites, repeats FROM bench_profiles WHERE id=?", (int(pid),))
+    if p is None:
+        return []
+    want = json.loads(p["suites"] or "[]")
+    reps = max(1, int(p["repeats"] or 1))
+    have: dict = {}
+    for r in db.query("SELECT suite FROM bench_runs WHERE profile_id=? AND replaced_by IS NULL "
+                      "AND status='done'", (int(pid),)):
+        have[r["suite"]] = have.get(r["suite"], 0) + 1
+    out = []
+    for rep in range(reps):
+        out += [s for s in want if have.get(s, 0) <= rep]
+    return out
+
+
+def resume(svc, pid: int) -> dict:
+    """Carry on a profile a restart or a stop cut off (v0.181.250): the suites
+    it finished stay on the card, the suite it was in carries on at the case it
+    stopped (when that suite has not changed since), and the suites it never
+    reached run. A profile with nothing left is marked done."""
+    from . import bench
+    db = svc.db
+    p = db.query_one("SELECT * FROM bench_profiles WHERE id=?", (int(pid),))
+    if p is None:
+        return {"state": "refused", "error": f"there is no profile {pid}"}
+    if p["status"] not in ("interrupted", "stopped"):
+        return {"state": "refused",
+                "error": f"profile {pid} is {p['status']}; only an interrupted or stopped "
+                         "profile resumes"}
+    if _state.get("state") == "running" or bench.state().get("state") == "running":
+        return {"state": "refused", "error": "a benchmark is running; resume it after"}
+    built = {s["name"] for s in bench.suites(svc)}
+    todo = missing(svc, pid)
+    gone = sorted({s for s in todo if s not in built})
+    if gone:
+        return {"state": "refused",
+                "error": f"not built any more: {', '.join(gone)} - build them first"}
+    if not todo:
+        card = build_card(svc, pid)
+        db.execute("UPDATE bench_profiles SET status='done', score=?, note=? WHERE id=?",
+                   (card.get("composite"), (card.get("note") or "")[:600], int(pid)))
+        return {"state": "done", "profile_id": int(pid), "resumed": [],
+                "composite": card.get("composite")}
+    # the run each cut-off suite was in, when it can carry on where it stopped
+    tag = p["label"] or f"profile {pid}"
+    carry: dict = {}
+    for s in dict.fromkeys(todo):
+        r = db.query_one("SELECT id FROM bench_runs WHERE suite=? AND model=? AND label=? "
+                         "AND profile_id IS NULL AND status IN ('interrupted','stopped') "
+                         "AND ts >= ? ORDER BY id DESC LIMIT 1",
+                         (s, p["model"], tag, p["ts"] or ""))
+        if r and bench.resumable(svc, r["id"])[0] is not None:
+            carry[s] = int(r["id"])
+    if not _lock.acquire(blocking=False):
+        return {"state": "refused", "error": "a benchmark is running; resume it after"}
+    db.execute("UPDATE bench_profiles SET status='running' WHERE id=?", (int(pid),))
+    _state.clear()
+    _state.update({"state": "running", "profile_id": int(pid), "model": p["model"],
+                   "suites": todo, "repeats": 1, "done": 0, "total": len(todo),
+                   "started": time.time(), "into": False, "resumed": True,
+                   "carried_on": dict(carry)})
+
+    def go():
+        try:
+            from .loopclient import run_on_own_loop
+            run_on_own_loop(svc, _run(svc, int(pid), p["model"], todo, p["label"] or "",
+                                      1, 0, resume_runs=carry))
+        except Exception as e:                                    # noqa: BLE001
+            from .errors import describe_exception
+            msg = describe_exception(e)
+            _state.update({"state": "failed", "error": msg, "finished": time.time()})
+            db.execute("UPDATE bench_profiles SET status='interrupted', note=? WHERE id=?",
+                       (("resume failed: " + msg)[:300], int(pid)))
+        finally:
+            _lock.release()
+
+    threading.Thread(target=go, name="foundry-profile", daemon=True).start()
+    time.sleep(0.05)
+    return dict(_state)
+
+
 async def _run(svc, pid: int, model: str, names: list, label: str,
-               reps: int, limit: int, into: bool = False) -> dict:
+               reps: int, limit: int, into: bool = False,
+               resume_runs: Optional[dict] = None) -> dict:
     from . import bench
     db = svc.db
     done = 0
     halted = False
+    carry = dict(resume_runs or {})
     for rep in range(1, reps + 1):
         for suite in names:
             if _state.get("stop"):
                 break
             _state.update({"suite": suite, "rep": rep})
-            out = await bench._run(svc, suite, model,
-                                   label or f"profile {pid}", limit)
+            # v0.181.250: the suite a restart cut off carries on at its case
+            go_on = int(carry.pop(suite, 0) or 0)
+            out = await (bench._run(svc, suite, model, label or f"profile {pid}", limit,
+                                    resume=go_on) if go_on else
+                         bench._run(svc, suite, model, label or f"profile {pid}", limit))
             if into:
                 ran = db.query_one("SELECT status FROM bench_runs WHERE id=?",
                                    (out["run_id"],))
@@ -292,7 +382,13 @@ async def _run(svc, pid: int, model: str, names: list, label: str,
             break
     card = build_card(svc, pid)
     if into:
-        # the profile's own status stands: it was whole before and still is
+        # the profile's own status stands: it was whole before and still is -
+        # unless it was cut off and this rerun ran what it was missing
+        # (v0.181.250), when it is whole now and says so
+        p = db.query_one("SELECT status FROM bench_profiles WHERE id=?", (pid,))
+        if p and p["status"] in ("interrupted", "stopped") and not missing(svc, pid) \
+                and not (_state.get("stop") or halted):
+            db.execute("UPDATE bench_profiles SET status='done' WHERE id=?", (pid,))
         db.execute("UPDATE bench_profiles SET score=?, note=? WHERE id=?",
                    (card.get("composite"), (card.get("note") or "")[:600], pid))
     else:

@@ -2981,18 +2981,87 @@ def ladder_of(case: dict) -> tuple:
     return lad, lvl
 
 
+def resumable(svc, run_id: int) -> tuple:
+    """(the run row, "") when an interrupted or stopped run can be picked up
+    where it stopped (v0.181.250), or (None, why not)."""
+    r = svc.db.query_one("SELECT * FROM bench_runs WHERE id=?", (int(run_id),))
+    if r is None:
+        return None, f"there is no run {run_id}"
+    if r["status"] not in ("interrupted", "stopped"):
+        return None, f"run {run_id} is {r['status']}; only an interrupted or stopped run resumes"
+    if not any(s["name"] == r["suite"] for s in suites(svc)):
+        return None, f"the suite {r['suite']!r} is no longer built"
+    if (r["suite_hash"] or "") != suite_hash(svc, r["suite"]):
+        return None, (f"the {r['suite']} suite has changed since run {run_id} started, so its "
+                      "cases are a different test: run it again instead")
+    return r, ""
+
+
+def _replay(db, run_id: int, items: list, totals: dict, streak: dict, closed: dict) -> set:
+    """Count the cases a resumed run already finished, as the loop below would
+    have, and return their ids so they are not sent again (v0.181.250). Token
+    counts and the answer score of those cases were not stored per case, so
+    they cover only the cases run after the resume."""
+    by_id = {str(c.get("id") or ""): c for c in items}
+    seen: set = set()
+    for row in db.query("SELECT * FROM bench_results WHERE run_id=? ORDER BY id", (run_id,)):
+        case = by_id.get(str(row["case_id"] or ""))
+        if case is None or row["case_id"] in seen:
+            continue
+        seen.add(row["case_id"])
+        score, detail = row["score"], str(row["code_detail"] or "")
+        if score is None and detail.startswith("beyond"):
+            totals["beyond"] += 1
+        elif score is None and "why=unchecked" in detail:
+            totals["unchecked"] = totals.get("unchecked", 0) + 1
+        elif score is None:
+            totals["delivered"] += 1
+        else:
+            w = float(case.get("weight") or 1.0)
+            totals["score"] += float(score) * w
+            totals["score_n"] += w
+        totals["tools"] += float(row["tools_score"] or 0)
+        if row["code_pass"] is not None:
+            totals["code"] += float(row["code_pass"])
+            totals["code_n"] += 1
+        totals["seconds"] += float(row["seconds"] or 0)
+        totals["errors"] += 1 if row["error"] else 0
+        if score is not None and float(score) >= 100:
+            totals["passed"] = totals.get("passed", 0) + 1
+        lad, lvl = ladder_of(case)
+        if lad and lad not in closed and score is not None:
+            streak[lad] = 0 if float(score) >= 100 else streak.get(lad, 0) + 1
+            if streak[lad] >= LADDER_STOP:
+                closed[lad] = lvl
+    return seen
+
+
 async def _run(svc, suite: str, model: str, label: str, limit: int,
-               use_recall: bool = False, use_lessons: bool = False) -> dict:
+               use_recall: bool = False, use_lessons: bool = False,
+               resume: int = 0) -> dict:
+    """One suite against one model. `resume` (v0.181.250) is an interrupted or
+    stopped run of it to carry on: its finished cases are kept and counted, and
+    only the cases it never reached are sent."""
     db = svc.db
     items = cases(svc, suite, limit)
     if not items:
         raise ValueError(f"the suite {suite!r} has no cases")
-    db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, "
-               "recall, lessons, suite_hash) "
-               "VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?, ?, ?)",
-               (suite, model, label, len(items), 1 if use_recall else 0,
-                1 if use_lessons else 0, suite_hash(svc, suite)))
-    run_id = db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]
+    if resume:
+        row, why = resumable(svc, resume)
+        if row is None:
+            raise ValueError(why)
+        if row["suite"] != suite or row["model"] != model:
+            raise ValueError(f"run {resume} is {row['model']} on {row['suite']}, "
+                             f"not {model} on {suite}")
+        run_id = int(resume)
+        db.execute("UPDATE bench_runs SET status='running', note='' WHERE id=?", (run_id,))
+    else:
+        db.execute("INSERT INTO bench_runs (ts, suite, model, label, cases, scored, status, "
+                   "recall, lessons, suite_hash) "
+                   "VALUES (datetime('now'), ?, ?, ?, ?, 0, 'running', ?, ?, ?)",
+                   (suite, model, label, len(items), 1 if use_recall else 0,
+                    1 if use_lessons else 0, suite_hash(svc, suite)))
+        run_id = db.query_one("SELECT MAX(id) AS id FROM bench_runs")["id"]
     # a fresh state for every run (v0.181.211). start() clears it, but a
     # profile calls _run directly, suite after suite, so the previous run's
     # finished/scored/delivered/seconds showed on the live status as if they
@@ -3030,9 +3099,21 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
     # a case to fail them. One miss does not close a ladder: these runs move.
     streak: dict = {}
     closed: dict = {}
+    already: set = set()
+    if resume:
+        already = _replay(db, run_id, items, totals, streak, closed)
+        _state["done"] = len(already)
+        _state["passed"] = totals.pop("passed", 0)
+        _state["errors"] = totals["errors"]
+        _state["model_seconds"] = round(totals["seconds"], 2)
+        _state["score"] = (round(totals["score"] / totals["score_n"], 1)
+                           if totals["score_n"] else None)
+        _state["resumed_at"] = len(already)
     for i, case in enumerate(items, start=1):
         if _state.get("stop"):
             break
+        if (case.get("id") or "") in already:
+            continue
         hits: list = []
         if use_recall:
             case, hits = await with_recall(svc, case)
@@ -3160,6 +3241,8 @@ async def _run(svc, suite: str, model: str, label: str, limit: int,
                 out["seconds"], out["prompt_tokens"], out["completion_tokens"],
                 "stopped" if _state.get("stop") else "done",
                 "; ".join(x for x in (
+                    f"resumed after case {len(already)} of {len(items)}; tokens count "
+                    f"only the cases run after that" if already else "",
                     f"{out['errors']} call(s) failed" if out["errors"] else "",
                     f"past work found for {out['recalled']} of {out['scored']} case(s)"
                     if use_recall else "",
@@ -3192,6 +3275,39 @@ def start(svc, suite: str, model: str, label: str = "", limit: int = 0,
         try:
             from .loopclient import run_on_own_loop
             run_on_own_loop(svc, _run(svc, suite, model, label, limit, use_recall, use_lessons))
+        except Exception as e:                                    # noqa: BLE001
+            from .errors import describe_exception
+            _state.update({"state": "failed", "error": describe_exception(e),
+                           "finished": time.time()})
+        finally:
+            _lock.release()
+    threading.Thread(target=go, name="foundry-bench", daemon=True).start()
+    time.sleep(0.05)
+    return dict(_state)
+
+
+def resume(svc, run_id: int) -> dict:
+    """Carry on an interrupted or stopped run where it stopped (v0.181.250): the
+    cases it finished stay, the rest are sent. Refused while anything runs and
+    when the suite has changed since the run started."""
+    row, why = resumable(svc, run_id)
+    if row is None:
+        return {"state": "refused", "error": why}
+    from . import benchprofile
+    if _state.get("state") == "running" or benchprofile.state().get("state") == "running":
+        return {"state": "refused", "error": "a benchmark is running; resume it after"}
+    if not _lock.acquire(blocking=False):
+        return {"state": "refused", "error": "a benchmark is running; resume it after"}
+    _state.clear()
+    _state.update({"state": "running", "suite": row["suite"], "model": row["model"],
+                   "done": 0, "recall": bool(row["recall"]), "lessons": bool(row["lessons"])})
+
+    def go():
+        try:
+            from .loopclient import run_on_own_loop
+            run_on_own_loop(svc, _run(svc, row["suite"], row["model"], row["label"] or "",
+                                      int(row["cases"] or 0), bool(row["recall"]),
+                                      bool(row["lessons"]), resume=int(run_id)))
         except Exception as e:                                    # noqa: BLE001
             from .errors import describe_exception
             _state.update({"state": "failed", "error": describe_exception(e),

@@ -1,3 +1,35 @@
+## v0.181.250 - resume an interrupted benchmark
+
+Asked: "when it shows interrupted, can it have a resume function". A rebuild
+cut the qwen3.8-flash profile off in its ninth suite of thirteen. The card
+named the suites that had not run, and the only way back was ticking them into
+a rerun by hand, which also started the suite it had been in from its first
+case again.
+
+**A profile.** An interrupted or stopped profile now has a Resume button in
+the profile list (POST /admin/api/bench/profile/resume {id}). The suites it
+finished stay on the card. The suite it was in carries on at the case it
+stopped, when that suite has not been rebuilt since; otherwise it runs again
+from the start. The suites it never reached run, and with repeats, every pass
+it lacks. While it runs the profile says running, so a second restart is
+caught like the first, and when it has nothing left it says done. A profile
+with nothing left to run is just marked done; so is one completed by ticking
+its missing suites into a rerun, which before this kept saying interrupted.
+
+**A single run.** An interrupted or stopped run that is not part of a profile
+has a Resume button in the runs table (POST /admin/api/bench/run {resume: id}).
+It is the same run carried on: the cases it finished keep their scores and
+count in its total, only the rest are sent, and a ladder closed before the cut
+stays closed. Refused when anything is running, when the run is finished, and
+when the suite has changed since the run started (a different test - run it
+again instead).
+
+Not stored per case before this, so not carried over: the token counts and the
+answer score of the cases run before the cut. The run's note says so.
+
+Not done: the router does not resume by itself after a restart; Resume is a
+button. 12 tests.
+
 ## v0.181.249 - Media_Gen 5.21.1: 3D models from a picture, in chat and in coding sessions
 
 Asked: Media_Gen 5.21.1 has `generate_3d_model` (one picture in, GLB files out). Support it
