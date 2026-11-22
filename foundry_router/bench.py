@@ -1187,6 +1187,47 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
+def build_summaries(svc, name: str = "summaries", top_level: int = 0) -> dict:
+    """The suite of summaries that invent nothing (v0.181.244): a service log
+    or a call transcript, one subject in it and look-alikes beside it
+    (benchsumm.summ_spec). Every figure the summary gives is looked up in the
+    source: the subject's is fine, one found only about something else or
+    found nowhere scores 0, and so does running over the word limit. No tier
+    is assigned: the card tiers each case from what the models run on it did.
+    Returns {name, cases, path}."""
+    from . import benchsumm
+    out = []
+    for sp in benchsumm.summ_specs(top_level):
+        asked = sum(len(str(m.get("content") or "")) for m in sp["messages"])
+        tags = ["summaries", f"source:{sp['kind']}",
+                f"dial:{sp['ladder'].split(' ')[-1] if sp['ladder'] else sp['variant']}",
+                f"lines:{sp['lines']}", f"facts:{len(sp['facts'])}",
+                f"decoys:{sp['decoys']}", f"words:{sp['cap']}",
+                f"tokens:{int(asked / CHARS_PER_TOKEN) + 120}"]
+        if sp["ladder"]:
+            tags += [f"ladder:{sp['ladder']}", f"level:{sp['level']}"]
+        out.append({
+            "id": f"SUMM-{sp['task']}",
+            "task_id": sp["task"],
+            "tags": tags,
+            "max_tokens": THINK_ROOM,
+            "messages": sp["messages"],
+            "reference": {"summary": {k: sp[k] for k in (
+                              "subject", "others", "facts", "mine", "theirs", "names",
+                              "places", "codes", "cap")},
+                          "content": sp["ideal"][:400]},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench", f"built the {name} suite: {len(out)} case(s)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f)}
+
+
 def build_heldrule(svc, name: str = "heldrule", top_level: int = 0) -> dict:
     """The suite of a rule held across a conversation (v0.181.243): the rule
     in the system prompt or said once by the user, N turns of ordinary talk
@@ -2646,6 +2687,16 @@ async def score_one(svc, case: dict, got: dict) -> dict:
             ps["detail"] += " (reached for " + ", ".join(called) + " instead of ending the turn)"
         return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
                 "exact": None, "code_detail": ps["detail"], "error": ""}
+    if ref.get("summary"):
+        # every figure the subject's, nothing invented, inside the word limit
+        # (v0.181.244). A reply past the budget counts for nothing.
+        from . import benchsumm
+        seen = "" if got.get("out_of_room") else (got.get("content") or "")
+        ss = benchsumm.summ_score(seen, ref["summary"])
+        return {"score": ss["score"],
+                "tools": 0.0 if ss["why"] in ("theirs", "invented") else 1.0, "code": None,
+                "answer": round(ss["present"] / ss["total"], 4) if ss["total"] else 0.0,
+                "exact": None, "error": "", "code_detail": ss["detail"]}
     if ref.get("heldrule"):
         # every rule in force kept in the last reply, and its answer right
         # (v0.181.243)
@@ -2726,6 +2777,13 @@ def expected_of(case: dict) -> str:
     ref = case.get("reference") or {}
     if ref.get("deliverable"):
         return "a deliverable (no answer key)"
+    if ref.get("summary"):
+        sm = ref["summary"]
+        facts = "; ".join(f"{f['label']} {str((f.get('any') or [''])[0]).split(':', 1)[-1]}"
+                          for f in sm.get("facts") or [])
+        return (f"a summary of {sm.get('subject')} in at most {sm.get('cap')} words that "
+                f"keeps {facts}, and says nothing about "
+                + ", ".join(sm.get("others") or []) + " and nothing the source does not say")
     if ref.get("heldrule"):
         from . import benchrules
         hr = ref["heldrule"]

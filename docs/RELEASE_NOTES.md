@@ -1,3 +1,47 @@
+## v0.181.244 - summaries that invent nothing
+
+Asked: build the next gap in docs/BENCH_GAPS.md, the sixth. Video notes and
+infrastructure pulses are summaries, and nothing measured whether one says
+only what its source says.
+
+**The suite.** "Summaries that invent nothing": 60 generated cases
+(foundry_router/benchsumm.py). Each is a service log with several services
+interleaved, or the transcript of a call that went through several items, and
+one subject in it to summarise for someone who missed it. The others are made
+like it on purpose - mail-api beside mail-canary, the spring fair beside the
+summer fair - and carry the same kinds of facts: an error code, a count, a
+restart time, a name, a version, an incident number, an amount, a place, a
+reference. Three ladders for each kind of source: the length (24 to 1,280
+lines), the facts about the subject (2 to 18), the look-alikes beside it (1
+to 8). Twelve single cases: a figure corrected later, a quiet subject beside
+busy neighbours, every fact at the very end, a fact said in another item.
+
+**Scoring.** No judge. Every figure the summary gives - a time in any form, a
+number of 11 or more, a version, an error code in capitals or in words, a name
+or a place the source uses - is looked up in the source: on a line about the
+subject it is fine, found only about something else or found nowhere it is a
+0, and so is going over the word limit. With nothing wrong, 100 when every
+fact about the subject is there and 50 when at least half are.
+
+**What it measured** (every case, one run each). qwen3.8-flash 60 of 60, at
+about 93 seconds a case. Sonnet 5.5 59: with almost nothing to report on a
+quiet item it filled the summary out and went to 53 words under a limit of
+50. Opus 5.5 59: on-call was paged at 09:08:40 and it wrote "at 08:40". No
+model gave a fact about a look-alike in any case, at 1,280 lines or beside
+eight services of the same family, so no tier is written on a case and the
+card tiers each from what the models run on it did. Both frontier misses were
+read against their sources; neither is a fault in the case.
+
+On the card: the kind of source, what was raised, the length, and every miss
+named (a fact about something else, a figure not in the source, over the word
+limit, facts left out). On the page: a "Summaries that invent nothing" plate
+under Suites with a top-level box (2 to 8). On the wire: POST
+/admin/api/bench/summaries.
+
+Not done: one run a model. The scorer does not see a name or a place the
+source never used, or a count written in words. The brain lane was not run
+and GPT was at its weekly cutoff. 108 tests.
+
 ## v0.181.243 - a rule held over a conversation
 
 Asked: build the next gap in docs/BENCH_GAPS.md, the fifth. Household and

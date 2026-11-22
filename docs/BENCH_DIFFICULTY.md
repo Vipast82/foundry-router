@@ -512,6 +512,67 @@ asks how far.
 The whole suite on a frontier model through the subscription backend is one
 call a case, about 280,000 input tokens.
 
+## Summaries that invent nothing (v0.181.244)
+
+A new suite, the sixth addition in `docs/BENCH_GAPS.md`. Video notes and
+infrastructure pulses are summaries. A case (`benchsumm.summ_spec`) is a
+source to summarise for someone who missed it - a service log with several
+services interleaved, or the transcript of a call that went through several
+items - and one subject in it: one service, or one item. The others are made
+like it on purpose (mail-api beside mail-canary and mail-ledger, the spring
+fair beside the summer fair) and carry the same kinds of facts: an error code,
+a count, a restart time, a name, a version, an incident number, an amount, a
+place, a reference. Every number in a source occurs once, so each belongs to
+exactly one subject.
+
+Three ladders for each kind of source: the length (24 to 1,280 lines), the
+facts about the subject (2 to 18), and the look-alikes beside it (1 to 8, all
+of the same family). Twelve single cases: a figure corrected later in the
+source, a quiet subject with two facts beside busy neighbours, every fact in
+the last lines of the log, and a fact said in the middle of another item.
+
+**Scoring** (`benchsumm.summ_score`) needs no judge. Every figure the summary
+gives - a time (in any form: 2:05 pm, 14:05:31), a number of 11 or more, a
+version, an error code (in capitals or in words), a name or a place the source
+uses - is looked up in the source. On a line about the subject it is fine;
+found only on lines about something else it is a fact about something else;
+found nowhere it is invented. Either is a 0, and so is going over the word
+limit (30 words and 10 a fact). With nothing wrong, 100 when every planted
+fact about the subject is there and 50 when at least half are. The ask says to
+give figures exactly as they appear and to work out none, so a computed
+duration counts as a figure the source does not have.
+
+**No tier is assigned.** Measured on every case, one run each:
+
+| Ladder or case | What rises | qwen3.8-flash | Sonnet 5.5 | Opus 5.5 |
+|---|---|---|---|---|
+| log, length | 24 to 1,280 lines (about 21,000 tokens), 4 facts, 2 look-alikes | 8 of 8 | 8 of 8 | 8 of 8 |
+| log, facts | 2 to 18 facts in 160 lines | 8 of 8 | 8 of 8 | 8 of 8 |
+| log, look-alikes | 1 to 8 services of the same family | 8 of 8 | 8 of 8 | 8 of 8 |
+| transcript, length | 23 to 1,280 lines, 4 facts, 2 look-alikes | 8 of 8 | 8 of 8 | 8 of 8 |
+| transcript, facts | 2 to 18 facts | 8 of 8 | 8 of 8 | 8 of 8 |
+| transcript, look-alikes | 1 to 8 items that sound alike | 8 of 8 | 8 of 8 | 8 of 8 |
+| a figure corrected later | log and transcript, 2 each | 4 of 4 | 4 of 4 | 3 of 4: "08:40" for 09:08:40 |
+| a quiet subject | 2 facts beside busy look-alikes | 4 of 4 | 3 of 4: 53 words under 50 | 4 of 4 |
+| every fact at the very end; a fact said in another item | 2 each | 4 of 4 | 4 of 4 | 4 of 4 |
+| **all 60** | | **60: 100** | **59: 98.3** | **59: 98.3** |
+
+Nothing separates the models: no model gave a fact about a look-alike in any
+case, at 1,280 lines or beside eight services of the same family. The two
+frontier misses are single slips, and each was read against its source before
+it was counted: Opus 5.5 wrote that on-call was paged "at 08:40" when the line
+says 09:08:40, and Sonnet 5.5, with almost nothing to report on a quiet item,
+filled out the summary with "details would be sent round" and went to 53 words.
+qwen3.8-flash kept every case, at about 93 seconds a case against 4 to 11 for
+the frontier models, because it thinks for 1,500 to 6,400 tokens first.
+
+What the scorer cannot see: a name or a place the source never used (only
+the source's own are looked up), a count written in words ("forty-one"), and a
+wrong figure that happens to be on another line about the same subject.
+
+The whole suite on a frontier model through the subscription backend is about
+445,000 input tokens.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers

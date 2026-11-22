@@ -132,6 +132,13 @@ preference stated once and needed later.
 
 ### 6. Summaries that invent nothing
 
+**Built in v0.181.244** as the "Summaries that invent nothing" suite: 60 generated
+logs and call transcripts, up to 1,280 lines, 18 facts and eight look-alikes.
+qwen3.8-flash kept all 60; Sonnet 5.5 and Opus 5.5 59 each, neither ever
+giving a fact about a look-alike. It is generated on its own rather than from
+the long-context generator, so every figure belongs to one subject. What was
+proposed:
+
 Video notes and infrastructure pulses are summaries. Generate a transcript or
 a log with planted facts (a time, a count, a name, an error line) and planted
 near-facts that are not true of the thing asked about. Score on the planted

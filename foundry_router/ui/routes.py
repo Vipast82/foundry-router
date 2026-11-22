@@ -3264,6 +3264,27 @@ async def bench_protocol(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/summaries")
+async def bench_summaries(request: Request):
+    """Build the suite of summaries that invent nothing (v0.181.244):
+    {name?, top_level?}.
+
+    A service log or a call transcript, one subject and look-alikes beside
+    it; every figure in the summary is looked up in the source. Generated;
+    nothing is read from the corpus."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_summaries, svc, str(body.get("name") or "summaries"),
+            int(body.get("top_level") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/heldrule")
 async def bench_heldrule(request: Request):
     """Build the suite of a rule held across a conversation (v0.181.243):

@@ -10208,6 +10208,14 @@ async function tabBench() {
           <div class="row tight"><button class="act" id="bench-heldrule">Build the held-rule suite</button>
             <label class="nw hint" style="margin:0" title="The highest rung of each ladder: 0, 2, 5, 10, 20, 40, 80 and 160 ordinary turns between the rule and the turn that pulls against it. The turns separate nothing: qwen3.8-flash kept all 78, and all nine rules with 640 turns between. Sonnet 5.5 went over a 30-word cap in 3 of 8; Opus 5.5 showed 24-hour working after being asked for am/pm in 8 of 8 (2026-11-21).">top level
               <input type="number" id="bench-heldrule-top" min="2" max="8" value="8" style="width:52px"></label></div></div>
+        <div class="suite"><h5>Summaries that invent nothing<span>${suiteNote("summaries")}</span></h5>
+          <p>A service log or the transcript of a call, and one service or one item in it to
+            summarise, with look-alikes beside it. Every time, number, version, code, name and
+            place in the summary is looked up in the source: one about something else, or one
+            found nowhere, scores nothing. Up to 1,280 lines and 18 facts.</p>
+          <div class="row tight"><button class="act" id="bench-summaries">Build the summaries suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of each ladder: up to 1,280 lines, 18 facts about the subject and 8 look-alikes beside it. Nothing separates the models: qwen3.8-flash kept all 60, Sonnet 5.5 and Opus 5.5 59 each, one slip apiece (a word limit, an hour dropped from a time), and no model gave a fact about a look-alike (2026-11-22).">top level
+              <input type="number" id="bench-summaries-top" min="2" max="8" value="8" style="width:52px"></label></div></div>
         <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
           <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
             a scope request in place of an edit outside the task's files.</p>
@@ -10339,6 +10347,14 @@ async function tabBench() {
   if ($("#bench-guard")) $("#bench-guard").onclick = async () => {
     try {
       const out = await api("bench/guard", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} cases`);
+      render();
+    } catch (e) { $("#suite-msg").textContent = e.message; }
+  };
+  if ($("#bench-summaries")) $("#bench-summaries").onclick = async () => {
+    try {
+      const out = await api("bench/summaries", {method: "POST", body: {
+        top_level: +($("#bench-summaries-top") || {}).value || 0}});
       toast(`built "${out.name}": ${out.cases} cases`);
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }

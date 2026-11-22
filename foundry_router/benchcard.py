@@ -62,6 +62,7 @@ SUITE_NAMES = {
     "toolsteps": "Tool work in steps",
     "structured": "Output a program reads",
     "heldrule": "A rule held over a conversation",
+    "summaries": "Summaries that invent nothing",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -82,6 +83,8 @@ SUITE_ASKS = {
                   "every value the one the notes give.",
     "heldrule": "A rule given once, turns of ordinary talk, then a turn that pulls against "
                 "it: is the rule still kept, and the answer still right?",
+    "summaries": "Summarise one service in a log, or one item on a call, beside look-alikes: "
+                 "every fact about it kept, nothing about the others, nothing invented.",
 }
 
 
@@ -149,6 +152,10 @@ def miss_kind(suite: str, row) -> Optional[str]:
         # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
+    if suite == "summaries" or "summaries" in tags:
+        # v0.181.244: the first thing wrong, as the scorer named it
+        from .benchsumm import WHY_WORDS as _why
+        return _why.get(str(_detail(row).get("why") or ""), "missed")
     if suite == "heldrule" or "heldrule" in tags:
         # v0.181.243: which rule went, or that it was kept and the answer was not
         from .benchrules import RULE_WORDS as _rules
@@ -386,6 +393,27 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Source",
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
+    if suite == "summaries":
+        from .benchsumm import KIND_NAMES as _kinds, LADDER_NAMES as _lads
+        from .benchsumm import SINGLE_NAMES as _singles
+        out.append({"name": "The source",
+                    "rows": _group(rows, lambda r: _kinds.get(_tag(_tags(r), "source") or ""),
+                                   list(_kinds.values()))})
+        dials = {**_lads, **_singles}
+        out.append({"name": "What was raised",
+                    "rows": _group(rows, lambda r: dials.get(_tag(_tags(r), "dial") or ""),
+                                   list(dials.values()))})
+
+        def _long(r):
+            try:
+                n = int(_tag(_tags(r), "lines") or 0)
+            except ValueError:
+                return None
+            return ("up to 100 lines" if n <= 100 else "101 to 400 lines" if n <= 400
+                    else "more than 400 lines")
+        out.append({"name": "Length of the source",
+                    "rows": _group(rows, _long, ["up to 100 lines", "101 to 400 lines",
+                                                 "more than 400 lines"])})
     if suite == "heldrule":
         from .benchrules import LADDER_NAMES as _names
         names = {**_names, "stack": "several rules at once"}
@@ -503,7 +531,8 @@ def facets(suite: str, rows: list) -> list:
         out.insert(1 if out and out[0]["name"] == "Difficulty" else 0,
                    {"name": "How far up each ladder", "rows": reach})
     if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol",
-                     "grounded", "guard", "toolsteps", "structured", "heldrule"):
+                     "grounded", "guard", "toolsteps", "structured", "heldrule",
+                     "summaries"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})
