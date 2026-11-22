@@ -409,7 +409,12 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
     # lane), or covered by ANY earlier visual approval (approved, carried, accepted with
     # notes), are never sent again; when none is left the record itself is the approval
     mem = accepted_hashes(c.store, pid, tid, t)
-    todo = [f for f in frames if arts.get(f[0]) not in mem]
+    held = _held(c, pid, tid, t, revision)
+    todo = [f for f in frames if arts.get(f[0]) not in mem
+            and arts.get(f[0]) not in held["judged"]]
+    if not todo and held["findings"]:
+        # every frame of this revision has been looked at: the one complete list goes back
+        return _send_held(c, P, t, revision, arts, held, held["actor"] or "model:visual")
     if not todo:
         c.store.add_approval(pid, tid, "visual", revision, arts, "coordinator:vision-memory",
                              f"every required frame was judged clean or accepted at these bytes "
@@ -453,7 +458,8 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
                                      f"recovered recorded model review {result.get('session_id')}; "
                                      "policy visual_model v1")
             elif result.get("verdict") == "changes_required":
-                _changes(c, P, t, revision, arts, actor, list(result.get("findings") or []))
+                _changes_or_hold(c, P, t, revision, arts, actor,
+                                 list(result.get("findings") or []), frames, todo, partial)
             else:
                 # W1.3: an inconclusive answer is retried once (structured), then
                 # accepted with notes; never a dead end at AWAITING_HUMAN
@@ -558,11 +564,14 @@ def step(c, P, t: dict, spec, rule, revision: str) -> None:
             "revision": revision, "frames": len(frames), "left": len(todo) - len(frames),
             "notes": findings[:5], "accepted_with_notes": True})
         return
-    if verdict == "approve":
+    if verdict == "approve" and _held(c, pid, tid, t, revision)["findings"]:
+        # the last batch is clean, earlier batches of this revision were not
+        _send_held(c, P, t, revision, arts, _held(c, pid, tid, t, revision), actor)
+    elif verdict == "approve":
         c.store.add_approval(pid, tid, "visual", revision, arts, actor,
                              f"model visual review {sid}; policy visual_model v1")
     elif verdict == "changes_required":
-        _changes(c, P, t, revision, arts, actor, findings)
+        _changes_or_hold(c, P, t, revision, arts, actor, findings, frames, todo, partial)
     else:
         _uncertain(c, P, t, revision, arts, actor, fingerprint, tries, findings)
 
@@ -769,7 +778,91 @@ def _judge(c, P, t: dict, revision: str, arts: dict, findings: list):
     return out
 
 
-def _changes(c, P, t: dict, revision: str, arts: dict, actor: str, findings: list) -> None:
+# 2026-11 POL-7 (COORDINATOR_AUTOMATION_NEEDS item 11): three and more visual rounds a day,
+# each fixing some overlaps and adding others. A large frame set is reviewed in batches, and
+# the first batch with a finding sent the sprint back before the other batches were looked
+# at, so every round found the next batch's problems. After [approval]
+# visual_full_list_after_rounds fix rounds (default 2) every batch of the revision is
+# reviewed first, ONE complete list goes back, and the fix session is told to re-capture
+# and check every frame on it before it ends.
+FULL_LIST_AFTER = 2
+FULL_LIST_NOTE = ("COMPLETE LIST: every required frame of this revision was reviewed before "
+                  "this list was sent ({n} finding(s), fix round {round}). Fix all of them in "
+                  "this round. Before you end the turn, re-capture EVERY frame named below and "
+                  "look at each new capture against its finding; a frame you did not "
+                  "re-capture and check counts as not fixed, and the next review looks at "
+                  "all of them.")
+
+
+def _record_fix(c, P, t: dict, revision: str, findings: list, round_no: int) -> None:
+    """What this visual round asked for, kept for the clash check (clash.py)."""
+    if callable(getattr(c.store, "merge_data", None)):
+        from . import clash
+        clash.record_visual(c, P, t, revision, findings, round_no)
+
+
+def _full_after(P) -> int:
+    cfg = P.profile.raw.get("approval") or {}
+    try:
+        return max(0, int(cfg.get("visual_full_list_after_rounds", FULL_LIST_AFTER)))
+    except (TypeError, ValueError):
+        return FULL_LIST_AFTER
+
+
+def _held(c, pid: str, tid: str, t: dict, revision: str) -> dict:
+    """This revision's findings held back while its other batches are reviewed:
+    {"judged": {frame hashes}, "findings": [...], "actor"}."""
+    cur = ((_task(c.store, pid, tid, t) or {}).get("data") or {}).get("visual_round") or {}
+    if cur.get("revision") != revision:
+        return {"judged": set(), "findings": [], "actor": ""}
+    return {"judged": set(cur.get("judged") or []), "findings": list(cur.get("findings") or []),
+            "actor": str(cur.get("actor") or "")}
+
+
+def _changes_or_hold(c, P, t: dict, revision: str, arts: dict, actor: str, findings: list,
+                     frames: list, todo: list, partial: bool) -> None:
+    """A batch asked for changes. After the configured number of fix rounds, and while other
+    frames of the revision are still unreviewed, its findings are held and the next batch
+    follows; otherwise they go back now (with whatever was held)."""
+    pid, tid = P.id, t["task_id"]
+    cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+    rounds = int(cur.get("visual_changes_rounds") or 0)
+    held = _held(c, pid, tid, t, revision)
+    left = len(todo) - len(frames)
+    full = rounds >= _full_after(P) and callable(getattr(c.store, "merge_data", None))
+    if full and partial and left > 0:
+        judged = held["judged"] | {arts[r] for r, _, _ in frames}
+        allf = held["findings"] + [str(f) for f in findings]
+        c.store.merge_data(pid, tid, visual_round={
+            "revision": revision, "judged": sorted(judged), "findings": allf[:300],
+            "actor": actor})
+        c.store.event(pid, tid, "visual_findings_held", detail={
+            "revision": revision, "held": len(allf), "left": left, "round": rounds + 1})
+        c.store.update_task(pid, tid, next_action=f"visual review: {len(allf)} finding(s) "
+                            f"held; {left} frame(s) left before the one fix list goes back")
+        return
+    if held["findings"]:
+        return _send_held(c, P, t, revision, arts,
+                          {**held, "findings": held["findings"] + [str(f) for f in findings]},
+                          actor)
+    _changes(c, P, t, revision, arts, actor, findings,
+             lead_in=FULL_LIST_NOTE.format(n=len(findings), round=rounds + 1) if full else "")
+
+
+def _send_held(c, P, t: dict, revision: str, arts: dict, held: dict, actor: str) -> None:
+    pid, tid = P.id, t["task_id"]
+    cur = dict((_task(c.store, pid, tid, t) or {}).get("data") or {})
+    rounds = int(cur.get("visual_changes_rounds") or 0)
+    findings = list(held["findings"])
+    c.store.merge_data(pid, tid, visual_round=None)
+    c.store.event(pid, tid, "visual_full_list", detail={
+        "revision": revision, "findings": len(findings), "round": rounds + 1})
+    _changes(c, P, t, revision, arts, actor, findings,
+             lead_in=FULL_LIST_NOTE.format(n=len(findings), round=rounds + 1))
+
+
+def _changes(c, P, t: dict, revision: str, arts: dict, actor: str, findings: list,
+             lead_in: str = "") -> None:
     """Vision CHANGES after closeout: back into a fix round (CHANGES_REQUIRED). With
     [approval] visual_rounds_max set, rounds continue until the frames are clean; from
     visual_rounds_before_judge on, a judge model rules on each finding first; at the max
@@ -807,16 +900,19 @@ def _changes(c, P, t: dict, revision: str, arts: dict, actor: str, findings: lis
                 c.store.merge_data(pid, tid, visual_changes_rounds=rounds + 1)
             c.store.event(pid, tid, "visual_approval_changes", detail={
                 "revision": revision, "round": rounds + 1, "of": hard,
-                "findings": findings[:10]})
-            c.reject_human(pid, tid, findings, actor)
+                "findings": findings[:10], "complete_list": bool(lead_in)})
+            _record_fix(c, P, t, revision, findings, rounds + 1)
+            c.reject_human(pid, tid, ([lead_in] if lead_in else []) + findings, actor)
             return
     mx = _max_rounds(P)
     if rounds < mx and callable(getattr(c, "reject_human", None)):
         if callable(getattr(c.store, "merge_data", None)):
             c.store.merge_data(pid, tid, visual_changes_rounds=rounds + 1)
         c.store.event(pid, tid, "visual_approval_changes", detail={
-            "revision": revision, "round": rounds + 1, "of": mx, "findings": findings[:10]})
-        c.reject_human(pid, tid, findings, actor)
+            "revision": revision, "round": rounds + 1, "of": mx, "findings": findings[:10],
+            "complete_list": bool(lead_in)})
+        _record_fix(c, P, t, revision, findings, rounds + 1)
+        c.reject_human(pid, tid, ([lead_in] if lead_in else []) + findings, actor)
         return
     _accept_with_notes(c, P, t, revision, arts, actor, findings,
                        f"after {rounds} CHANGES round(s)")

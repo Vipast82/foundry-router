@@ -373,6 +373,32 @@ a session the outage killed is restarted within a few minutes. One notice (`rout
 then says how long the router was away, each live session with what Kilo reports for it,
 what was restarted, and what is still not right.
 
+### Visual rounds that end, and findings that clash (`visual_approval.py`, `clash.py`)
+
+**One complete list.** A large frame set is reviewed in batches, and a batch with a finding
+used to send the sprint back before the other batches were looked at, so each round found
+the next batch's problems (POL-7: three and more rounds a day). After `[approval]
+visual_full_list_after_rounds` fix rounds (default 2, on the Automation page; `0` = from the
+first review) every batch of the revision is reviewed first: a batch's findings are held
+(`visual_findings_held`), the next batch follows, and when every frame has been looked at
+one list goes back (`visual_full_list`). Its first line tells the fix session that the
+list is complete and that it must re-capture every frame named and check each new capture
+against its finding before it ends. A set that fits one batch gets the same instruction.
+What is held belongs to one revision: a new commit starts a new review from the first
+batch. The judge (`visual_rounds_before_judge`) rules on the findings as before; the
+instruction line is added after it.
+
+**A finding that forbids what another one needs.** When the visual review sends a sprint
+back, its revision and findings are kept. When a code review then asks for changes, each
+of its findings that forbids touching a file ("must not edit", "out of scope", "belongs to
+a completed sprint", "revert the changes to") and names a file changed since that visual
+round is a clash: the visual fix needed the file, the review forbids it. The sprint stops
+once, BLOCKED with class `findings_clash` and both findings in the blocker (with the Lead
+on: a Lead case), instead of sending the review's findings to the implementer to undo the
+fix. The answer is the unblock's resolution, which rides into the next session. The same
+files clashing again are not asked about again. A review that only mentions a file, or
+forbids one the visual fix did not touch, changes nothing.
+
 ### The repository: big pushes, count pins, plan checks (`pushjob.py`, `tracks/pins.py`, `plancheck.py`)
 
 **A push too big for one go.** Before a closeout push the outgoing size is measured (what

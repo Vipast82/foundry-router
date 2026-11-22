@@ -1349,6 +1349,11 @@ FIELDS: list[Field] = [
       "still have.", "review", "coordinator.engine", item_type="str"),
     F("approval.visual_model", "bool", False, "Model-judged visual approval (vision persona).",
       "review", "coordinator.visual_approval"),
+    F("approval.visual_full_list_after_rounds", "int", 2, "After this many visual fix "
+      "rounds of a sprint, every batch of frames is reviewed before anything goes back: one "
+      "complete list of findings, and the fix session is told to re-capture and check every "
+      "frame on it before it ends. 0 = from the first review on.", "review",
+      "coordinator.visual_approval", min=0),
     F("approval.asset_judge", "bool", False, "Asset judge for 3D model sprints: a fresh "
       "vision session writes its own checklist from the reference images, then scores the "
       "model's renders shown under shuffled letters. Uses the approval rules with rubric "

@@ -664,7 +664,8 @@ UPGRADE_RERUN_GAP_S = 6 * 3600.0
 RERUN_TEXT = re.compile(r"insufficiently inspected:", re.I)
 # classes a new release cannot change: a budget or time limit (their own rules), and
 # stops that are the sprint's own work
-NOT_TOOLING = ("task_minutes", "build_stalled", "review_blocked", "fast_lane_red_gates")
+NOT_TOOLING = ("task_minutes", "build_stalled", "review_blocked", "fast_lane_red_gates",
+               "findings_clash")
 
 
 def first_stop(c, P, t: dict, episode: list) -> dict:

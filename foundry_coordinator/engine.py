@@ -3506,6 +3506,16 @@ class Coordinator:
                 review_id=rev["review_id"])
         if rev["verdict"] == "CHANGES_REQUIRED":
             findings = R.findings_for_repair(res) or ["reviewer asked for changes without details"]
+            from . import clash                    # it forbids what the visual fix needed
+            ask = clash.check(self, P, t, rev)
+            if ask:
+                self.store.release(pid, tid)
+                return self._stop(P, t, S.BLOCKED, {
+                    "blocker": ask, "review_id": rev["review_id"],
+                    "verdict": "CHANGES_REQUIRED"}, cls="findings_clash",
+                    review_id=rev["review_id"], blocker=ask,
+                    data={**((self.store.task(pid, tid) or t)["data"] or {}),
+                          "findings": findings})
             if self.fast_lane.on(P, tid) and self.fast_lane.review_changes(P, t, rev, findings):
                 return           # B4: the same warm session fixes it (one round, no cold start)
             return self.store.transition(pid, tid, S.CHANGES_REQUIRED, {

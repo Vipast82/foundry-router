@@ -1,3 +1,41 @@
+## v0.181.239 - visual rounds get one complete list; clashing findings are asked once
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 11 and 25.
+
+- **One complete list after two rounds (11).** POL-7 went through three and
+  more visual rounds a day, each fixing some overlaps and finding others. A
+  large frame set is reviewed in batches, and the first batch with a finding
+  sent the sprint back before the other batches were looked at. After
+  `[approval] visual_full_list_after_rounds` fix rounds (new, default 2, on
+  the Automation page; 0 = from the first review) every batch of the revision
+  is reviewed first and ONE list goes back. Its first line says the list is
+  complete and that the fix session must re-capture every frame named and
+  check each new capture against its finding before it ends. The judge rules
+  on the findings as before.
+- **Findings that clash (25).** POL-7's code review said the plan forbids
+  editing completed sprints' files, while the visual fixes needed exactly
+  those files, and the sprint went round. The visual review's revision and
+  findings are now kept; when a code review then asks for changes and one of
+  its findings forbids a file that was changed since that visual round, the
+  sprint stops once with both findings side by side (blocker class
+  `findings_clash`; with the Lead on, a Lead case) instead of sending the
+  review's findings to the implementer to undo the fix. The unblock's
+  resolution rides into the next session. The same files clashing again are
+  not asked about again.
+
+Not built, item 24 (review a long sprint after each big step): the split
+review by file (0286000) and the incremental re-review already bound what one
+review call reads. Reviewing at step boundaries needs a sprint that is in
+review while its plan still has open steps, which changes what an APPROVED
+verdict is bound to; that is a design decision and wants a trial sprint, not a
+change made blind.
+
+Files: `foundry_coordinator/visual_approval.py`, `clash.py` (new),
+`engine.py`, `selfheal.py`, `foundry_automation/schema.py`,
+`docs/COORDINATOR.md`. 11 tests.
+
+Deploy: coordinator only.
+
 ## v0.181.238 - big pushes in chunks, count pins, a plan check at the start
 
 Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 20 (the
