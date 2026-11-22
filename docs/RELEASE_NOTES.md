@@ -1,3 +1,51 @@
+## v0.181.252 - Media_Gen checklist fixes: follow-up references, the 3D refusal, viewer light
+
+The section 9 checklist was run on 2026-11-22 against the live router (v0.181.249) through
+Foundry-Chat with the OpenAI API, at Victor's request.
+
+**Passed:**
+- 1. A game icon was made in the game library, two variations. The router waited 123 s and
+  both pictures showed inline. "Check my last media job" made one media_check_job call
+  (plus one job list).
+- 2. "Make a 3D model of this picture" with a picture attached: the upload reference was
+  injected, generate_3d_model queued, and the reply came back in 17 s without waiting.
+  Checked later, the reply showed the 8.0 MB GLB as a download link and "view in 3D"
+  (which renders in a browser), and the 47.6 MB glb_detail as Media_Gen's own link.
+- 6. "hello" in voice victor: generate_speech, with the mp3 shown as a link.
+- 7. A 30 second video: its queued reply said "about 24-48 minutes", so nothing waited and
+  the model said it is queued. The test job was then cancelled from the chat.
+
+**Fixed here:**
+- **Item 3.** On the follow-up "make it again but with only one tail", the picture was only
+  in an earlier message. Its `upload:` reference had been injected there, but the model
+  passed its chat backend's temp file path (`/tmp/claude-1000/.../images/1.png`) and
+  Media_Gen refused it.
+  - When the latest user message has no attachment of its own, it now repeats the earlier
+    references in one line: "[Media references from earlier in this chat: image 1 =
+    upload:... — pass these to Media_Gen tools, never a file path.]"
+  - The guide sentence says "never a file path" too.
+- **Item 4.** Stable Audio Small is installed, so the door creak simply queued. Pixal3D is
+  not installed, and generate_3d_model refuses it with different wording from the spec:
+  "3D models are not set up yet: missing model files (Models page, ...)". .249 only knew
+  "is not installed on the media server", so there was no note, and the model quietly
+  switched to trellis2 and queued a job the user had not asked for. That job was cancelled.
+  - "missing model files" is now a missing-model refusal too.
+  - The note says not to switch to another model or setting to get around it unless the
+    user asks.
+- **The 3D view page** gets model-viewer's built-in neutral lighting
+  (`environment-image="neutral"`, nothing loaded from elsewhere). Media_Gen's textures are
+  dark in themselves (metal / roughness), so the change is small.
+
+**For the media-gen side (no router change):**
+- The speech job's mp3 (hello_fe553e2f.mp3) is 237 bytes, an ID3 header and one frame. The
+  ogg (3,964 bytes) and the flac (53,799 bytes) of the same job are fine.
+- The router shows the mp3 copy of a sound first, so the chat linked a silent file.
+
+**Not run:**
+- Item 5: a result has to be deleted on the console's Files page first.
+- Item 8: the nsfw library's chat access is on. media_list_jobs listed an nsfw
+  create_private_image job to the chat model.
+
 ## v0.181.251 - the ladder says what one pass can and cannot show
 
 Asked: tighten the Local ladder's "could go" after the first real runs. With

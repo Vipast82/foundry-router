@@ -269,7 +269,7 @@ model-viewer{{width:100%;height:calc(100% - 40px);background:#2b2c2f}}
 p{{margin:0;padding:10px 14px}} a{{color:#8ab4f8}}
 </style></head>
 <body><model-viewer src="../{token}" alt="3D model" camera-controls auto-rotate
-shadow-intensity="1" touch-action="pan-y"></model-viewer>
+shadow-intensity="1" environment-image="neutral" touch-action="pan-y"></model-viewer>
 <p>Drag to turn it, scroll to zoom. <a href="../{token}?download=1">Download the GLB</a></p>
 </body></html>"""
 

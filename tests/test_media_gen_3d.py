@@ -210,6 +210,20 @@ NOT_INSTALLED = ("Error executing tool generate_sfx: Stable Audio Small is not i
                  "media server: missing checkpoints/sa_small.safetensors (1.3 GB). Tell the user to "
                  "install it in the media-gen console (the tool's form has a 'Download the missing "
                  "files' button, or Models). Nothing was queued.")
+# v0.181.252: the live wording of generate_3d_model's refusal (checklist, 2026-11-22)
+NOT_SET_UP = ("Error executing tool generate_3d_model: 3D models are not set up yet: missing model "
+              "files (Models page, or download into the ComfyUI models folder): diffusion_models/"
+              "pixal3d.safetensors")
+
+
+def test_the_3d_tools_wording_is_a_missing_model_refusal_too():
+    """The model then quietly switched pixal3d to trellis2: the note now says not to."""
+    err = ToolCallError(f"MCP tool Media_Gen/generate_3d_model returned error: {NOT_SET_UP}",
+                        ToolResult([{"type": "text", "text": NOT_SET_UP}], is_error=True))
+    out = str(tool_media.note_refusal("Media_Gen", "generate_3d_model", {"model": "pixal3d"}, err))
+    assert "missing-model refusal" in out and "do not switch to another model" in out
+    page = __import__("foundry_router.facade.media_api", fromlist=["x"])._VIEW_PAGE
+    assert 'environment-image="neutral"' in page
 
 
 def test_a_missing_model_refusal_is_relayed_and_never_retried_in_the_same_reply():

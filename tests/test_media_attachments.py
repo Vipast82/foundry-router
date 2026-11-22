@@ -99,6 +99,27 @@ def test_injection_and_numbering_keeps_pictures():
     assert out[0]["images"] == msgs[0]["images"]                        # picture stays
 
 
+def test_a_follow_up_turn_repeats_the_earlier_references():
+    """v0.181.252, checklist item 3: "make it again but with only one tail" carries no picture;
+    the model passed its chat backend's temp file path instead of the upload: ref."""
+    raw, msgs = convo({"role": "user", "content": [{"type": "text", "text": "3D model of this"},
+                                                   img(PNG)]},
+                      {"role": "assistant", "content": "queued"},
+                      {"role": "user", "content": "again but with only one tail"})
+    atts = MA.extract(raw, msgs)
+    atts[0].ref = "upload:aaaa_attachment-image1.png"
+    out = MA.inject(msgs, atts)
+    assert out[2]["content"] == ("again but with only one tail\n\n[Media references from earlier "
+                                 "in this chat: image 1 = upload:aaaa_attachment-image1.png — "
+                                 "pass these to Media_Gen tools, never a file path.]")
+    assert msgs[2]["content"] == "again but with only one tail"          # original untouched
+    assert "never a file path" in MA.GUIDE and MA.GUIDE in out[0]["content"]
+    # nothing passed: no recap
+    atts[0].ref = ""
+    atts[0].error = "media-gen unreachable (X)"
+    assert "earlier in this chat" not in MA.inject(msgs, atts)[2]["content"]
+
+
 # ------------------------------------------------------------------ cache + failures
 
 def test_sha256_cache_is_an_lru():

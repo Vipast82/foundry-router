@@ -53,7 +53,11 @@ URL_KEY = "_media_urls"
 PART_KEY = "_media_parts"
 GUIDE = ("Attached pictures/audio have media references in [Attached for media tools: ...]; "
          "pass those references to Media_Gen tools (image, photo, singer_image, audio, song, "
-         "video, logo...).")
+         "video, logo...), never a file path.")
+# v0.181.252: a follow-up turn ("make it again but with only one tail") carries no
+# attachment of its own; the model then passed its chat backend's temp file path
+RECAP = ("[Media references from earlier in this chat: {refs} — pass these to Media_Gen tools, "
+         "never a file path.]")
 
 _CACHE: "OrderedDict[str, str]" = OrderedDict()      # sha256 -> upload ref (successes only)
 
@@ -453,6 +457,16 @@ def inject(messages: list, atts: list[Attachment]) -> list:
         text = m.get("content") or ""
         m["content"] = (text.rstrip() + "\n\n" if text.strip() else "") + "\n".join(lines)
         out[i] = m
+    # v0.181.252: the latest user message has no attachment of its own: it repeats the
+    # references of the earlier ones, so a follow-up can pass the same picture again
+    users = [i for i, m in enumerate(out) if (m or {}).get("role") == "user"]
+    refs = [f"{a.kind} {a.number} = {a.ref}" for a in atts if a.ref]
+    if users and users[-1] > last and refs and isinstance(out[users[-1]].get("content"), str):
+        m = dict(out[users[-1]])
+        text = m.get("content") or ""
+        m["content"] = (text.rstrip() + "\n\n" if text.strip() else "") + RECAP.format(
+            refs="; ".join(refs))
+        out[users[-1]] = m
     return out
 
 

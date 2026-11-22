@@ -852,12 +852,17 @@ async def run_tool(svc, mcp, server: str, tool: str, args: Optional[dict], *,
 
 # Media_Gen 5.21.1: "Krea 2 Turbo is not installed on the media server: missing ...
 # Tell the user to install it in the media-gen console ... Nothing was queued."
-_NOT_INSTALLED = re.compile(r"\bis not installed on the media server\b", re.I)
+# v0.181.252: generate_3d_model words it "3D models are not set up yet: missing model files
+# (Models page, or download into the ComfyUI models folder): ..." (found by the live
+# checklist; the model then quietly switched pixal3d to trellis2)
+_NOT_INSTALLED = re.compile(r"\bis not installed on the media server\b|\bmissing model files\b",
+                            re.I)
 _REFUSAL_NOTE = ("[Foundry: this is a missing-model refusal from the media server. Nothing was "
                  "queued and nothing in this chat can install it. Tell the user this message as "
                  "it is (which model, and that they install it in the media-gen console: the "
                  "tool's form has a 'Download the missing files' button, or Models). Do NOT call "
-                 "the tool again until the user says it is installed.]")
+                 "the tool again until the user says it is installed, and do not switch to "
+                 "another model or setting to get around it unless the user asks for that.]")
 _REFUSED: dict = {}                    # (request, server, tool, args) -> (time, the error)
 _REFUSED_TTL = 900.0
 
