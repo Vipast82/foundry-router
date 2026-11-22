@@ -1480,3 +1480,307 @@ def flow_specs() -> list:
             sp.update({"level": level, "seed": seed, "ladder": "flow:fit", "tier": "easy"})
             out.append(sp)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Grounded answers: from the documents, cited, or not at all                  #
+# --------------------------------------------------------------------------- #
+# The ecosystem's main work use is answering from retrieved work documents
+# (docs/BENCH_GAPS.md, addition 1). Until v0.181.228 that was two eval prompts
+# with one sentence of context each. These hand the model a stack of short
+# records, each with an id, a collection, a tier and a date - the shape a
+# knowledge search returns - and ask something with exactly one right reply:
+#   cite      the value, and the id of the record it is in
+#   join      two records have to be put together; both ids
+#   conflict  the same fact in several dated records; the latest one wins
+#   absent    no record has it, though near ones do: NOT FOUND
+#   counter   a record says something other than what a model already
+#             believes (a 4-day week, HTTPS on 8443): the record wins
+# Level sets how many records there are and how many of them are near misses.
+
+GROUND_KINDS = ("cite", "join", "conflict", "absent", "counter", "scope", "tally")
+# scope     the question may use only some tiers: the confidential record has
+#           the answer and must not be used
+# tally     a count or a total over every record that matches, value only
+# The first calibration (2026-11-21) had only the first five kinds over
+# records all written one way, and qwen3.8-flash, Sonnet 5.5 and Opus 5.5 got
+# 35 of 35: a tidy look-up is not hard at 160 records. So records are now
+# written three ways, a record can lack the field asked for, and these two
+# kinds were added.
+_GROUND_TALLY = (3, 5, 8, 12, 18, 26, 36, 50, 70, 100, 140, 190)   # records a tally has to find
+_GROUND_SIZES = (6, 12, 24, 48, 96, 160)             # records on the page
+_GROUND_NEAR = (1, 2, 3, 4, 6, 8)                    # near-miss clients beside the one asked about
+NOT_FOUND = "NOT FOUND"
+GROUND_RULE = ("Answer from the documents only. Give the value and the id of every document "
+               "you used, in the form `ANSWER: <value> [<id>]`. If the documents do not "
+               f"contain the answer, the line is `ANSWER: {NOT_FOUND}`. You may reason first; "
+               "only the last ANSWER line is read.")
+
+_G_FIRST = ("Northgate", "Harlow", "Meridian", "Calder", "Ashby", "Tennant", "Whitlow",
+            "Brackley", "Dunmore", "Easton", "Farrow", "Glenrock", "Hadley", "Ingram",
+            "Jarrow", "Kelby", "Larkin", "Marden", "Norwell", "Orrin", "Penrose",
+            "Quill", "Radnor", "Selby", "Thorne", "Ulver", "Varley", "Wexford", "Yarrow",
+            "Zennor", "Alder", "Birch", "Corran", "Dalby", "Elm", "Fenwick", "Garth",
+            "Holt", "Ivel", "Jessop")
+_G_SECOND = ("Logistics", "Legal", "Dental", "Foods", "Systems", "Freight", "Capital",
+             "Estates", "Labs", "Motors")
+_G_GIVEN = ("Priya", "Tomas", "Ines", "Kwame", "Sofia", "Dmitri", "Aiko", "Luca", "Noor", "Elena")
+_G_FAMILY = ("Nwosu", "Lindqvist", "Okafor", "Haddad", "Romero", "Petrov", "Tanaka", "Ferrari",
+             "Rahman", "Kowalski")
+_G_CODE = ("Heron", "Quartz", "Lantern", "Sable", "Juniper", "Corvid", "Marlin", "Tundra",
+           "Ember", "Willow", "Osprey", "Basalt")
+# (the question, what the record says, the record's value, what a model believes)
+_G_COUNTER = (
+    ("How many days long is the working week at the Harlow site?",
+     "The working week at the Harlow site is {v} days.", "4", "5"),
+    ("Which port does HTTPS use on the internal gateway?",
+     "On the internal gateway HTTPS is served on port {v}.", "8443", "443"),
+    ("How many bytes does the storage team count as one kilobyte?",
+     "For capacity reports the storage team counts one kilobyte as {v} bytes.", "1000", "1024"),
+    ("Which port does SSH use on the build hosts?",
+     "SSH on the build hosts listens on port {v}.", "2222", "22"),
+    ("How many minutes are in one billing hour?",
+     "One billing hour is {v} minutes of recorded work.", "50", "60"),
+    ("How many hours is a standard shift at the plant?",
+     "A standard shift at the plant is {v} hours.", "9", "8"),
+    ("How many working days does the finance team count in a year?",
+     "Finance counts {v} working days in a year.", "248", "260"),
+    ("At what temperature does the lab record water as boiling on site?",
+     "At the site's altitude the lab records water boiling at {v} degrees Celsius.", "96", "100"),
+)
+_G_FIELDS = (("retainer", "What is the monthly retainer for {c}, in USD?"),
+             ("renewal", "On what date does the contract with {c} renew?"),
+             ("lead", "Who is the account lead for {c}?"),
+             ("terms", "Within how many days are invoices to {c} due?"))
+
+
+def _g_ids(rnd: random.Random, n: int) -> list:
+    out: set = set()
+    while len(out) < n:                      # letters only: an id never contains a value
+        out.add("KB-" + "".join(rnd.choice("BCDFGHJKLMNPQRSTVWXZ") for _ in range(4)))
+    ordered = sorted(out)
+    rnd.shuffle(ordered)
+    return ordered
+
+
+def _g_client(rnd: random.Random, name: str) -> dict:
+    return {"name": name, "retainer": f"{rnd.randrange(2450, 9950, 50):,}",
+            "renewal": f"2027-{rnd.randint(1, 12):02d}-{rnd.randint(1, 28):02d}",
+            "lead": f"{rnd.choice(_G_GIVEN)} {rnd.choice(_G_FAMILY)}",
+            "terms": str(rnd.choice((14, 21, 30, 45, 60, 75, 90)))}
+
+
+def _g_record(rid: str, c: dict, date: str, tier: str = "work_confidential",
+              style: int = 0, drop: str = "") -> str:
+    """One client record. `style` is how it is written (a row, a note, a minute);
+    `drop` leaves one field out, which is how a real record is incomplete."""
+    bits = {
+        "retainer": (f"monthly retainer {c['retainer']} USD",
+                     f"we bill them {c['retainer']} USD a month as a retainer",
+                     f"the retainer was confirmed at {c['retainer']} USD monthly"),
+        "renewal": (f"Contract renews on {c['renewal']}",
+                    f"the contract comes up for renewal on {c['renewal']}",
+                    f"renewal falls on {c['renewal']}"),
+        "lead": (f"Account lead: {c['lead']}",
+                 f"{c['lead']} looks after the account",
+                 f"{c['lead']} was named account lead"),
+        "terms": (f"Invoices are due within {c['terms']} days",
+                  f"they pay invoices within {c['terms']} days",
+                  f"payment terms stay at {c['terms']} days"),
+    }
+    order = [k for k in ("retainer", "renewal", "lead", "terms") if k != drop]
+    if style % 3 == 1:
+        order = order[1:] + order[:1]
+    elif style % 3 == 2:
+        order = order[::-1]
+    said = [bits[k][style % 3] for k in order]
+    head = f"{rid} | collection: clients | tier: {tier} | dated {date}\n"
+    if style % 3 == 0:
+        return head + f"{c['name']}: " + ". ".join(said) + "."
+    if style % 3 == 1:
+        return head + f"Note on {c['name']}. " + ". ".join(x[0].upper() + x[1:] for x in said) + "."
+    return head + f"Minutes, {c['name']} review: " + "; ".join(said) + "."
+
+
+def _g_day(rnd: random.Random) -> str:
+    return f"2026-{rnd.randint(1, 12):02d}-{rnd.randint(1, 28):02d}"
+
+
+def ground_spec(kind: str, level: int, seed: int) -> dict:
+    """{records: [text], question, want, avoid, kind} for one grounded case."""
+    rnd = random.Random(f"ground-{kind}-{level}-{seed}")
+    level = max(1, int(level))
+    size = _size(_GROUND_SIZES, level)
+    near = _size(_GROUND_NEAR, level)
+    first, second = rnd.choice(_G_FIRST), rnd.choice(_G_SECOND)
+    target = f"{first} {second}"
+    # near misses share a word with the client asked about; the rest share none
+    close = [f"{first} {s}" for s in _G_SECOND if s != second] + \
+            [f"{f} {second}" for f in _G_FIRST if f != first]
+    rnd.shuffle(close)
+    absent_name = close.pop()                 # a near name no record is about
+    far = [f"{f} {s}" for f in _G_FIRST for s in _G_SECOND
+           if f != first and s != second]
+    rnd.shuffle(far)
+    # a tally needs names of its own: leave them out of the other records
+    spare = _size(_GROUND_TALLY, level) if kind == "tally" else 0
+    names = close[:near] + far[:max(0, min(size - near - 1, len(far) - spare))]
+    ids = _g_ids(rnd, size + 3 * near + 16 + _size(_GROUND_TALLY, level))
+    clients = {n: _g_client(rnd, n) for n in names}
+    mine = _g_client(rnd, target)
+    field, ask = rnd.choice(_G_FIELDS)
+    for n in close[:near]:                    # a near miss never happens to agree
+        while clients[n][field] == mine[field]:
+            clients[n] = _g_client(rnd, n)
+    # (id, client, date, tier, style) for every other client: kept, so a kind that
+    # changes a client can write its record again under the same id
+    base = [(ids.pop(), c, _g_day(rnd), rnd.choice(("work_general", "work_confidential")),
+             rnd.randrange(3)) for c in clients.values()]
+    records = [_g_record(i, c, d, tier=t, style=st) for i, c, d, t, st in base]
+    avoid = [clients[n][field] for n in close[:near]]
+    question, want = ask.format(c=target), []
+
+    if kind == "cite":
+        rid = ids.pop()
+        records.append(_g_record(rid, mine, _g_day(rnd), style=rnd.randrange(3)))
+        want = [mine[field], rid]
+    elif kind == "join":
+        rid, pid = ids.pop(), ids.pop()
+        code = rnd.choice(_G_CODE)
+        records.append(_g_record(rid, mine, _g_day(rnd), style=rnd.randrange(3)))
+        records.append(f"{pid} | collection: projects | tier: work_general | dated "
+                       f"{_g_day(rnd)}\nProject {code} is run for {target}. It has a budget "
+                       f"of {rnd.randrange(20, 400, 5)},000 USD and reports monthly.")
+        others = [c for c in _G_CODE if c != code]
+        rnd.shuffle(others)
+        for n, other in zip(close[:near], others):       # a project for each near miss too
+            records.append(f"{ids.pop()} | collection: projects | tier: work_general | dated "
+                           f"{_g_day(rnd)}\nProject {other} is run for {n}. It has a budget "
+                           f"of {rnd.randrange(20, 400, 5)},000 USD and reports monthly.")
+        question = ask.format(c=f"the client that project {code} is run for")
+        want = [mine[field], rid, pid]
+    elif kind == "conflict":
+        k = min(6, 2 + level // 2)            # dated versions of the same record
+        days = sorted(rnd.sample(range(1, 361), k))
+        dates = [f"2026-{(d - 1) // 30 + 1:02d}-{(d - 1) % 30 + 1:02d}" for d in days]
+        versions, seen = [], {mine[field]}
+        for d in dates[:-1]:
+            old = _g_client(rnd, target)
+            while old[field] in seen:
+                old = _g_client(rnd, target)
+            seen.add(old[field])
+            versions.append((ids.pop(), old, d))
+        last = ids.pop()
+        versions.append((last, mine, dates[-1]))
+        records += [_g_record(i, c, d, style=rnd.randrange(3)) for i, c, d in versions]
+        question = (ask.format(c=target)
+                    + " Several documents record it: use the most recently dated one.")
+        want = [mine[field], last]
+        avoid = (avoid + [c[field] for _i, c, _d in versions[:-1]]
+                 + [i for i, _c, _d in versions[:-1]])
+    elif kind == "absent":
+        if seed % 2:
+            # the client has a record, and the record does not say
+            records.append(_g_record(ids.pop(), mine, _g_day(rnd), style=rnd.randrange(3),
+                                     drop=field))
+            avoid = avoid + [mine[field]]
+        else:
+            question = ask.format(c=absent_name)      # a near name no record is about
+        want = [NOT_FOUND]
+    elif kind == "scope":
+        # the confidential record has the current figure; the question may not use it
+        secret = ids.pop()
+        records.append(_g_record(secret, mine, _g_day(rnd), tier="work_confidential",
+                                 style=rnd.randrange(3)))
+        question = (ask.format(c=target) + " This is for a reader cleared for work_general "
+                    "only: use documents tiered work_general, and none tiered "
+                    "work_confidential.")
+        avoid = avoid + [mine[field], secret]
+        if seed % 2:
+            want = [NOT_FOUND]                        # only the confidential one says
+        else:
+            older = _g_client(rnd, target)
+            while older[field] == mine[field]:
+                older = _g_client(rnd, target)
+            public = ids.pop()
+            records.append(_g_record(public, older, _g_day(rnd), tier="work_general",
+                                     style=rnd.randrange(3)))
+            want = [older[field], public]
+    elif kind == "tally":
+        # every record a named lead has: how many, and what they add up to
+        k = _size(_GROUND_TALLY, level)
+        lead = f"{rnd.choice(_G_GIVEN)} {rnd.choice(_G_FAMILY)}"
+        for c in clients.values():                    # nobody else has that name
+            while c["lead"] == lead:
+                c["lead"] = f"{rnd.choice(_G_GIVEN)} {rnd.choice(_G_FAMILY)}"
+        taken = set(clients) | {target, absent_name}
+        pool = [f"{f} {x}" for f in _G_FIRST for x in _G_SECOND if f"{f} {x}" not in taken]
+        rnd.shuffle(pool)
+        total = 0
+        records = [_g_record(i, c, d, tier=t, style=st) for i, c, d, t, st in base]
+        made = pool[:k]
+        if len(made) < k:                 # never a key that counts records not written
+            raise ValueError(f"a tally of {k} needs more client names than there are")
+        for n in made:
+            c = _g_client(rnd, n)
+            c["lead"] = lead
+            total += int(c["retainer"].replace(",", ""))
+            records.append(_g_record(ids.pop(), c, _g_day(rnd), style=rnd.randrange(3)))
+        question = (f"How many clients have {lead} as account lead, and what do their monthly "
+                    f"retainers add up to, in USD? Give both numbers; no document ids are "
+                    f"needed for this one.")
+        want, avoid = [str(k), str(total)], []
+    elif kind == "counter":
+        q, says, value, believed = _G_COUNTER[rnd.randrange(len(_G_COUNTER))]
+        rid = ids.pop()
+        records.append(f"{rid} | collection: handbook | tier: work_general | dated "
+                       f"{_g_day(rnd)}\n" + says.format(v=value)
+                       + " This is set locally and differs from the usual figure.")
+        question, want, avoid = q, [value, rid], [believed]
+    else:
+        raise ValueError(f"unknown grounded kind: {kind}")
+    rnd.shuffle(records)
+    return {"kind": kind, "records": records, "question": question, "want": want,
+            "avoid": [a for a in dict.fromkeys(avoid) if a not in want], "task": target}
+
+
+# What goes in the grounded suite. Measured 2026-11-21, working allowed, 8,192
+# tokens (docs/BENCH_DIFFICULTY.md):
+#   the six look-ups (cite, join, conflict, absent, counter, scope), to 160
+#   records: qwen3.8-flash 27 of 27, Sonnet 5.5 13 of 13, Opus 5.5 13 of 13.
+#   tally: flash right to level 6 (26 records), wrong at 7, 8 and 9.
+#          Sonnet wrong at 7, right at 8, 10 and 11, over budget at 12 (190).
+#          Opus right at 7 to 12. Both over budget at 13 and 14 (240, 290).
+# So a look-up over tidy or untidy records is easy for all three, including
+# the tier rule and saying NOT FOUND; adding up across records is what
+# separates them, and it is the one ladder here.
+GROUND_LOOKUPS = ("cite", "join", "conflict", "absent", "counter", "scope")
+GROUND_LOOKUP_LEVELS = (3, 6)
+GROUND_TOP = 14
+GROUND_MAX = 15                                      # the names run out past this
+GROUND_TALLY_TIERS = {2: "easy", 4: "easy", 6: "easy", 7: "medium", 8: "medium",
+                      10: "medium", 11: "medium", 12: "hard", 13: "expert", 14: "expert"}
+# (level, seeds): one case a level on the way up, more where the tier is decided
+GROUND_TALLY_RUNGS = ((2, 1), (4, 1), (6, 1), (7, 1), (8, 1), (10, 1), (11, 1), (12, 4),
+                      (13, 2), (14, 2))
+
+
+def ground_specs(top_level: int = GROUND_TOP) -> list:
+    """Every grounded case: the look-ups, then the tally ladder lowest level first."""
+    top = max(2, min(GROUND_MAX, int(top_level or GROUND_TOP)))
+    out = []
+    for kind in GROUND_LOOKUPS:
+        for level in GROUND_LOOKUP_LEVELS:
+            for seed in (0, 1):
+                sp = ground_spec(kind, level, seed)
+                sp.update({"level": level, "seed": seed, "tier": "easy", "ladder": ""})
+                out.append(sp)
+    rungs = [r for r in GROUND_TALLY_RUNGS if r[0] <= top]
+    rungs += [(n, 2) for n in range(max(GROUND_TALLY_TIERS) + 1, top + 1)]
+    for level, seeds in rungs:
+        for seed in range(seeds):
+            sp = ground_spec("tally", level, seed)
+            sp.update({"level": level, "seed": seed, "ladder": "ground:tally",
+                       "tier": GROUND_TALLY_TIERS.get(level, "expert")})
+            out.append(sp)
+    return out

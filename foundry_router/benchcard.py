@@ -57,6 +57,7 @@ SUITE_NAMES = {
     "toolpick": "Pick the right tool",
     "agent": "Agent deliverables",
     "protocol": "Coordinator protocol",
+    "grounded": "Grounded answers",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -67,6 +68,8 @@ SUITE_ASKS = {
     "agent": "Build a deliverable from this ecosystem's real work. Judged, not scored.",
     "protocol": "End a sprint turn the way the coordinator reads it: a valid report, the "
                 "right status, the BLOCKED rules, a scope request.",
+    "grounded": "Answer from a stack of work records: the value and the record it came "
+                "from, or say the documents do not have it.",
 }
 
 
@@ -134,6 +137,24 @@ def miss_kind(suite: str, row) -> Optional[str]:
         # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
+    if suite == "grounded" or "grounded" in tags:
+        # v0.181.228: how a grounded answer went wrong, by what the case was for
+        said = str(row["answer"] or "").lower() if "answer" in row.keys() else ""
+        wanted_none = "not found" in str(row["expected"] or "").lower() \
+            if "expected" in row.keys() else False
+        if wanted_none:
+            return "answered when the documents did not say"
+        if "not found" in said[-200:]:
+            return "said not found when a document had it"
+        if "g-tally" in tags:
+            return "wrong count or total"
+        if 0 < float(score) < 100:
+            return "right value, citation missing or wrong"
+        return {"g-counter": "answered from what it believes, not the document",
+                "g-scope": "used a document outside the tier it was told to use",
+                "g-conflict": "took a superseded document",
+                "g-join": "did not put the two records together"}.get(
+                    next((t for t in tags if t.startswith("g-")), ""), "wrong value")
     if suite == "protocol" or "protocol" in tags:
         from .protocolbench import CHECK_WORDS
         if _detail(row).get("wrote_call"):
@@ -327,6 +348,15 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Source",
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
+    if suite == "grounded":
+        kinds = {"g-cite": "one record has it", "g-join": "two records put together",
+                 "g-conflict": "the latest of several", "g-absent": "no record has it",
+                 "g-counter": "the record against what it believes",
+                 "g-scope": "only some tiers may be used", "g-tally": "a total over many records"}
+        out.append({"name": "Kind of question",
+                    "rows": _group(rows, lambda r: next(
+                        (kinds[t] for t in _tags(r) if t in kinds), None),
+                        list(kinds.values()))})
     if suite == "codereason":
         families = {"stacked": "several rules at once", "lying": "names that lie",
                     "trace": "long traces", "search": "too big to trace"}
@@ -343,7 +373,8 @@ def facets(suite: str, rows: list) -> list:
         # any suite with generated ladders (v0.181.223, every suite v0.181.224)
         out.insert(1 if out and out[0]["name"] == "Difficulty" else 0,
                    {"name": "How far up each ladder", "rows": reach})
-    if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol"):
+    if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol",
+                     "grounded"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})

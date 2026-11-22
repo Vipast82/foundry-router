@@ -3264,6 +3264,25 @@ async def bench_protocol(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/grounded")
+async def bench_grounded(request: Request):
+    """Build the grounded-answers suite (v0.181.228): {name?, top_level?}.
+
+    Generated work records and questions with one right reply: the value and
+    the record it came from, or NOT FOUND. Nothing is read from the corpus."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(
+            bench.build_grounded, svc, str(body.get("name") or "grounded"),
+            int(body.get("top_level") or 0))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/codereason")
 async def bench_codereason(request: Request):
     """Build the code-reasoning suite: {name?, limit?, top_level?}.

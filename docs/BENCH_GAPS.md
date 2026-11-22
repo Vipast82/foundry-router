@@ -48,6 +48,12 @@ level as the dial, tiers by who misses.
 
 ### 1. Grounded answers over documents
 
+**Built in v0.181.228** as the "Grounded answers" suite: 39 generated cases,
+with a tier-scope kind added. Result: every look-up kind is easy for flash,
+Sonnet 5.5 and Opus 5.5; totals across records separate them. Still open
+from this item: the same cases through a persona's real route as eval
+prompts, once the tier gate (A1) exists. What was proposed:
+
 The plan's main work use. Give the model a handful of retrieved passages, each
 with an id and a tier marker, and a question. Four kinds of case:
 

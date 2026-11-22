@@ -1187,6 +1187,57 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
+_GROUND_SYSTEM = ("You answer questions from the documents you are given, and only "
+                  "from them.")
+
+
+def build_grounded(svc, name: str = "grounded", top_level: int = 0) -> dict:
+    """The grounded-answers suite (v0.181.228): a stack of short work records,
+    each with an id, a collection, a tier and a date, and a question with one
+    right reply - the value and the record it came from, or NOT FOUND. Every
+    case is generated (benchhard.ground_spec); the tally ladder climbs to
+    `top_level`. Returns {name, cases, path, tiers}."""
+    from . import benchhard
+    out = []
+    for sp in benchhard.ground_specs(top_level):
+        body = "\n\n".join(sp["records"]) + "\n\n" + sp["question"] + "\n" \
+            + benchhard.GROUND_RULE
+        tags = ["grounded", "context", f"g-{sp['kind']}", f"tier:{sp['tier']}",
+                f"records:{len(sp['records'])}",
+                f"tokens:{int(len(body) / CHARS_PER_TOKEN) + 120}"]
+        if sp["ladder"]:
+            tags += [f"ladder:{sp['ladder']}", f"level:{sp['level']}"]
+        out.append({
+            "id": f"GROUND-{sp['kind']}-L{sp['level']}-{sp['seed']}",
+            "task_id": sp["task"],
+            "tags": tags,
+            "max_tokens": THINK_ROOM,
+            "messages": [{"role": "system", "content": _GROUND_SYSTEM},
+                         {"role": "user", "content": body}],
+            "reference": {"content": ", ".join(sp["want"]), "must_include": sp["want"],
+                          "must_exclude": sp["avoid"], "final": True},
+        })
+    weights = tier_weights(out)
+    tiers: dict = {}
+    for c in out:
+        t = next((x.split(":", 1)[1] for x in c["tags"] if x.startswith("tier:")), "")
+        tiers[t] = tiers.get(t, 0) + 1
+        if weights:
+            c["weight"] = weights[t]
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench",
+                         f"built the {name} suite: {len(out)} case(s), "
+                         + ", ".join(f"{tiers[t]} {t}" for t in TIERS if t in tiers))
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f),
+            "tiers": {t: tiers[t] for t in TIERS if t in tiers}}
+
+
 _LOOKALIKE_SYSTEM = ("You choose tools. You are given every tool this system has, one per "
                      "line as NAME - description. Pick the one tool that meets every part "
                      "of the request. If no tool meets all of it, the answer is none.")

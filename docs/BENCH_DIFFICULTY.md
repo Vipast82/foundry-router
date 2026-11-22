@@ -1,6 +1,6 @@
 # Benchmark difficulty: what the tiers mean and how to raise them
 
-Written for v0.181.223 to v0.181.225 (2026-11-21). Code:
+Written for v0.181.223 to v0.181.228 (2026-11-21). Code:
 `foundry_router/benchhard.py`, `foundry_router/bench.py`,
 `foundry_router/protocolbench.py`. Covers every suite.
 
@@ -222,6 +222,46 @@ model run on that version of the suite did: easy when every local model
 passed, medium when one missed and no frontier model did, hard when a frontier
 model missed, expert when two or more frontier models ran it and all missed. A
 call that failed is not a miss.
+
+## Grounded answers (v0.181.228)
+
+A new suite, the first addition in `docs/BENCH_GAPS.md`. A stack of short work
+records - an id, a collection, a tier, a date, then a client's retainer,
+renewal, account lead and payment terms, written one of three ways - and a
+question with one right reply: `ANSWER: <value> [<id>]`, or `ANSWER: NOT FOUND`.
+
+| Kind | The right reply |
+|---|---|
+| cite | the value and the id of the one record that has it, among near-named clients |
+| join | a project record names the client, the client's record has the value: both ids |
+| conflict | the same fact in several dated records: the latest, not the others |
+| absent | NOT FOUND: no record is about that client, or its record leaves the field out |
+| counter | a record says a 4-day week, HTTPS on 8443: the record, not what a model believes |
+| scope | "use only work_general": the confidential record has the answer and may not be used |
+| tally | how many clients a named lead has and what their retainers add up to |
+
+| Kind and level | flash | Sonnet 5.5 | Opus 5.5 | Tier |
+|---|---|---|---|---|
+| the six look-ups, 12 to 160 records | 28/28 | 13/13 | 13/13 | easy |
+| tally, levels 2 to 6 (5 to 26 records to add) | 5/5 | 2/2 | 2/2 | easy |
+| tally, levels 7 to 9 (36 to 70) | 0/3 | 1/2 | 2/2 | medium |
+| tally, levels 10 and 11 (100, 140) | - | 2/2 | 2/2 | medium |
+| tally, level 12 (190) | - | over budget | right | hard |
+| tally, levels 13 and 14 (240, 290) | - | 0/2, over budget | 0/2, over budget | expert |
+
+A look-up over records is easy for all three, the tier rule and NOT FOUND
+included. That is worth knowing and worth keeping as the floor: a smaller
+model that fails it cannot be given work documents. What separates models is
+adding up across records, the same finding as the recall suite's ledgers.
+The suite is 39 cases: 24 look-ups and a 15-case tally ladder, with four
+cases at level 12 and two each at 13 and 14 so no tier rests on one case.
+
+Found while calibrating, both first seen as Sonnet and Opus scoring exactly
+the same partial mark: a tally whose records shared ids, and a tally whose key
+counted more records than there were client names to write. A tally too big
+for the names is now refused when the suite is built.
+
+## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers
 above are from the cases before these fixes.

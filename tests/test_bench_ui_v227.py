@@ -100,7 +100,9 @@ def test_the_page_leads_with_report_cards_and_every_suite_can_always_be_built():
                     'id="bench-agent"'):
         assert control in plates, control
         assert control not in tab[runs:], "not in the runs toolbar, which needs a run to exist"
-    assert plates.count('<div class="suite">') + plates.count('<div class="suite wide">') == 7
+    # eight since v0.181.228 added the grounded suite
+    assert plates.count('<div class="suite">') + plates.count('<div class="suite wide">') == 8
+    assert 'id="bench-grounded"' in plates and 'id="bench-grounded-top"' in plates
     assert tab.count('id="bench-cmp-msg"') == 1 and 'id="suite-msg"' in tab[cards:run_one]
 
 

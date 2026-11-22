@@ -10172,6 +10172,13 @@ async function tabBench() {
                 the model chooses is recorded and never executed. Half the marks for a search
                 that surfaced the right tool, half for then choosing it."
         >Build the finder suite</button></div></div>
+        <div class="suite"><h5>Grounded answers<span>${suiteNote("grounded")}</span></h5>
+          <p>A stack of work records with ids, tiers and dates, and a question with one right
+            reply: the value and the record it came from, or that no record has it. Then a
+            total over many records, which is what separates models.</p>
+          <div class="row tight"><button class="act" id="bench-grounded">Build the grounded suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of the tally ladder: how many clients a named lead has and what their retainers add up to. qwen3.8-flash passes to level 6 (26 records); Opus 5.5 passes level 12 (190) where Sonnet 5.5 runs over the budget; both fail 13 and 14 (2026-11-21).">top level
+              <input type="number" id="bench-grounded-top" min="2" max="15" value="14" style="width:52px"></label></div></div>
         <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
           <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
             a scope request in place of an edit outside the task's files.</p>
@@ -10297,6 +10304,14 @@ async function tabBench() {
       const tiers = Object.entries(out.tiers || {}).map(([t, n]) => `${n} ${t}`).join(", ");
       toast(`built "${out.name}": ${out.cases} cases` + (tiers ? ` (${tiers}; ladders to level ${out.top_level})` : "") +
             ((out.refused || []).length ? `, ${out.refused.length} refused` : ""));
+      render();
+    } catch (e) { $("#suite-msg").textContent = e.message; }
+  };
+  if ($("#bench-grounded")) $("#bench-grounded").onclick = async () => {
+    try {
+      const out = await api("bench/grounded", {method: "POST", body: {
+        top_level: +($("#bench-grounded-top") || {}).value || 0}});
+      toast(`built "${out.name}": ${out.cases} cases` + pfTiers(out));
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }
   };

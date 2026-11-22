@@ -1,3 +1,48 @@
+## v0.181.228 - grounded answers over work records
+
+Asked: build the first gap in docs/BENCH_GAPS.md. The ecosystem's main work
+use is answering from retrieved, tiered documents, and it was measured by two
+eval prompts with one sentence of context each.
+
+**The suite.** "Grounded answers": a stack of short work records - an id, a
+collection, a tier, a date, then a client's retainer, renewal, account lead
+and payment terms, written one of three ways - and a question with one right
+reply, `ANSWER: <value> [<id>]` or `ANSWER: NOT FOUND`. Seven kinds: the one
+record that has it among near-named clients; two records put together; the
+latest of several dated records; nothing has it (no record, or a record that
+leaves the field out); a record that says other than what a model believes (a
+4-day week, HTTPS on 8443); "use only work_general" when the confidential
+record has the answer; and a total over every record a named lead has. Every
+case is generated from (kind, level, seed) and the reply is scored on the
+value and on the citation, half each, with a near client's value, a
+superseded record or the believed figure scoring 0.
+
+**What it measured** (qwen3.8-flash, Sonnet 5.5, Opus 5.5, working allowed,
+8,192 tokens). The six look-ups came back right from all three, 54 of 54, to
+160 records, the tier rule and NOT FOUND included. Totals separate them: flash
+is right to 26 records and wrong from 36; Sonnet is right at 50, 100 and 140
+and over budget at 190; Opus is right to 190; both are over budget at 240 and
+290. So the look-ups are easy, and the tally ladder is easy to level 6, medium
+from 7 to 11, hard at 12 and expert at 13 and 14. 39 cases: 27 easy, 4 medium,
+4 hard, 4 expert, each tier a quarter of the score.
+
+**Two faults in the generator, found the way the others were.** Sonnet and
+Opus scored exactly the same partial mark on the same cases. One tally's
+records shared ids. Another's key counted more matching records than there
+were client names left to write, so both models had counted correctly and the
+key had not. Ids are now drawn once for a case, the name pool is doubled, and
+a tally too big for the names is refused when the suite is built.
+
+On the page: a "Grounded answers" plate under Suites with its build button and
+a "top level" box for the tally ladder (default 14, at most 15). On the card:
+"Kind of question", the ladder drawn, and misses named for what went wrong
+("answered when the documents did not say", "used a document outside the tier
+it was told to use", "right value, citation missing or wrong").
+
+Not done: the same cases as eval prompts through a persona's real route, which
+is where the tier gate (A1) will act; the brain lane and GPT were not
+calibrated. 40 tests.
+
 ## v0.181.227 - the Benchmark tab leads with where a model stops
 
 Asked: before the rebuild, go over Eval and Benchmark for gaps against the
