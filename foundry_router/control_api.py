@@ -278,6 +278,19 @@ async def tracks(request: Request, project: str = ""):
     return _cc(request).tracks_view(s["projects"], project)
 
 
+@router.get("/control/api/board")
+@_guard
+async def board(request: Request, project: str = ""):
+    """The status board as the coordinator's heartbeat reports it, per project (every seat
+    with its sprint or why it is idle, what is stopped and what it holds up, open
+    decisions, done in the last day, standing orders, the machine), plus the models the
+    router served in its last 100 requests. Read-only."""
+    s = _op(request)
+    if project and s["projects"] and project not in s["projects"]:
+        raise ControlError("unknown project", "not_found", 404)
+    return _cc(request).board_view(s["projects"], project)
+
+
 @router.get("/control/api/orders")
 @_guard
 async def orders(request: Request, project: str = ""):

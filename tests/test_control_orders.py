@@ -130,7 +130,7 @@ def test_the_payload_check_is_the_same_for_the_audit_summary():
 def test_the_automation_page_has_the_orders_tab_wired():
     html = PAGE.read_text(encoding="utf-8")
     assert 'id="tab-orders"' in html and 'id="v-orders"' in html
-    assert '"tracks", "orders", "services"' in html                 # VIEWS
+    assert '"orders", "services"' in html                           # VIEWS
     assert 'if (S.view === "orders") return renderOrders();' in html
     assert 'else if (a.startsWith("so-")) orderClick(a, b);' in html
     for needle in ('api("orders"', 'orderAction("order_add"', 'orderAction("order_cancel"',

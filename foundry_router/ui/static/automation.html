@@ -398,6 +398,7 @@
   <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
   <button role="tab" id="tab-queue" aria-controls="v-queue" data-view="queue">Queue</button>
   <button role="tab" id="tab-tracks" aria-controls="v-tracks" data-view="tracks" title="Parallel tracks: one git worktree per track, Studio shared at merge time">Tracks</button>
+  <button role="tab" id="tab-status" aria-controls="v-status" data-view="status" title="Status: every seat with its sprint or why it is idle, what is stopped and what it holds up, open decisions, what was done">Status</button>
   <button role="tab" id="tab-orders" aria-controls="v-orders" data-view="orders" title="Standing orders: an order that runs as a rule until its end condition is met, and the log of what the coordinator did by itself">Orders</button>
   <button role="tab" id="tab-services" aria-controls="v-services" data-view="services" title="Studio, Blender, audio and other services sprints need">Services</button>
   <button role="tab" id="tab-memory" aria-controls="v-memory" data-view="memory" title="Project memory (docs/memory) and the cross-project playbook: browse, search, add and edit, and the slice each session got">Memory</button>
@@ -417,6 +418,7 @@
   <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
   <section id="v-queue" role="tabpanel" aria-labelledby="tab-queue" hidden></section>
   <section id="v-tracks" role="tabpanel" aria-labelledby="tab-tracks" hidden></section>
+  <section id="v-status" role="tabpanel" aria-labelledby="tab-status" hidden></section>
   <section id="v-orders" role="tabpanel" aria-labelledby="tab-orders" hidden></section>
   <section id="v-services" role="tabpanel" aria-labelledby="tab-services" hidden></section>
   <section id="v-memory" role="tabpanel" aria-labelledby="tab-memory" hidden></section>
@@ -714,7 +716,7 @@ $("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.them
 applyTheme(store("fr-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
 
 /* ======================================================================== views */
-const VIEWS = ["ask", "routing", "settings", "rules", "queue", "tracks", "orders", "services", "memory", "prep"];
+const VIEWS = ["ask", "routing", "settings", "rules", "queue", "tracks", "status", "orders", "services", "memory", "prep"];
 function setView(v, push = true) {
   if (!VIEWS.includes(v)) v = "routing";
   S.view = v;
@@ -723,7 +725,7 @@ function setView(v, push = true) {
     b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
   }
   for (const x of VIEWS) $("#v-" + x).hidden = x !== v;
-  $("#draftbar").hidden = v === "queue" || v === "ask" || v === "tracks" || v === "orders" || v === "services" || v === "memory" || v === "prep";
+  $("#draftbar").hidden = v === "queue" || v === "ask" || v === "tracks" || v === "status" || v === "orders" || v === "services" || v === "memory" || v === "prep";
   if (push && location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
   closeDrawer();
   renderView();
@@ -741,6 +743,7 @@ function renderView() {
   if (S.view === "ask") return renderAsk();          // the chat needs no project document
   if (S.view === "tracks") return renderTracks();    // the coordinator's heartbeat, no document
   if (S.view === "orders") return renderOrders();    // standing orders and the watch log
+  if (S.view === "status") return renderBoard();     // the status board (heartbeat block)
   if (S.view === "services") { S.svc = null; return renderServices(); }   // nor do the services
   if (S.view === "memory") return renderMemory();    // nor does the memory (the coordinator reports it)
   if (S.view === "prep") return renderPrep();        // nor do the repo changes (heartbeat block)
@@ -753,7 +756,7 @@ function renderView() {
 function renderNotes() {
   const notes = [];
   if (S.loadError) notes.push(`<div class="banner bad"><b>Settings not loaded.</b> ${esc(S.loadError)}</div>`);
-  else if (S.c1 && !S.deployedRevision && !["queue", "tracks", "orders", "services", "memory", "prep"].includes(S.view))
+  else if (S.c1 && !S.deployedRevision && !["queue", "tracks", "status", "orders", "services", "memory", "prep"].includes(S.view))
     notes.push(`<div class="banner">Nothing is deployed for <b>${esc(S.cfgProject)}</b> yet. Start from the coordinator's own settings with <button class="act" type="button" data-act="import">Import project.toml…</button>, or edit here and deploy the first revision.</div>`);
   $("#notes").innerHTML = notes.join("");
 }
@@ -1168,6 +1171,7 @@ $("#main").addEventListener("click", e => {
   }
   else if (a.startsWith("tr-")) trackClick(a, b);
   else if (a.startsWith("so-")) orderClick(a, b);
+  else if (a.startsWith("bd-")) boardClick(a, b);
   else if (a.startsWith("pq-")) prepClick(a, b);
   else if (a.startsWith("svc-")) servicesClick(a, b);
   else if (a) queueClick(a, b);
@@ -2033,6 +2037,73 @@ async function trackClick(a, b) {
   } catch (e) { S.tr.busy = false; toast(e.message, true); }
 }
 $("#main").addEventListener("change", e => { const b = e.target.closest("[data-act=tr-project]"); if (b) trackClick("tr-project", b); });
+
+
+/* ===================================================================== status board
+   GET /control/api/board: the coordinator heartbeat's `board` block per project (every
+   seat with its sprint or why it is idle, the stopped sprints with what each holds up,
+   the open decisions, what was done in the last day, the standing orders, the machine)
+   plus the models the router served in its last 100 requests. Read-only: this is the
+   answer to "status". */
+S.bd = {data: null, project: "", seen: 0};
+const BD_SEEN = "foundry.board.seen";
+async function loadBoard() {
+  const r = await api("board" + (S.bd.project ? "?project=" + encodeURIComponent(S.bd.project) : ""));
+  S.bd.data = r;
+  const ids = Object.keys(r.board || {});
+  const known = Array.from(new Set([...(S.ovProjects || []), ...ids]));
+  if (!S.bd.project || !known.includes(S.bd.project)) S.bd.project = ids[0] || known[0] || "";
+}
+function bdMins(m) { return m === null || m === undefined ? "?" : m < 120 ? m + " min" : (Math.round(m / 6) / 10) + " h"; }
+function seatRow(s) {
+  if (s.idle) return `<tr><td><b>${esc(s.seat)}</b></td><td><span class="pill warn">idle</span></td><td colspan="2">${esc(s.why || "")}</td></tr>`;
+  return `<tr><td><b>${esc(s.seat)}</b>${s.lane ? ` <span class="hint" style="margin:0">lane ${esc(s.lane)}</span>` : ""}</td><td><span class="mono">${esc(s.sprint || "")}</span> ${sprintPill(s.state)}${s.phase ? ` <span class="hint" style="margin:0">${esc(s.phase)}</span>` : ""}</td><td style="white-space:nowrap">${esc(bdMins(s.minutes))}</td><td>${esc(s.doing || "")}</td></tr>`;
+}
+async function renderBoard() {
+  const el = $("#v-status");
+  if (!S.bd.data) {
+    el.innerHTML = `<p class="hint">Loading the status…</p>`;
+    try { await loadBoard(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  }
+  const d = S.bd.data || {}, all = d.board || {}, b = all[S.bd.project] || null;
+  const projects = Array.from(new Set([...(S.ovProjects || []), ...Object.keys(all)]));
+  let seen = 0;
+  try { seen = Number(JSON.parse(localStorage.getItem(BD_SEEN) || "{}")[S.bd.project] || 0); } catch (e) { seen = 0; }
+  const head = `<div class="row" style="margin-top:12px"><label class="fld" for="bd-project">Project</label>
+      <select id="bd-project" data-act="bd-project">${projects.map(p => `<option ${p === S.bd.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
+      ${b && b.paused ? `<span class="pill bad" title="${esc(b.pause_note || "")}">project paused</span>` : ""}
+      <span class="grow"></span>
+      <button class="act" type="button" data-act="bd-seen" title="Remember this moment: 'done since' counts from here next time">Mark as seen</button>
+      <button class="act" type="button" data-act="bd-refresh">Refresh</button></div>`;
+  if (!b) { el.innerHTML = head + `<div class="banner">No coordinator has reported a status board yet. It needs to run with <code>--control</code> on a release with the board.</div>`; return; }
+  const seats = b.seats || [], stopped = b.blockers || [], decs = b.decisions || [], done = b.done || [], orders = b.orders || [];
+  const fresh = seen ? done.filter(r => r.ts > seen) : [];
+  const m = b.machine || {}, models = d.models || {};
+  const mline = Object.entries(m).map(([k, v]) => `${esc(k.replace(/_gb$/, "").replace(/_/g, " "))} <b>${esc(v)}</b>${k.endsWith("_gb") ? " GB" : ""}`).join(" · ");
+  const modl = Object.entries(models.served || {}).map(([k, v]) => `<span class="pill">${esc(k)} ${v}</span>`).join(" ");
+  el.innerHTML = head + `
+    <p class="hint">Reported by ${esc(d.source || "?")} ${fmtAge(d.age_s)} ago.${Object.keys(b.errors || {}).length ? ` Not read: ${esc(Object.entries(b.errors).map(([k, v]) => k + ": " + v).join("; "))}.` : ""}</p>
+    <h2>Seats</h2>
+    <table class="jrn"><thead><tr><th>Seat</th><th>Sprint</th><th>For</th><th>Doing, or why idle</th></tr></thead><tbody>${seats.map(seatRow).join("")}</tbody></table>
+    <h2>Stopped${stopped.length ? ` (${stopped.length})` : ""}</h2>
+    ${stopped.length ? `<table class="jrn"><thead><tr><th>Sprint</th><th>For</th><th>Holds up</th><th>Why</th></tr></thead><tbody>${stopped.map(r => `<tr><td><span class="mono">${esc(r.sprint)}</span> ${sprintPill(r.state)}${r.waits_itself ? ` <span class="pill info" title="An outage wait or a hold: it goes on by itself">waits by itself</span>` : ""}</td><td style="white-space:nowrap">${esc(bdMins(r.minutes))}</td><td>${r.holds_up_n ? `<b>${r.holds_up_n}</b> <span class="mono">${esc((r.holds_up || []).join(", "))}</span>` : "<span class='hint' style='margin:0'>nothing</span>"}</td><td>${esc(r.doing || "")}</td></tr>`).join("")}</tbody></table>` : `<p class="hint">Nothing is stopped.</p>`}
+    <h2>Open decisions${decs.length ? ` (${decs.length})` : ""}</h2>
+    ${decs.length ? `<table class="jrn"><thead><tr><th>Sprint</th><th>Whose</th><th>Open</th><th>Question</th></tr></thead><tbody>${decs.map(x => `<tr><td class="mono">${esc(x.task)}</td><td><span class="pill ${x.whose === "yours" ? "warn" : ""}">${esc(x.whose)}</span> <span class="hint" style="margin:0">${esc(x.kind)}</span></td><td style="white-space:nowrap">${esc(bdMins(x.open_minutes))}${x.answers_itself_in_minutes !== null && x.answers_itself_in_minutes !== undefined ? `<div class="hint" style="margin:0">answers itself in ${esc(bdMins(x.answers_itself_in_minutes))}</div>` : ""}</td><td>${esc(x.question)}</td></tr>`).join("")}</tbody></table>` : `<p class="hint">No open decision.</p>`}
+    <h2>Done</h2>
+    <p>${seen ? `Since you marked it seen (${esc(when(seen))}): ${fresh.length ? fresh.map(r => `<span class="pill ok">${esc(r.sprint)}</span>`).join(" ") : "<span class='hint' style='margin:0'>none</span>"}<br>` : ""}In the last 24 h (${done.length}): ${done.map(r => `<span class="pill">${esc(r.sprint)}</span>`).join(" ") || "<span class='hint' style='margin:0'>none</span>"}</p>
+    ${orders.length ? `<h2>Standing orders (${orders.length})</h2><ul style="margin:6px 0;padding-left:18px">${orders.map(o => `<li>${esc(o.order)} <span class="hint" style="margin:0">from ${esc(o.by)}; acted ${o.actions}×${o.waiting ? "; waiting: " + esc(o.waiting) : ""}</span></li>`).join("")}</ul>` : ""}
+    <h2>Machine and models</h2>
+    <p>${mline || "<span class='hint' style='margin:0'>no machine reading (psutil is not installed beside the coordinator)</span>"}</p>
+    <p>Served in the router's last ${models.requests || 0} requests: ${modl || "<span class='hint' style='margin:0'>nothing recorded</span>"}${models.fallbacks ? ` <span class="pill warn" title="Requests that did not get the first model of their route">${models.fallbacks} fell to a later route</span>` : ""}</p>`;
+}
+function boardClick(a, b) {
+  if (a === "bd-project") S.bd.project = b.value;
+  if (a === "bd-seen") {
+    try { const o = JSON.parse(localStorage.getItem(BD_SEEN) || "{}"); o[S.bd.project] = Date.now() / 1000; localStorage.setItem(BD_SEEN, JSON.stringify(o)); } catch (e) { /* private mode */ }
+  }
+  S.bd.data = null; renderBoard();
+}
+$("#main").addEventListener("change", e => { const b = e.target.closest("[data-act=bd-project]"); if (b) boardClick("bd-project", b); });
 
 
 /* ===================================================================== standing orders
@@ -2911,6 +2982,7 @@ async function boot() {
   setInterval(async () => { if (document.hidden) return; await refreshUsage(); if (S.view === "routing" && !busy("v-routing")) { renderRouting(); refreshDry(); } }, 60000);
   setInterval(() => { if (!document.hidden && S.view === "queue" && !busy("v-queue")) { S.queue = null; renderQueue(); } }, 20000);
   setInterval(() => { if (!document.hidden && S.view === "tracks" && !busy("v-tracks") && !S.tr.busy) { S.tr.data = null; renderTracks(); } }, 20000);
+  setInterval(() => { if (!document.hidden && S.view === "status" && !busy("v-status")) { S.bd.data = null; renderBoard(); } }, 20000);
   setInterval(() => { if (!document.hidden && S.view === "services" && !busy("v-services")) { S.svc = null; renderServices(); } }, 20000);
   setInterval(() => { if (!document.hidden && S.view === "memory" && !busy("v-memory") && !S.mem.busy && !S.mem.edit) { S.mem.data = null; renderMemory(); } }, 30000);
 }

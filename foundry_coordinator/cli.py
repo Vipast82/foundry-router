@@ -47,6 +47,10 @@ Commands
   approve PROJECT TASK --kind KIND --by NAME [--note]     a human approval
   reject PROJECT TASK --by NAME --finding TEXT [...]      send back with findings
   answer PROJECT TASK TEXT...              answer the coding session's question
+  status [--board] [--json]                the tasks and locks; --board: every seat with
+                                           its sprint or why it is idle, what is stopped and
+                                           what it holds up, open decisions, done since the
+                                           last check, standing orders, the machine
   history PROJECT TASK  /  events [PROJECT]  /  reviews PROJECT TASK
   playbook init|status|reindex|search|add    the cross-project playbook (A1): its own
                                            repo, --playbook or $FOUNDRY_PLAYBOOK
@@ -791,6 +795,9 @@ def main(argv=None, clients=None, foundry=None) -> int:
     q3 = qs.add_parser("set-deps"); q3.add_argument("project"); q3.add_argument("task")
     q3.add_argument("--deps", default=""); q3.add_argument("--by", required=True)
     st = sub.add_parser("status"); st.add_argument("--json", action="store_true")
+    st.add_argument("--board", action="store_true",
+                    help="the status board: every seat with its sprint or why it is idle, what is "
+                         "stopped and what it holds up, open decisions, done since the last check")
     sub.add_parser("tick")
     r = sub.add_parser("run"); r.add_argument("--poll", type=float, default=5)
     r.add_argument("--max-ticks", type=int); r.add_argument("--until-settled", action="store_true")
@@ -1340,6 +1347,15 @@ def _dispatch(a, c: Coordinator) -> int:
                 t = s.task(p["project_id"], e["task_id"])
                 print(f"  {e['position']:>3}. {e['task_id']:<14} {t['state']:<17} deps "
                       f"{','.join(e['deps']) or '-'}  approved by {e['approved_by']}")
+        return 0
+    if a.cmd == "status" and a.board:
+        from . import board as B
+        boards = {pid: B.build(c, P) for pid, P in sorted(c.projects.items())}
+        if a.json:
+            print(json.dumps(boards, indent=2, default=str))
+            return 0
+        for pid, b in boards.items():
+            print(B.text(b, last_check=B.last_check(c, pid, mark=True)) + "\n")
         return 0
     if a.cmd == "status":
         st = c.status()

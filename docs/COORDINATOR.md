@@ -316,6 +316,23 @@ state change someone other than the engine made (an operator's unblock with its
 resolution). It is plain text in `<state dir>/watch-log/<YYYY-MM>.md`, appended once a
 minute; `log [--lines N]` prints its end, and the Orders tab shows the last lines.
 
+### The status board (`board.py`)
+
+`status --board` and Automation -> Status show one board per project, rebuilt each
+heartbeat from the coordinator's store:
+
+- **Seats**: the workstation's main line, every configured slot, every lane without a
+  Studio. A busy seat has its sprint, state, phase, minutes in that state and what it is
+  doing; an idle one says why, and an unbound slot names the queued sprints that could
+  start on it now (never a `workstation_only_sprints` one).
+- **Stopped**: each BLOCKED / FAILED / PAUSED / AWAITING_HUMAN sprint, for how long, why,
+  and the open sprints that wait on it directly or through others, the most held-up first.
+- **Open decisions** (whose, and when each answers itself), **done** in the last 24 hours,
+  the **standing orders**, and the **machine** (RAM where psutil is installed).
+
+The page adds the models the router served in its last 100 requests and how many of those
+fell to a later route. Read-only; a part that cannot be read is listed under "not read".
+
 ### Needs and services (`services.py`, Team Lead piece 5)
 
 A sprint may declare `needs` (`studio`, `blender`, `audio`, `images`, `gpu`, `backend`, `none`): a

@@ -1,3 +1,50 @@
+## v0.181.232 - one status board: every seat, what is stopped, what it holds up
+
+Fifth release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: item 26 (status on
+demand) and the listing half of item 12 (what every slot and the workstation
+is doing, and why an idle one is idle).
+
+Until now "status" meant reading five places: `status`, `tracks status`, the
+control center's overview, its inbox, and the usage log. The coordinator now
+builds one board, each heartbeat, from its own store:
+
+- **Seats.** The workstation's main line, every configured slot, and every
+  lane without a Studio. A busy seat shows its sprint, state and phase, how
+  long it has been there, and what it is doing. An idle one says why: the
+  sprint on it is stopped (with the reason), its lane has no open sprint, or
+  no lane is bound to it - and then which queued sprints could start on a slot
+  right now ("ready to start on a slot: BAL-2e"), or why none can ("FIN-1
+  waits for FIN-0"). Workstation-only sprints are never offered to a slot.
+- **Stopped.** Every BLOCKED, FAILED, PAUSED or AWAITING_HUMAN sprint with how
+  long and why, and the open sprints that wait on it directly or through other
+  waiting sprints, the most held-up first. That is "what is blocking the
+  critical path". One that is waiting out an outage or a hold by itself is
+  marked.
+- **Open decisions**, oldest first: whose each is (yours, or the
+  coordinator's own), and when it answers itself.
+- **Done** in the last 24 hours, and since you last looked: the page's "Mark as
+  seen", the CLI's own last run.
+- **Standing orders**, a line each.
+- **Machine and models**: free and total RAM, and the models the router served
+  in its last 100 requests with how many of those fell to a later route (the
+  router adds this; only it knows).
+
+Where: Automation -> **Status** (new tab, refreshes every 20 seconds), and
+`status --board` on the CLI (`--json` for the data). Read-only; one part
+failing shows as "not read" and never takes the rest down.
+
+Not yet on the board: Kilo's memory and the slot disks (they arrive with the
+releases that measure them), and starting a sprint on a free slot by itself
+(the board only says what could go there; that release is later and ships
+off).
+
+Files: `foundry_coordinator/board.py` (new), `control.py`, `cli.py`;
+`foundry_router/control_center.py` (`board_view`, `models_served`),
+`control_api.py`, `ui/static/automation.html`. 9 tests, one the page's own
+script run in node.
+
+Deploy: coordinator and router both changed.
+
 ## v0.181.231 - standing orders, and a log of what the coordinator did by itself
 
 Fourth release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: items 27 and 28.

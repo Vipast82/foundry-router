@@ -290,6 +290,8 @@ class ControlChannel:
                 # (Automation -> Orders)
                 "orders": self._orders_status(),
                 "watch_log": self._watch_log(),
+                # the status board per project (Automation -> Status)
+                "board": self._board_status(),
                 # 2026-10-27: the project checks running in the background (verify /
                 # closeout), per check, for the control center's activity view
                 "checks": self._checks_running(),
@@ -484,6 +486,16 @@ class ControlChannel:
                 out[pid] = O.view(self.c, P)
             except Exception as e:                               # noqa: BLE001
                 out[pid] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return out
+
+    def _board_status(self) -> dict:
+        from . import board as B
+        out = {}
+        for pid, P in sorted(self.c.projects.items()):
+            try:
+                out[pid] = B.build(self.c, P)
+            except Exception as e:                               # noqa: BLE001
+                out[pid] = {"errors": {"board": f"{type(e).__name__}: {e}"[:200]}}
         return out
 
     def _watch_log(self) -> list:

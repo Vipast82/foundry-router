@@ -745,7 +745,7 @@ class ControlCenter:
             "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s",
             "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
             "features", "overall", "client_version", "tracks", "prep_queue", "orders",
-            "watch_log")
+            "watch_log", "board")
             if payload.get(k) is not None})
         if isinstance(payload.get("checks"), list):
             # the coordinator's background project checks (verify / closeout), bounded
@@ -3596,6 +3596,50 @@ class ControlCenter:
             raise
         self._notify()
         return self.action_view(aid)
+
+    def board_view(self, projects: list, project: str = "") -> dict:
+        """The `board` block of the freshest coordinator heartbeat, per project (every
+        seat, the stopped sprints, open decisions, done, orders, machine), plus what only
+        the router knows: the models it served in its last 100 requests."""
+        best, out = None, {}
+        for s in self.sources(projects):
+            if s.get("kind") != "coordinator":
+                continue
+            d = s.get("detail") if isinstance(s.get("detail"), dict) else _uj(s.get("detail"), {})
+            bd = (d or {}).get("board")
+            if not isinstance(bd, dict):
+                continue
+            if best is None or (s.get("last_seen") or 0) > (best.get("last_seen") or 0):
+                best, out = s, bd
+        if projects:
+            out = {k: v for k, v in out.items() if k in projects}
+        if project:
+            out = {k: v for k, v in out.items() if k == project}
+        return {"board": out, "models": self.models_served(), "source": (best or {}).get("source_id"),
+                "age_s": (round(self.clock() - (best.get("last_seen") or 0)) if best else None)}
+
+    def models_served(self, limit: int = 100) -> dict:
+        """{requests, served: {model: n}, fallbacks} over the last `limit` requests the
+        router logged. A fallback is a request that needed more than one route."""
+        try:
+            read = getattr(self.db, "ro_query", None) or self.db.query
+            rows = read("SELECT served_model, attempts, models_used FROM request_log ORDER BY id "
+                        "DESC LIMIT ?", (max(1, min(1000, int(limit))),))
+        except Exception:                                         # noqa: BLE001
+            return {"requests": 0, "served": {}, "fallbacks": 0}
+        served: dict = {}
+        fell = 0
+        for r in rows:
+            m = _s(r.get("served_model"), 80) or "(none)"
+            served[m] = served.get(m, 0) + 1
+            mu = _uj(r.get("models_used"), []) or []
+            try:
+                if len(mu) > 1 or int(r.get("attempts") or 1) > 1:
+                    fell += 1
+            except (TypeError, ValueError):
+                pass
+        top = dict(sorted(served.items(), key=lambda kv: (-kv[1], kv[0]))[:12])
+        return {"requests": len(rows), "served": top, "fallbacks": fell}
 
     def orders_view(self, projects: list, project: str = "") -> dict:
         """The `orders` block of the freshest coordinator heartbeat, per project
