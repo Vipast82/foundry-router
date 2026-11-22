@@ -111,13 +111,35 @@ def opencode_config(*, provider: dict, implementer: str, dialect: str = "oc2",
     return cfg
 
 
+def remote_mcp_blocks(global_path: Optional[str] = None) -> dict:
+    """v0.181.249: the remote MCP servers the coordinator switches per sprint (Media_Gen),
+    copied from the global Kilo config so an OpenCode project can reach them: kilo_config
+    only flips `enabled`, and a name with no block of its own was written as
+    {"enabled": true} with no url (Kilo reads the rest from its global config, OpenCode
+    has none). Only type, url and timeout are copied (never headers or tokens); each starts
+    off, and the track/session config turns it on for the sprints that need it."""
+    from foundry_automation import service_map as SM
+    out: dict = {}
+    merged = SM.merged_mcp(global_path=global_path)
+    for name in SM.CONTROLLED_MCP:
+        srv = merged.get(name) or {}
+        if srv.get("type") != "remote" or not str(srv.get("url") or "").startswith(
+                ("http://", "https://")):
+            continue
+        blk = {"type": "remote", "url": str(srv["url"]), "enabled": False}
+        if isinstance(srv.get("timeout"), int):
+            blk["timeout"] = srv["timeout"]
+        out[name] = blk
+    return out
+
+
 def target_path(profile) -> str:
     from .kilo_config import kilo_path
     return kilo_path(profile)
 
 
 def write(profile, *, provider_from: str = "", dialect: str = "", apply: bool = False,
-          role_rules: Optional[dict] = None) -> dict:
+          role_rules: Optional[dict] = None, mcp_from: Optional[str] = None) -> dict:
     """Build (and with apply, write) the project's opencode.jsonc. Refuses to overwrite an
     existing file: after the first write the coordinator edits it in place."""
     client = getattr(profile, "client", None) or {}
@@ -146,6 +168,7 @@ def write(profile, *, provider_from: str = "", dialect: str = "", apply: bool = 
     cfg = opencode_config(provider=prov, implementer=impl, dialect=dialect, role_rules=rules,
                           default_agent=str(client.get("agent") or AB.OPENCODE.default_agent),
                           subagents=subs)
+    cfg["mcp"] = remote_mcp_blocks(mcp_from)
     text = "// written by foundry-coordinator agent-config; the coordinator edits it in place\n" \
            + json.dumps(cfg, indent=2) + "\n"
     out = {"path": path, "dialect": dialect, "agents": list(cfg["agent"]), "applied": False,
@@ -166,4 +189,5 @@ def write(profile, *, provider_from: str = "", dialect: str = "", apply: bool = 
     return out
 
 
-__all__ = ["AgentConfigError", "provider_block", "opencode_config", "write", "target_path"]
+__all__ = ["AgentConfigError", "provider_block", "opencode_config", "write", "target_path",
+           "remote_mcp_blocks"]

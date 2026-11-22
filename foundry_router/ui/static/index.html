@@ -8361,6 +8361,12 @@ async function tabMCP() {
         ? '<span class="pill ok" title="' + esc((r.tools || []).join(", ")) + '">reachable · ' + r.tool_count + ' tools</span>'
         : '<span class="pill bad" title="' + esc(r.error) + '">unreachable</span>';
       if (!r.ok) toast(name + ": " + r.error, true);
+      // v0.181.249: the test also takes the server's tools in now; say what changed
+      const sy = r.sync || {};
+      const parts = [["new", sy.added], ["gone", sy.removed], ["changed", sy.changed]]
+        .filter(([, l]) => l && l.length).map(([w, l]) => l.length + " " + w + " (" + l.slice(0, 6).join(", ") + (l.length > 6 ? ", …" : "") + ")");
+      if (r.ok) toast(name + ": tools updated" + (parts.length ? " — " + parts.join("; ") : ", no changes") + ". Start a new chat to use them.");
+      if (r.sync_error) toast(name + ": tool sync failed: " + r.sync_error, true);
     } catch (e) { if (el) el.innerHTML = '<span class="pill bad">error</span>'; toast(e.message, true); }
   };
   $("#main").innerHTML = `
@@ -8393,6 +8399,10 @@ async function tabMCP() {
         <label title="One call can take minutes (ComfyUI, Stable Audio). In chat, a call runs as a background job: the reply waits up to media.tool_inline_wait_seconds, then the model gets a job id it checks with tool_job_status — client timeouts can't kill the generation.">⏳ long-running</label>
         <input type="checkbox" id="mcp-long">
         <span class="hint">chat calls become jobs the model checks with tool_job_status</span></div>
+      <div class="row">
+        <label title="A server can send the model notes on how to use its tools (MCP 'instructions'; Media_Gen: queue, report the job id, check once, never loop). On: they are added to the system prompt of every chat whose tools include this server's. Off: the model sees only the tool descriptions.">📝 give the model its instructions</label>
+        <input type="checkbox" id="mcp-instr">
+        <span class="hint">the server's own usage notes go into the system prompt</span></div>
       <div id="mcp-sandbox" class="row" style="display:none">
         <label title="CPU cores passed to the sandbox as a call default (config wins over the model). Real enforcement is the sandbox container's cgroup limit — set it there too; a container restart may be needed.">CPU cores</label>
         <input id="mcp-cpus" type="number" step="0.5" min="0" size="5" value="1">
@@ -8433,6 +8443,7 @@ async function tabMCP() {
     // keys out of call_defaults; anything else stays in the raw JSON field.
     $("#mcp-exec").checked = !!s.executes_code;
     $("#mcp-long").checked = !!s.long_running;
+    $("#mcp-instr").checked = !!s.pass_instructions;
     const cd = {...(s.call_defaults || {})};
     $("#mcp-cpus").value = cd.cpus ?? 1;
     $("#mcp-mem").value = cd.memory_mb ?? 512;
@@ -8448,7 +8459,7 @@ async function tabMCP() {
     $("#mcp-to").value = 300; $("#mcp-pace").value = 0; $("#mcp-hdr").value = "Authorization";
     $("#mcp-retries").value = 3; $("#mcp-backoff").value = 30;
     $("#mcp-tr").value = "streamable-http";
-    $("#mcp-exec").checked = false; $("#mcp-long").checked = false;
+    $("#mcp-exec").checked = false; $("#mcp-long").checked = false; $("#mcp-instr").checked = false;
     $("#mcp-cpus").value = 1; $("#mcp-mem").value = 512;
     $("#mcp-net").checked = false; $("#mcp-defaults").value = "{}"; syncSandboxVis();
   };
@@ -8474,6 +8485,7 @@ async function tabMCP() {
         rate_limit_backoff_seconds: +$("#mcp-backoff").value || 30,
         executes_code: $("#mcp-exec").checked,
         long_running: $("#mcp-long").checked,
+        pass_instructions: $("#mcp-instr").checked,
         call_defaults: callDefaults}});
       const tok = $("#mcp-token").value.trim();
       if (tok) await api("mcp_servers/token", {method: "POST", body: {
@@ -9455,6 +9467,8 @@ function mediaCard(md) {
       <input type="checkbox" id="md-aud" ${c.audio_html ? "checked" : ""}><label for="md-aud" title="Also put an audio player under the link. Only for chat programs that show HTML in a reply.">audio player in the reply</label>
       <input type="checkbox" id="md-nostore" ${c.tool_fetch_no_store ? "checked" : ""}><label for="md-nostore" title="A tool server can mark a file as not to be kept anywhere else (Media_Gen does this for every file of a private library). Off: such a file is never copied to Foundry and gets no link from it; the chat gets the tool server's own link, which opens on your network. On: it is copied and shown like any other file, behind a link that needs no key.">also copy files marked private</label>
       <span class="hint">saved with the Save button above</span></div>
+    <div class="row"><label title="Tools whose jobs take longer than any chat can wait (a 3D model takes 10-25 minutes, a finished video 20 minutes and more). The reply says the job is queued and the person asks later; nothing holds the chat open. A queued reply whose own estimate is longer than the wait above is not waited for either. Comma-separated.">never wait for</label><input id="md-nowait" size="60" value="${esc((c.job_no_wait_tools || []).join(", "))}" placeholder="no tools">
+      <label title="The script the 'view in 3D' page loads to show a .glb a tool made (Google model-viewer), in the browser of the person chatting. Empty = no viewer: a 3D model is a download link only.">3D viewer script</label><input id="md-viewer" size="44" value="${esc(c.model_viewer_url || "")}" placeholder="none: download link only"></div>
     <p class="hint">A timeout is never resubmitted, the same request within ${c.dedupe_minutes} min returns the existing job, and a refused or unavailable model fails without falling back to another model or provider. Kilo/Cline save results into the project via the local media adapter (contrib/media-adapter).</p>
     ${jobs ? `<table><tr><th>time (UTC)</th><th>client</th><th>model</th><th>status</th><th>prompt</th><th>time</th><th>result</th></tr>${jobs}</table>` : '<p class="hint">No image jobs yet.</p>'}
   </div>`;
@@ -9477,7 +9491,8 @@ function bindMediaCard() {
         job_wait_seconds: +$("#md-wait").value, tool_output_max_mb: +$("#md-maxmb").value,
         public_base_url: $("#md-base").value.trim(), public_link_ttl_hours: +$("#md-ttl").value,
         video_html: $("#md-vid").checked, audio_html: $("#md-aud").checked,
-        tool_fetch_no_store: $("#md-nostore").checked}});
+        tool_fetch_no_store: $("#md-nostore").checked,
+        job_no_wait_tools: $("#md-nowait").value, model_viewer_url: $("#md-viewer").value.trim()}});
       toast("Image settings saved"); render();
     } catch (e) { toast(e.message, true); }
   };

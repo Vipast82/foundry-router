@@ -191,6 +191,9 @@ class MCPManager:
         # running rather than hung.
         self._inflight: dict[int, dict] = {}
         self._inflight_seq = 0
+        # v0.181.249: each server's MCP `instructions` from its last initialize
+        # (server_notes.py hands them to the model when the server is set to)
+        self.instructions: dict[str, str] = {}
         # Persistent (pooled) MCP sessions, one per server: the handshake
         # (connect + initialize) is paid once, not on every tool call.
         # keyed by (server, event loop): a session cannot be used from a loop
@@ -355,7 +358,11 @@ class MCPManager:
             # (read, write) — take the first two either way.
             read, write = streams[0], streams[1]
             async with ClientSession(read, write) as session:
-                await session.initialize()
+                init = await session.initialize()
+                try:
+                    self.instructions[name] = str(getattr(init, "instructions", "") or "")[:8000]
+                except Exception:                                 # noqa: BLE001
+                    pass
                 yield session
 
     async def list_tools(self, name: str) -> list[dict]:

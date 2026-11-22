@@ -85,7 +85,25 @@ async def call_tool_rich(mcp, server: str, tool: str, args: dict, *, sink=None,
 
     sink: a chat path's per-request media list. With it, the call goes through
     tool_media.run_tool — images/audio are stored and queued for the reply,
-    long-running servers become tool jobs. tool_job_status always goes there."""
+    long-running servers become tool jobs. tool_job_status always goes there.
+
+    v0.181.249: a "model not installed" refusal (Media_Gen 5.21.1) gets a note for
+    the model to relay it and not retry, and the same call again in the same
+    request is answered with that refusal without reaching the server."""
+    from .. import tool_media
+    from ..tools.mcp_client import ToolCallError
+    held = tool_media.refused_before(server, tool, args)
+    if held is not None:
+        raise held
+    try:
+        return await _call_tool_rich(mcp, server, tool, args, sink=sink, persona=persona,
+                                     progress=progress, **kw)
+    except ToolCallError as e:
+        raise tool_media.note_refusal(server, tool, args, e) from None
+
+
+async def _call_tool_rich(mcp, server: str, tool: str, args: dict, *, sink=None,
+                          persona=None, progress=None, **kw):
     from .. import tool_media
     from .. import tool_finder
     svc = getattr(mcp, "foundry_svc", None)

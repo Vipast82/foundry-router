@@ -42,6 +42,16 @@ person chatting. Now, on the brain, worker and direct paths:
    and makes the file later (Media_Gen) is waited for here: Foundry reads the
    job with ``media.job_check_tool`` until it is done or
    ``media.job_wait_seconds`` passed, so the picture is in the same reply.
+9. **3D models (v0.181.249).** A .glb a tool lists (Media_Gen generate_3d_model)
+   is stored like the rest and shown as a download link plus a "view in 3D" page
+   (``/media/a/<token>/view``, Google <model-viewer>, ``media.model_viewer_url``).
+   A detailed mesh (label or file name ending ``_detail``, hundreds of MB) is
+   never fetched: the chat gets one line with the tool server's own link. A job
+   whose tool takes longer than any chat wait (``media.job_no_wait_tools``, or
+   the queued reply's own "about 10-25 minutes") is not waited for at all.
+10. **Deleted at the source (v0.181.249).** When Media_Gen says files of a job
+   were deleted from its library, Foundry deletes its own copies of them too,
+   so the old links stop working, and the model is told not to show them again.
 """
 
 from __future__ import annotations
@@ -69,11 +79,20 @@ _MAX_WAIT = 60.0                      # tool_job_status long-poll cap
 _DEDUPE_S = 600.0                     # same long call from the same client -> same job
 _URL_RE = re.compile(r"https?://[^\s<>\"'`\])}]+", re.I)
 _MEDIA_EXT = {"png", "jpg", "jpeg", "webp", "gif", "wav", "mp3", "ogg", "oga", "flac",
-              "m4a", "webm", "opus", "mp4", "m4v", "mov"}
+              "m4a", "webm", "opus", "mp4", "m4v", "mov", "glb"}
 _VIDEO_EXT = {"mp4", "m4v", "mov"}
+_MODEL_EXT = {"glb"}
+GLB_MIME = "model/gltf-binary"
 # which copy to show when one result is listed in several formats: first wins
 _FORMAT_ORDER = ("png", "jpg", "jpeg", "webp", "gif", "mp4", "m4v", "mov", "webm",
-                 "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac")
+                 "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac", "glb")
+# a side file that is still shown: the picture a 3D model was built from ("picture_png:")
+_SHOWN_SIDE = re.compile(r"^picture_(png|jpe?g|webp)$")
+# a model file that is only ever a link (Media_Gen "glb_detail:", <name>_detail.glb)
+_DETAIL = re.compile(r"_detail$")
+# Media_Gen 5.20.1: files deleted from the library since the job ran
+_DELETED_SOME = re.compile(r"Deleted from the library since this job ran[^:]*:\s*([A-Za-z0-9_, ]+)")
+_DELETED_ALL = re.compile(r"FILES DELETED")
 # "mp4: http://..." — the word a tool put in front of a link
 _LABELLED_URL = re.compile(r"([A-Za-z0-9_]+):\s*(https?://[^\s<>\"'`\])}]+)")
 _JOB_FINAL = ("done", "failed", "cancelled", "canceled", "error")
@@ -114,7 +133,16 @@ class MediaItem:
     @property
     def kind(self) -> str:
         return ("audio" if self.mime.startswith("audio/")
-                else "video" if self.mime.startswith("video/") else "image")
+                else "video" if self.mime.startswith("video/")
+                else "model" if self.mime.startswith("model/") else "image")
+
+
+@dataclass
+class LinkOnly:
+    """A file shown only as the tool server's own link, never fetched: a
+    detailed 3D mesh of hundreds of MB."""
+    url: str
+    label: str
 
 
 @dataclass
@@ -128,6 +156,7 @@ class PendingJob:
 class _Captured:
     items: list = field(default_factory=list)
     notes: list = field(default_factory=list)     # skipped files, for the model
+    links: list = field(default_factory=list)     # LinkOnly: shown as the server's own link
 
 
 # -- signed links -------------------------------------------------------------
@@ -207,6 +236,11 @@ def render(svc, sink: list) -> str:
             url = link(svc, it)
             if it.kind == "image":
                 lines.append(f"![{_md(it.label)}]({url})")
+            elif it.kind == "model":
+                line = f"🧊 [{_md(it.label)} (glb, {_size(it.bytes)})]({url}?download=1)"
+                if (getattr(cfg.media, "model_viewer_url", "") or "").strip():
+                    line += f" · [view in 3D]({url}/view)"
+                lines.append(line)
             elif it.kind == "video":
                 ext = it.mime.split("/", 1)[1].replace("quicktime", "mov")
                 lines.append(f"🎬 [{_md(it.label)} ({ext}, {_size(it.bytes)})]({url}) · "
@@ -218,6 +252,11 @@ def render(svc, sink: list) -> str:
                 lines.append(f"🔊 [{_md(it.label)} ({ext}, {_size(it.bytes)})]({url})")
                 if getattr(cfg.media, "audio_html", False):
                     lines.append(f'<audio controls src="{url}"></audio>')
+        elif isinstance(it, LinkOnly):
+            if ("link", it.url) in seen:
+                continue
+            seen.add(("link", it.url))
+            lines.append(f"🧊 [{_md(it.label)} (large file, opens on your network)]({it.url})")
         elif isinstance(it, PendingJob):
             if ("job", it.job_id) in seen:
                 continue
@@ -231,16 +270,22 @@ def _md(text: str) -> str:
     return re.sub(r"[\[\]()\n]", " ", text or "file").strip()[:80] or "file"
 
 
-def model_note(items: list, notes: list) -> str:
+def model_note(items: list, notes: list, links: Optional[list] = None) -> str:
     """What the model is told about the files it can't hand back itself."""
     out = []
-    if items:
+    if items or links:
         n_img = sum(1 for i in items if i.kind == "image")
         n_vid = sum(1 for i in items if i.kind == "video")
-        n_aud = len(items) - n_img - n_vid
+        n_mod = sum(1 for i in items if i.kind == "model")
+        n_aud = len(items) - n_img - n_vid - n_mod
+        n_lnk = len(links or [])
         what = ", ".join(p for p in (f"{n_img} image(s)" if n_img else "",
                                      f"{n_vid} video(s)" if n_vid else "",
-                                     f"{n_aud} audio file(s)" if n_aud else "") if p)
+                                     f"{n_mod} 3D model(s) (a download link and a 3D view)"
+                                     if n_mod else "",
+                                     f"{n_aud} audio file(s)" if n_aud else "",
+                                     f"{n_lnk} link(s) to a detailed mesh (large, link only)"
+                                     if n_lnk else "") if p)
         out.append(f"[Foundry: {what} from this tool are shown to the user automatically "
                    f"under your reply. Don't repeat or invent links to them; just say what "
                    f"you made.]")
@@ -298,18 +343,21 @@ def pick_urls(texts: list, hosts: set) -> list[str]:
       ("mp4:", "png:") while others say more ("uncaptioned_mp4:",
       "narration_flac:"), only the plain ones: the others are side files;
     * one link per result: of "x.ogg", "x.mp3" and "x.flac" the first format in
-      _FORMAT_ORDER."""
+      _FORMAT_ORDER;
+    * never a detailed 3D mesh (detail_links): it is hundreds of MB;
+    * the picture a 3D model was built from ("picture_png:") counts as a main file."""
     cands: list[tuple[str, str, bool]] = []          # (url, ext, plain label)
+    labels = url_labels(texts)
     for txt in texts:
-        labels = {m.group(2).rstrip(".,;:!?"): m.group(1).lower()
-                  for m in _LABELLED_URL.finditer(txt or "")}
         for u in _URL_RE.findall(txt or ""):
             u = u.rstrip(".,;:!?")
             ext = _url_ext(u)
             if not ext or any(c[0] == u for c in cands) \
-                    or (urlsplit(u).hostname or "").lower() not in hosts:
+                    or (urlsplit(u).hostname or "").lower() not in hosts \
+                    or _is_detail(u, labels.get(u, "")):
                 continue
-            cands.append((u, ext, labels.get(u) == ext))
+            lab = labels.get(u)
+            cands.append((u, ext, lab == ext or bool(_SHOWN_SIDE.match(lab or ""))))
     if any(c[2] for c in cands):
         cands = [c for c in cands if c[2]]
     best: dict[str, tuple[str, str, bool]] = {}
@@ -319,6 +367,55 @@ def pick_urls(texts: list, hosts: set) -> list[str]:
         if stem not in best or rank.get(c[1], 99) < rank.get(best[stem][1], 99):
             best[stem] = c
     return [c[0] for c in best.values()]
+
+
+def url_labels(texts: list) -> dict:
+    """{url: the word the tool put in front of it, lower case} ("glb_detail: http://...")."""
+    out: dict = {}
+    for txt in texts:
+        for m in _LABELLED_URL.finditer(txt or ""):
+            out.setdefault(m.group(2).rstrip(".,;:!?"), m.group(1).lower())
+    return out
+
+
+def _is_detail(url: str, label: str) -> bool:
+    """A detailed 3D mesh: a model file labelled or named *_detail."""
+    if _url_ext(url) not in _MODEL_EXT:
+        return False
+    name = urlsplit(url).path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return bool(_DETAIL.search(label or "") or _DETAIL.search(name))
+
+
+def detail_links(texts: list, hosts: set) -> list[tuple[str, str]]:
+    """[(url, label)] of the detailed 3D meshes a result lists: shown as the tool
+    server's own link and never fetched."""
+    labels = url_labels(texts)
+    out: list[tuple[str, str]] = []
+    for txt in texts:
+        for u in _URL_RE.findall(txt or ""):
+            u = u.rstrip(".,;:!?")
+            if (urlsplit(u).hostname or "").lower() in hosts and _is_detail(u, labels.get(u, "")) \
+                    and all(o[0] != u for o in out):
+                out.append((u, labels.get(u) or "glb_detail"))
+    return out
+
+
+def _model_mime(raw: bytes, ext: str) -> Optional[str]:
+    """model/gltf-binary for a file a tool NAMED .glb whose bytes start with the
+    binary glTF magic; None otherwise."""
+    return GLB_MIME if ext in _MODEL_EXT and raw[:4] == b"glTF" else None
+
+
+def _job_at(text: str, pos: int) -> str:
+    """The Media_Gen job id a link at `pos` of a reply belongs to: the last
+    "job_id: <id>" line before it ("" = none)."""
+    from .media import _MG_JOB
+    last = ""
+    for m in _MG_JOB.finditer(text or ""):
+        if m.start() > pos:
+            break
+        last = m.group(1)
+    return last
 
 
 def _video_mime(raw: bytes, ext: str) -> Optional[str]:
@@ -356,8 +453,9 @@ async def _fetch(svc, url: str, cap: int) -> tuple[Optional[bytes], str]:
         return None, describe_exception(e)[:160]
 
 
-async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple[list, list]:
-    """([{raw, mime, w, h, label}], notes) from one tool result."""
+async def _collect(svc, server: str, tool: str, rich,
+                   fetch_urls: bool) -> tuple[list, list, list]:
+    """([{raw, mime, w, h, label, source_*}], notes, [LinkOnly]) from one tool result."""
     from .media import sniff_media
     mcfg = svc.config_store.config.media
     cap = int(float(mcfg.tool_output_max_mb or 0) * 1024 * 1024) or (100 * 1024 * 1024)
@@ -365,7 +463,10 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
     notes: list[str] = []
     seen: set[str] = set()
 
-    def add(raw: Optional[bytes], label: str, video: Optional[str] = None) -> None:
+    links: list = []
+
+    def add(raw: Optional[bytes], label: str, video: Optional[str] = None,
+            src: Optional[dict] = None) -> None:
         if not raw:
             return
         if len(raw) > cap:
@@ -379,7 +480,7 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
         if digest in seen:
             return
         seen.add(digest)
-        found.append({"raw": raw, "mime": mime, "w": w, "h": h, "label": label})
+        found.append({"raw": raw, "mime": mime, "w": w, "h": h, "label": label, **(src or {})})
 
     for b in getattr(rich, "blocks", None) or []:
         t = b.get("type")
@@ -406,6 +507,9 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
                  if b.get("type") == "text"]
         texts += [b.get("uri") or "" for b in getattr(rich, "blocks", None) or []
                   if b.get("type") == "resource_link"]
+        joined = "\n".join(texts)
+        labels = url_labels(texts)
+        links = [LinkOnly(u, f"{tool} {lab}") for u, lab in detail_links(texts, hosts)]
         for u in pick_urls(texts, hosts)[:_MAX_URLS]:
             raw, why = await _fetch(svc, u, cap)
             if raw is None and why == _NO_STORE:
@@ -418,11 +522,62 @@ async def _collect(svc, server: str, tool: str, rich, fetch_urls: bool) -> tuple
                 notes.append(f"[Foundry: couldn't fetch {u} to show the user ({why}); give the "
                              f"user that link instead.]")
                 continue
-            video = _video_mime(raw, _url_ext(u))
-            kind = "video" if video else (
-                "audio" if (sniff_media(raw)[0] or "").startswith("audio/") else "image")
-            add(raw, f"{tool} {kind}", video)
-    return found, notes
+            ext = _url_ext(u)
+            forced = _video_mime(raw, ext) or _model_mime(raw, ext)
+            kind = ("video" if (forced or "").startswith("video/") else
+                    "3D model" if forced else
+                    "audio" if (sniff_media(raw)[0] or "").startswith("audio/") else "image")
+            # where it came from: Media_Gen's delete notice names the job and the file's key
+            add(raw, f"{tool} {kind}", forced,
+                {"source_url": u, "source_key": labels.get(u, ""),
+                 "source_job": _job_at(joined, max(0, joined.find(u)))})
+    return found, notes, links
+
+
+def forget_deleted(svc, text: str) -> list[str]:
+    """Media_Gen 5.20.1: a check reply says files of a job were deleted from its
+    library ("Deleted from the library since this job ran ...: png, glb." or
+    "FILES DELETED: every file of this job ..."). Foundry's copies of those files
+    are deleted too, so a /media/a link given earlier stops working (bare 404),
+    and the model gets a note not to show earlier links. Returns the notes.
+    Training-capture records hold hashes only and are kept."""
+    if not text or "job_id" not in text:
+        return []
+    every = bool(_DELETED_ALL.search(text))
+    some = _DELETED_SOME.search(text)
+    if not (every or some):
+        return []
+    from .media import _MG_JOB, _jl
+    jid = (_MG_JOB.search(text) or [None, ""])[1]
+    if not jid:
+        return []
+    keys = None if every else {k.strip().lower() for k in some.group(1).split(",") if k.strip()}
+    media = getattr(svc, "media", None)
+    n = 0
+    if media is not None:
+        try:
+            rows = svc.db.query(
+                "SELECT id, artifacts FROM media_jobs WHERE op IN ('tool','tool_job') "
+                "AND artifacts LIKE ?", (f'%"source_job": "{jid}"%',))
+            for row in rows:
+                for a in _jl(row.get("artifacts"), []):
+                    if a.get("source_job") != jid or (
+                            keys is not None and (a.get("source_key") or "") not in keys):
+                        continue
+                    p = media.dir / row["id"] / str(a.get("file") or "")
+                    if a.get("file") and p.is_file():
+                        p.unlink()
+                        n += 1
+        except Exception:                                        # noqa: BLE001
+            log.exception("forgetting the deleted files of job %s failed", jid)
+    if n:
+        svc.db.log_event("info", "media", f"job {jid}: {n} copied file(s) deleted",
+                         "the tool server says they were deleted from its library")
+    what = "every file" if every else "the file(s) " + ", ".join(sorted(keys or []))
+    return [f"[Foundry: {what} of job {jid} were deleted from the media server's library"
+            + (f"; Foundry deleted its {n} copied file(s) too, so links to them no longer work"
+               if n else "")
+            + ". Don't show or repeat any earlier link to them; tell the user they are gone.]"]
 
 
 async def store_result(svc, server: str, tool: str, args: Optional[dict], rich, *,
@@ -432,15 +587,24 @@ async def store_result(svc, server: str, tool: str, args: Optional[dict], rich, 
     job_id: write into this existing tool_job row instead of a new 'tool' row."""
     out = _Captured()
     media = getattr(svc, "media", None)
-    if media is None or not svc.config_store.config.media.tool_outputs:
+    if media is None:
+        return out
+    # before anything else, and also with tool_outputs off: copies made earlier go
+    gone = forget_deleted(svc, getattr(rich, "text", "") or "")
+    if not svc.config_store.config.media.tool_outputs:
+        out.notes = gone
         return out
     try:
-        found, out.notes = await _collect(svc, server, tool, rich, fetch_urls)
+        found, out.notes, out.links = await _collect(svc, server, tool, rich, fetch_urls)
+        out.notes += gone
         if not found:
             return out
-        n_img = n_aud = n_vid = 0
+        n_img = n_aud = n_vid = n_mod = 0
         for f in found:
-            if f["mime"].startswith("audio/"):
+            if f["mime"].startswith("model/"):
+                n_mod += 1
+                f["label"] = f"{tool} 3D model" + (f" {n_mod}" if n_mod > 1 else "")
+            elif f["mime"].startswith("audio/"):
                 n_aud += 1
                 f["label"] = f"{tool} audio" + (f" {n_aud}" if n_aud > 1 else "")
             elif f["mime"].startswith("video/"):
@@ -675,11 +839,72 @@ async def run_tool(svc, mcp, server: str, tool: str, args: Optional[dict], *,
     rich = await raw_call_tool_rich(mcp, server, tool, args or {})
     rich = await wait_for_queued(svc, mcp, server, tool, rich, sink, progress)
     cap = await store_result(svc, server, tool, args, rich, persona=persona)
-    if cap.items or cap.notes:
+    if cap.items or cap.notes or cap.links:
         sink.extend(cap.items)
-        rich.text = "\n".join(p for p in ((rich.text or ""), model_note(cap.items, cap.notes)) if p)
+        sink.extend(cap.links)
+        rich.text = "\n".join(p for p in ((rich.text or ""),
+                                          model_note(cap.items, cap.notes, cap.links)) if p)
     rich.media_items = cap.items
     return rich
+
+
+# -- refusals a chat model must relay, not retry (v0.181.249) ----------------------
+
+# Media_Gen 5.21.1: "Krea 2 Turbo is not installed on the media server: missing ...
+# Tell the user to install it in the media-gen console ... Nothing was queued."
+_NOT_INSTALLED = re.compile(r"\bis not installed on the media server\b", re.I)
+_REFUSAL_NOTE = ("[Foundry: this is a missing-model refusal from the media server. Nothing was "
+                 "queued and nothing in this chat can install it. Tell the user this message as "
+                 "it is (which model, and that they install it in the media-gen console: the "
+                 "tool's form has a 'Download the missing files' button, or Models). Do NOT call "
+                 "the tool again until the user says it is installed.]")
+_REFUSED: dict = {}                    # (request, server, tool, args) -> (time, the error)
+_REFUSED_TTL = 900.0
+
+
+def _refusal_key(server: str, tool: str, args) -> Optional[tuple]:
+    """None outside a request: nothing is remembered then."""
+    from . import request_context
+    who = request_context.request_id()
+    if not who:
+        return None
+    try:
+        a = json.dumps(args or {}, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        a = str(args)
+    return (who, server, tool, a)
+
+
+def note_refusal(server: str, tool: str, args, err):
+    """The error to raise for a failed tool call: a missing-model refusal gets the
+    relay note (once) and is remembered for this request; anything else as it is."""
+    from .tools.mcp_client import ToolCallError
+    msg = str(err)
+    if not isinstance(err, ToolCallError) or not _NOT_INSTALLED.search(msg):
+        return err
+    if _REFUSAL_NOTE not in msg:
+        err = ToolCallError(f"{msg}\n{_REFUSAL_NOTE}", err.result)
+    now = time.time()
+    for k in [k for k, v in _REFUSED.items() if now - v[0] > _REFUSED_TTL]:
+        _REFUSED.pop(k, None)
+    key = _refusal_key(server, tool, args)
+    if key is not None:
+        _REFUSED[key] = (now, err)
+    return err
+
+
+def refused_before(server: str, tool: str, args):
+    """The remembered refusal when this exact call was refused earlier in the same
+    request (the model retried it), else None. A different request — the user
+    saying it is installed now — calls the server again."""
+    key = _refusal_key(server, tool, args)
+    hit = _REFUSED.get(key) if key is not None else None
+    if hit is None or time.time() - hit[0] > _REFUSED_TTL:
+        return None
+    from .tools.mcp_client import ToolCallError
+    err = hit[1]
+    return ToolCallError(f"{err}\n[Foundry: refused again without calling the server — the "
+                         f"same call was refused earlier in this reply.]", err.result)
 
 
 def _server_has_tool(svc, server: str, tool: str) -> bool:
@@ -688,6 +913,26 @@ def _server_has_tool(svc, server: str, tool: str) -> bool:
                    for t in svc.tool_registry.enabled())
     except Exception:                                            # noqa: BLE001
         return False
+
+
+_ESTIMATE = re.compile(r"\babout\s+(\d+(?:\.\d+)?)(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*"
+                       r"(seconds?|secs?|minutes?|mins?|hours?|hrs?)\b", re.I)
+_UNIT_S = {"s": 1.0, "m": 60.0, "h": 3600.0}
+
+
+def too_long_to_wait(mcfg, tool: str, text: str, wait: float) -> str:
+    """Why a chat should not wait for this queued job at all ("" = wait): its tool
+    is listed in media.job_no_wait_tools, or the queued reply's own estimate
+    ("usually takes about 10-25 minutes") starts above the wait."""
+    listed = {str(t).strip().lower() for t in (getattr(mcfg, "job_no_wait_tools", None) or [])
+              if str(t).strip()}
+    m = _ESTIMATE.search(text or "")
+    est = m.group(0)[len("about "):].strip() if m else ""
+    if tool.lower() in listed:
+        return f"takes about {est}" if est else "takes many minutes"
+    if m and float(m.group(1)) * _UNIT_S[m.group(2)[0].lower()] > wait:
+        return f"takes about {est}"
+    return ""
 
 
 async def wait_for_queued(svc, mcp, server: str, tool: str, rich, sink: list,
@@ -729,6 +974,19 @@ async def wait_for_queued(svc, mcp, server: str, tool: str, rich, sink: list,
                 pass
 
     names = ", ".join(ids)
+    takes = too_long_to_wait(mcfg, tool, text, wait)
+    if takes:
+        # v0.181.249: a 3D model (10-25 min) or a finished video is never waited for:
+        # the turn ends now and the user asks later
+        say(f"⏳ {server} queued job {names} for {tool} — {takes}, so not waiting for it\n")
+        for jid in ids:
+            sink.append(PendingJob(jid, f"{server}/{tool}"))
+        rich.text = (f"{text}\n[Foundry: {tool} {takes}, longer than a chat reply can wait, so "
+                     f"Foundry did not wait for job {names}. Tell the user the job id and roughly "
+                     f"how long it takes, and stop. When they ask later, call {check} once with "
+                     f"job_id \"{ids[0]}\". Do NOT call {tool} again — that would start a second "
+                     f"job.]")
+        return rich
     say(f"⏳ {server} queued job {names} for {tool} — waiting up to {int(wait)}s for it here\n")
     poll = max(0.05, float(getattr(mcfg, "fallback_poll_seconds", 3.0) or 3.0))
     t0 = said = time.monotonic()

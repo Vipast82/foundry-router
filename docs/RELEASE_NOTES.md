@@ -1,3 +1,135 @@
+## v0.181.249 - Media_Gen 5.21.1: 3D models from a picture, in chat and in coding sessions
+
+Asked: Media_Gen 5.21.1 has `generate_3d_model` (one picture in, GLB files out). Support it
+in chat sessions through the router and in the coordinator's game-dev sessions. The spec
+is the media-gen side's "what Foundry Router needs to know", and the plan is
+MEDIA_GEN_3D_PLAN.md in the session notes. Victor approved it on 2026-11-22 with the
+recommended answers.
+
+Read live, read-only (initialize and tools/list on 192.168.0.206:8190): media-gen 5.21.1
+has 38 tools. The spec counts 36; the other two are `create_private_image` and
+`create_private_video`. Its MCP `instructions` are 1,715 characters. Foundry never read
+them.
+
+**3D models in the chat reply (tool_media.py).**
+- A `.glb` a tool lists is fetched like a picture. It is stored only when its bytes start
+  with the glTF magic (`model/gltf-binary`).
+- Under the reply it shows as `🧊 <tool> 3D model (glb, 12.3 MB)`. That line has a
+  download link and a "view in 3D" link.
+- "View in 3D" opens a page at `/media/a/<token>/view`. The page uses Google
+  `<model-viewer>`, loaded in the viewer's own browser from `media.model_viewer_url`
+  (model-viewer 3.5.0 on jsdelivr).
+  - It uses the same signed token as the file, so no key is needed.
+  - It has a strict CSP.
+  - It returns 404 for anything that is not a 3D model, or when the viewer setting is
+    empty.
+- The detailed mesh (`glb_detail:`, or any `*_detail.glb`) can be hundreds of MB. It is
+  never fetched or loaded: the reply has one line with the media server's own link. This
+  also holds when it is the only file (`game_faces=0`).
+- The picture a model was built from (`picture_png:`) is shown inline beside the model.
+- The model is told what is shown and not to repeat the links.
+
+**Jobs no chat waits for.**
+- A 3D model takes 10 to 25 minutes, and up to 90. Until now the queued-job wait held
+  every queued job for `media.job_wait_seconds` (90 s) and then gave up.
+- It now skips the wait when either:
+  - the tool is in `media.job_no_wait_tools` (default: generate_3d_model and the six
+    create_* finished-video tools); or
+  - the queued reply's own estimate ("usually takes about 10-25 minutes") starts above
+    the wait.
+- The reply then says the job is queued. The model is told to give the job id and how long
+  it takes, to stop, and to check once when asked. It must never call the tool again.
+- "about 40-90 seconds per image" is still waited for.
+
+**Files deleted at the source (Media_Gen 5.20.1).**
+- Each copied file now records the Media_Gen job and the key it came under.
+- A check reply can say "Deleted from the library since this job ran ...: glb" or "FILES
+  DELETED". Foundry then deletes its own copies of those files, so earlier /media/a links
+  return 404.
+- The model is told not to show or repeat old links. This also happens with "show tool
+  files in the chat" off.
+- Training-capture records hold hashes only and are kept.
+
+**Missing-model refusals (Media_Gen 5.21.1).**
+- The refusal is "... is not installed on the media server ... Nothing was queued". It now
+  reaches the model with a note:
+  - tell the user that sentence as it is;
+  - they install the model in the media-gen console;
+  - do not call the tool again until they say it is installed.
+- The same call again in the same reply is answered with that refusal and never reaches
+  the server. A new reply calls the server again.
+- This lives in `agent.call_tool_rich`, so the brain, direct, aggregator and find-on-demand
+  paths all have it.
+- Other tool errors are unchanged.
+
+**The test button takes new tools in.**
+- POST /admin/api/mcp_servers/test used to list tools only. The registry waited for the
+  300 s sweep, and a schema change under the same tool names was never logged.
+- A test that reaches the server now also runs the tool sync. It reports this server's
+  added, removed and changed tools, and the page says so in a toast ("start a new chat to
+  use them").
+- The sync logs changed schemas (`~N`, `changed=[...]`).
+
+**A server's own usage notes.**
+- `MCPManager` keeps each server's MCP `instructions` from its last handshake.
+- A new switch in the MCP connection form, "📝 give the model its instructions"
+  (`mcp_servers[].pass_instructions`, off by default), adds them to the system prompt.
+  This covers chats whose tool set includes that server's tools (server_notes.py, beside
+  the attachment hook).
+- To pass Media_Gen's notes, switch it on for Media_Gen.
+
+**Coordinator sessions (Kilo and OpenCode).**
+- **Media_Gen tools are now allow-listed.**
+  - Sessions were denied Media_Gen tools by a list of 20 names. 18 of the 38 tools were
+    open in every session that had Media_Gen on, including the private-library tools and
+    generate_3d_model.
+  - The rules are now: deny `Media_Gen_*`, then every known tool by name, then allow the
+    sprint's families. The last matching rule wins, so a tool no family names stays off.
+  - generate_song_personal, create_private_image and create_private_video are never
+    allowed (`service_map.media_gen_rules`).
+- **A 3D family.** `generate_3d_model` and the job tools go to the implementer of a sprint
+  that needs `blender` while `[automation] media_gen_3d` is "allow". It is the default, and
+  "deny" is the other value; it is on the Automation page. A blender track now gets
+  Media_Gen enabled (`NEEDS_MCP`); its session rules decide which tools.
+- **A "3D models from a picture" paragraph in the BUILD prompt**, following AU's own asset
+  rules (docs/ASSET_PIPELINE.md, au-blender-asset). It covers:
+  - `library: "game"` only, and `change_picture` for fixes;
+  - uploading a project picture to Media_Gen's /upload (the address comes from the global
+    Kilo config);
+  - calling once, then one media_check_job per completed step, never a loop;
+  - `curl -L` of the `glb` into `assets/source/<category>/<ID>/gen/<ID>_ai.glb`, and not
+    `glb_detail` unless the plan asks;
+  - a `<ID>_ai.glb.media_gen.json` sidecar: job, models, library, source URL, sha256,
+    arguments, licence (MIT TRELLIS.2 / Pixal3D; Hi3D outputs free), "unapproved";
+  - then ai_mesh_eval / mesh_report, and the FBX from export_fbx.py for Roblox, never the
+    GLB.
+- **AU's own rule is unchanged.** A generated mesh ships only where the plan says the owner
+  approved it, and every GLB goes in the report and in the ledger Notes. Whether
+  Media_Gen meshes may ship (DECISIONS.md: AI meshes blockout only) stays Victor's call in
+  the AU docs.
+- **OpenCode reaches Media_Gen.**
+  - `agent-config` wrote `mcp = {}`, and track files added only `{"enabled": true}`, so an
+    OpenCode project had no address for Media_Gen.
+  - The first opencode.jsonc now gets the remote block (type, url, timeout; never headers)
+    of each remote server the coordinator switches per sprint, copied from the global Kilo
+    config and starting off.
+
+**Unchanged.**
+- The upload hook for chat attachments (`[Attached for media tools: image 1 =
+  upload:...]`) and `change_picture` pass through as before; generate_3d_model's `image`
+  is a media reference like any other.
+- No live router setting, persona, route, model order or cutoff changed.
+- Kilo personas are untouched.
+
+Victor's steps:
+1. Rebuild the router.
+2. Press test on Media_Gen. The toast lists the new and changed tools.
+3. Optionally tick "give the model its instructions" on Media_Gen and save.
+4. Open a new chat and run the section 9 checklist. Item 8 needs the nsfw library's chat
+   access switched off first: it is on now, so nsfw is in every library list. Item 5 needs
+   a result deleted on the console's Files page.
+5. Deploy the coordinator: check out the tag, then restart, after any lead check.
+
 ## v0.181.248 - lead and tracks on a deep path
 
 Asked: 14 tests in test_lead_e2e, test_tracks_lead_repair and test_tracks_merge failed on

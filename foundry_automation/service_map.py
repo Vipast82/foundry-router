@@ -119,7 +119,9 @@ NEEDS_SERVICES: dict[str, list] = {
 # need -> MCP servers a track with that need gets enabled in its kilo.jsonc
 NEEDS_MCP: dict[str, tuple] = {
     "studio": ("Roblox_Studio", "robloxstudio-mcp"),
-    "blender": ("blender-mcp",),
+    # v0.181.249: Media_Gen for generate_3d_model (a picture -> GLB); its session rules
+    # deny every Media_Gen tool unless [automation] media_gen_3d allows the 3D family
+    "blender": ("blender-mcp", "Media_Gen"),
     "audio": ("Media_Gen",),
     "images": ("Media_Gen", "foundry-media"),
 }
@@ -137,25 +139,53 @@ MEDIA_GEN_IMAGES = ("generate_image", "edit_image", "remove_background", "upscal
 MEDIA_GEN_VIDEO = ("generate_video", "interpolate_video", "add_audio_to_video", "stitch_videos",
                    "create_music_video")
 MEDIA_GEN_JOBS = ("media_check_job", "media_list_jobs", "media_cancel_job")
-# personal-library only (LeVo 2, research licence): never sprint (product) work
-MEDIA_GEN_NEVER = ("generate_song_personal",)
+# v0.181.249: one picture -> a GLB (TRELLIS.2 / Pixal3D + Hi3D 1.0, MIT: fine for 'game')
+MEDIA_GEN_3D = ("generate_3d_model",)
+# personal-library only (LeVo 2, research licence) and the private-library tools: never
+# sprint (product) work
+MEDIA_GEN_NEVER = ("generate_song_personal", "create_private_image", "create_private_video")
+MEDIA_GEN_PREFIX = "Media_Gen_"
 
 
-def media_gen_denied(audio: bool, images: bool) -> list[str]:
-    """The Media_Gen tools a coordinator session is denied (Kilo names, Media_Gen_<tool>):
-    every family the sprint doesn't need, video always, the personal-only tools always,
-    and the job tools unless some family is allowed. 2026-10-27: a session sees only the
-    Media_Gen tools its sprint needs (Victor: "turn it on for that sprint")."""
+def _media_gen_allowed(audio: bool, images: bool, models3d: bool = False) -> set:
     allow: set = set()
     if audio:
         allow |= set(MEDIA_GEN_AUDIO)
     if images:
         allow |= set(MEDIA_GEN_IMAGES)
+    if models3d:
+        allow |= set(MEDIA_GEN_3D)
     if allow:
         allow |= set(MEDIA_GEN_JOBS)
-    allow -= set(MEDIA_GEN_NEVER)
-    every = MEDIA_GEN_AUDIO + MEDIA_GEN_IMAGES + MEDIA_GEN_VIDEO + MEDIA_GEN_JOBS
-    return [f"Media_Gen_{t}" for t in dict.fromkeys(every) if t not in allow]
+    return allow - set(MEDIA_GEN_NEVER)
+
+
+def media_gen_denied(audio: bool, images: bool, models3d: bool = False) -> list[str]:
+    """The Media_Gen tools a coordinator session is denied by name (Kilo names,
+    Media_Gen_<tool>): every family the sprint doesn't need, video always, the
+    personal-only and private-library tools always, and the job tools unless some family
+    is allowed. 2026-10-27: a session sees only the Media_Gen tools its sprint needs
+    (Victor: "turn it on for that sprint"). media_gen_rules adds the wildcard that
+    covers tools this list doesn't know yet."""
+    allow = _media_gen_allowed(audio, images, models3d)
+    every = (MEDIA_GEN_AUDIO + MEDIA_GEN_IMAGES + MEDIA_GEN_VIDEO + MEDIA_GEN_JOBS
+             + MEDIA_GEN_3D + MEDIA_GEN_NEVER)
+    return [f"{MEDIA_GEN_PREFIX}{t}" for t in dict.fromkeys(every) if t not in allow]
+
+
+def media_gen_rules(audio: bool, images: bool, models3d: bool = False) -> list[dict]:
+    """v0.181.249: the session rules for Media_Gen. Media_Gen keeps adding tools (38 in
+    5.21.1, the denied-by-name list knew 20), and a tool no list named was open in every
+    session that had Media_Gen on, the private-library ones included. Now: deny
+    Media_Gen_* first, then every known tool by name, then allow the families the sprint
+    needs (Kilo / OpenCode: the last matching rule wins), so a new tool stays off until a
+    family names it."""
+    rules = [{"permission": MEDIA_GEN_PREFIX + "*", "pattern": "*", "action": "deny"}]
+    rules += [{"permission": n, "pattern": "*", "action": "deny"}
+              for n in media_gen_denied(audio, images, models3d)]
+    rules += [{"permission": f"{MEDIA_GEN_PREFIX}{t}", "pattern": "*", "action": "allow"}
+              for t in sorted(_media_gen_allowed(audio, images, models3d))]
+    return rules
 # 2026-10-27 (Victor): ChatGPT images first. The foundry-media MCP server
 # (contrib/media-adapter/foundry_media_mcp.py; Kilo names "foundry-media_<tool>") and the
 # foundry-images skill are gated by the same 2D decision as Media_Gen's image tools.

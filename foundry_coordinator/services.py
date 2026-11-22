@@ -544,3 +544,74 @@ def images_brief(c, P, t: dict, needs: list, spec=None) -> str:
     return ("\n## 2D images\nThe owner provides this sprint's 2D assets: do not generate images "
             "(the image tools are off). Use the files the plan or the owner names; if one is "
             "missing, report BLOCKED `user_action` naming the exact file.\n")
+
+
+# -- 3D models from a picture (v0.181.249) --------------------------------------------
+
+MEDIA_GEN_DEFAULT_URL = "http://192.168.0.206:8190/mcp"
+
+
+def models3d_mode(P) -> str:
+    """[automation] media_gen_3d: 'allow' (default) or 'deny'."""
+    from .automation import get as auto_get
+    try:
+        mode = str(auto_get(P, "media_gen_3d") or "allow").strip().lower()
+    except KeyError:
+        mode = "allow"
+    return mode if mode in ("allow", "deny") else "allow"
+
+
+def models3d_allowed(P, needs) -> bool:
+    """May this sprint's implementer call Media_Gen generate_3d_model? A sprint that
+    needs `blender` (3D assets), while [automation] media_gen_3d is 'allow'."""
+    return "blender" in (needs or []) and models3d_mode(P) == "allow"
+
+
+def media_gen_upload_url() -> str:
+    """Media_Gen's upload address: its MCP URL in the global Kilo config with /mcp ->
+    /upload (the default server when none is configured)."""
+    from foundry_automation import service_map as SM
+    url = str((SM.merged_mcp(global_path=None).get("Media_Gen") or {}).get("url") or "")
+    url = url.strip() or MEDIA_GEN_DEFAULT_URL
+    base = url.rsplit("/mcp", 1)[0] if url.rstrip("/").endswith("/mcp") else url.rstrip("/")
+    return base + "/upload"
+
+
+def models3d_brief(P, needs: list) -> str:
+    """The BUILD prompt's 3D paragraph for a sprint that may call generate_3d_model ('' else).
+    It follows the project's own asset rules (AU: docs/ASSET_PIPELINE.md, the
+    au-blender-asset skill, docs/THIRD_PARTY_ASSETS.md); it decides nothing about whether a
+    generated mesh ships: that stays the plan's and the owner's call."""
+    if not models3d_allowed(P, needs):
+        return ""
+    up = media_gen_upload_url()
+    return (
+        "\n## 3D models from a picture (Media_Gen generate_3d_model)\n"
+        "Use it only where the plan asks for a mesh made from a picture (a blockout, a "
+        "reference or a candidate the plan names). Always `library: \"game\"` (TRELLIS.2 / "
+        "Pixal3D are MIT and Hi3D outputs are free to use; a result in any other library is "
+        "never used in the project). One picture of ONE object or character, square, works "
+        "best; to fix extra limbs, crossed legs or a busy background pass `change_picture` "
+        "(e.g. \"exactly one tail, arms slightly away from the body\") instead of editing the "
+        "picture yourself.\n"
+        f"- Input: a finished Media_Gen job_id, or a project picture uploaded first: POST "
+        f"{up} with JSON {{\"files\": [{{\"name\": \"<file>.png\", \"type\": \"image/png\", "
+        f"\"data\": \"data:image/png;base64,...\"}}]}} (a short python script) and pass the "
+        f"`upload:...` ref it returns as `image`.\n"
+        "- It takes 10-25 minutes (up to 90). Call it ONCE, keep working on the rest of the "
+        "sprint, and check with ONE media_check_job per completed step (never a loop, never a "
+        "sleep-and-poll); before calling it again, look in media_list_jobs.\n"
+        "- When it is done: `curl -L -o assets/source/<category>/<ID>/gen/<ID>_ai.glb <glb "
+        "url>` (and the `picture_png` beside it when there is one). Do not download "
+        "`glb_detail` (hundreds of MB, untextured) unless the plan asks for it.\n"
+        "- Beside the GLB write `<ID>_ai.glb.media_gen.json`: job_id, tool, the `tool:` line of "
+        "the check (the models), library, the source URL, sha256, the arguments you passed, "
+        "licence \"MIT (TRELLIS.2 / Pixal3D); Hi3D 1.0 outputs free to use\", and status "
+        "\"unapproved\".\n"
+        "- Then the project's own asset flow: score and normalise it with "
+        "tools/blender/ai_mesh_eval.py, mesh_report, the au-blender-asset rules; Roblox takes "
+        "the FBX from export_fbx.py, never the GLB. A generated mesh is unapproved: it ships "
+        "only where the plan says the owner approved that. List every GLB in your report and "
+        "in the ledger Notes (\"Media_Gen (G) generate_3d_model job <id>\").\n"
+        "- A refusal that a model is not installed on the media server: report BLOCKED "
+        "`user_action` with that sentence; do not retry.\n")

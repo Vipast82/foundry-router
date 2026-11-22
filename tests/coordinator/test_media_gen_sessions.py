@@ -38,7 +38,10 @@ def denied(c, tid):
 
 def test_the_denied_set_per_need():
     every = set(SM.media_gen_denied(False, False))
-    assert len(every) == 20 and "Media_Gen_media_check_job" in every
+    # v0.181.249: + generate_3d_model and the two private-library tools
+    assert len(every) == 23 and "Media_Gen_media_check_job" in every
+    assert {"Media_Gen_generate_3d_model", "Media_Gen_create_private_image",
+            "Media_Gen_create_private_video"} <= every
     audio = set(SM.media_gen_denied(True, False))
     assert "Media_Gen_generate_sfx" not in audio and "Media_Gen_generate_dialogue" not in audio
     assert "Media_Gen_media_check_job" not in audio                # its jobs can be checked
@@ -50,7 +53,7 @@ def test_a_code_sprint_gets_no_media_gen_and_an_audio_sprint_gets_the_audio_tool
     c, P = env(tmp_path)
     c.approve("game", "T1", [], "victor")
     assert run_until(c, lambda: c.store.task("game", "T1")["state"] == S.COMPLETE, limit=40)
-    assert len(denied(c, "T1")) == 20
+    assert len(denied(c, "T1")) == 24                  # 23 by name + the Media_Gen_* wildcard
     c.approve("game", "A1", [], "victor")
     assert run_until(c, lambda: c.store.task("game", "A1")["state"] == S.COMPLETE, limit=40)
     d = denied(c, "A1")

@@ -718,6 +718,13 @@ async def _chat_dispatch(svc, body: dict):
         svc, persona, body.get("messages") or [], messages, client_tools,
         direct=bool(is_strict(persona) or client_tools or exec_mode == "direct"
                     or client_format is not None))
+    # v0.181.249: tool servers' own usage notes (MCP instructions) where the server is set
+    # to pass them and its tools are in this request's tool set (server_notes.py)
+    from .. import server_notes
+    messages = server_notes.apply(
+        svc, persona, messages, client_tools,
+        direct=bool(is_strict(persona) or client_tools or exec_mode == "direct"
+                    or client_format is not None))
     # `direct` = thin proxy: pick ONE model per the persona's static policy and
     # forward the client's request verbatim. Triggered by client-supplied tools
     # (Kilo/Cline agent loops) OR by an explicit `direct` execution_mode — the

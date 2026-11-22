@@ -617,6 +617,11 @@ class MCPServerConfig(BaseModel):
     # with tool_job_status — so a client's own request timeout (AnythingLLM
     # ~120 s) never kills a 10-minute generation. Off = a normal call.
     long_running: bool = False
+    # v0.181.249: put the server's MCP `instructions` (its own notes on how to use
+    # its tools: Media_Gen says queue, report the job id, check once, never loop)
+    # into the system prompt of a chat whose tools include this server's
+    # (server_notes.py). Off = the model sees only the tool descriptions.
+    pass_instructions: bool = False
 
 
 class ToolSyncConfig(BaseModel):
@@ -926,6 +931,20 @@ class MediaConfig(BaseModel):
     # under AnythingLLM's ~120 s cut-off; Open WebUI allows about 300.
     job_check_tool: str = "media_check_job"
     job_wait_seconds: int = 90
+    # v0.181.249: tools whose jobs take longer than any chat can wait (a 3D model
+    # 10-25 min, a finished video 20 min and more) are never waited for: the reply
+    # says the job is queued and the user asks later. A queued reply whose own
+    # estimate ("about 10-25 minutes") starts above job_wait_seconds is not waited
+    # for either, listed or not.
+    job_no_wait_tools: list[str] = Field(default_factory=lambda: [
+        "generate_3d_model", "create_music_video", "create_parody_music_video",
+        "create_short_film", "create_explainer_video", "create_tutorial_video",
+        "create_presenter_video"])
+    # The "view in 3D" page for a .glb a tool made (/media/a/<token>/view) loads
+    # Google's <model-viewer> from here, in the browser of the person chatting.
+    # "" = no viewer: the 3D model is a download link only.
+    model_viewer_url: str = (
+        "https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js")
     # -- chat attachments for media-gen (media_attachments.py, v0.181.117) ----
     # Where attachments are uploaded: "" = the Media_Gen MCP server's URL with /mcp -> /upload
     # (env MEDIA_GEN_UPLOAD_URL wins over both).

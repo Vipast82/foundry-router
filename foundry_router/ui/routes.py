@@ -1787,6 +1787,20 @@ async def set_media(request: Request):
             updates["tool_output_max_mb"] = max(1.0, min(4096.0, float(body["tool_output_max_mb"])))
         except (TypeError, ValueError):
             return JSONResponse({"error": "tool_output_max_mb must be a number"}, status_code=400)
+    if "model_viewer_url" in body:
+        # v0.181.249: the script the "view in 3D" page loads; "" = no viewer
+        url = str(body["model_viewer_url"] or "").strip()
+        if url and not url.startswith("https://"):
+            return JSONResponse({"error": "model_viewer_url must start with https://"},
+                                status_code=400)
+        updates["model_viewer_url"] = url
+    if "job_no_wait_tools" in body:
+        names = body["job_no_wait_tools"]
+        if isinstance(names, str):
+            names = names.replace("\n", ",").split(",")
+        if not isinstance(names, list):
+            return JSONResponse({"error": "job_no_wait_tools must be a list"}, status_code=400)
+        updates["job_no_wait_tools"] = [str(n).strip() for n in names if str(n).strip()]
     if "attachments_fetch_hosts" in body:
         hosts = body["attachments_fetch_hosts"]
         if isinstance(hosts, str):
@@ -2547,14 +2561,27 @@ async def test_mcp(request: Request):
         return JSONResponse({"error": "name required"}, status_code=400)
     try:
         tools = await asyncio.wait_for(svc.mcp.list_tools(name), timeout=20)
-        return {"ok": True, "tool_count": len(tools),
-                "tools": [t["name"] for t in tools][:50], "error": ""}
     except asyncio.TimeoutError:
         return {"ok": False, "tool_count": 0, "tools": [],
                 "error": "timed out after 20s — server unreachable?"}
     except Exception as e:
         return {"ok": False, "tool_count": 0, "tools": [],
                 "error": describe_exception(e)}
+    # v0.181.249: a working server's tools are taken in now (new tools, a new library
+    # in a schema), not at the next periodic sync; the next new chat gets them
+    def mine() -> set:
+        return {t.name for t in svc.tool_registry.tools.values() if t.server == name}
+    before = mine()
+    try:
+        synced = await svc.tool_registry.sync(svc.pool)
+    except Exception as e:                                        # noqa: BLE001
+        synced = {"error": describe_exception(e)}
+    after = mine()
+    sync = {"added": sorted(after - before), "removed": sorted(before - after),
+            "changed": [n for n in synced.get("changed", []) if n in after]}
+    return {"ok": True, "tool_count": len(tools),
+            "tools": [t["name"] for t in tools][:50], "error": "", "sync": sync,
+            "sync_error": synced.get("error", "")}
 
 
 @router.post("/admin/api/mcp_servers/token")
@@ -2606,7 +2633,11 @@ async def upsert_mcp(request: Request):
              # Long-running generation (tool_media.py): chat calls become tool
              # jobs. Kept when an older UI posts without the field.
              "long_running": bool(body["long_running"]) if "long_running" in body
-                             else bool(getattr(existing, "long_running", False))}
+                             else bool(getattr(existing, "long_running", False)),
+             # v0.181.249: the server's MCP instructions go into the system prompt
+             "pass_instructions": bool(body["pass_instructions"])
+                                  if "pass_instructions" in body
+                                  else bool(getattr(existing, "pass_instructions", False))}
     if body.get("headers"):
         entry["headers"] = body["headers"]
 

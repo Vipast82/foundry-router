@@ -480,11 +480,19 @@ class ToolRegistry:
             # 4: diff for the log, then swap atomically
             added = sorted(set(new_tools) - set(self.tools))
             removed = sorted(set(self.tools) - set(new_tools))
-            if added or removed:
+            # v0.181.249: a server can change a tool's options without renaming it
+            # (Media_Gen: a new library, a new argument such as change_picture)
+            changed = sorted(n for n, t in new_tools.items()
+                             if n in self.tools and t.kind == "mcp"
+                             and (t.parameters != self.tools[n].parameters
+                                  or t.description != self.tools[n].description))
+            if added or removed or changed:
                 self.db.log_event("info", "tool_sync",
-                                  f"tool set changed: +{len(added)} -{len(removed)}",
-                                  f"added={added} removed={removed}")
+                                  f"tool set changed: +{len(added)} -{len(removed)}"
+                                  f" ~{len(changed)}",
+                                  f"added={added} removed={removed} changed={changed}")
             self.tools = new_tools
             from ..db import utcnow
             self.last_sync = utcnow()
-            return {"added": added, "removed": removed, "total": len(new_tools)}
+            return {"added": added, "removed": removed, "changed": changed,
+                    "total": len(new_tools)}

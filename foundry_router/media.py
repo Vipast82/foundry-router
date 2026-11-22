@@ -55,7 +55,9 @@ TOOL_EXT = {**_EXT, "image/gif": "gif", "audio/wav": "wav", "audio/mpeg": "mp3",
             "audio/ogg": "ogg", "audio/flac": "flac", "audio/mp4": "m4a",
             "audio/webm": "webm",
             # v0.181.136: a video a tool made (tool_media.py decides it is one)
-            "video/mp4": "mp4", "video/quicktime": "mov"}
+            "video/mp4": "mp4", "video/quicktime": "mov",
+            # v0.181.249: a 3D model a tool made (Media_Gen generate_3d_model)
+            "model/gltf-binary": "glb"}
 # image-budget rows only: tool output (op tool / tool_job) never counts
 _IMAGE_OPS = "op IN ('generate','edit')"
 _IMAGE_MODEL_RE = re.compile(r"(^|[-_/])(gpt-image|dall-e|grok-imagine|imagen|flux|"
@@ -913,7 +915,10 @@ class MediaService:
             out.append({"id": f"{job_id}-{i}", "index": i, "file": name, "mime": it["mime"],
                         "bytes": len(raw), "width": it.get("w"), "height": it.get("h"),
                         "sha256": hashlib.sha256(raw).hexdigest(),
-                        "label": it.get("label") or ""})
+                        "label": it.get("label") or "",
+                        # v0.181.249: where a fetched file came from (tool_media.forget_deleted)
+                        **{k: it[k] for k in ("source_url", "source_key", "source_job")
+                           if it.get(k)}})
         return out
 
     def finish_tool_row(self, job_id: str, *, status: str, artifacts: Optional[list] = None,

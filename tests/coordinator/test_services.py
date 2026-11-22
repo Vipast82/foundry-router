@@ -58,7 +58,10 @@ def test_every_mapped_service_is_in_the_catalog_and_knows_who_needs_it():
             for name in (g if isinstance(g, tuple) else (g,)):
                 assert name in SM.SERVICES and need in SM.SERVICES[name].needed_by
                 assert need in SM.needed_by(name)
-    assert SM.mcp_for(["studio", "blender"]) == ["blender-mcp", "Roblox_Studio", "robloxstudio-mcp"]
+    # v0.181.249: a blender sprint gets Media_Gen too (generate_3d_model; its session rules
+    # decide which tools)
+    assert SM.mcp_for(["studio", "blender"]) == ["blender-mcp", "Media_Gen", "Roblox_Studio",
+                                                 "robloxstudio-mcp"]
 
 
 # ----------------------------------------------------------------------------- ready()

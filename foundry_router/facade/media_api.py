@@ -20,6 +20,8 @@ The one exception, on purpose:
                                      for a browser rendering the chat reply. No key:
                                      the HMAC-signed, expiring token is the access
                                      (tool_media.py, media.public_link_ttl_hours).
+  GET  /media/a/{token}/view         v0.181.249: the same token's 3D model (.glb) in a
+                                     <model-viewer> page; 404 for anything else.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import base64
 import time
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .. import client_auth
 from ..media import MediaError
@@ -254,6 +256,55 @@ async def public_artifact(request: Request, token: str):
                                  "x-content-type-options": "nosniff",
                                  "cache-control": "private, max-age=3600",
                                  "referrer-policy": "no-referrer"})
+
+
+_VIEW_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D model</title>
+<script type="module" src="{script}"></script>
+<style>
+html,body{{margin:0;height:100%;background:#202124;color:#e8eaed;font:14px system-ui,sans-serif}}
+model-viewer{{width:100%;height:calc(100% - 40px);background:#2b2c2f}}
+p{{margin:0;padding:10px 14px}} a{{color:#8ab4f8}}
+</style></head>
+<body><model-viewer src="../{token}" alt="3D model" camera-controls auto-rotate
+shadow-intensity="1" touch-action="pan-y"></model-viewer>
+<p>Drag to turn it, scroll to zoom. <a href="../{token}?download=1">Download the GLB</a></p>
+</body></html>"""
+
+
+@router.get("/media/a/{token}/view")
+async def public_model_view(request: Request, token: str):
+    """v0.181.249: a page that shows one stored 3D model (.glb) with Google's
+    <model-viewer>, for whoever holds the same signed token as the file itself.
+    Only for a model file and only with media.model_viewer_url set; every other
+    case is the same bare 404 as the file route. The viewer script loads in the
+    viewer's own browser, and the model is read from ../<token>."""
+    import html
+    from urllib.parse import urlsplit
+
+    from .. import tool_media
+    svc = request.app.state.services
+    script = (getattr(svc.config_store.config.media, "model_viewer_url", "") or "").strip()
+    hit = tool_media.verify(svc.db, token)
+    found = svc.media.artifact_path(*hit) if hit else None
+    if found is None or not script.startswith("https://") \
+            or not str(found[1].get("mime") or "").startswith("model/"):
+        return _NOT_FOUND
+    origin = "https://" + (urlsplit(script).netloc or "")
+    page = _VIEW_PAGE.format(script=html.escape(script, quote=True),
+                             token=html.escape(token, quote=True))
+    # model-viewer fetches the model and its textures itself; a Draco/meshopt GLB also
+    # pulls a decoder from gstatic
+    csp = (f"default-src 'none'; script-src {origin} https://www.gstatic.com "
+           f"'wasm-unsafe-eval'; connect-src 'self' blob: data: https://www.gstatic.com; "
+           f"img-src 'self' blob: data:; style-src 'unsafe-inline'; worker-src blob:; "
+           f"base-uri 'none'; form-action 'none'")
+    return HTMLResponse(page, headers={"content-security-policy": csp,
+                                       "x-content-type-options": "nosniff",
+                                       "cache-control": "private, max-age=3600",
+                                       "referrer-policy": "no-referrer"})
 
 
 @router.get("/media/models")

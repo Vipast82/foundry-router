@@ -1037,6 +1037,7 @@ class Coordinator:
             prompt += TRACK_BRIEF.format(track=self.tracks.track_name(P),
                                          workspace=P.profile.workspace)
         prompt += self._images_brief(P, spec)
+        prompt += self._models3d_brief(P, spec)
         if inter:
             prompt += ("\n## Intermediate gate outputs\nThese task-owned files are untracked "
                        "intermediate gate output: " + ", ".join(inter[:8]) + ". They do not "
@@ -1220,8 +1221,7 @@ class Coordinator:
     def _session_rules(self, P: Project, spec, phase: str, role: str) -> list[dict]:
         from foundry_automation import service_map as SM
         rules = [dict(r) for r in (P.adapter.session_permissions(spec, phase) or [])]
-        rules += [{"permission": name, "pattern": "*", "action": "deny"}
-                  for name in self._media_gen_denied(P, spec, role)]
+        rules += self._media_gen_rules(P, spec, role)
         # the ChatGPT image path (foundry-media tools + foundry-images skill) is gated by
         # the same 2D decision as Media_Gen's image tools
         rules += SM.foundry_media_denied(self._images_allowed(P, spec, role))
@@ -1259,18 +1259,31 @@ class Coordinator:
         except Exception:                                         # noqa: BLE001
             return ""
 
-    def _media_gen_denied(self, P: Project, spec, role: str) -> list[str]:
+    def _models3d_brief(self, P: Project, spec) -> str:
+        """The BUILD prompt's 3D paragraph (services.models3d_brief); '' without it."""
+        from . import services as SV
+        try:
+            t = self.store.task(P.id, spec.task_id) or {"task_id": spec.task_id}
+            return SV.models3d_brief(P, SV.needs_of(t, spec))
+        except Exception:                                         # noqa: BLE001
+            return ""
+
+    def _media_gen_rules(self, P: Project, spec, role: str) -> list[dict]:
         """2026-10-27: a session gets only the Media_Gen tools its sprint needs: the
         audio family for `audio`, the image family (the fallback after foundry-media)
         for `images` once the owner allowed 2D generation ([automation]
-        media_gen_images), nothing for reviewers."""
+        media_gen_images), nothing for reviewers. v0.181.249: generate_3d_model for
+        `blender` while [automation] media_gen_3d is 'allow', and every Media_Gen tool
+        no family names (a new one, the private-library ones) is denied by a wildcard
+        (service_map.media_gen_rules)."""
         from foundry_automation import service_map as SM
-        if role != "implementer":
-            return SM.media_gen_denied(False, False)
+        if role != "implementer" or spec is None:
+            return SM.media_gen_rules(False, False)
         from . import services as SV
         t = self.store.task(P.id, spec.task_id) or {}
         needs = SV.needs_of(t, spec)
-        return SM.media_gen_denied("audio" in needs, self._images_allowed(P, spec, role))
+        return SM.media_gen_rules("audio" in needs, self._images_allowed(P, spec, role),
+                                  SV.models3d_allowed(P, needs))
 
     def _bind(self, P: Project, sid: str, tid: str, run_id: str, role: str, persona: str,
               parent: str = "", purpose: str = "") -> None:
