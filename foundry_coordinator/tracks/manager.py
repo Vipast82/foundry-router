@@ -51,7 +51,9 @@ class TrackError(ValueError):
 
 
 def _git(cwd: str, *args, check: bool = True, timeout: int = 300) -> subprocess.CompletedProcess:
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    from ..adapters.git import git_env
+    # track worktrees sit one level under the workspace: core.longpaths (see git_env)
+    env = git_env(None, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
     r = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, env=env,
                        encoding="utf-8", errors="replace", timeout=timeout)
     if check and r.returncode != 0:

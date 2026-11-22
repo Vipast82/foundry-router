@@ -436,20 +436,20 @@ def _branch_own_diff(ws: str, ref: str):
     import types
     ch = _git(ws, "cherry", "HEAD", ref)
     if ch.returncode != 0:
-        return _git(ws, "diff", "--binary", f"HEAD...{ref}")
+        return _git(ws, "diff", "--binary", f"HEAD...{ref}", "--")
     own = [l.split()[1] for l in (ch.stdout or "").splitlines() if l.startswith("+ ")]
     if not own:
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     first, last = own[0], own[-1]
     parent = _git(ws, "rev-parse", "--verify", "--quiet", first + "^")
     if parent.returncode != 0:
-        return _git(ws, "diff", "--binary", f"HEAD...{ref}")
+        return _git(ws, "diff", "--binary", f"HEAD...{ref}", "--")
     # the own commits are consecutive at the branch's tip in the usual case (a branch cut
     # from master plus its commits); then their combined diff is parent(first)..last
-    between = _git(ws, "rev-list", f"{first}^..{last}")
+    between = _git(ws, "rev-list", f"{first}^..{last}", "--")
     if between.returncode == 0 and len(between.stdout.split()) == len(own):
-        return _git(ws, "diff", "--binary", f"{first}^", last)
-    return _git(ws, "diff", "--binary", f"HEAD...{ref}")
+        return _git(ws, "diff", "--binary", f"{first}^", last, "--")
+    return _git(ws, "diff", "--binary", f"HEAD...{ref}", "--")
 
 
 def safe_point(c, P, cfg: Optional[dict] = None) -> tuple[bool, str]:

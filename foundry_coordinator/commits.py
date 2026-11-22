@@ -132,7 +132,7 @@ def rewordable(P, t: dict, shas: list) -> str:
     base = (t.get("data") or {}).get("task_base") or t.get("base_sha") or ""
     try:
         head = P.ws.head()
-        if base and P.ws.run("rev-list", "--merges", f"{base}..{head}").strip():
+        if base and P.ws.run("rev-list", "--merges", f"{base}..{head}", "--").strip():
             return "a merge commit is in the range"
         if P.ws.run("symbolic-ref", "-q", "HEAD", check=False).strip() == "":
             return "HEAD is detached"
@@ -183,7 +183,7 @@ def reword(c, P, t: dict, spec) -> dict:
         branch = P.ws.run("symbolic-ref", "-q", "HEAD").strip()
     except GitError:
         return {"skipped": "HEAD is detached"}
-    order = [s for s in P.ws.run("rev-list", "--reverse", f"{base}..{head}").split() if s]
+    order = [s for s in P.ws.run("rev-list", "--reverse", f"{base}..{head}", "--").split() if s]
     bad_set = {s for s, _ in bad}
     first = next((i for i, s in enumerate(order) if s in bad_set), None)
     if first is None:

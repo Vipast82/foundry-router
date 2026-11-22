@@ -727,7 +727,10 @@ class Supervisor:
 
     def _run_tests_at(self, req, sha: str, ids: list[str]) -> dict:
         from . import repair as RP
-        wt = os.path.join(self.backup_root, req["upgrade_id"], f"verify-{uuid.uuid4().hex[:8]}")
+        # 2026-11-22: a short path, not <backup_root>/<upgrade_id>/verify-<id>. Git refuses a
+        # worktree path of 220 characters or more ("'$GIT_DIR' too big"), and the upgrade id
+        # alone added 38; the check step then failed at "verifying" on a deep state dir.
+        wt = os.path.join(self.backup_root, f"v-{uuid.uuid4().hex[:8]}")
         _git(self.repo, "worktree", "add", "--detach", wt, sha)
         try:
             return RP.run_pytest(self.python, wt, ids, self.test_timeout)

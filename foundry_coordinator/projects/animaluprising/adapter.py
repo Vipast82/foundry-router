@@ -1383,7 +1383,7 @@ Change no code or test file in this session; if one needs changing, stop and rep
             full = subprocess.run(["git", "-C", self.p.workspace, "rev-parse", gate_head],
                                   capture_output=True, text=True).stdout.strip()
             changed = subprocess.run(["git", "-C", self.p.workspace, "diff", "--name-only",
-                                      f"{full}..{revision}"], capture_output=True,
+                                      f"{full}..{revision}", "--"], capture_output=True,
                                      text=True).stdout.split()
         except OSError as e:
             return VerificationResult("au.gate_bound_to_head", UNKNOWN, True, rel, str(e), revision)

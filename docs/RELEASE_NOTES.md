@@ -1,3 +1,41 @@
+## v0.181.248 - lead and tracks on a deep path
+
+Asked: 14 tests in test_lead_e2e, test_tracks_lead_repair and test_tracks_merge failed on
+a clean origin/main (v0.181.246 and v0.181.247). Were the code or the tests wrong?
+
+**Cause: Windows path length.** Nothing in the tests was wrong, and no lead or tracks
+release introduced it. The three files pass 59 of 59 with a short `--basetemp`. With a
+114-character one (a session scratchpad, as both gates used) exactly the same 14 fail;
+with 157 characters, 51. Git on Windows dies on a deep worktree in two ways:
+
+- `fatal: failed to stat '<sha>..<sha>': Filename too long`. Git checks whether a
+  revision argument is also a file, and that check fails past 260 characters. A track
+  worktree (`<workspace>/.tracks/<name>`) deeper than about 178 characters then never got
+  through verification, and its merge stayed `merging`. git's own `rebase` hits the same
+  check inside git.
+- `fatal: '$GIT_DIR' too big`. `git worktree add` refuses a path of 220 characters or
+  more. The supervisor's check worktree sat under `<backup_root>/<upgrade_id>/verify-<id>`
+  (the upgrade id alone is 38 characters), so an upgrade failed at `verifying` instead of
+  being checked, which gave `'failed' == 'rolled_back'`.
+
+Live paths are far shorter (an AU track is about 65 characters), so the live stack never
+hit this. It needed a deep checkout or state folder.
+
+**Fix (coordinator only).**
+- `adapters/git.py`: `git_env()` turns on core.longpaths on Windows through
+  `GIT_CONFIG_PARAMETERS`. It appends to what is already set, so argv, the repo's config
+  and the AU gate's `GIT_CONFIG_COUNT` keys are unchanged. `Workspace` and the track
+  manager's `_git` (rebase, merge and worktrees of tracks) use it.
+- A `--` now ends the revision ranges in `Workspace` (`changed_files`, `commits`, `diff`,
+  `diff_files`, `operator_commits`, `commit_files`), `commits.py`, `prep_queue.py` and the
+  AU gate's head check. Git no longer stats the range as a file at all.
+- `supervisor.py`: the check worktree is `<backup_root>/v-<id>`, 11 characters below the
+  backup root.
+
+No test was weakened, and no live persona, route or sprint setting changed.
+tests/coordinator/test_git_long_paths.py (5 tests) builds its paths to a fixed depth, so
+it fails on the old code with any basetemp.
+
 ## v0.181.247 - OpenCode beside Kilo
 
 Asked: everything that talks to Kilo Code should also support the latest OpenCode, with
