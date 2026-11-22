@@ -1078,6 +1078,20 @@ Change no code or test file in this session; if one needs changing, stop and rep
         except Exception:                                         # noqa: BLE001
             return None
 
+    def studio_ready(self) -> tuple:
+        """("ok" | "no_studio" | "play" | "unknown", why): is a Studio with the TEST place
+        connected on this workstation? What the coordinator asks before it restarts a
+        sprint that stopped for want of Studio (autoheal.fault_present, v0.181.229):
+        "no_studio" keeps the sprint waiting, anything else lets the retry go. Read-only
+        (studio_gate.studio_preflight: list_roblox_studios and get_studio_state), 8 s at
+        most, never raises."""
+        try:
+            from ...studio_calls import gate_place
+            from . import studio_gate
+            return studio_gate.studio_preflight(gate_place())
+        except Exception as e:                                    # noqa: BLE001
+            return "unknown", f"{type(e).__name__}: {e}"[:200]
+
     def studio_busy(self, task_id: str) -> str:
         """'' when AU's shared studio.lock (tools/coord/lock.py) is free or held for
         `task_id` itself, else who holds it: a Studio auto-reopen (0.145.0) never

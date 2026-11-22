@@ -1111,6 +1111,12 @@ class Recovery:
             if str(s.get("outcome") or "") in self.INFRA_OUTCOMES:
                 out.add(sid)
                 continue
+            # v0.181.229: its turn ended in a stop the auto-heal took for infrastructure
+            # (the gate it asked for found no Studio, a slot push timed out): the session
+            # reported nothing wrong itself, so neither test here sees it
+            if isinstance(s.get("data"), dict) and s["data"].get("infra_stop"):
+                out.add(sid)
+                continue
             rep = ((s.get("data") or {}).get("report") or {}) if isinstance(
                 s.get("data"), dict) else {}
             if isinstance(rep, dict) and str(rep.get("status") or "").upper() in (

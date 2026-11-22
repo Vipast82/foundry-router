@@ -42,7 +42,11 @@ equal.
   no_progress_sessions       sessions in a row with no commit, no verified delta and
                              no plan step before a no-progress decision
   auto_heal_retries          deterministic re-runs of a tooling / infra stop before a
-                             lead case opens (per head and class)
+                             lead case opens (per head and class; three times this per
+                             class and signature in six hours whatever the head)
+  infra_wait_notice_minutes  a stop on an outage the coordinator can see (Studio with the
+                             TEST place, the router) waits until it is back; one alert per
+                             outage after this long (0 = none)
   lead_hard_max_calls        absolute lead calls per task (delegation never raises it)
   lead_report_repairs        invalid lead reports sent back into the same session
   infra_retry_max            infrastructure failures retried free per task run

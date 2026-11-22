@@ -108,11 +108,30 @@ INFRA_SIGNATURES = (
                                     r"(?:window )?(?:exceeded|overflow)|exceeds the available "
                                     r"context size", re.I)),
     ("kilo_auth", re.compile(r"Kilo[^.\n]{0,40}\b401\b", re.I)),
+    # 2026-11-20 18:25 FIN-4a: the first push of a lane to slot-3's 36 GB copy ran into the
+    # push timeout; the wrapper died with the traceback ("subprocess.TimeoutExpired: Command
+    # '['git', '-C', ..., 'push', ..., '<head>:refs/heads/slot/FIN-4a']' timed out after 300
+    # seconds"), no signature matched, and the sprint sat in a Lead case for four hours. The
+    # wrapper prints "SLOT FAIL: ..." lines now (slots.run); the traceback form stays
+    # recognised for a run an older release left behind.
+    ("slot_push", re.compile(r"SLOT FAIL: could not push the sources|"
+                             r"SLOT push \([^)\n]*\): [^\n]{0,60}(?:timed out|push: )|"
+                             r"TimeoutExpired[^\n]{0,600}'push'[^\n]{0,600}refs/heads/slot/",
+                             re.I)),
+    ("slot_checkout", re.compile(r"SLOT FAIL: slot-checkout", re.I)),
+    # 2026-11-16 08:40 LOB-1b: the PC rebooted under a running gate ("the pipeline (pid
+    # 38784) is gone without a result"); the stop went to a Lead case and the operator
+    # re-ran it. A process that vanished says nothing about the code. Last, so a log tail
+    # that names a real cause above wins.
+    ("gate_runner_gone", re.compile(r"the pipeline \(pid \d+\) is gone without a result", re.I)),
 )
 # stop classes whose blocker is the gate / check tooling, not the code
 VERIFY_CLASSES = ("fast_lane_gate_error", "checks_unknown")
 # stop classes of a session that may have died on infrastructure
 SESSION_CLASSES = ("session_blocked", "session_needs_human", "session_error")
+# a scripted run that never reached the slot's Studio (the slot's git copy or checkout), or
+# whose process vanished: nothing about the sprint, and nothing to reopen
+SLOT_SIGS = ("slot_push", "slot_checkout", "gate_runner_gone")
 MAX_BACKOFF = 900
 
 
@@ -137,9 +156,118 @@ def plan(cls: str, reason: str) -> Optional[tuple[str, str]]:
         # merge's new check files missing in Studio (live=missing): the Rojo restart and
         # reopen (v0.157.74) never ran for this class; both sprints went to a lead case.
         sig = infra_signature(reason)
-        if sig in STUDIO_SYNC_SIGS:
+        if sig in STUDIO_SYNC_SIGS or sig in SLOT_SIGS:
             return sig, "restart"
     return None
+
+
+# ---- an outage the coordinator can see is waited out (v0.181.229) --------------------------
+# 2026-11-17 21:45: a Studio update closed Studio. ORI-2, FIN-5a1, POL-7 and LOB-1b each
+# asked for their gate, got "need exactly one Studio matching '[TEST]', found 0", were
+# restarted "free" after 60 s into the same missing Studio, and again, five times in an
+# hour: every restart was a session (POL-7 hit "44 sessions used"), every session counted
+# as "no progress", and three sprints were parked "self-repair exhausted". The head moved
+# with each run, so the per-head retry count never filled and no bound applied.
+#
+# Before a scheduled retry is released, the fault is looked for where it can be seen: a
+# Studio with the TEST place connected (the adapter's studio_ready), the router's /health.
+# While it is still there the task waits (checked every WAIT_RECHECK_S, the repair asked
+# for again every WAIT_REPAIR_S), nothing is restarted, counted or charged, and after
+# [automation] infra_wait_notice_minutes one alert names the outage and everyone waiting on
+# it. A fault that cannot be seen (a slot's Studio, a slot push) keeps the bounded retries.
+WAIT_STUDIO = ("studio", "studio_reload")
+WAIT_ROUTER = ("connection", "backend_5xx", "router_storage", "kilo_retry")
+WAIT_WHAT = {"studio": "Studio with the TEST place", "router": "the router"}
+PROBE_CACHE_S = 45.0
+WAIT_RECHECK_S = 60.0
+WAIT_REPAIR_S = 900.0
+OUTAGE_FORGET_S = 300.0          # nobody waited on it this long: the next one is a new outage
+RECENT_WINDOW_S = 6 * 3600.0
+RECENT_PER_RETRY = 3             # x auto_heal_retries: restarts of one class and signature
+
+
+def wait_family(sig: str) -> str:
+    return "studio" if sig in WAIT_STUDIO else "router" if sig in WAIT_ROUTER else ""
+
+
+def fault_present(c, P, sig: str) -> Optional[bool]:
+    """Is the fault a stop signature names still there? True (seen), False (seen gone) or
+    None (no way to look: retry as before). One look per project and family per
+    PROBE_CACHE_S, however many tasks wait. Never raises."""
+    fam = wait_family(sig)
+    if not fam:
+        return None
+    cache = c.__dict__.setdefault("_fault_probe", {})
+    now = c.clock()
+    try:
+        main = c.tracks.main_of(P)
+    except Exception:                                            # noqa: BLE001
+        main = P
+    key = (main.id, fam)
+    if fam == "studio":
+        try:
+            from . import slots
+            slot = slots.slot_for(c, P)
+        except Exception:                                        # noqa: BLE001
+            slot = None
+        if slot is not None:
+            return None                  # a slot's Studio: nothing here can see it
+    hit = cache.get(key)
+    if hit and now - hit[0] < PROBE_CACHE_S:
+        return hit[1]
+    out: Optional[bool] = None
+    why = ""
+    try:
+        if fam == "studio":
+            fn = getattr(P.adapter, "studio_ready", None)
+            if callable(fn):
+                verdict, why = fn()
+                out = True if verdict == "no_studio" else False if verdict in ("ok", "play") \
+                    else None
+        else:
+            from . import infra
+            specs = infra.router_probe(main)
+            if specs:
+                why = infra.check_endpoint(infra._endpoint(specs[0])[1])
+                out = bool(why)
+    except Exception as e:                                       # noqa: BLE001
+        out, why = None, f"{type(e).__name__}: {e}"
+    cache[key] = (now, out, str(why or "")[:200])
+    return out
+
+
+def _fault_why(c, P, sig: str) -> str:
+    try:
+        main = c.tracks.main_of(P)
+    except Exception:                                            # noqa: BLE001
+        main = P
+    hit = c.__dict__.get("_fault_probe", {}).get((main.id, wait_family(sig)))
+    return str(hit[2]) if hit else ""
+
+
+def _mark_infra_session(c, P, t: dict, sig: str, key: str) -> None:
+    """The session whose turn ended in an infrastructure stop says nothing about the
+    sprint: it is left out of the no-progress count (recovery._infra_sessions reads
+    `infra_stop`), and its place in the session budget is given back (one
+    `infra:sessions:<session>` row; the ledger checks the mark and a daily cap)."""
+    sid = str(t.get("session_id") or "")
+    if not sid:
+        return
+    try:
+        s = c.store.session(sid)
+        if not s or (s.get("data") or {}).get("infra_stop"):
+            return
+        c.store.update_session(sid, data={**(s.get("data") or {}), "infra_stop": sig,
+                                          "infra_stop_key": key})
+        from .obligations import INFRA_ACTOR, INFRA_REF
+        c.obligations.authorize(P.id, t["task_id"], "sessions", 1,
+                                f"session {sid} ended on infrastructure ({sig}): not counted",
+                                INFRA_ACTOR, f"{INFRA_REF}sessions:{sid}")
+        c.store.event(P.id, t["task_id"], "infra_session_refund", detail={
+            "session_id": sid, "signature": sig, "key": key})
+    except Exception as e:                                       # noqa: BLE001
+        c.store.event(P.id, t["task_id"], "infra_session_refund_refused", detail={
+            "session_id": sid, "signature": sig, "why": f"{type(e).__name__}: {e}"[:300]})
 
 
 def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> Optional[dict]:
@@ -167,22 +295,42 @@ def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> 
     counts = dict(data.get("auto_heal_counts") or {})
     key = f"{head[:12]}|{cls}|{sig}"
     n = int(counts.get(key) or 0)
-    if n >= retries:
-        c.store.event(pid, tid, "auto_heal_exhausted", detail={
-            "key": key, "retries": n, "action": action, "reason": reason[:300]})
-        return None
-    delay = min(MAX_BACKOFF, int(auto_get(P, "infra_backoff_seconds") or 0) * (2 ** n))
     now = c.clock()
-    counts[key] = n + 1
-    blocker = (f"auto-heal {n + 1}/{retries} ({sig}): "
-               + ("re-running the gate/checks" if action == "verify"
-                  else "restarting the session (no attempt charged)")
-               + f" in {delay} s; was: {reason}")[:1000]
+    # the count above is per head, and every failed run moved the head (11-17: "auto-heal
+    # 1/2" five times in a row, never 2/2). The same class and signature is also counted
+    # over RECENT_WINDOW_S whatever the head: RECENT_PER_RETRY times auto_heal_retries
+    rkey = f"{cls}|{sig}"
+    recent_all = dict(data.get("auto_heal_recent") or {})
+    recent = [float(x) for x in recent_all.get(rkey) or [] if now - float(x) < RECENT_WINDOW_S]
+    waiting = False
+    if n >= retries or len(recent) >= retries * RECENT_PER_RETRY:
+        if fault_present(c, P, sig) is not True:
+            c.store.event(pid, tid, "auto_heal_exhausted", detail={
+                "key": key, "retries": n, "action": action, "reason": reason[:300],
+                "recent": len(recent), "recent_hours": RECENT_WINDOW_S / 3600})
+            return None
+        # the retries are used up and the outage is still there: it is waited out, not
+        # handed to a paid Lead case that can only say "infrastructure"
+        waiting = True
+    if not waiting:
+        recent_all[rkey] = recent + [now]
+        data["auto_heal_recent"] = recent_all
+    if waiting:
+        delay = int(WAIT_RECHECK_S)
+        blocker = (f"waiting for {WAIT_WHAT[wait_family(sig)]} ({sig}): checked every "
+                   f"{delay} s; no attempt, session or Lead call is used; was: {reason}")[:1000]
+    else:
+        delay = min(MAX_BACKOFF, int(auto_get(P, "infra_backoff_seconds") or 0) * (2 ** n))
+        counts[key] = n + 1
+        blocker = (f"auto-heal {n + 1}/{retries} ({sig}): "
+                   + ("re-running the gate/checks" if action == "verify"
+                      else "restarting the session (no attempt charged)")
+                   + f" in {delay} s; was: {reason}")[:1000]
     data.update(auto_heal_counts=counts, auto_heal={
-        "key": key, "n": n + 1, "action": action, "signature": sig, "class": cls,
-        "retry_at": now + delay, "blocker": blocker, "reason": reason[:500],
+        "key": key, "n": n if waiting else n + 1, "action": action, "signature": sig,
+        "class": cls, "retry_at": now + delay, "blocker": blocker, "reason": reason[:500],
         "verification_id": evidence.get("verification_id") or fields.get("verification_id")
-        or ""})
+        or "", **({"wait_since": now} if waiting else {})})
     ev = {**evidence, "blocker": blocker, "auto_heal": True}
     try:
         S.check(cur["state"], S.BLOCKED, ev)
@@ -192,6 +340,8 @@ def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> 
     c.store.release(pid, tid)
     out = c.store.transition(pid, tid, S.BLOCKED, ev, blocker=blocker, data=data,
                              next_action=blocker[:500], **extra)
+    if action == "restart":
+        _mark_infra_session(c, P, cur, sig, key)
     # the stopped task (its blocker names what Studio is missing), not the pre-stop copy
     repairs = repair(c, P, c.store.task(pid, tid) or t, sig, action)  # W1.8
     job = next((r.get("job") for r in repairs if r.get("job")), "")
@@ -205,8 +355,9 @@ def try_heal(c, P, t: dict, to: str, evidence: dict, cls: str, fields: dict) -> 
         d2["auto_heal"] = ah
         c.store.update_task(pid, tid, data=d2)
     c.store.event(pid, tid, "auto_heal", detail={
-        "key": key, "n": n + 1, "of": retries, "action": action, "signature": sig,
-        "class": cls, "delay_s": delay, "reason": reason[:300], "repairs": repairs})
+        "key": key, "n": n if waiting else n + 1, "of": retries, "action": action,
+        "signature": sig, "class": cls, "delay_s": delay, "reason": reason[:300],
+        "repairs": repairs, **({"waiting": True} if waiting else {})})
     if n == 0:
         # A1: one promotion-pipeline occurrence per auto-heal key (head/class/
         # signature), counted on its first retry; inert without a playbook
@@ -479,6 +630,16 @@ def step(c, P, t: dict) -> bool:
     if ah.get("studio_job"):
         if not _studio_job_settled(c, P, t, data, ah):
             return True                  # the Studio reopen is still running
+        ah = {k: v for k, v in ah.items() if k not in ("studio_job", "studio_job_ts")}
+        data["auto_heal"] = ah           # settled and journaled once (a wait asks again)
+    sig = str(ah.get("signature") or "")
+    if fault_present(c, P, sig) is True:
+        _keep_waiting(c, P, t, data, ah)
+        return True                      # still down: nothing is restarted or counted
+    if ah.get("wait_since"):
+        c.store.event(pid, tid, "infra_back", detail={
+            "signature": sig, "waited_s": int(c.clock() - float(ah["wait_since"])),
+            "checks": int(ah.get("waits") or 0)})
     held = getattr(c, "_held", None)
     if callable(held) and held(P, t, "auto-heal retry"):
         return True
@@ -497,6 +658,74 @@ def step(c, P, t: dict) -> bool:
     c.store.event(pid, tid, "auto_heal_retry", detail={"key": ah.get("key"),
                                                        "action": ah.get("action")})
     return True
+
+
+def _keep_waiting(c, P, t: dict, data: dict, ah: dict) -> None:
+    """The fault is still there at the retry time: look again in WAIT_RECHECK_S, ask for the
+    repair again every WAIT_REPAIR_S (a Studio reopen; the client's own limits apply), say so
+    on the task, and after [automation] infra_wait_notice_minutes raise the outage once."""
+    pid, tid = P.id, t["task_id"]
+    now = c.clock()
+    sig = str(ah.get("signature") or "")
+    fam = wait_family(sig)
+    ah = dict(ah)
+    first = not ah.get("wait_since")
+    ah["wait_since"] = float(ah.get("wait_since") or now)
+    ah["waits"] = int(ah.get("waits") or 0) + 1
+    ah["retry_at"] = now + WAIT_RECHECK_S
+    waited = now - ah["wait_since"]
+    if now - float(ah.get("repair_ts") or ah["wait_since"]) >= WAIT_REPAIR_S:
+        ah["repair_ts"] = now
+        repairs = repair(c, P, t, sig, str(ah.get("action") or ""))
+        job = next((r.get("job") for r in repairs if r.get("job")), "")
+        if job:
+            ah.update(studio_job=job, studio_job_ts=now)
+    data["auto_heal"] = ah
+    why = _fault_why(c, P, sig)
+    note = (f"waiting for {WAIT_WHAT[fam]}"
+            + (f" ({why})" if why else "")
+            + f": down for {int(waited // 60)} min, checked every {int(WAIT_RECHECK_S)} s; "
+              f"no attempt, session or Lead call is used")
+    c.store.update_task(pid, tid, data=data, next_action=note[:500])
+    if first:
+        c.store.event(pid, tid, "infra_waiting", detail={"signature": sig, "family": fam,
+                                                          "why": why, "key": ah.get("key")})
+    _outage_notice(c, P, fam, sig, why, ah["wait_since"])
+
+
+def _outage_notice(c, P, fam: str, sig: str, why: str, since: float) -> None:
+    """One alert per outage, not per waiting task: raised when the oldest wait on it passed
+    infra_wait_notice_minutes, and forgotten when nothing waits on it any more."""
+    try:
+        main = c.tracks.main_of(P)
+    except Exception:                                            # noqa: BLE001
+        main = P
+    mins = float(auto_get(P, "infra_wait_notice_minutes") or 0)
+    seen = c.__dict__.setdefault("_infra_outage", {})
+    st = seen.get((main.id, fam))
+    if st is None or c.clock() - float(st.get("last") or 0) > OUTAGE_FORGET_S:
+        st = seen[(main.id, fam)] = {"since": since, "noticed": False}
+    st["since"] = min(st["since"], since)
+    st["last"] = c.clock()
+    if mins <= 0 or st["noticed"] or c.clock() - st["since"] < mins * 60:
+        return
+    st["noticed"] = True
+    waiting = sorted(t["task_id"] for t in c.store.tasks(main.id)
+                     if t["state"] == S.BLOCKED and wait_family(str(
+                         ((t.get("data") or {}).get("auto_heal") or {}).get("signature")
+                         or "")) == fam and ((t.get("data") or {}).get("auto_heal")
+                                             or {}).get("wait_since"))
+    down = int((c.clock() - st["since"]) // 60)
+    text = (f"{WAIT_WHAT[fam][0].upper() + WAIT_WHAT[fam][1:]} has not answered for {down} "
+            f"min" + (f" ({why})" if why else "") + f". Waiting on it: "
+            f"{', '.join(waiting) or 'nothing right now'}. They restart by themselves when it "
+            f"is back; no attempt, session or Lead call is used meanwhile."
+            + (" A reopen is asked for every 15 min; if Studio is open, check that it shows "
+               "the TEST place and that its MCP plugin is connected." if fam == "studio" else ""))
+    c.store.event(main.id, waiting[0] if waiting else "", "operator_notice", detail={
+        "text": text, "kind": "infra_outage", "alert_class": "watch",
+        "title": f"{WAIT_WHAT[fam]} has been down for {down} min", "family": fam,
+        "signature": sig, "waiting": waiting})
 
 
 def _studio_job_settled(c, P, t: dict, data: dict, ah: dict) -> bool:

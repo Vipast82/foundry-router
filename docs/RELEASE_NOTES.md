@@ -1,3 +1,104 @@
+## v0.181.229 - an outage is waited out, not restarted into; a fix that is live is tried
+
+Second release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: items 2 and 3
+(infrastructure faults that burned self-repair), and one the document does not
+list but the database does: seven of last week's hand unblocks read "Foundry
+<commit> is live: run it again". Built from what the live coordinator
+recorded, not from the summary of it.
+
+**What 11-17 actually did (item 2).** A Studio update closed Studio at 21:45.
+ORI-2, FIN-5a1, POL-7 and LOB-1b each asked for their gate and got `need
+exactly one Studio matching '[TEST]', found 0`. That was already classed as
+infrastructure and retried "free" after 60 seconds - into the same missing
+Studio. Each retry was a new session; each of those ended the same way, five
+times in an hour per sprint. No attempt was charged, but every one of those
+sessions counted against the session budget (POL-7: "44 sessions used") and as
+a session with no progress, and that is what parked three sprints as
+"self-repair exhausted". The bound that should have stopped it never applied:
+the retry count is per commit, each failed run moved the commit, and every
+event read "auto-heal 1/2".
+
+Three changes in the coordinator:
+
+- **The fault is looked for before a retry is released.** For a stop on Studio
+  the coordinator asks whether a Studio with the TEST place is connected (the
+  gate's own read-only check); for a stop on the router, its `/health`. While
+  it is still down the sprint waits: checked every minute, nothing restarted,
+  nothing counted, no Lead case, and a Studio reopen asked for again every 15
+  minutes. When it is back the retry goes (`infra_back`, with how long it
+  waited). If the retries are used up and the outage is still there, that
+  waits too instead of going to a paid Lead case. One alert per outage, not per
+  sprint, after `[automation] infra_wait_notice_minutes` (new, default 30, 0 =
+  no alert; Automation page), naming every sprint waiting on it.
+- **The session that ran into it is not the sprint's.** It is left out of the
+  no-progress count and its place in the session budget is given back (a ledger
+  row `infra:sessions:<session>`, written only for a session the auto-heal
+  marked, at most 12 a day per sprint).
+- **Restarts are bounded whatever the commit**: the same stop class and
+  signature gets at most three times `auto_heal_retries` in six hours, then it
+  goes on to the Lead as before. A fault nothing can look at (a slot's Studio,
+  a slot push) keeps bounded retries only.
+
+**The Studio reopen (Foundry Client).** The records also show why Studio stayed
+closed for an hour: ORI-2's reopen job (21:47) and FIN-5a1's (21:52) both sat
+in the idle wait, the first opened the TEST place at 21:58 and the second
+closed that window at 22:02 to open it again. Two reopens in five minutes used
+up `max_per_hour`, and every request until 23:00 was refused.
+
+- One reopen at a time: a request made while a reopen runs, or within five
+  minutes of one that succeeded, gets that job back.
+- A Studio update is waited for: while `RobloxStudioInstaller` runs nothing is
+  closed, opened or counted (up to 15 minutes), and the wait for the TEST
+  window does not run out while a launch is installing.
+- An update starts the hourly count again. The Studio logs carry the version
+  and start time in their names; when the newest ones name two versions and
+  the new one first ran inside the last hour, reopens made before that do not
+  count. The job says what it saw (`Studio updated 0.747.0.7471481 ->
+  0.748.0.7481526`).
+
+**Slot push and vanished runners (item 3).** FIN-4a sat in a Lead case for four
+hours on 11-20 because the first push of its lane to slot-3 hit the push
+timeout: the timeout was not caught, the wrapper died with a traceback, and no
+signature matched. A push or checkout on a slot that times out now says so
+(`SLOT push (...): AU push: timed out after 3600 s`) and is a named fault
+(`slot_push`, `slot_checkout`), retried without a Lead call; the traceback an
+older run left is recognised too. So is a gate whose process vanished (`the
+pipeline (pid N) is gone without a result`: LOB-1b, the PC reboot of 11-16).
+
+**A Lead case opened on infrastructure goes back (item 3).** Self-repair rule
+`infra_case`: a blocked sprint whose open Lead case was opened on a fault the
+auto-heal knows, with no call in flight for five minutes, has the case
+cancelled and the stop handed to the auto-heal, which waits for the fault and
+retries free. NEEDS_VICTOR included; bounded like any other restart. A case on
+the sprint's own findings is never taken from the Lead.
+
+**What a new release fixes is tried.** POL-7, LOB-1b and FIN-5a1 sat blocked
+for 2.5 to 7 hours on 11-17, each on a review that could not fit its diff,
+until the operator wrote "Foundry 4d194d9 is live" and unblocked them; FIN-4a
+the same on 11-21. Self-repair rule `upgrade_rerun`: when a release is first
+seen running, a sprint that was stopped by tooling under the older one - a
+tooling stop class (gate or check errors, readiness, a session's own BLOCKED
+report), or the review refusing a diff - gets one free run on the new code.
+Once per release, at most every six hours, never while a product decision or
+something only you can do is open, and not for budget or time stops (those are
+next). `[automation] self_heal_rerun_after_upgrade` (new, default on;
+Automation page). The first deploy of this release counts as an upgrade: every
+sprint that is blocked that way gets its one run.
+
+Not done by this: after a Studio update the MCP bridge may still need a
+restart by hand ("found 0" with Studio open); the alert now says so after 30
+minutes instead of three sprints being parked.
+
+Files: `foundry_coordinator/autoheal.py` (`fault_present`, the wait in `step`,
+`_mark_infra_session`), `selfheal.py` (`upgrade_reruns`, `infra_cases`),
+`obligations.py` (`infra:` rows), `engine.py`, `recovery.py`, `slots.py`,
+`projects/animaluprising/adapter.py` (`studio_ready`),
+`foundry_client/studio.py`, `foundry_automation/schema.py`,
+`docs/COORDINATOR.md`. 36 tests.
+
+Deploy: coordinator and Foundry Client both changed; the client needs a
+restart for the reopen changes.
+
 ## v0.181.228 - grounded answers over work records
 
 Asked: build the first gap in docs/BENCH_GAPS.md. The ecosystem's main work

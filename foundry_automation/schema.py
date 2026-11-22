@@ -291,6 +291,7 @@ AUTOMATION_DEFAULTS: dict = {
     "lead_report_repairs": 1,
     "infra_retry_max": 5,
     "infra_backoff_seconds": 60,
+    "infra_wait_notice_minutes": 30,
     "preflight": True,
     "preflight_endpoints": [],
     # 2026-11-07: a track gets the official Studio MCP server (36 tools, ~20.8k tokens a
@@ -374,6 +375,7 @@ AUTOMATION_DEFAULTS: dict = {
     "self_heal_stale_playtest_minutes": 10,
     "self_heal_unowned_pause_hours": 12,
     "self_heal_reverify_fixed": True,
+    "self_heal_rerun_after_upgrade": True,
 }
 _SCOPE_RULE_KEYS = {"name", "path", "lines", "blocks", "json_paths_in_plan", "reason"}
 
@@ -965,6 +967,12 @@ _AUTO_DESC = {
     "lead_report_repairs": "Invalid lead reports sent back into the same session.",
     "infra_retry_max": "Infrastructure failures retried free per task run.",
     "infra_backoff_seconds": "First infra retry delay (doubles, capped at 15 min).",
+    "infra_wait_notice_minutes": "A sprint that stopped because Studio (with the TEST place) "
+                                 "or the router is down waits until it is back: checked "
+                                 "every minute, nothing restarted, no attempt, session or "
+                                 "Lead call used. After this many minutes of one outage, "
+                                 "one alert names it and every sprint waiting on it. 0 = no "
+                                 "alert (the wait itself stays).",
     "preflight": "Check Kilo / Rojo / Studio MCP / local model before a session starts.",
     "preflight_endpoints": "Extra endpoints the preflight probes (name=url; tcp:// or http(s)://).",
     "studio_official_mcp_on_demand": "A track with the studio need gets the official Roblox_Studio "
@@ -1081,6 +1089,12 @@ _AUTO_DESC = {
     "self_heal_reverify_fixed": "A BLOCKED task whose blocker a newer running release fixes "
                                 "(selfheal.FIXED_SIGNATURES) is re-verified once, with no "
                                 "attempt charged.",
+    "self_heal_rerun_after_upgrade": "When a new release starts running, a sprint that was "
+                                     "stopped by tooling under the older one (a tooling stop "
+                                     "class, or the review refusing a diff it could not fit) "
+                                     "gets one free run on the new code: once per release, at "
+                                     "most every six hours, never while a decision of yours is "
+                                     "open. Budget and time stops are not re-run.",
 }
 
 C = "coordinator"

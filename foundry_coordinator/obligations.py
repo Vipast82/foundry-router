@@ -86,6 +86,14 @@ AUTH_PREFIX = "authorized:"
 POLICY_ACTOR = "policy"
 POLICY_REF = "policy:"
 POLICY_WINDOW_SECONDS = 86400.0
+# v0.181.229: a session whose turn ended in an infrastructure stop (no Studio, a slot push
+# that timed out) is not the sprint's: its place in the session budget is given back with
+# one `infra:sessions:<session id>` row. Only INFRA_ACTOR writes it, one unit, for the
+# sessions counter only, once per session, and only when the engine's validator finds the
+# session marked by the auto-heal; INFRA_REFUNDS_PER_DAY bounds a signature that misfires.
+INFRA_ACTOR = "infra"
+INFRA_REF = "infra:"
+INFRA_REFUNDS_PER_DAY = 12
 
 def budget_epoch(trow) -> Optional[float]:
     """When a task's budget starts: a merge repair or an operator reopen gives it fresh
@@ -429,7 +437,7 @@ def _ob_categories(ob: dict) -> set[str]:
 class Obligations:
     def __init__(self, store, clock=time.time, *, operator_actors: Optional[Iterable[str]] = None,
                  unblock_validator=None, lead_validator=None, decision_policy=None,
-                 policy_cap=None, policy_validator=None):
+                 policy_cap=None, policy_validator=None, infra_validator=None):
         """operator_actors: names allowed to carry `operator` authority outside
         the control channel (default none: only channel='control' answers
         carry it). unblock_validator(project, task, ref, actor) -> bool checks
@@ -451,6 +459,9 @@ class Obligations:
         # review is for was never reviewed). Without policy_cap no policy row is valid.
         self.policy_cap = policy_cap
         self.policy_validator = policy_validator
+        # infra_validator(project, task, ref, counter) -> bool: the session an
+        # `infra:sessions:<session>` row names is this task's and ended on infrastructure
+        self.infra_validator = infra_validator
         migrate(store)
 
     # -- rows ---------------------------------------------------------------------
@@ -1280,6 +1291,9 @@ class Obligations:
         if decision_id.startswith(POLICY_REF):
             self._require_policy(project, task, decision_id, actor, counter, n)
             return
+        if decision_id.startswith(INFRA_REF):
+            self._require_infra(project, task, decision_id, actor, counter, n)
+            return
         if decision_id.startswith("unblock:"):
             if callable(self.unblock_validator):
                 try:
@@ -1322,6 +1336,37 @@ class Obligations:
             "task_id=? AND counter=? AND decision_id LIKE ? AND ts>=?",
             (project, task, AUTH_PREFIX + counter, POLICY_REF + "%", self.clock() - window))
         return int((rows[0]["n"] if rows else 0) or 0)
+
+    def _require_infra(self, project, task, ref: str, actor: str, counter: str,
+                       n: int) -> None:
+        """An `infra:sessions:<session id>` row (see INFRA_REF): the infra actor only,
+        the sessions counter only, one unit, within INFRA_REFUNDS_PER_DAY per task, and
+        only when the engine confirms the session ended on infrastructure."""
+        if actor != INFRA_ACTOR:
+            raise LedgerRefused(f"{ref}: only the {INFRA_ACTOR!r} actor writes infra rows "
+                                f"(not {actor!r})")
+        parts = ref.split(":")
+        if len(parts) < 3 or not parts[2] or parts[1] != counter or counter != "sessions":
+            raise LedgerRefused(f"{ref} does not name the sessions counter and a session")
+        if int(n) != 1:
+            raise LedgerRefused(f"{ref}: an infra row is one unit, not {n}")
+        rows = self.store.q(
+            "SELECT COALESCE(SUM(delta), 0) AS n FROM budget_ledger WHERE project_id=? AND "
+            "task_id=? AND counter=? AND decision_id LIKE ? AND ts>=?",
+            (project, task, AUTH_PREFIX + counter, INFRA_REF + "%",
+             self.clock() - POLICY_WINDOW_SECONDS))
+        used = int((rows[0]["n"] if rows else 0) or 0)
+        if used + 1 > INFRA_REFUNDS_PER_DAY:
+            raise LedgerRefused(f"{used}/{INFRA_REFUNDS_PER_DAY} sessions of {project}/{task} "
+                                f"were given back for infrastructure in the last day")
+        ok = False
+        if callable(self.infra_validator):
+            try:
+                ok = bool(self.infra_validator(project, task, ref, counter))
+            except Exception:                                     # noqa: BLE001
+                ok = False
+        if not ok:
+            raise LedgerRefused(f"{ref}: that session did not end on infrastructure")
 
     def _require_policy(self, project, task, ref: str, actor: str, counter: str,
                         n: int) -> None:

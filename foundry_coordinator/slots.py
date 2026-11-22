@@ -269,24 +269,42 @@ def push_sources(slot: dict, worktree: str, task: str, head: str) -> tuple:
         # 2026-11-21: a lane's FIRST push to a slot's 36 GB copy sends every evidence frame
         # committed since the slot's last lane; FIN-4a's (slot-3) and BAL-2e3's (slot-1) ran
         # far past the 300 s default, and the gate died before it reached Studio
-        r = _git(worktree, "push", "-q", "--force", url, f"{head}:refs/heads/slot/{task}",
-                 env=git_ssh_env(slot), timeout=SLOT_PUSH_TIMEOUT_S)
+        try:
+            r = _git(worktree, "push", "-q", "--force", url, f"{head}:refs/heads/slot/{task}",
+                     env=git_ssh_env(slot), timeout=SLOT_PUSH_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # 2026-11-20 FIN-4a: the timeout was not caught, the wrapper died with a
+            # traceback and nothing could tell a slow push from a broken gate
+            return False, (f"AU push: timed out after {int(SLOT_PUSH_TIMEOUT_S)} s (the slot's "
+                           f"copy is far behind)")
+        except OSError as e:
+            return False, f"AU push: {type(e).__name__}: {e}"[:300]
         if r.returncode != 0:
             return False, "AU push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
         done.append(f"AU {head[:12]} -> slot/{task}")
     furl, fdir = slot.get("foundry_push_url") or "", slot.get("foundry_host_dir") or ""
     if furl and fdir:
-        r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, "HEAD:refs/heads/deploy",
-                 env=git_ssh_env(slot))
+        try:
+            r = _git(FOUNDRY_ROOT, "push", "-q", "--force", furl, "HEAD:refs/heads/deploy",
+                     env=git_ssh_env(slot))
+        except subprocess.TimeoutExpired:
+            return False, "Foundry push: timed out after 300 s"
+        except OSError as e:
+            return False, f"Foundry push: {type(e).__name__}: {e}"[:300]
         if r.returncode != 0:
             return False, "Foundry push: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
         q = shlex.quote(fdir)
-        r = subprocess.run(host_argv(slot, ["sh", "-c",
-                           f"git -C {q} fetch -q origin deploy && "
-                           f"git -C {q} -c advice.detachedHead=false checkout -q --force --detach FETCH_HEAD && "
-                           f"git -C {q} rev-parse --short=12 HEAD"]),
-                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           timeout=300, creationflags=_NO_WINDOW)
+        try:
+            r = subprocess.run(host_argv(slot, ["sh", "-c",
+                               f"git -C {q} fetch -q origin deploy && "
+                               f"git -C {q} -c advice.detachedHead=false checkout -q --force --detach FETCH_HEAD && "
+                               f"git -C {q} rev-parse --short=12 HEAD"]),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=300, creationflags=_NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            return False, "Foundry checkout on the host: timed out after 300 s"
+        except OSError as e:
+            return False, f"Foundry checkout on the host: {type(e).__name__}: {e}"[:300]
         if r.returncode != 0:
             return False, "Foundry checkout on the host: " + (r.stdout or b"").decode("utf-8", "replace")[-300:]
         done.append("Foundry " + (r.stdout or b"").decode("utf-8", "replace").strip()[-12:])

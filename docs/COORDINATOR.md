@@ -274,7 +274,8 @@ Victor decided on 2026-10-21.
 | `scope_unlisted_default` | `"deny"` | Recommended answer of a `scope_request` decision for any other path. |
 | `decision_timeout_minutes` | `30` | A decision with a recommended option applies it after this (authority `timeout_default`, journaled, `operator_notice`). Defects never time out. |
 | `no_progress_sessions` | `2` | Sessions in a row with no commit, verified delta or plan step before a no-progress stop (infra sessions don't count; an operator resolution resets). |
-| `auto_heal_retries` | `2` | Deterministic retries of a tooling / infra stop (per head and class) before a lead case. |
+| `auto_heal_retries` | `2` | Deterministic retries of a tooling / infra stop (per head and class) before a lead case; the same class and signature is also capped at three times this in six hours whatever the head. A fault that can be seen (Studio with the TEST place, the router's `/health`) is not retried into: the task waits until it is back, checked every minute, with nothing restarted, counted or charged. |
+| `infra_wait_notice_minutes` | `30` | One alert (class `watch`) per outage after this long, naming every sprint waiting on it. `0` = no alert; the wait stays. |
 | `lead_hard_max_calls` | `8` | Absolute lead calls per task; delegation never raises it. |
 | `lead_report_repairs` | `1` | Invalid lead reports sent back into the same session. |
 | `infra_retry_max` | `5` | Free infra retries in a row; then an ordinary attempt (and one operator notice for a failing preflight). |

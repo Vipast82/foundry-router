@@ -4897,8 +4897,17 @@ class Coordinator:
                                             lead_validator=self._lead_authority_ok,
                                             decision_policy=self._decision_meta,
                                             policy_cap=self._policy_cap,
-                                            policy_validator=self._policy_ref_ok)
+                                            policy_validator=self._policy_ref_ok,
+                                            infra_validator=self._infra_ref_ok)
         return self._obligations
+
+    def _infra_ref_ok(self, project: str, task: str, ref: str, counter: str) -> bool:
+        """`infra:sessions:<session id>`: a session of this task that autoheal marked as
+        ended on infrastructure (autoheal._mark_infra_session)."""
+        sid = ref.split(":", 2)[2] if ref.count(":") >= 2 else ""
+        s = self.store.session(sid) if sid else None
+        return bool(s and s.get("project_id") == project and s.get("task_id") == task
+                    and counter == "sessions" and (s.get("data") or {}).get("infra_stop"))
 
     def _policy_cap(self, project: str, counter: str, task: str = "") -> int:
         """Self-driving part 1: policy extensions of `counter` per task per day. A task at

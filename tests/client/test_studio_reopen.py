@@ -185,3 +185,177 @@ def test_rojo_auto_sync_off_and_bad_files_are_left_alone(tmp_path):
     assert SR.apply_rojo_auto_sync([], str(tmp_path / "Roblox")) == [str(p)]
     assert bad.read_text(encoding="utf-8") == "not json"
     assert "studio.rojo_auto_sync must be true or false" in SR.validate(dict(TEST_ST, rojo_auto_sync="yes"))
+
+
+# ------------------------------------------------------------------ v0.181.229: one reopen at
+# a time, and a Studio update (the 2026-11-17 update, 0.747 -> 0.748)
+
+OLD, NEW = "0.747.0.7471481", "0.748.0.7481526"
+
+
+class UpdatingStudio(FakeStudio):
+    """A Studio whose installer runs until `update_until`, with the versions its logs name."""
+
+    def __init__(self, clock, update_until=0.0, versions=(), opens_after=0.0, **kw):
+        super().__init__(clock, **kw)
+        self.update_until, self.versions, self.opens_after = update_until, list(versions), opens_after
+        self.launch_at = None
+
+    def updating(self):
+        return "RobloxStudioInstaller.exe pid 4242" if self.clock() < self.update_until else ""
+
+    def log_versions(self):
+        return sorted(self.versions, reverse=True)
+
+    def launch(self, uri):
+        self.launched.append(uri)
+        self.launch_at = self.clock()
+
+    def windows(self):
+        if self.launch_at is not None and self.clock() - self.launch_at >= self.opens_after \
+                and not any(w["hwnd"] == 2 for w in self.wins):
+            self.wins.append({"hwnd": 2, "pid": 20, "title": self.reopen_title})
+            self.versions.append((self.clock(), NEW))
+        return super().windows()
+
+
+def _reopen(tmp_path, fake, clock, st=None):
+    alerts = []
+    r = SR.StudioReopen(lambda: dict(st or TEST_ST), str(tmp_path), backend_factory=lambda: fake,
+                        alert=lambda k, t: alerts.append(t), clock=clock, sleep=clock.sleep,
+                        plugin_settings_dir=str(tmp_path / "Roblox"))
+    return r, alerts
+
+
+def test_replay_a_second_request_joins_the_reopen_under_way(tmp_path):
+    """11-17: the job for ORI-2 (21:47) and the one for FIN-5a1 (21:52) both sat in the idle
+    wait; the first opened the TEST place at 21:58, the second closed it again at 22:02. Two
+    reopens in five minutes used up max_per_hour and Studio stayed closed for an hour."""
+    clock = Clock()
+    fake = FakeStudio(clock, idle=5.0)                 # someone is typing: the job waits
+    r, _ = _reopen(tmp_path, fake, clock)
+    joined = []
+    real_sleep = clock.sleep
+
+    def sleep(s):                                      # FIN-5a1 asks while the first job waits
+        real_sleep(s)
+        if not joined:
+            joined.append(r.start(task="FIN-5a1"))
+    r.sleep = sleep
+    j1 = r.start(task="ORI-2", wait=True)
+    assert j1["state"] == "done" and len(fake.launched) == 1 and fake.closed == [1]
+    assert joined[0]["job"] == j1["job"] and joined[0]["state"] == "running"
+    assert any("also asked for by FIN-5a1" in s["text"] for s in j1["steps"])
+    assert j1["joined"] == ["FIN-5a1"]
+    # POL-7 asks two minutes after it opened: the same reopen answers, nothing is closed
+    clock.t += 120
+    j3 = r.start(task="POL-7", wait=True)
+    assert j3["job"] == j1["job"] and j3["state"] == "done"
+    assert len(fake.launched) == 1 and fake.closed == [1]
+    assert len(json.loads((tmp_path / "studio-reopen.json").read_text())) == 1   # one counted
+    # later it is a new reopen
+    clock.t += SR.REUSE_S
+    j4 = r.start(task="LOB-1b", wait=True)
+    assert j4["job"] != j1["job"] and j4["state"] == "done" and len(fake.launched) == 2
+    # a dry run never joins a real reopen
+    assert r.start(task="x", dry_run=True, wait=True)["job"] not in (j1["job"], j4["job"])
+
+
+def test_a_failed_reopen_is_not_handed_to_the_next_request(tmp_path):
+    clock = Clock()
+    fake = FakeStudio(clock, asks="Save changes to Roblox?")
+    r, _ = _reopen(tmp_path, fake, clock)
+    j1 = r.start(task="ORI-2", wait=True)
+    assert j1["state"] == "failed"
+    fake.asks = ""
+    fake.wins = [w for w in fake.wins if not w.get("dialog")]
+    j2 = r.start(task="FIN-5a1", wait=True)
+    assert j2["job"] != j1["job"] and j2["state"] == "done"
+
+
+def test_a_studio_update_in_progress_is_waited_for(tmp_path):
+    clock = Clock()
+    fake = UpdatingStudio(clock, update_until=clock.t + 240, wins=[])
+    r, _ = _reopen(tmp_path, fake, clock)
+    j = r.start(task="ORI-2", wait=True)
+    assert j["state"] == "done", j
+    texts = [s["text"] for s in j["steps"]]
+    assert texts[0] == ("Studio is updating (RobloxStudioInstaller.exe pid 4242): waiting for "
+                        "it to finish")
+    assert texts[1].startswith("the update finished after 24")
+    assert fake.launch_at >= 1_000_000.0 + 240          # nothing opened while it installed
+
+
+def test_an_update_that_does_not_finish_fails_without_touching_or_counting(tmp_path):
+    clock = Clock()
+    fake = UpdatingStudio(clock, update_until=clock.t + 10 ** 6)
+    r, alerts = _reopen(tmp_path, fake, clock)
+    j = r.start(task="ORI-2", wait=True)
+    assert j["state"] == "failed" and "still updating after 15 min" in j["result"]
+    assert fake.closed == [] and fake.launched == [] and alerts
+    assert not (tmp_path / "studio-reopen.json").exists()
+    # a dry run only reports it
+    d = r.start(task="x", dry_run=True, wait=True)
+    assert d["state"] == "done" and "a real reopen would wait" in d["steps"][0]["text"]
+
+
+def test_an_update_starts_the_hourly_count_again(tmp_path):
+    """Two reopens were made at 21:58 and 22:02; the new version first ran at 21:57:45, so
+    the one that launched the update (recorded before it) does not count and a third request
+    inside the hour is allowed. With one version in the logs the limit holds as before."""
+    clock = Clock()
+    now = clock.t
+    (tmp_path / "studio-reopen.json").write_text(json.dumps([now - 1500, now - 900]))
+    logs = [(now - 6000, OLD), (now - 4000, OLD), (now - 1200, NEW), (now - 800, NEW)]
+    fake = UpdatingStudio(clock, versions=logs)
+    r, _ = _reopen(tmp_path, fake, clock)
+    j = r.start(task="POL-7", wait=True)
+    assert j["state"] == "done", j
+    assert j["result"] == f"TEST place reopened (Studio {NEW})"
+    step = next(s["text"] for s in j["steps"] if "was updated" in s["text"])
+    assert f"{OLD} -> {NEW}" in step and "20 min ago" in step and "do not count" in step
+    # the same history, no update in the logs: refused
+    clock2 = Clock()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "studio-reopen.json").write_text(json.dumps([now - 1500, now - 900]))
+    r2, _ = _reopen(tmp_path / "b", UpdatingStudio(clock2, versions=[(now - 4000, NEW)]), clock2)
+    j2 = r2.start(task="POL-7", wait=True)
+    assert j2["state"] == "failed" and "rate limit: 2 reopen(s)" in j2["result"]
+    # an update more than an hour old changes nothing either
+    clock3 = Clock()
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "studio-reopen.json").write_text(json.dumps([now - 1500, now - 900]))
+    old_update = [(now - 9000, OLD), (now - 4000, NEW)]
+    r3, _ = _reopen(tmp_path / "c", UpdatingStudio(clock3, versions=old_update), clock3)
+    assert "rate limit" in r3.start(task="x", wait=True)["result"]
+
+
+def test_a_launch_that_starts_an_update_is_given_time_and_names_both_versions(tmp_path):
+    clock = Clock()
+    fake = UpdatingStudio(clock, wins=[], versions=[(clock.t - 5000, OLD)], opens_after=400)
+    fake.update_until = clock.t + 390                  # the launcher installs for 6.5 min
+    fake.updating = lambda: ("RobloxStudioInstaller.exe pid 9"
+                             if fake.launch_at is not None and clock() < fake.update_until else "")
+    r, _ = _reopen(tmp_path, fake, clock)
+    j = r.start(task="ORI-2", wait=True)
+    assert j["state"] == "done", j                     # 400 s > OPEN_WAIT_S, but it installed
+    assert j["result"] == f"TEST place reopened (Studio updated {OLD} -> {NEW})"
+    assert any("the launch started a Studio update" in s["text"] for s in j["steps"])
+    # a window that never comes still fails
+    clock2 = Clock()
+    fake2 = UpdatingStudio(clock2, wins=[], opens_after=10 ** 6)
+    r2, _ = _reopen(tmp_path / "n", fake2, clock2)
+    assert "did not appear within 240 s" in r2.start(task="x", wait=True)["result"]
+
+
+def test_log_versions_reads_version_and_start_time_from_the_log_names(tmp_path):
+    for name in ("0.748.0.7481526_20261118T035745Z_Studio_9151C_last.log",
+                 "0.748.0.7481526_20261118T040226Z_Studio_12CC9_last.log",
+                 "0.747.0.7471481_20261117T170211Z_Studio_AA001_last.log",
+                 "RobloxStudioInstaller_4D8BA.log", "cacert.pem",
+                 "0.748.0.7481526_2026111T04Z_Studio_bad_last.log"):
+        (tmp_path / name).write_text("x")
+    got = SR.log_versions(str(tmp_path))
+    assert [v for _, v in got] == [NEW, NEW, OLD]
+    assert got[0][0] - got[1][0] == 4 * 60 + 41          # 04:02:26 - 03:57:45, UTC
+    assert SR.log_versions(str(tmp_path / "missing")) == []

@@ -20,12 +20,28 @@ The coordinator calls it (POST /api/studio/reopen) only after its own guards: no
 other sprint holds Studio, no gate runner or playtest is live. A job runs in a
 background thread; GET /api/studio/jobs/<id> reports it. `dry_run` checks the guards
 and says what it would do without touching Studio.
+
+v0.181.229, from the Studio update of 2026-11-17 (0.747 -> 0.748):
+- one reopen at a time. ORI-2 asked at 21:47 and FIN-5a1 at 21:52; both jobs sat in the
+  idle wait, the first opened the TEST place at 21:58 and the second closed that window
+  at 22:02 to open it again. Two reopens in five minutes used up `max_per_hour`, and Studio
+  stayed closed until 23:00. A request made while a reopen runs, or within REUSE_S of one
+  that succeeded, gets that job back.
+- a Studio update is waited for: while the installer runs nothing is closed, opened or
+  counted (up to UPDATE_WAIT_S), and the wait for the TEST window does not run out while
+  it installs.
+- an update starts the count again: when the newest Studio logs name two versions and the
+  new one first ran inside the last hour, reopens made before that do not count against
+  `max_per_hour` (the launch that triggered the update is one of them). The job says which
+  versions it saw.
 """
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -34,9 +50,36 @@ from pathlib import Path
 from typing import Callable, Optional
 
 STUDIO_EXE = "robloxstudiobeta.exe"
+INSTALLER_EXE = "robloxstudioinstaller"       # RobloxStudioInstaller.exe, any suffix
 CLOSE_WAIT_S = 60
 OPEN_WAIT_S = 240
 SETTLE_S = 30
+REUSE_S = 300                 # a reopen that succeeded this recently answers the next request
+UPDATE_WAIT_S = 900           # how long a job waits for a running Studio update
+# %LOCALAPPDATA%/Roblox/logs/0.748.0.7481526_20261118T035745Z_Studio_9151C_last.log
+_LOG_RE = re.compile(r"^(\d+\.\d+\.\d+\.\d+)_(\d{8}T\d{6})Z_Studio_")
+
+
+def log_versions(log_dir: Optional[str] = None, limit: int = 60) -> list:
+    """[(first-line time, version)] of the newest Studio logs, newest first: the version
+    and UTC start time are in each log's name. [] when the folder cannot be read."""
+    d = Path(log_dir or os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "logs"))
+    out = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    for name in names:
+        m = _LOG_RE.match(name)
+        if not m:
+            continue
+        try:
+            ts = calendar.timegm(time.strptime(m.group(2), "%Y%m%dT%H%M%S"))
+        except ValueError:
+            continue
+        out.append((float(ts), m.group(1)))
+    out.sort(reverse=True)
+    return out[:limit]
 
 DEFAULTS = {
     "auto_reopen": False,
@@ -200,6 +243,25 @@ class WinBackend:
     def launch(self, uri: str) -> None:
         os.startfile(uri)                                          # the roblox-studio: handler
 
+    def updating(self) -> str:
+        """'' or the Studio installer that is running ("RobloxStudioInstaller.exe pid 1234"):
+        Studio is being updated. Needs psutil; without it the answer is always ''."""
+        try:
+            import psutil
+        except ImportError:
+            return ""
+        try:
+            for p in psutil.process_iter(["name", "pid"]):
+                name = str(p.info.get("name") or "")
+                if name.lower().startswith(INSTALLER_EXE):
+                    return f"{name} pid {p.info.get('pid')}"
+        except Exception:                                         # noqa: BLE001
+            return ""
+        return ""
+
+    def log_versions(self) -> list:
+        return log_versions()
+
 
 # ------------------------------------------------------------------ the reopen job
 
@@ -252,6 +314,17 @@ class StudioReopen:
     def start(self, task: str = "", dry_run: bool = False, wait: bool = False) -> dict:
         """Start a reopen job; {"job": id, "state": ...}. Guards that fail before any
         action make the job fail at once with the reason."""
+        if not dry_run:
+            with self.lock:
+                cur = self._reusable()
+                if cur is not None:
+                    # the request joins the reopen under way (or just made): a second job
+                    # would close the window the first one opened
+                    cur["steps"].append({"ts": self.clock(), "text": (
+                        f"also asked for by {str(task)[:80] or 'another task'}: one reopen "
+                        f"serves both")[:300]})
+                    cur.setdefault("joined", []).append(str(task)[:80])
+                    return json.loads(json.dumps(cur))
         jid = "sr-" + uuid.uuid4().hex[:10]
         job = {"job": jid, "task": str(task)[:80], "dry_run": bool(dry_run), "state": "running",
                "steps": [], "result": "", "started": self.clock(), "ended": None}
@@ -270,6 +343,64 @@ class StudioReopen:
         with self.lock:
             j = self.jobs.get(jid)
             return json.loads(json.dumps(j)) if j else None
+
+    def _reusable(self) -> Optional[dict]:
+        """The real (not dry-run) job a new request joins: one still running, or one that
+        reopened the TEST place within REUSE_S. Called with the lock held."""
+        now = self.clock()
+        for j in reversed(list(self.jobs.values())):
+            if j.get("dry_run"):
+                continue
+            if j["state"] == "running":
+                return j
+            if j["state"] == "done" and now - float(j.get("ended") or 0) < REUSE_S:
+                return j
+        return None
+
+    # -- a Studio update
+
+    def _versions(self, be) -> list:
+        fn = getattr(be, "log_versions", None)
+        if not callable(fn):
+            return []
+        try:
+            return [(float(ts), str(v)) for ts, v in fn() or []]
+        except Exception:                                         # noqa: BLE001
+            return []
+
+    def _updated_since(self, vers: list) -> tuple:
+        """(time the newest version first ran, "old -> new") when the newest logs name two
+        versions and the new one first ran inside the last hour; else (0.0, "")."""
+        if not vers:
+            return 0.0, ""
+        cur = vers[0][1]
+        prev = next((v for _, v in vers if v != cur), "")
+        if not prev:
+            return 0.0, ""
+        first = min(ts for ts, v in vers if v == cur)
+        if self.clock() - first >= 3600:
+            return 0.0, ""
+        return first, f"{prev} -> {cur}"
+
+    def _wait_for_update(self, job: dict, be) -> str:
+        """'' once no Studio update is running (waited for up to UPDATE_WAIT_S), else why
+        the reopen is not made. A dry run only says what it sees."""
+        fn = getattr(be, "updating", None)
+        what = fn() if callable(fn) else ""
+        if not what:
+            return ""
+        if job["dry_run"]:
+            self._step(job, f"Studio is updating ({what}): a real reopen would wait for it")
+            return ""
+        self._step(job, f"Studio is updating ({what}): waiting for it to finish")
+        t0 = self.clock()
+        while fn() and self.clock() - t0 < UPDATE_WAIT_S:
+            self.sleep(5)
+        if fn():
+            return (f"Studio is still updating after {UPDATE_WAIT_S // 60} min ({what}): "
+                    f"nothing was closed, opened or counted")
+        self._step(job, f"the update finished after {int(self.clock() - t0)} s")
+        return ""
 
     def _step(self, job: dict, text: str) -> None:
         with self.lock:
@@ -295,11 +426,20 @@ class StudioReopen:
             return "failed", "studio.auto_reopen is off"
         if errs:
             return "failed", "; ".join(errs)
-        recent = [t for t in self._history() if self.clock() - t < 3600]
+        be = self.backend_factory()
+        why = self._wait_for_update(job, be)
+        if why:
+            return "failed", why
+        before = self._versions(be)
+        since, change = self._updated_since(before)
+        if change:
+            self._step(job, f"Studio was updated ({change}) "
+                            f"{int((self.clock() - since) // 60)} min ago: reopens before the "
+                            f"update do not count against max_per_hour")
+        recent = [t for t in self._history() if self.clock() - t < 3600 and t >= since]
         if not job["dry_run"] and len(recent) >= int(st["max_per_hour"]):
             return "failed", (f"rate limit: {len(recent)} reopen(s) in the last hour "
                               f"(max_per_hour {st['max_per_hour']})")
-        be = self.backend_factory()
         match = str(st["title_match"]).strip().lower()
         wins = be.windows()
         mine = [w for w in wins if match in w["title"].lower()]
@@ -356,10 +496,25 @@ class StudioReopen:
         be.launch(uri)
         self._step(job, f"opened {uri}")
         t0 = self.clock()
-        while self.clock() - t0 < OPEN_WAIT_S:
+        upd = getattr(be, "updating", None)
+        installing = 0.0                 # time the installer ran: not counted as waiting
+        noted = False
+        while self.clock() - t0 - installing < OPEN_WAIT_S and installing < UPDATE_WAIT_S:
             self.sleep(3)
             if any(match in x["title"].lower() for x in be.windows()):
                 self._step(job, "TEST window is open; waiting for Rojo to reconnect")
                 self.sleep(SETTLE_S)
-                return "done", "TEST place reopened"
+                after = self._versions(be)
+                old, new = (before[0][1] if before else ""), (after[0][1] if after else "")
+                note = (f" (Studio updated {old} -> {new})" if old and new and old != new
+                        else f" (Studio {new})" if new else "")
+                return "done", "TEST place reopened" + note
+            if callable(upd) and upd():
+                installing += 3
+                if not noted:
+                    noted = True
+                    self._step(job, "the launch started a Studio update: waiting for it")
+        if installing >= UPDATE_WAIT_S:
+            return "failed", (f"Studio was still updating {UPDATE_WAIT_S // 60} min after the "
+                              f"launch; the TEST window did not appear")
         return "failed", f"the TEST window did not appear within {OPEN_WAIT_S} s"

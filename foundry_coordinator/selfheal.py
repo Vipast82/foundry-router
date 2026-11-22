@@ -22,6 +22,17 @@ lists them). No model call is made here.
   3 fixed_release   a BLOCKED task whose blocker matches a signature a newer running
                     release fixes (FIXED_SIGNATURES), blocked before that release was
                     first seen running: re-verified once, no attempt charged
+    3b upgrade_rerun  a BLOCKED task stopped by tooling (a tooling stop class, or the
+                    review refusing a diff it could not fit) before the running release was
+                    first seen: one free run on the new code per release, at most every
+                    six hours, never while an owner decision is open
+                    (self_heal_rerun_after_upgrade). Seven operator unblocks in the week
+                    of 2026-11-14 read "Foundry <commit> is live: run it again".
+    3c infra_case     a BLOCKED task whose open Lead case was opened on an infrastructure
+                    fault the auto-heal knows (a slot push that timed out, no Studio, a
+                    vanished gate runner) and has no call in flight: the case is cancelled
+                    and the stop goes back to the auto-heal, which waits for the fault and
+                    retries free (FIN-4a 2026-11-20: four hours in NEEDS_VICTOR)
   4 stale_lock      the gate runner lock with a dead pid, a studio_gate studio.lock
                     with no live runner, coordinator locks held by a task that can
                     hold nothing (stopped, no Lead call / check / run): released
@@ -160,7 +171,8 @@ def sweep(c, P, force: bool = False) -> list[dict]:
     out: list[dict] = []
     for name, fn in (("pending_abort", pending_aborts),
                      ("dead_session", dead_sessions), ("stuck_case", stuck_cases),
-                     ("fixed_release", fixed_releases), ("stale_lock", stale_locks),
+                     ("fixed_release", fixed_releases), ("upgrade_rerun", upgrade_reruns),
+                     ("infra_case", infra_cases), ("stale_lock", stale_locks),
                      ("stale_playtest", stale_playtests), ("hold", holds)):
         try:
             out += fn(c, P) or []
@@ -642,6 +654,223 @@ def _withdraw(c, pid, tid, did: str, status: str, reason: str) -> None:
                 "decision_id": did, "by": "self_heal", "reason": reason})
     except Exception:                                            # noqa: BLE001
         pass                         # no decisions table ([lifecycle] off)
+
+
+# ------------------------------------------------------------------ 3b re-run after an upgrade
+
+UPGRADE_RERUN_GAP_S = 6 * 3600.0
+# stops that carry no class but are the coordinator's own limit: the review refusing a diff
+# it could not fit in a packet (POL-7, LOB-1b, FIN-5a1 11-17; FIN-4a 11-21)
+RERUN_TEXT = re.compile(r"insufficiently inspected:", re.I)
+# classes a new release cannot change: a budget or time limit (their own rules), and
+# stops that are the sprint's own work
+NOT_TOOLING = ("task_minutes", "build_stalled", "review_blocked", "fast_lane_red_gates")
+
+
+def first_stop(c, P, t: dict, episode: list) -> dict:
+    """{"class", "reason"} of what first stopped the task in its current BLOCKED stretch:
+    the first Lead case of the stretch (later ones are opened on the decisions that follow
+    it), else the transition's own evidence."""
+    d = t.get("data") or {}
+    ev = (episode[0].get("evidence") or {}) if episode else {}
+    trig: dict = {}
+    L = c._lead_any()
+    if L is not None and episode:
+        since = float(episode[0]["ts"] or 0) - 5
+        cases = sorted((x for x in L.cases(P.id, t["task_id"])
+                        if float(x.get("created_ts") or 0) >= since),
+                       key=lambda x: float(x.get("created_ts") or 0))
+        if cases:
+            trig = dict(cases[0].get("trigger") or {})
+    if not trig:
+        trig = dict(d.get("lead_trigger") or {})
+    return {"class": str(trig.get("class") or ev.get("blocker_class")
+                         or d.get("blocker_class") or ""),
+            "reason": str(trig.get("reason") or ev.get("blocker") or ev.get("reason")
+                          or t.get("blocker") or "")}
+
+
+def tooling_stop(stop: dict) -> bool:
+    from .decision_policy import BUDGET_TRIGGERS, TOOLING_TRIGGERS
+    cls = str(stop.get("class") or "")
+    if cls in BUDGET_TRIGGERS or cls in NOT_TOOLING or cls.startswith("decision_"):
+        return False
+    if cls and cls.startswith(TOOLING_TRIGGERS):
+        return True
+    return bool(RERUN_TEXT.search(str(stop.get("reason") or "")))
+
+
+def _owner_decision_open(c, P, tid: str) -> str:
+    """The open decision that is the owner's to answer ('' = none): a re-run never
+    overtakes a product question or something only a person can do."""
+    try:
+        from . import decision_policy as DP
+        for d in c.obligations.active_decisions(P.id, tid):
+            if d.get("status") == "open" and \
+                    DP.decision_category(d) in (DP.PRODUCT, DP.USER_ACTION):
+                return str(d.get("decision_id") or "?")
+    except Exception:                                            # noqa: BLE001
+        return ""
+    return ""
+
+
+def _rerun(c, P, t: dict, why: str, mark: dict, ref: str,
+           data_extra: Optional[dict] = None) -> Optional[tuple]:
+    """Release a BLOCKED task for one free run: its open Lead case is cancelled, the
+    decisions it waited on withdrawn, and it goes to VERIFYING at the same head (committed
+    work, clean tree) or READY with a free retry. (target, cancelled case id), or None
+    when another writer holds the workspace (next sweep)."""
+    pid, tid = P.id, t["task_id"]
+    Pt = c.tracks.project_for(P, t)
+    try:
+        head = Pt.ws.head()
+        pending = [p for x, p in Pt.ws.status() if str(x).strip() != "??"]
+    except Exception:                                            # noqa: BLE001
+        head, pending = "", ["?"]
+    target = S.READY
+    if head and t.get("base_sha") and head != t["base_sha"] and not pending:
+        if c._acquire(Pt, t, c._workspace_locks(Pt)):
+            return None
+        target = S.VERIFYING
+    data = dict(t.get("data") or {})
+    case_id = data.get("recovery_case")
+    if case_id:
+        L = c._lead_any()
+        if L is not None:
+            L.cancel(case_id, f"self-heal: {why}", actor="self_heal", P=P)
+    for did in list((data.get("decision_wait") or {}).get("ids") or []):
+        _withdraw(c, pid, tid, did, "open", f"self-heal: {why}")
+    stop = (data.get("lc_stop") or {}).get("decision_id")
+    if stop:
+        _withdraw(c, pid, tid, stop, "answered", f"self-heal: {why}")
+    for k in ("question", "decision_wait", "readiness_block", "readiness", "blocker_class",
+              getattr(c, "LC_PENDING", "lc_pending_continuation"), "lc_stop",
+              "recovery_case", "lead_trigger"):
+        data.pop(k, None)
+    data.update(mark)
+    data.update(data_extra or {})
+    data["free_retry"] = True
+    res = (f"self-heal: {why}; "
+           + ("verifying the same head again" if target == S.VERIFYING else "a free retry")
+           + " (no attempt charged)")
+    ev = {"resolution": res, "self_heal": ref}
+    if target == S.VERIFYING:
+        ev["decision_id"] = f"self_heal:{ref}"
+    c.store.transition(pid, tid, target, ev, actor="self_heal", data=data,
+                       next_action=res[:500])
+    return target, str(case_id or "")
+
+
+def upgrade_reruns(c, P) -> list[dict]:
+    if not _setting(P, "self_heal_rerun_after_upgrade"):
+        return []
+    reg = note_version(c)
+    v = _running_version()
+    if len(reg) < 2 or v not in reg:
+        return []                    # the only release this store ever ran: not an upgrade
+    first = float(reg[v])
+    now = time.time()
+    out = []
+    for t in c.store.tasks(P.id):
+        if t["state"] != S.BLOCKED:
+            continue
+        d = t.get("data") or {}
+        if d.get("auto_heal") or d.get("hold"):
+            continue
+        done = dict(d.get("self_heal_upgrade") or {})
+        if v in done or (done and now - max(float(x) for x in done.values())
+                         < UPGRADE_RERUN_GAP_S):
+            continue
+        tid = t["task_id"]
+        hist = c.store.history(P.id, tid)
+        block_ts, episode = _episode(hist)
+        if not episode or block_ts >= first:
+            continue                 # it stopped on this release: nothing new to try
+        stop = first_stop(c, P, t, episode)
+        if not tooling_stop(stop) or _owner_decision_open(c, P, tid):
+            continue
+        if _task_busy(c, P, t) or not _allowed(c, P, tid):
+            continue
+        got = _rerun(c, P, t, f"v{v} runs now and this stopped on tooling under an older "
+                              f"release ({stop['class'] or 'review refusal'}): one run on the "
+                              f"new code", {"self_heal_upgrade": {**done, v: now}},
+                     f"upgrade:{v}")
+        if got is None:
+            continue
+        out.append(_record(c, P, tid, "upgrade_rerun", f"re-run ({got[0]})",
+                           {"running": v, "first_seen": first, "blocked_ts": block_ts,
+                            "class": stop["class"], "reason": stop["reason"][:300],
+                            "case_cancelled": got[1]}))
+    return out
+
+
+# ------------------------------------------------------------------ 3c infrastructure cases
+
+INFRA_CASE_QUIET_S = 300.0           # a case this long without a call in flight
+
+
+def infra_cases(c, P) -> list[dict]:
+    from . import autoheal
+    from .automation import get as auto_get
+    L = c._lead_any()
+    if L is None:
+        return []
+    from .lead import OPEN_STATES
+    out = []
+    now = c.clock()
+    for t in c.store.tasks(P.id):
+        d = t.get("data") or {}
+        if t["state"] != S.BLOCKED or d.get("auto_heal") or d.get("hold") \
+                or not d.get("recovery_case"):
+            continue
+        tid = t["task_id"]
+        case = L.case(str(d["recovery_case"]))
+        if not case or case["state"] not in OPEN_STATES or case.get("paused"):
+            continue
+        trig = case.get("trigger") or {}
+        cls, reason = str(trig.get("class") or ""), str(trig.get("reason") or "")
+        got = autoheal.plan(cls, reason)
+        if got is None:
+            continue
+        sig, action = got
+        if now - float(case.get("state_ts") or case.get("updated_ts") or now) < INFRA_CASE_QUIET_S:
+            continue
+        try:
+            if any(a.get("status") in ("started", "uncertain") for a in L.actions(case["case_id"])):
+                continue             # a call is in flight: its answer comes first
+        except Exception:                                        # noqa: BLE001
+            continue
+        retries = int(auto_get(P, "auto_heal_retries") or 0)
+        rkey = f"{cls}|{sig}"
+        recent = [float(x) for x in (d.get("auto_heal_recent") or {}).get(rkey) or []
+                  if now - float(x) < autoheal.RECENT_WINDOW_S]
+        if retries <= 0 or len(recent) >= retries * autoheal.RECENT_PER_RETRY:
+            continue                 # it was retried enough for now: the Lead keeps it
+        if _owner_decision_open(c, P, tid) or _task_busy(c, P, t) or not _allowed(c, P, tid):
+            continue
+        blocker = (f"auto-heal ({sig}): the Lead case was opened on an infrastructure fault; "
+                   + ("re-running the gate/checks" if action == "verify"
+                      else "restarting the session (no attempt charged)")
+                   + f" once it is gone; was: {reason}")[:1000]
+        why = f"the stop was infrastructure ({sig}), not the sprint's work"
+        L.cancel(case["case_id"], f"self-heal: {why}", actor="self_heal", P=P)
+        data = dict((c.store.task(P.id, tid) or t).get("data") or {})
+        for did in list((data.get("decision_wait") or {}).get("ids") or []):
+            _withdraw(c, P.id, tid, did, "open", f"self-heal: {why}")
+        for k in ("question", "decision_wait", "blocker_class", "lc_stop", "recovery_case",
+                  "lead_trigger", getattr(c, "LC_PENDING", "lc_pending_continuation")):
+            data.pop(k, None)
+        data["auto_heal_recent"] = {**(data.get("auto_heal_recent") or {}), rkey: recent + [now]}
+        data["auto_heal"] = {"key": f"case|{cls}|{sig}", "n": len(recent) + 1, "action": action,
+                             "signature": sig, "class": cls, "retry_at": now,
+                             "blocker": blocker, "reason": reason[:500],
+                             "verification_id": t.get("verification_id") or "",
+                             "from_case": case["case_id"]}
+        c.store.update_task(P.id, tid, blocker=blocker, data=data, next_action=blocker[:500])
+        out.append(_record(c, P, tid, "infra_case", "handed the stop back to the auto-heal",
+                           {"case_id": case["case_id"], "case_state": case["state"],
+                            "signature": sig, "class": cls, "reason": reason[:300]}))
+    return out
 
 
 # ------------------------------------------------------------------ 4 stale locks
