@@ -117,6 +117,12 @@ this in ways the current suites do not show.
 
 ### 5. A rule held across a conversation
 
+**Built in v0.181.243** as the "A rule held over a conversation" suite: 78
+generated conversations, up to 160 turns between the rule and the turn that
+pulls against it. qwen3.8-flash kept every rule; Sonnet 5.5 went over a word
+cap in 3 of 8; Opus 5.5 showed working that broke a changed preference in 8
+of 8. What was proposed:
+
 Household and work personas carry rules: answer in three sentences, never
 give medical dosages, reply in the language of the question, call the user by
 a name they gave at the start. Cases: the rule is in the system prompt or an

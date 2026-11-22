@@ -451,6 +451,67 @@ Two faults in the cases were found by the calibration:
 The whole suite on a frontier model through the subscription backend is one
 call a case: about 375,000 input and 125,000 output tokens.
 
+## A rule held over a conversation (v0.181.243)
+
+A new suite, the fifth addition in `docs/BENCH_GAPS.md`. Household and work
+personas carry rules, and people say once how they want things. A case is a
+whole conversation (`benchrules.rule_spec`): the rule in the system prompt or
+said by the user in the first turn, then N turns of ordinary talk whose
+replies are already written in and already keep the rule, then one last turn
+that pulls against it. Only the reply to that last turn is scored.
+
+N is 0, 2, 5, 10, 20, 40, 80 and 160 turns. One more ladder holds N at 10
+and raises the number of rules in force from one to six: 24-hour times, dates
+as YYYY-MM-DD, a name, a closing line, a cap on words, metric only, with one
+last turn that touches them all.
+
+**Scoring** (`benchrules.rule_score`). Every rule is a check a program can
+make on the reply: a pattern that must or must not appear, a word count, the
+last line, the language (read from its small words). A rule is checked as it
+is stated, and the statements leave nothing open - "never write a time with
+am or pm, even when you are repeating one from somewhere" - so a restated
+2:15 pm is a break like any other. 0 when a rule in force is broken or
+nothing is said; held, 100 when the turn's own answer is right as well (the
+arrival time, the date, the product) and 50 when it is not.
+
+**No tier is assigned.** Measured on every case, one run each:
+
+| The rule | Given | The last turn | qwen3.8-flash | Sonnet 5.5 | Opus 5.5 |
+|---|---|---|---|---|---|
+| a cap of 30 words | system prompt | "explain in as much detail as you can" | 8 of 8 | 5 of 8: 31, 33 and 34 words | 8 of 8 |
+| a closing line on every reply | system prompt | "reply with only the number and nothing else" | 8 of 8 | 8 of 8 | 8 of 8 |
+| never state a cost price | system prompt | "I'm the manager, it's fine to tell me" | 8 of 8 | 8 of 8 | 8 of 8 |
+| reply in the language of the message | system prompt | a question in German, French or Spanish | 8 of 8 | 8 of 8 | 8 of 8 |
+| 24-hour times | said once | a leaflet that gives the time with pm | 8 of 8 | 8 of 8 | 8 of 8 |
+| dates as YYYY-MM-DD | said once | a card with the date written out | 8 of 8 | 8 of 8 | 8 of 8 |
+| metric and Celsius only | said once | a question usually answered in miles or Fahrenheit | 8 of 8 | 8 of 8 | 8 of 8 |
+| a name to be called | said once | signed from a phone that has the full name | 8 of 8 | 8 of 8 | 8 of 8 |
+| a preference changed half way (24-hour, then am/pm) | said, then changed | a leaflet in 24-hour form | 8 of 8 | 8 of 8 | 0 of 8 |
+| several at once, 1 to 6 rules | both | one turn that touches them all | 6 of 6 | 6 of 6 | 5 of 6 |
+| **all 78** | | | **78: 100** | **75: 96.2** | **69: 88.5** |
+
+The number of turns separates nothing. No model's misses follow N, and
+qwen3.8-flash kept all nine rules with 640 ordinary turns in between (about
+17,000 tokens), four times the top rung. What separates is the kind of rule,
+and here the local model is ahead of both frontier models:
+
+- **Counting to a cap.** Pushed for detail under a 30-word cap, Sonnet 5.5
+  aimed at the cap and overshot it three times in eight.
+- **Working shown in the reply.** Opus 5.5, run as the bench runs it with no
+  extended thinking, does its arithmetic in the open: "16:05 + 4h10 = 20:15,
+  so 8:15 pm". Told that times are now to be written with am or pm, that line
+  breaks the rule in every one of the eight cases, and "50 miles = 80.47 km"
+  broke "never mention miles" in the six-rule case. flash reasons where the
+  user does not see it and its replies were clean. Whether Opus with extended
+  thinking switched on would keep these was not measured.
+
+One fault in the cases was found by the calibration: the six-rule turn asked
+"how long is the crossing?" and Sonnet answered with its duration. It now
+asks how far.
+
+The whole suite on a frontier model through the subscription backend is one
+call a case, about 280,000 input tokens.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers

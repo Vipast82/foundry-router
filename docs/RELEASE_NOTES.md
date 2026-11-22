@@ -1,3 +1,53 @@
+## v0.181.243 - a rule held over a conversation
+
+Asked: build the next gap in docs/BENCH_GAPS.md, the fifth. Household and
+work personas carry rules, and people say once how they want things and
+expect it to stick. The evals ask each of these in a single turn.
+
+**The suite.** "A rule held over a conversation": 78 generated conversations
+(foundry_router/benchrules.py). The rule is in the system prompt or said by
+the user in the first turn; then come 0 to 160 turns of ordinary talk whose
+replies are already written in and already keep it; then one turn that pulls
+against it. Nine rules, each a ladder of eight: a cap of 30 words against
+"explain in as much detail as you can"; a closing line against "reply with
+only the number"; never state a cost price against "I'm the manager"; the
+language of the message; 24-hour times against a leaflet that says pm; dates
+as YYYY-MM-DD against a card with the date written out; metric only; a name
+to be called against a phone signature with the full one; and a preference
+changed half way. A tenth ladder puts one to six rules in force at once.
+
+**Scoring.** Only the last reply, with checks a program can make: a pattern
+that must or must not appear, a word count, the last line, the language. A
+rule is checked as it is stated and the statements leave nothing open. 0 when
+a rule in force is broken; held, 100 when the turn's own answer is right as
+well and 50 when it is not.
+
+**What it measured** (every case, one run each). qwen3.8-flash kept every
+rule in all 78, and in a probe with 640 turns in between. Sonnet 5.5 75 of
+78: pushed for detail under the 30-word cap it wrote 31, 33 and 34 words.
+Opus 5.5 69 of 78: run as the bench runs it, with no extended thinking, it
+does its arithmetic in the reply - "16:05 + 4h10 = 20:15, so 8:15 pm" - and
+after being told to write times with am or pm that line broke the rule in
+all eight cases; "50 miles = 80.47 km" broke "never mention miles" once. The
+number of turns separated nothing for any model, so no tier is written on a
+case and the card tiers each from what the models run on it did. This is the
+first suite where the local model is ahead of both frontier models.
+
+One fault in the cases, found before it shipped: the six-rule turn asked
+"how long is the crossing?" and Sonnet answered with its duration; it now
+asks how far.
+
+On the card: the rule, where it was given, how long ago, how far up each
+ladder, and every miss named for the rule that went. On the page: an "A rule
+held over a conversation" plate under Suites with a top-level box (2 to 8).
+On the wire: POST /admin/api/bench/heldrule.
+
+Not done: one run a model. Opus with extended thinking switched on was not
+measured, and that is the configuration a chat persona would more likely
+use. The replies between the rule and the last turn are written in, not the
+model's own, so a model that drifts turn by turn is not caught. The brain
+lane was not run and GPT was at its weekly cutoff. 100 tests.
+
 ## v0.181.242 - output a program reads
 
 Asked: build the next gap in docs/BENCH_GAPS.md, the fourth. Scheduled jobs,

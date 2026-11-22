@@ -10200,6 +10200,14 @@ async function tabBench() {
           <div class="row tight"><button class="act" id="bench-structured">Build the structured suite</button>
             <label class="nw hint" style="margin:0" title="The highest rung of each ladder (the wide one stops at 6). At 8 the largest object has about 570 values and takes about 6,800 of the 8,192 tokens a case gets. Opus 5.5 got 79 of 80 and Sonnet 5.5 76, their misses single values at any size; qwen3.8-flash 72, cut off at the budget on the three largest (2026-11-21).">top level
               <input type="number" id="bench-structured-top" min="2" max="8" value="8" style="width:52px"></label></div></div>
+        <div class="suite"><h5>A rule held over a conversation<span>${suiteNote("heldrule")}</span></h5>
+          <p>A rule in the system prompt or said once by the user - 24-hour times, dates as
+            YYYY-MM-DD, a name, never a cost price, a word cap - then up to 160 turns of
+            ordinary talk and one turn that pulls against it. Only that last reply is scored.
+            One ladder puts up to six rules in force at once.</p>
+          <div class="row tight"><button class="act" id="bench-heldrule">Build the held-rule suite</button>
+            <label class="nw hint" style="margin:0" title="The highest rung of each ladder: 0, 2, 5, 10, 20, 40, 80 and 160 ordinary turns between the rule and the turn that pulls against it. The turns separate nothing: qwen3.8-flash kept all 78, and all nine rules with 640 turns between. Sonnet 5.5 went over a 30-word cap in 3 of 8; Opus 5.5 showed 24-hour working after being asked for am/pm in 8 of 8 (2026-11-21).">top level
+              <input type="number" id="bench-heldrule-top" min="2" max="8" value="8" style="width:52px"></label></div></div>
         <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
           <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
             a scope request in place of an edit outside the task's files.</p>
@@ -10331,6 +10339,14 @@ async function tabBench() {
   if ($("#bench-guard")) $("#bench-guard").onclick = async () => {
     try {
       const out = await api("bench/guard", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} cases`);
+      render();
+    } catch (e) { $("#suite-msg").textContent = e.message; }
+  };
+  if ($("#bench-heldrule")) $("#bench-heldrule").onclick = async () => {
+    try {
+      const out = await api("bench/heldrule", {method: "POST", body: {
+        top_level: +($("#bench-heldrule-top") || {}).value || 0}});
       toast(`built "${out.name}": ${out.cases} cases`);
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }

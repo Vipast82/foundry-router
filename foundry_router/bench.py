@@ -1187,6 +1187,41 @@ def _fit_catalogue(rows: list) -> tuple:
     return "\n".join(n for n, _d in rows), 0
 
 
+def build_heldrule(svc, name: str = "heldrule", top_level: int = 0) -> dict:
+    """The suite of a rule held across a conversation (v0.181.243): the rule
+    in the system prompt or said once by the user, N turns of ordinary talk
+    already written in, and a last turn that pulls against it
+    (benchrules.rule_spec); and one ladder with several rules in force at
+    once. Only the last reply is scored, by benchrules.rule_score. No tier is
+    assigned: the card tiers each case from what the models run on it did.
+    Returns {name, cases, path}."""
+    from . import benchrules
+    out = []
+    for sp in benchrules.rule_specs(top_level):
+        asked = sum(len(str(m.get("content") or "")) for m in sp["messages"])
+        out.append({
+            "id": f"RULE-{sp['task']}",
+            "task_id": sp["task"],
+            "tags": ["heldrule", f"rule:{sp['kind']}", f"where:{sp['where']}",
+                     f"turns:{sp['turns']}", f"rules:{len(sp['rules'])}",
+                     f"tokens:{int(asked / CHARS_PER_TOKEN) + 8 * len(sp['messages']) + 120}",
+                     f"ladder:{sp['ladder']}", f"level:{sp['level']}"],
+            "messages": sp["messages"],
+            "reference": {"heldrule": {"hold": sp["hold"], "task": sp["task_checks"],
+                                       "rules": sp["rules"]},
+                          "content": ", ".join(sp["rules"])},
+        })
+    f = _dir(svc) / f"{name}.jsonl"
+    with f.open("w", encoding="utf-8", newline="\n") as fh:
+        for c in out:
+            fh.write(json.dumps(c, ensure_ascii=False) + "\n")
+    try:
+        svc.db.log_event("info", "bench", f"built the {name} suite: {len(out)} case(s)")
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {"name": name, "cases": len(out), "path": str(f)}
+
+
 def build_structured(svc, name: str = "structured", top_level: int = 0) -> dict:
     """The suite of output a program will read (v0.181.242): a JSON Schema and
     notes in prose, and the object handed over as the whole reply or as one
@@ -2611,6 +2646,14 @@ async def score_one(svc, case: dict, got: dict) -> dict:
             ps["detail"] += " (reached for " + ", ".join(called) + " instead of ending the turn)"
         return {"score": ps["score"], "tools": 0.0, "code": None, "answer": None,
                 "exact": None, "code_detail": ps["detail"], "error": ""}
+    if ref.get("heldrule"):
+        # every rule in force kept in the last reply, and its answer right
+        # (v0.181.243)
+        from . import benchrules
+        rs = benchrules.rule_score(got.get("content") or "", ref["heldrule"])
+        return {"score": rs["score"], "tools": rs["held"], "code": None,
+                "answer": rs["task"], "exact": None, "error": "",
+                "code_detail": rs["detail"]}
     if ref.get("structured"):
         # valid against the schema, and every value the notes' (v0.181.242).
         # Past the budget nothing counts, a call included.
@@ -2683,6 +2726,12 @@ def expected_of(case: dict) -> str:
     ref = case.get("reference") or {}
     if ref.get("deliverable"):
         return "a deliverable (no answer key)"
+    if ref.get("heldrule"):
+        from . import benchrules
+        hr = ref["heldrule"]
+        s = "keep: " + "; ".join(benchrules.RULE_WORDS.get(r, r) for r in hr.get("rules") or [])
+        wants = [c["pattern"] for c in hr.get("task") or [] if c.get("kind") == "has"]
+        return s + (" - and the answer matches " + " and ".join(wants) if wants else "")
     if ref.get("structured"):
         from . import benchschema
         st = ref["structured"]

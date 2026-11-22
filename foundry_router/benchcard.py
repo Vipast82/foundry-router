@@ -61,6 +61,7 @@ SUITE_NAMES = {
     "guard": "Instructions in the data",
     "toolsteps": "Tool work in steps",
     "structured": "Output a program reads",
+    "heldrule": "A rule held over a conversation",
 }
 SUITE_ASKS = {
     "baseline": "Given a real conversation up to a verified step, does it make the same move?",
@@ -79,6 +80,8 @@ SUITE_ASKS = {
                  "check, recover, and hand over exactly the right links.",
     "structured": "Fill a JSON Schema from notes in prose: valid against the schema, and "
                   "every value the one the notes give.",
+    "heldrule": "A rule given once, turns of ordinary talk, then a turn that pulls against "
+                "it: is the rule still kept, and the answer still right?",
 }
 
 
@@ -146,6 +149,15 @@ def miss_kind(suite: str, row) -> Optional[str]:
         # not enforce one - v0.181.223
         return "ran out of tokens before answering"
     tags = _tags(row)
+    if suite == "heldrule" or "heldrule" in tags:
+        # v0.181.243: which rule went, or that it was kept and the answer was not
+        from .benchrules import RULE_WORDS as _rules
+        first = str(_detail(row).get("broke") or "").split(";")[0]
+        if first == "nothing":
+            return "said nothing"
+        if first:
+            return "broke the rule: " + _rules.get(first, first)
+        return "kept the rule, wrong answer"
     if suite == "structured" or "structured" in tags:
         # v0.181.242: the first thing that went wrong, as the scorer named it
         from .benchschema import WHY_WORDS as _words
@@ -374,6 +386,30 @@ def facets(suite: str, rows: list) -> list:
         out.append({"name": "Source",
                     "rows": _group(rows, lambda r: "real coordinator turn"
                                    if "real" in _tags(r) else "scenario")})
+    if suite == "heldrule":
+        from .benchrules import LADDER_NAMES as _names
+        names = {**_names, "stack": "several rules at once"}
+        out.append({"name": "The rule",
+                    "rows": _group(rows, lambda r: names.get(_tag(_tags(r), "rule") or ""),
+                                   list(names.values()))})
+        out.append({"name": "Where it was given",
+                    "rows": _group(rows, lambda r: {"system": "in the system prompt",
+                                                    "user": "said once by the user",
+                                                    "both": "some of each"}.get(
+                        _tag(_tags(r), "where") or ""),
+                        ["in the system prompt", "said once by the user", "some of each"])})
+
+        def _gap(r):
+            try:
+                n = int(_tag(_tags(r), "turns") or 0)
+            except ValueError:
+                return None
+            return ("no turns between" if n == 0 else "2 to 10 turns between" if n <= 10
+                    else "20 to 40 turns between" if n <= 40 else "80 or more turns between")
+        out.append({"name": "How long ago",
+                    "rows": _group([r for r in rows if _tag(_tags(r), "rule") != "stack"], _gap,
+                                   ["no turns between", "2 to 10 turns between",
+                                    "20 to 40 turns between", "80 or more turns between"])})
     if suite == "structured":
         shapes = {"flat": "one record, many fields", "list": "many records",
                   "nested": "records inside records",
@@ -467,7 +503,7 @@ def facets(suite: str, rows: list) -> list:
         out.insert(1 if out and out[0]["name"] == "Difficulty" else 0,
                    {"name": "How far up each ladder", "rows": reach})
     if suite not in ("needle", "toolflow", "toolpick", "codereason", "agent", "protocol",
-                     "grounded", "guard", "toolsteps", "structured"):
+                     "grounded", "guard", "toolsteps", "structured", "heldrule"):
         out.append({"name": "What the verified step was",
                     "rows": _group(rows, lambda r: "a tool call"
                                    if _list(r["tools_expected"]) else "an answer in words")})
