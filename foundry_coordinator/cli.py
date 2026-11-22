@@ -32,6 +32,10 @@ Commands
   pause-project PROJECT [--note]  /  resume-project PROJECT
   studio-reserve PROJECT [--minutes N] [--reason]  /  studio-release PROJECT
   unblock PROJECT TASK --resolution TEXT [--reset-attempts]
+  extend-time PROJECT TASK --minutes N [--by NAME] [--note TEXT]
+                                           more active minutes for this sprint only, live
+                                           (the project's max_task_minutes stays); a sprint
+                                           stopped on its minutes goes on
   approve PROJECT TASK --kind KIND --by NAME [--note]     a human approval
   reject PROJECT TASK --by NAME --finding TEXT [...]      send back with findings
   answer PROJECT TASK TEXT...              answer the coding session's question
@@ -343,7 +347,7 @@ def _state_dir(a) -> str:
 
 
 # (command, subcommand or None) pairs that change coordinator state
-_WRITING = {("unblock", None), ("approve", None), ("reject", None), ("answer", None),
+_WRITING = {("unblock", None), ("extend-time", None), ("approve", None), ("reject", None), ("answer", None),
             ("resume", None), ("pause", None), ("cancel", None), ("decision", None),
             ("pause-project", None), ("resume-project", None), ("queue", "approve"),
             ("queue", "set-deps"),
@@ -771,6 +775,9 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x = sub.add_parser("resume-project"); x.add_argument("project")
     x = sub.add_parser("unblock"); x.add_argument("project"); x.add_argument("task")
     x.add_argument("--resolution", required=True); x.add_argument("--reset-attempts", action="store_true")
+    x = sub.add_parser("extend-time"); x.add_argument("project"); x.add_argument("task")
+    x.add_argument("--minutes", type=int, required=True)
+    x.add_argument("--by", default="operator"); x.add_argument("--note", default="")
     x = sub.add_parser("approve"); x.add_argument("project"); x.add_argument("task")
     x.add_argument("--kind", required=True); x.add_argument("--by", required=True)
     x.add_argument("--note", default="")
@@ -1370,6 +1377,9 @@ def _dispatch(a, c: Coordinator) -> int:
         s.set_project_paused(a.project, False)
     elif a.cmd == "unblock":
         c.unblock(a.project, a.task, a.resolution, reset_attempts=a.reset_attempts)
+    elif a.cmd == "extend-time":
+        print(json.dumps(c.extend_time(a.project, a.task, a.minutes, actor=a.by, note=a.note),
+                         sort_keys=True))
     elif a.cmd == "approve":
         print(c.approve_human(a.project, a.task, a.kind, a.by, a.note))
     elif a.cmd == "reject":

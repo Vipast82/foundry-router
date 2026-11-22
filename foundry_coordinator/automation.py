@@ -44,6 +44,12 @@ equal.
   auto_heal_retries          deterministic re-runs of a tooling / infra stop before a
                              lead case opens (per head and class; three times this per
                              class and signature in six hours whatever the head)
+  budget_renewals_per_day    a sprint out of sessions / attempts / review calls that
+                             ticked a plan step since its last renewal gets its budget
+                             back by itself, this many times a day (budget_policy.py)
+  task_minutes_auto_extend   a sprint over max_task_minutes that ticked a plan step since
+                             its last extension gets minutes of its own, sized from its
+                             open steps, at most the limit again per day
   infra_wait_notice_minutes  a stop on an outage the coordinator can see (Studio with the
                              TEST place, the router) waits until it is back; one alert per
                              outage after this long (0 = none)

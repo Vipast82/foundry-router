@@ -1,3 +1,72 @@
+## v0.181.230 - budgets and time limits follow the plan's progress
+
+Third release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: items 9 and 10.
+These two were the largest single reason for a hand unblock last week: 10 of
+the last 25.
+
+**Session and attempt caps (item 9).** FIN-2a, FIN-2c, FIN-4a (twice) and POL-7
+each ran out of sessions ("29/32/33/59 sessions") or of the three policy
+extensions a day. Each time the operator asked, the answer was "Yes, reset it",
+and `unblock --reset-attempts` was run. Three of those resolutions name a plan
+that was still moving (FIN-4a: 6 BUILD steps left, gates passing; FIN-2c: 9 not
+ticked; FIN-2a: 9 of 14 rows done). Before that point the existing self-repair
+had been adding one session at a time, each behind a Lead case and a 30-minute
+decision timeout, which is where "blocked 7.4 h" came from.
+
+A sprint that runs out of sessions, attempts or review calls now gets its
+budget back by itself when a plan step was ticked since its last renewal:
+every counter is brought back to its base room, at the point where the stop
+would have been made, with no Lead case and no wait. `[automation]
+budget_renewals_per_day` (new, default 1, 0 = never; Automation page). Each
+renewal is reported (`budget_renewed`: what ran out, which steps were ticked,
+"Renewal 1 of 1 in a day"). When no step was ticked since the last renewal, or
+the day's renewals are used, the stop goes on exactly as before: the Lead,
+then you. That is POL-7's case on 11-18 (code approved, only visual findings
+going round): no plan step moved, so it stays your call.
+
+A renewal does only what a reset does to the budget ledger. It does not zero
+the attempt number, restart the minutes clock, or start a new Lead round, which
+`unblock --reset-attempts` all do. The ledger itself enforces it: a
+`renewal:<counter>:<key>` row is refused from any other actor, past the daily
+cap, or when no plan step was ticked.
+
+**Time limits (item 10).** POL-7's `max_task_minutes` was raised by hand five
+times in three days (1440, 1920, 2400, 2640, 3360), each with a restart, and
+the project-wide limit stayed at 3360 for every sprint after it.
+
+- The limit is now the project's plus minutes that belong to the sprint (task
+  data `task_minutes_extra`). They end with the sprint, so there is no default
+  to put back.
+- A sprint over its limit that ticked a plan step since its last extension is
+  extended by itself (`[automation] task_minutes_auto_extend`, new, default on):
+  by what its open steps need at its own pace - active minutes so far per step
+  done, times the steps left, plus an hour for the close-out - and never more
+  than the base limit again per rolling day. Reported as `time_extended` with
+  the arithmetic ("2 of 10 plan steps open at 181 min a step").
+- With no step ticked it stops as before, and the reason now carries the amount:
+  `over max_task_minutes (1440 active minutes); not extended by itself: no plan
+  step was ticked since the last extension. If it should go on: 423 more
+  minutes (...)`. You are asked once, with a number.
+- `extend-time PROJECT TASK --minutes N [--by] [--note]` (new CLI command, and
+  `Coordinator.extend_time`) is your own grant: live, no restart, this sprint
+  only, and a sprint stopped on its minutes goes on at once.
+
+Both rules read plan steps from the session marks the coordinator already
+keeps (the plan checklist before and after each session). A project without a
+plan checklist, or without `[lifecycle]`, behaves as before.
+
+Not in this release: a button for `extend-time` in the control center (it comes
+with standing orders, next), and the Automation page still shows
+`limits.max_task_minutes` as the only time setting; per-sprint minutes show in
+the sprint's events.
+
+Files: `foundry_coordinator/budget_policy.py` (new), `obligations.py`
+(`renewal:` rows), `engine.py` (`_lc_budget`, the review budget, the minutes
+check, `extend_time`), `retry_guidance.py`, `cli.py`,
+`foundry_automation/schema.py`, `docs/COORDINATOR.md`. 10 tests.
+
+Deploy: coordinator only.
+
 ## v0.181.229 - an outage is waited out, not restarted into; a fix that is live is tried
 
 Second release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: items 2 and 3

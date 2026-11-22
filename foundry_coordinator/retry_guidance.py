@@ -124,9 +124,10 @@ class RetryGuidance:
             return False
         base = {"persona": cfg["persona"], "extra_attempts": 0, "attempt": t["attempt"],
                 "ts": self.c.clock()}
+        from .budget_policy import minutes_limit
         if (t["sessions"] >= P.profile.limit("max_sessions_per_task", 8) or
-                (P.profile.limit("max_task_minutes", 0) and t.get("started_ts") and
-                 _active_seconds(self.c, t) > P.profile.limit("max_task_minutes", 0) * 60)):
+                (minutes_limit(P, t) and t.get("started_ts") and
+                 _active_seconds(self.c, t) > minutes_limit(P, t) * 60)):
             self._record(P, t, {**base, "status": "skipped", "reason": "hard session/time limit reached"})
             return False
         if not P.foundry or not cfg["persona"] or cfg["persona"] == P.profile.persona("implementer", t["task_id"]):

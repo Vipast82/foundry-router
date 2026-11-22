@@ -821,13 +821,18 @@ class Coordinator:
             return self._stop(P, t, S.FAILED, {
                 "reason": f"{t['sessions']} sessions used (max_sessions_per_task)"},
                 cls="sessions_exhausted")
-        minutes = lim.limit("max_task_minutes", 0)
-        from . import infra
-        if minutes and t["started_ts"] and infra.active_seconds(self, t) > minutes * 60:
-            # active time only: overnight idle, parked, paused and waiting time is free
-            return self._stop(P, t, S.FAILED, {
-                "reason": f"over max_task_minutes ({minutes} active minutes)"},
-                cls="task_minutes")
+        from . import budget_policy, infra
+        minutes = budget_policy.minutes_limit(P, t)       # the project's + this sprint's own
+        if minutes and t["started_ts"]:
+            active = infra.active_seconds(self, t)
+            if active > minutes * 60:
+                # active time only: overnight idle, parked, paused and waiting time is free
+                why = budget_policy.try_extend_time(self, P, t, active)
+                if why:
+                    return self._stop(P, t, S.FAILED, {
+                        "reason": budget_policy.stop_reason(self, P, t, active, why)},
+                        cls="task_minutes")
+                t = self.store.task(pid, tid) or t
         try:
             spec = P.adapter.describe(tid)
         except AdapterError as e:
@@ -2769,6 +2774,10 @@ class Coordinator:
             if lim["remaining"] <= 0 and not early and \
                     self._policy_review_extension(P, t, head, prior):
                 lim = self.obligations.effective_limits(P, t)["review_calls"]
+            if lim["remaining"] <= 0 and not early:
+                from . import budget_policy
+                if budget_policy.try_renew(self, P, t, "review_calls"):
+                    lim = self.obligations.effective_limits(P, t)["review_calls"]
             if lim["remaining"] <= 0:
                 if not early:
                     self.store.release(pid, tid)
@@ -4898,8 +4907,52 @@ class Coordinator:
                                             decision_policy=self._decision_meta,
                                             policy_cap=self._policy_cap,
                                             policy_validator=self._policy_ref_ok,
-                                            infra_validator=self._infra_ref_ok)
+                                            infra_validator=self._infra_ref_ok,
+                                            renewal_cap=self._renewal_cap,
+                                            renewal_validator=self._renewal_ref_ok)
         return self._obligations
+
+    def _renewal_cap(self, project: str) -> int:
+        from .automation import get as auto_get
+        P = self.projects.get(project)
+        return int(auto_get(P, "budget_renewals_per_day") or 0) if P is not None else 0
+
+    def _renewal_ref_ok(self, project: str, task: str, ref: str, counter: str) -> bool:
+        from . import budget_policy
+        P = self.projects.get(project)
+        return P is not None and budget_policy.renewal_ref_ok(self, P, task, ref)
+
+    def extend_time(self, project_id: str, task_id: str, minutes: int, actor: str = "operator",
+                    note: str = "") -> dict:
+        """The owner's own grant of active minutes to one sprint, live (no restart, the
+        project's max_task_minutes untouched). A sprint stopped on its minutes goes on."""
+        from . import budget_policy
+        P = self._task_project(project_id, task_id)
+        t = self.store.task(project_id, task_id)
+        if t is None:
+            raise ValueError(f"no task {project_id}/{task_id}")
+        minutes = int(minutes)
+        if minutes <= 0 or minutes > 14 * 24 * 60:
+            raise ValueError("give between 1 minute and 14 days")
+        if not P.profile.limit("max_task_minutes", 0):
+            raise ValueError(f"{project_id} has no max_task_minutes: nothing to extend")
+        g = budget_policy._grant(self, P, t, minutes, actor, note or "granted by hand")
+        self.store.event(project_id, task_id, "operator_notice", detail={
+            "text": f"{task_id}: {minutes} more minutes from {actor} (its own limit is now "
+                    f"{budget_policy.minutes_limit(P, self.store.task(project_id, task_id))} "
+                    f"active minutes)" + (f": {note}" if note else ""),
+            "kind": "time_extended", "digest": True, "minutes": minutes, "by": actor})
+        cur = self.store.task(project_id, task_id)
+        trig = str(((cur.get("data") or {}).get("lead_trigger") or {}).get("class") or "")
+        hist = self.store.history(project_id, task_id)
+        last = (hist[-1].get("evidence") or {}) if hist else {}
+        text = " ".join(str(x or "") for x in (cur.get("blocker"), last.get("reason"),
+                                              last.get("blocker")))
+        if cur["state"] in (S.BLOCKED, S.FAILED) and (
+                trig == "task_minutes" or "over max_task_minutes" in text):
+            self.unblock(project_id, task_id, f"{minutes} more minutes from {actor}"
+                         + (f": {note}" if note else ""), actor=actor)
+        return {**g, "limit": budget_policy.minutes_limit(P, self.store.task(project_id, task_id))}
 
     def _infra_ref_ok(self, project: str, task: str, ref: str, counter: str) -> bool:
         """`infra:sessions:<session id>`: a session of this task that autoheal marked as
@@ -5127,6 +5180,9 @@ class Coordinator:
         pid, tid = P.id, t["task_id"]
         self._lc_backfill(P, t)
         L = self.obligations.effective_limits(P, t)
+        from . import budget_policy
+        if L["sessions"]["remaining"] <= 0 and budget_policy.try_renew(self, P, t, "sessions"):
+            L = self.obligations.effective_limits(P, t)
         if L["sessions"]["remaining"] <= 0:
             self._stop(P, t, S.FAILED, {
                 "reason": f"{L['sessions']['used']} sessions used (max_sessions_per_task "
@@ -5138,6 +5194,8 @@ class Coordinator:
             return "attempt_ordinary", False
         if L["guided_extra"]["remaining"] > 0:
             return "attempt_guided", False
+        if budget_policy.try_renew(self, P, t, "attempt_ordinary"):
+            return "attempt_ordinary", False
         if self.retry_guidance.consult(P, t):
             return None, True             # one guided extra granted: next tick charges it
         if ((self.store.task(pid, tid).get("data") or {}).get("retry_guidance") or {}).get(

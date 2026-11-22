@@ -292,6 +292,9 @@ AUTOMATION_DEFAULTS: dict = {
     "infra_retry_max": 5,
     "infra_backoff_seconds": 60,
     "infra_wait_notice_minutes": 30,
+    # budget_policy.py: budgets and time limits follow plan progress
+    "budget_renewals_per_day": 1,
+    "task_minutes_auto_extend": True,
     "preflight": True,
     "preflight_endpoints": [],
     # 2026-11-07: a track gets the official Studio MCP server (36 tools, ~20.8k tokens a
@@ -967,6 +970,18 @@ _AUTO_DESC = {
     "lead_report_repairs": "Invalid lead reports sent back into the same session.",
     "infra_retry_max": "Infrastructure failures retried free per task run.",
     "infra_backoff_seconds": "First infra retry delay (doubles, capped at 15 min).",
+    "budget_renewals_per_day": "A sprint that runs out of sessions, attempts or review "
+                               "calls gets its budget back by itself this many times a day, "
+                               "but only if a plan step was ticked since its last renewal; "
+                               "each renewal is reported. With no step ticked, or the day's "
+                               "renewals used, the stop goes to the Lead and then to you as "
+                               "before. 0 = never renew.",
+    "task_minutes_auto_extend": "A sprint over max_task_minutes that ticked a plan step "
+                                "since its last extension gets more minutes of its own: what "
+                                "its open steps need at its own pace, at most the limit again "
+                                "per day. The extra belongs to that sprint and ends with it; "
+                                "the limit here is not changed. Off = it stops and asks, with "
+                                "the suggested amount.",
     "infra_wait_notice_minutes": "A sprint that stopped because Studio (with the TEST place) "
                                  "or the router is down waits until it is back: checked "
                                  "every minute, nothing restarted, no attempt, session or "

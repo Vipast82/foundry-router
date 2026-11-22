@@ -94,6 +94,13 @@ POLICY_WINDOW_SECONDS = 86400.0
 INFRA_ACTOR = "infra"
 INFRA_REF = "infra:"
 INFRA_REFUNDS_PER_DAY = 12
+# budget_policy: a sprint that keeps ticking plan steps gets its budget back by itself, a
+# `renewal:<counter>:<key>` row per counter under one key. Only RENEWAL_ACTOR writes it;
+# the ledger refuses it past renewal_cap(project) keys per rolling day, and unless the
+# engine's validator finds a plan step ticked since the task's last renewal.
+RENEWAL_ACTOR = "renewal"
+RENEWAL_REF = "renewal:"
+RENEWAL_COUNTERS = ("sessions", "attempt_ordinary", "review_calls")
 
 def budget_epoch(trow) -> Optional[float]:
     """When a task's budget starts: a merge repair or an operator reopen gives it fresh
@@ -437,7 +444,8 @@ def _ob_categories(ob: dict) -> set[str]:
 class Obligations:
     def __init__(self, store, clock=time.time, *, operator_actors: Optional[Iterable[str]] = None,
                  unblock_validator=None, lead_validator=None, decision_policy=None,
-                 policy_cap=None, policy_validator=None, infra_validator=None):
+                 policy_cap=None, policy_validator=None, infra_validator=None,
+                 renewal_cap=None, renewal_validator=None):
         """operator_actors: names allowed to carry `operator` authority outside
         the control channel (default none: only channel='control' answers
         carry it). unblock_validator(project, task, ref, actor) -> bool checks
@@ -462,6 +470,11 @@ class Obligations:
         # infra_validator(project, task, ref, counter) -> bool: the session an
         # `infra:sessions:<session>` row names is this task's and ended on infrastructure
         self.infra_validator = infra_validator
+        # renewal_cap(project) -> int: budget renewals a task may get per rolling day;
+        # renewal_validator(project, task, ref, counter) -> bool: a plan step was ticked
+        # since the task's last renewal. Without both no renewal row is valid.
+        self.renewal_cap = renewal_cap
+        self.renewal_validator = renewal_validator
         migrate(store)
 
     # -- rows ---------------------------------------------------------------------
@@ -1294,6 +1307,9 @@ class Obligations:
         if decision_id.startswith(INFRA_REF):
             self._require_infra(project, task, decision_id, actor, counter, n)
             return
+        if decision_id.startswith(RENEWAL_REF):
+            self._require_renewal(project, task, decision_id, actor, counter, n)
+            return
         if decision_id.startswith("unblock:"):
             if callable(self.unblock_validator):
                 try:
@@ -1336,6 +1352,45 @@ class Obligations:
             "task_id=? AND counter=? AND decision_id LIKE ? AND ts>=?",
             (project, task, AUTH_PREFIX + counter, POLICY_REF + "%", self.clock() - window))
         return int((rows[0]["n"] if rows else 0) or 0)
+
+    def _require_renewal(self, project, task, ref: str, actor: str, counter: str,
+                         n: int) -> None:
+        """A `renewal:<counter>:<key>` row (see RENEWAL_REF): the renewal actor only, a
+        renewable counter, at most renewal_cap keys per rolling day (the three counters
+        of one renewal share a key), and only when the engine confirms the plan
+        progress."""
+        if actor != RENEWAL_ACTOR:
+            raise LedgerRefused(f"{ref}: only the {RENEWAL_ACTOR!r} actor writes renewal rows "
+                                f"(not {actor!r})")
+        parts = ref.split(":")
+        if len(parts) < 3 or not parts[2] or parts[1] != counter or \
+                counter not in RENEWAL_COUNTERS:
+            raise LedgerRefused(f"{ref} does not name a renewable counter and a key")
+        if int(n) < 1:
+            raise LedgerRefused(f"{ref}: nothing to renew")
+        cap = 0
+        if callable(self.renewal_cap):
+            try:
+                cap = max(0, int(self.renewal_cap(project) or 0))
+            except Exception:                                     # noqa: BLE001
+                cap = 0
+        rows = self.store.q(
+            "SELECT DISTINCT decision_id FROM budget_ledger WHERE project_id=? AND task_id=? "
+            "AND decision_id LIKE ? AND ts>=?",
+            (project, task, RENEWAL_REF + "%", self.clock() - POLICY_WINDOW_SECONDS))
+        keys = {str(r["decision_id"]).split(":", 2)[2] for r in rows
+                if str(r["decision_id"]).count(":") >= 2}
+        if parts[2] not in keys and len(keys) + 1 > cap:
+            raise LedgerRefused(f"{len(keys)}/{cap} budget renewals of {project}/{task} in "
+                                f"the last day")
+        ok = False
+        if callable(self.renewal_validator):
+            try:
+                ok = bool(self.renewal_validator(project, task, ref, counter))
+            except Exception:                                     # noqa: BLE001
+                ok = False
+        if not ok:
+            raise LedgerRefused(f"{ref}: no plan step was ticked since the last renewal")
 
     def _require_infra(self, project, task, ref: str, actor: str, counter: str,
                        n: int) -> None:
