@@ -864,6 +864,9 @@ class Coordinator:
         from . import services                     # Team Lead 5: the sprint's needs are up
         if services.blocks(self, P, t, spec):
             return                                 # "waiting for <service>": no lock, no attempt
+        drain = infra.kilo_drain(self, P)          # a pending Kilo restart: let the safe point come
+        if drain:
+            return self._note(P, t, drain)
         if not self.tracks.is_track(P):
             from . import studio_reserve
             why = studio_reserve.blocks(self, P)

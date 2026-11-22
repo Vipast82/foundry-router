@@ -56,6 +56,9 @@ DEFAULTS: dict[str, Any] = {
     },
     # resource watch (resources.py): free RAM + the development / testing jobs the stack runs
     "resources": {"enabled": True, "interval_seconds": 60, "low_ram_gb": 2, "auto_stop": True,
+                  # item 6: Kilo over this (its whole tree) with free RAM under that:
+                  # a safe-point restart of Kilo (0 = never)
+                  "kilo_restart_gb": 6, "kilo_restart_free_gb": 4,
                   "limits": {"training": {"gb": 6, "minutes": 120},
                              "studio_check": {"gb": 3, "minutes": 240},
                              "gate_ps1": {"gb": 2, "minutes": 90},

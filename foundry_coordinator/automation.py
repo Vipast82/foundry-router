@@ -50,6 +50,8 @@ equal.
   task_minutes_auto_extend   a sprint over max_task_minutes that ticked a plan step since
                              its last extension gets minutes of its own, sized from its
                              open steps, at most the limit again per day
+  kilo_restart_drain_minutes no new session starts while the Foundry Client has a Kilo
+                             restart pending for a safe point, for at most this long
   infra_wait_notice_minutes  a stop on an outage the coordinator can see (Studio with the
                              TEST place, the router) waits until it is back; one alert per
                              outage after this long (0 = none)

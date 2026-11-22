@@ -82,7 +82,9 @@ class Manager:
             clear_alert=self._clear_alert,
             event=self._event,
             game=lambda: (self.cfg.get("workspace") or {}).get("game") or "",
-            protected=self._component_pids, clock=clock)
+            protected=self._component_pids, clock=clock,
+            kilo_pid=self._kilo_pid, kilo_pending=self._kilo_pending,
+            restart_kilo=self._restart_kilo_for_memory)
         from .studio import StudioReopen
         self.studio = StudioReopen(lambda: self.cfg.get("studio") or {},
                                    cfg["client"]["state_dir"],
@@ -463,6 +465,35 @@ class Manager:
     @staticmethod
     def _show(argv: list) -> str:
         return " ".join(str(a) for a in argv)          # argv never holds secrets
+
+    def _kilo_pid(self) -> Optional[int]:
+        """The Kilo server's process: ours, or the one that owns its port (adopted)."""
+        pr = self.procs.get("kilo")
+        if pr is None:
+            return None
+        if pr.p is not None and pr.p.poll() is None:
+            return int(pr.p.pid)
+        if pr.adopted and pr.spec.owner_pid:
+            try:
+                pid = pr.spec.owner_pid()
+            except Exception:                                     # noqa: BLE001
+                pid = None
+            return int(pid) if isinstance(pid, int) and pid > 0 else None
+        return None
+
+    def _kilo_pending(self) -> bool:
+        pr = self.procs.get("kilo")
+        return bool(pr is not None and pr.pending_restart)
+
+    def _restart_kilo_for_memory(self, why: str) -> str:
+        """The resource watch's request: Kilo's ordinary safe-point restart, never forced."""
+        if "kilo" not in self.procs:
+            return "the client manages no Kilo server"
+        if not self.cfg["components"]["kilo"].get("enabled", True):
+            return "the Kilo component is disabled"
+        st = self.restart("kilo")
+        self._event("kilo", f"restart asked by the resource watch: {why}")
+        return str(st.get("result") or "pending")
 
     def _component_pids(self) -> set:
         """The managed components' own processes: the resource watch never stops them."""

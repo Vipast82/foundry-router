@@ -1,3 +1,46 @@
+## v0.181.234 - Kilo is restarted before it takes the machine's memory
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for item 6.
+
+Kilo (Bun) grows to 7-10 GB within hours, and the workstation drops below 2 GB
+free. The Foundry Client's resource watch saw that and said so ("RAM low,
+biggest users: ...") but by its own rule never touched a component; somebody
+then asked for a Kilo restart by hand. And a safe-point restart behind a
+stream of new sessions could wait for hours, because the safe point only
+comes when no session is working and nothing stopped new ones from starting.
+
+Two halves:
+
+- **Foundry Client.** The resource watch now measures Kilo's whole process
+  tree. When it is over `resources.kilo_restart_gb` (new, default 6, 0 = never)
+  with free RAM under `resources.kilo_restart_free_gb` (new, default 4, 0 =
+  whatever is free) on two checks in a row, it asks for Kilo's own safe-point
+  restart - the same one a config reload uses, never a forced one, so no turn
+  is cut. One request per half hour. The Memory card on the client page shows
+  Kilo's size and "restart pending"; both settings are on the client's settings
+  page under Resource watch.
+- **Coordinator.** While the client has a Kilo restart pending for a safe
+  point - this one, or a config reload - no new implementer session starts
+  ("waiting: the Kilo server restarts at the next safe point"), for at most
+  `[automation] kilo_restart_drain_minutes` (new, default 60, 0 = never hold;
+  Automation page). The running sessions end their turn, the safe point comes,
+  Kilo restarts, and the sprints go on. Nothing is charged for the wait. After
+  the limit sprints start again whether or not the restart has happened; the
+  client's own "has waited 60 min" alert covers that case.
+
+The status board's machine line now shows Kilo's memory and a pending restart.
+
+Not covered: Lead sessions are not held during the drain (they are short and
+rare), and nothing shrinks Kilo while a long session is running; the restart
+waits for that session to end its turn.
+
+Files: `foundry_client/resources.py`, `manager.py`, `config.py`,
+`static/client.html`; `foundry_coordinator/infra.py` (`kilo_drain`),
+`engine.py`, `board.py`, `foundry_automation/schema.py`, `docs/COORDINATOR.md`.
+9 tests.
+
+Deploy: coordinator and Foundry Client both changed; the client needs a restart.
+
 ## v0.181.233 - a crash loop names its step and ends itself; an outage ends with a report
 
 Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 4 and 8.

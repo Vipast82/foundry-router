@@ -141,3 +141,141 @@ def test_protected_component_pids_are_never_jobs():
 def test_settings_validate():
     assert R.validate({**R.DEFAULTS}) == []
     assert R.validate({**R.DEFAULTS, "low_ram_gb": -1, "auto_stop": "yes"})
+
+
+# ------------------------------------------------------------------ Kilo's memory (item 6 of
+# COORDINATOR_AUTOMATION_NEEDS): Kilo (Bun) grows to 7-10 GB within hours and takes the
+# workstation below 2 GB free
+
+class Now:
+    def __init__(self, t=10_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _kilo_watch(kilo_gb=7.5, child_gb=1.0, free=3.0, settings=None, kilo_pid=77):
+    child = FakeProc(78, "bun.exe", "bun worker", gb=child_gb, ppid=77)
+    kilo = FakeProc(77, "bun.exe", "bun kilo serve --port 4096", gb=kilo_gb, children=[child])
+    ps = FakePs([kilo, child, FakeProc(20, "RobloxStudioBeta.exe", "RobloxStudioBeta", gb=4.0)],
+                free_gb=free)
+    st = {"alerts": {}, "events": [], "asked": [], "pending": False, "kilo": kilo, "ps": ps,
+          "now": Now()}
+
+    def restart(why):
+        st["asked"].append(why)
+        st["pending"] = True
+        return "waiting for a safe point: 2 session(s) working"
+    w = R.ResourceWatch(lambda: settings or {},
+                        alert=lambda k, t, level="warn": st["alerts"].__setitem__(k, (t, level)),
+                        clear_alert=lambda k: st["alerts"].pop(k, None),
+                        event=lambda c, t: st["events"].append(t),
+                        game=lambda: "C:/Roblox/AnimalUprising", clock=st["now"], ps=ps,
+                        protected=lambda: {77}, kilo_pid=lambda: kilo_pid,
+                        kilo_pending=lambda: st["pending"], restart_kilo=restart)
+    return w, st
+
+
+def test_replay_kilo_over_its_limit_with_ram_low_gets_a_safe_point_restart():
+    w, st = _kilo_watch()
+    last = w.tick(w.cfg())
+    assert last["kilo_gb"] == 8.5 and last["kilo"]["limit_gb"] == 6          # its whole tree
+    assert st["asked"] == []                                 # one check is not enough
+    last = w.tick(w.cfg())
+    assert st["asked"] == ["Kilo is using 8.5 GB (limit 6 GB) with 3.0 GB of RAM free "
+                           "(under 4 GB)"]
+    text, level = st["alerts"]["resources:kilo_memory"]
+    assert level == "info" and "restarts at the next safe point" in text
+    assert "the coordinator holds new session starts until then" in text
+    assert "asked for a Kilo restart at the next safe point (waiting for a safe point" in \
+        st["events"][-1]
+    assert last["kilo"]["pending"] is True
+    assert not st["kilo"].terminated and not st["kilo"].killed       # never stopped by the watch
+    # while it is pending nothing is asked again, however often it is checked
+    for _ in range(10):
+        st["now"].t += 60
+        w.tick(w.cfg())
+    assert len(st["asked"]) == 1
+    # it restarted: small again, the alert goes
+    st["pending"], st["kilo"]._gb = False, 0.4
+    st["kilo"]._children[0]._gb = 0.1
+    last = w.tick(w.cfg())
+    assert last["kilo_gb"] == 0.5 and "resources:kilo_memory" not in st["alerts"]
+
+
+def test_kilo_is_left_alone_when_ram_is_fine_it_is_small_or_the_rule_is_off():
+    for kw in ({"free": 10.0},                               # big, but RAM is not low
+               {"kilo_gb": 3.0, "child_gb": 0.5},           # RAM is low, Kilo is not why
+               {"settings": {"kilo_restart_gb": 0}},        # switched off
+               {"kilo_pid": None}):                          # no Kilo server here
+        w, st = _kilo_watch(**kw)
+        for _ in range(4):
+            st["now"].t += 60
+            w.tick(w.cfg())
+        assert st["asked"] == [] and "resources:kilo_memory" not in st["alerts"], kw
+    w, st = _kilo_watch(kilo_pid=None)
+    assert w.tick(w.cfg())["kilo_gb"] is None
+    # free RAM threshold 0: its own size is enough
+    w, st = _kilo_watch(free=20.0, settings={"kilo_restart_free_gb": 0})
+    w.tick(w.cfg())
+    w.tick(w.cfg())
+    assert st["asked"] == ["Kilo is using 8.5 GB (limit 6 GB) with 20.0 GB of RAM free"]
+
+
+def test_one_kilo_restart_request_per_half_hour():
+    w, st = _kilo_watch()
+    w.tick(w.cfg())
+    w.tick(w.cfg())
+    assert len(st["asked"]) == 1
+    st["pending"] = False                                    # it restarted and grew straight back
+    for _ in range(20):
+        st["now"].t += 60
+        w.tick(w.cfg())
+    assert len(st["asked"]) == 1
+    st["now"].t += 15 * 60
+    w.tick(w.cfg())
+    assert len(st["asked"]) == 2
+
+
+def test_the_kilo_settings_are_validated_defaulted_and_on_the_page():
+    from pathlib import Path
+
+    from foundry_client import config
+    assert config.DEFAULTS["resources"]["kilo_restart_gb"] == 6
+    assert config.DEFAULTS["resources"]["kilo_restart_free_gb"] == 4
+    ok = {**R.DEFAULTS}
+    assert R.validate(ok) == []
+    assert R.validate({k: v for k, v in ok.items() if not k.startswith("kilo_")}) == []   # older file
+    assert "resources.kilo_restart_gb must be a number, 0 or more" in R.validate(
+        {**ok, "kilo_restart_gb": -1})
+    assert "resources.kilo_restart_free_gb must be a number, 0 or more" in R.validate(
+        {**ok, "kilo_restart_free_gb": "lots"})
+    page = (Path(R.__file__).parent / "static" / "client.html").read_text(encoding="utf-8")
+    assert '"resources.kilo_restart_gb"' in page and '"resources.kilo_restart_free_gb"' in page
+    assert "rs.kilo.gb" in page and "restart pending" in page
+
+
+def test_the_manager_asks_for_kilos_own_safe_restart_never_a_forced_one():
+    from foundry_client.manager import Manager
+    calls, events = [], []
+    owned = SimpleNamespace(p=SimpleNamespace(pid=4096, poll=lambda: None), adopted=False,
+                            pending_restart="", spec=SimpleNamespace(owner_pid=None))
+    me = SimpleNamespace(procs={"kilo": owned},
+                         cfg={"components": {"kilo": {"enabled": True}}},
+                         restart=lambda name, force=False: calls.append((name, force)) or {
+                             "result": "waiting for a safe point: 1 session(s) working"},
+                         _event=lambda n, t: events.append((n, t)))
+    assert Manager._kilo_pid(me) == 4096 and Manager._kilo_pending(me) is False
+    assert Manager._restart_kilo_for_memory(me, "Kilo is using 8.5 GB") == \
+        "waiting for a safe point: 1 session(s) working"
+    assert calls == [("kilo", False)] and "resource watch" in events[0][1]
+    owned.pending_restart = "safe"
+    assert Manager._kilo_pending(me) is True
+    # adopted (started by something else): the process that owns its port
+    adopted = SimpleNamespace(p=None, adopted=True, pending_restart="",
+                              spec=SimpleNamespace(owner_pid=lambda: 5150))
+    assert Manager._kilo_pid(SimpleNamespace(procs={"kilo": adopted})) == 5150
+    assert Manager._kilo_pid(SimpleNamespace(procs={})) is None
+    me.cfg["components"]["kilo"]["enabled"] = False
+    assert "disabled" in Manager._restart_kilo_for_memory(me, "x") and len(calls) == 1

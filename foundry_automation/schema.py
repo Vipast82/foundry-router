@@ -292,6 +292,7 @@ AUTOMATION_DEFAULTS: dict = {
     "infra_retry_max": 5,
     "infra_backoff_seconds": 60,
     "infra_wait_notice_minutes": 30,
+    "kilo_restart_drain_minutes": 60,
     # budget_policy.py: budgets and time limits follow plan progress
     "budget_renewals_per_day": 1,
     "task_minutes_auto_extend": True,
@@ -982,6 +983,11 @@ _AUTO_DESC = {
                                 "per day. The extra belongs to that sprint and ends with it; "
                                 "the limit here is not changed. Off = it stops and asks, with "
                                 "the suggested amount.",
+    "kilo_restart_drain_minutes": "While the Foundry Client has a Kilo restart pending for "
+                                  "a safe point (memory over its limit, a config reload), no "
+                                  "new session starts, for at most this long, so the running "
+                                  "sessions end and the restart happens. 0 = never hold "
+                                  "starts.",
     "infra_wait_notice_minutes": "A sprint that stopped because Studio (with the TEST place) "
                                  "or the router is down waits until it is back: checked "
                                  "every minute, nothing restarted, no attempt, session or "

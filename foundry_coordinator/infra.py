@@ -245,6 +245,51 @@ def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
     return True
 
 
+KILO_DRAIN_CACHE_S = 30.0
+
+
+def kilo_drain(c, P) -> str:
+    """Why a new session must not start right now ('' = start): the Foundry Client has a
+    Kilo restart pending for a safe point (memory, a config reload), and a safe point only
+    comes when no session works. New starts are held for at most [automation]
+    kilo_restart_drain_minutes (0 = never held), so the restart happens when the running
+    sessions end their turn instead of waiting hours behind a stream of new ones. Read
+    from the client every KILO_DRAIN_CACHE_S; no client here means no hold."""
+    try:
+        limit = float(auto_get(P, "kilo_restart_drain_minutes") or 0) * 60
+    except Exception:                                             # noqa: BLE001
+        limit = 0
+    if limit <= 0:
+        return ""
+    cache = c.__dict__.setdefault("_kilo_drain", {})
+    now = c.clock()
+    if now - float(cache.get("ts") or -1e18) >= KILO_DRAIN_CACHE_S:
+        cache["ts"] = now
+        st = None
+        try:
+            from . import client_api
+            api = client_api.discover()
+            st = api.component("kilo") if api is not None else None
+        except Exception:                                         # noqa: BLE001
+            st = None
+        cache["pending"] = bool(st and st.get("pending_restart"))
+        cache["for_s"] = float((st or {}).get("pending_for_s") or 0)
+        cache["read"] = now
+    if not cache.get("pending"):
+        cache.pop("noted", None)
+        return ""
+    waited = float(cache.get("for_s") or 0) + (now - float(cache.get("read") or now))
+    if waited >= limit:
+        return ""                        # it waited long enough: sprints go on
+    if not cache.get("noted"):
+        cache["noted"] = True
+        c.store.event(P.id, "", "kilo_drain", detail={
+            "why": "the Kilo server has a restart pending for a safe point",
+            "held_for_at_most_minutes": limit / 60, "digest": True})
+    return (f"waiting: the Kilo server restarts at the next safe point; no new session starts "
+            f"until then (at most {max(1, int(-(-(limit - waited) // 60)))} more min)")
+
+
 def session_ok(c, P, tid: str) -> None:
     """A session reached an ordinary idle: the infra failure streak is over."""
     t = c.store.task(P.id, tid) or {}

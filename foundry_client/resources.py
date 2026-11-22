@@ -7,7 +7,15 @@ stack starts: training runs, scripted Studio checks, gate.ps1, Lune, headless Bl
 limit (on two checks in a row) or runs past its time limit is stopped with its whole process
 tree, when `auto_stop` is on; the work it was doing stays queued, and every stop is an event and
 an alert. Anything else (Studio, Blender's window, the components, your apps) is never touched:
-when free RAM is low the alert names the biggest users, that is all."""
+when free RAM is low the alert names the biggest users, that is all.
+
+One exception, asked for by name (COORDINATOR_AUTOMATION_NEEDS item 6): the Kilo server
+(Bun) grows to 7-10 GB within hours and takes the workstation below 2 GB free. When Kilo's
+whole process tree is over `kilo_restart_gb` and free RAM is under `kilo_restart_free_gb`
+on two checks in a row, the client asks for Kilo's own safe-point restart: nothing is cut,
+it waits until no session works. The coordinator holds new session starts while that
+restart is pending (infra.kilo_drain), so the safe point comes. One request per
+KILO_RESTART_GAP_S; `kilo_restart_gb = 0` switches it off."""
 
 from __future__ import annotations
 
@@ -20,6 +28,8 @@ DEFAULTS = {
     "interval_seconds": 60,
     "low_ram_gb": 2,              # alert when free RAM is below this (0 = never)
     "auto_stop": True,            # stop a runaway development / testing job
+    "kilo_restart_gb": 6,         # restart Kilo at a safe point when its tree is over this...
+    "kilo_restart_free_gb": 4,    # ...and free RAM is under this (0 = whatever is free)
     "limits": {                   # per kind: memory (GB, the job's whole process tree) + minutes
         "training": {"gb": 6, "minutes": 120},
         "studio_check": {"gb": 3, "minutes": 240},
@@ -39,6 +49,7 @@ KIND_LABEL = {
 }
 
 GB = 1024 ** 3
+KILO_RESTART_GAP_S = 1800         # one restart request per half hour
 
 
 def _cmd(p) -> tuple[str, str]:
@@ -89,7 +100,10 @@ class ResourceWatch:
     def __init__(self, settings: Callable[[], dict], alert: Callable, clear_alert: Callable,
                  event: Callable, game: Callable[[], str] = lambda: "",
                  protected: Callable[[], set] = lambda: set(),
-                 clock: Callable[[], float] = time.time, ps=None):
+                 clock: Callable[[], float] = time.time, ps=None,
+                 kilo_pid: Callable[[], Optional[int]] = lambda: None,
+                 kilo_pending: Callable[[], bool] = lambda: False,
+                 restart_kilo: Callable[[str], str] = lambda why: "no restart hook"):
         self.settings, self.alert, self.clear_alert, self.event = settings, alert, clear_alert, event
         self.game, self.protected, self.clock = game, protected, clock
         if ps is None:
@@ -98,6 +112,9 @@ class ResourceWatch:
             except ImportError:                                   # no psutil: the watch is off
                 ps = None
         self.ps = ps
+        self.kilo_pid, self.kilo_pending, self.restart_kilo = kilo_pid, kilo_pending, restart_kilo
+        self.kilo_over = 0                    # consecutive checks with Kilo over and RAM low
+        self.kilo_asked = -1e18               # when a memory restart was last asked for
         self.next_at = 0.0
         self.over: dict[int, int] = {}        # pid -> consecutive checks over its memory limit
         self.stops: list[dict] = []
@@ -162,6 +179,54 @@ class ResourceWatch:
                 continue
         return sorted(rows, key=lambda r: -r["gb"])[:n]
 
+    def kilo_gb(self) -> Optional[float]:
+        """Memory of the Kilo server's whole process tree, or None (not running here)."""
+        try:
+            pid = self.kilo_pid()
+            if not pid:
+                return None
+            p = self.ps.Process(int(pid))
+            return round(sum(_private(x) for x in [p] + p.children(recursive=True)) / GB, 2)
+        except Exception:                                         # noqa: BLE001
+            return None
+
+    def _kilo(self, s: dict, free: float) -> dict:
+        """The Kilo memory rule (module text). Returns what the status shows."""
+        gb = self.kilo_gb()
+        lim, need = float(s.get("kilo_restart_gb") or 0), float(s.get("kilo_restart_free_gb") or 0)
+        out = {"gb": gb, "limit_gb": lim, "free_below_gb": need, "pending": False}
+        if gb is None:
+            self.kilo_over = 0
+            return out
+        try:
+            pending = bool(self.kilo_pending())
+        except Exception:                                         # noqa: BLE001
+            pending = False
+        out["pending"] = pending
+        if not lim or gb <= lim or (need and free >= need):
+            self.kilo_over = 0
+            if not pending:
+                self.clear_alert("resources:kilo_memory")
+            return out
+        self.kilo_over += 1
+        now = self.clock()
+        if self.kilo_over < 2 or pending or now - self.kilo_asked < KILO_RESTART_GAP_S:
+            return out
+        self.kilo_asked = now
+        why = (f"Kilo is using {gb:.1f} GB (limit {lim:g} GB) with {free:.1f} GB of RAM free"
+               + (f" (under {need:g} GB)" if need else ""))
+        try:
+            res = str(self.restart_kilo(why) or "")
+        except Exception as e:                                    # noqa: BLE001
+            res = f"{type(e).__name__}: {e}"
+        self.event("resources", f"{why}: asked for a Kilo restart at the next safe point"
+                                + (f" ({res})" if res else ""))
+        self.alert("resources:kilo_memory",
+                   f"{why}. Kilo restarts at the next safe point (when no session is working); "
+                   f"the coordinator holds new session starts until then.", "info")
+        out.update(pending=True, asked=now)
+        return out
+
     def tick(self, s: Optional[dict] = None) -> dict:
         s = s or self.cfg()
         vm = self.ps.virtual_memory()
@@ -191,8 +256,10 @@ class ResourceWatch:
                                             f"Biggest users: {names}.")
         elif low and free >= low + 0.5:
             self.clear_alert("resources:low_ram")
+        kilo = self._kilo(s, free)
         self.last = {"ts": self.clock(), "free_gb": round(free, 1), "total_gb": round(total, 1),
-                     "jobs": jobs, "top": top, "stops": self.stops[-10:]}
+                     "jobs": jobs, "top": top, "stops": self.stops[-10:], "kilo": kilo,
+                     "kilo_gb": kilo.get("gb")}
         return self.last
 
     def _runaway(self, j: dict, why: str, stop: bool) -> None:
@@ -241,8 +308,8 @@ class ResourceWatch:
 
 def validate(s: dict) -> list[str]:
     errs = []
-    for k in ("interval_seconds", "low_ram_gb"):
-        v = s.get(k)
+    for k in ("interval_seconds", "low_ram_gb", "kilo_restart_gb", "kilo_restart_free_gb"):
+        v = s.get(k, 0)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             errs.append(f"resources.{k} must be a number, 0 or more")
     for k in ("enabled", "auto_stop"):

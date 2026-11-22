@@ -11,8 +11,9 @@ coordinator from its own store (COORDINATOR_AUTOMATION_NEEDS items 26 and 12).
   done        sprints completed in the last 24 hours (the CLI also says "since the last
               check", a time it keeps in the store)
   orders      the active standing orders, in a line each
-  machine     free and total RAM where psutil is installed (Kilo's memory and the slot
-              disks are added by the releases that measure them)
+  machine     free and total RAM, and Kilo's memory with a pending restart, from psutil
+              and the Foundry Client's resource watch (the slot disks are added by the
+              release that measures them)
 
 `build(c, P)` is the heartbeat's `board` block (the Automation page's Status tab adds the
 models served in the router's last 100 requests, which only the router knows); `text()`
@@ -221,13 +222,30 @@ def done(c, P, since: Optional[float] = None) -> list:
 
 
 def machine() -> dict:
+    """RAM from psutil where it is installed; Kilo's memory and whether its restart is
+    pending from the Foundry Client's resource watch, when a client runs here."""
+    out: dict = {}
     try:
         import psutil
         vm = psutil.virtual_memory()
-        return {"ram_free_gb": round(vm.available / 2 ** 30, 1),
-                "ram_total_gb": round(vm.total / 2 ** 30, 1)}
+        out.update(ram_free_gb=round(vm.available / 2 ** 30, 1),
+                   ram_total_gb=round(vm.total / 2 ** 30, 1))
     except Exception:                                            # noqa: BLE001
-        return {}
+        pass
+    try:
+        from . import client_api
+        api = client_api.discover()
+        rs = (api.status().get("resources") or {}) if api is not None else {}
+        kilo = rs.get("kilo") or {}
+        if kilo.get("gb") is not None:
+            out["kilo_gb"] = kilo["gb"]
+            if kilo.get("pending"):
+                out["kilo_restart"] = "pending"
+        if "ram_free_gb" not in out and rs.get("free_gb") is not None:
+            out.update(ram_free_gb=rs["free_gb"], ram_total_gb=rs.get("total_gb"))
+    except Exception:                                            # noqa: BLE001
+        pass
+    return out
 
 
 def build(c, P) -> dict:
