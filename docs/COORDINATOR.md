@@ -278,6 +278,9 @@ Victor decided on 2026-10-21.
 | `budget_renewals_per_day` | `1` | A sprint out of sessions, attempts or review calls gets every counter back to its base room by itself this many times a rolling day, only if a plan step was ticked since its last renewal (`budget_policy.py`; ledger rows `renewal:<counter>:<key>`, notice `budget_renewed`). Otherwise the stop goes to the Lead and the owner as before. `0` = never. |
 | `task_minutes_auto_extend` | `true` | A sprint over `limits.max_task_minutes` that ticked a plan step since its last extension gets minutes of its own: what its open steps need at its own pace, at most the limit again per day (task data `task_minutes_extra`, notice `time_extended`). The project limit is not changed. `extend-time PROJECT TASK --minutes N` is the owner's own grant, live. |
 | `kilo_restart_drain_minutes` | `60` | While the Foundry Client has a Kilo restart pending for a safe point (its resource watch found Kilo over `resources.kilo_restart_gb` with free RAM under `resources.kilo_restart_free_gb`, or a config reload), no new implementer session starts, for at most this long, so the running ones end and the restart happens. `0` = never hold starts. |
+| `push_chunk_mb` | `1500` | A closeout push that would send more than this is sent in chunks in the background (see "The repository"). `0` = never chunk. |
+| `count_pins` | `[]` | Tests that pin a count, one per line: `file :: regex with one group :: glob[ :: regex]`. Empty = the project's built-in list. |
+| `plan_check` | `warn` | `warn`, `block` or `off`: the plan check before a sprint's session starts. |
 | `slot_keep_fresh_hours` | `4` | While a remote Studio slot is idle, the main branch is pushed to its bare copy this often, in the background, so a lane's first push only sends what the lane added. `0` = never. |
 | `slot_disk_alert_pct` | `80` | Alert once a day per slot when its disk is this full (read every ten minutes, in the background). `0` = no alert. |
 | `slot_auto_fill` | `false` | A free Studio slot starts work by itself (see "Keeping the slots busy"). Off = the status board only says what would start. |
@@ -369,6 +372,59 @@ answers again, every project is swept at once and again after the dead-session g
 a session the outage killed is restarted within a few minutes. One notice (`router_back`)
 then says how long the router was away, each live session with what Kilo reports for it,
 what was restarted, and what is still not right.
+
+### The repository: big pushes, count pins, plan checks (`pushjob.py`, `tracks/pins.py`, `plancheck.py`)
+
+**A push too big for one go.** Before a closeout push the outgoing size is measured (what
+HEAD has that the remote branch and the `foundry-push/*` staging branches lack). Over
+`push_chunk_mb`, or after a plain push the remote refused for its size, the push is chunked:
+commits along the branch's first-parent line are grouped so each group is under the limit,
+each group's last commit is pushed to `refs/heads/foundry-push/<branch>-<n>`, then the branch
+itself. It runs in a background thread; the closeout stays in its push wait ("pushing in
+chunks: 3 of 13 sent") and finishes on the retry that finds the remote at the head. After
+it the staging branches are deleted, and so is any older `foundry-push/*` branch whose
+commit is already part of the pushed head; one that is not is left and named. A restart
+loses nothing: what is already on a staging branch is not sent again. One commit bigger
+than the limit cannot be split and is pushed on its own. Events `push_chunked`,
+`push_chunked_done`, `push_chunked_failed`.
+
+**Count pins.** A test that pins a count ("54 services loaded, 29 driven") is edited by
+every lane that adds one of the counted things. A pin is a line of `count_pins`:
+
+    tests/GateRunner.lua :: Boot complete — (\d+) services loaded :: src/server/Services/*.lua
+    tests/GateRunner.lua :: loaded, (\d+) driven by :: src/server/Services/*.lua :: :Update\(
+
+The count is the number of files the glob matches, or with a fourth part the number of
+those whose text matches it. At a lane merge:
+
+- a conflict hunk in a pin's file whose two sides are equal once the pinned numbers and
+  `--` comment lines are left out resolves itself (both sides' comment lines are kept); a
+  hunk that differs in anything else stops as before, for the Lead repair or a person;
+- after the lane holds master every pin is set to the real count and, when one changed,
+  committed on the lane (`<sprint>: count pins set to the real counts (53 -> 55)`) before
+  the merge gate reads it. Event `count_pins_fixed`. A count that cannot be taken (the
+  folder is not there) never overwrites a pin.
+
+The AnimalUprising adapter carries its seven pins (GateRunner's boot numbers, MapV2Pacing,
+MatchReset); the setting replaces them.
+
+**The plan check.** Before a sprint's session starts its plan (`docs/progress/<ID>_PLAN.md`)
+is read once per version of the file:
+
+- every repo path it names in backticks exists, outside its own file list and its own
+  outputs (a path with a placeholder is not judged). A wrong folder gets a hint:
+  "`docs/evidence/FIN/map/overview.png` does not exist; docs/evidence/FIN-0/map/overview.png
+  exists";
+- every sprint its "Depends on" names exists ("FIN-5a: no such sprint; did you mean
+  FIN-5a1?");
+- a run table (an `Id` column with Difficulty / Seed / Length) agrees with the plan's own
+  step lines and JSON blocks for those ids ("CQc: the table says seed 31415926, its step
+  says 20261016").
+
+`plan_check = "warn"` writes the findings as an event (`plan_check`, in the watch log) and
+the sprint starts. `"block"` stops the sprint with the findings as its blocker, once per
+version of the plan: fix the plan, or unblock to start with it as it is. It ships on
+`warn`, because a plan may name a path on purpose that one of its steps creates.
 
 ### Slot upkeep (`slotkeep.py`)
 

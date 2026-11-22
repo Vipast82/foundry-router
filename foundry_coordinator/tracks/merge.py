@@ -165,20 +165,36 @@ def union_text(text: str) -> str:
                   lambda m: m.group(1).rstrip("\r\n") + nl + nl + m.group(2), text, flags=re.S)
 
 
-def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50) -> bool:
+def _resolve_memory_conflicts(wt: str, how: str, limit: int = 50, pins=None) -> bool:
     """Resolve rebase/merge conflicts that touch ONLY docs/memory/** by keeping both sides,
     continuing a rebase step by step. False (nothing changed beyond the attempt) when any
-    other file conflicts: the caller aborts and opens the usual decision."""
+    other file conflicts: the caller aborts and opens the usual decision. `pins` = the
+    project's count pins (pins.py): a conflict in a pin's file that is only about the count
+    resolves too."""
+    from . import pins as PN
+    pin_files = {p.file for p in pins or []}
     for _ in range(limit):
         files = [l.strip() for l in _git(wt, "diff", "--name-only", "--diff-filter=U",
                                          check=False).stdout.splitlines() if l.strip()]
         if not files:
             return True
-        if not all(union_safe(f) for f in files):
+        if not all(union_safe(f) or f.replace("\\", "/") in pin_files for f in files):
             return False
         files = _resolve_counted_specs(wt, files)
         if files is None:
             return False
+        for f in [f for f in files if f.replace("\\", "/") in pin_files]:
+            p = os.path.join(wt, f)
+            try:
+                with open(p, encoding="utf-8", newline="") as fh:
+                    text = PN.resolve(fh.read(), [x for x in pins
+                                                  if x.file == f.replace("\\", "/")])
+            except (OSError, ValueError):
+                return False                         # more than a count: a person or the Lead
+            with open(p, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+            _git(wt, "add", "--", f, check=False)
+            files = [x for x in files if x != f]
         for f in files:
             p = os.path.join(wt, f)
             with open(p, encoding="utf-8", newline="") as fh:
@@ -376,6 +392,11 @@ class MergeManager:
         # case rc-bb1526ee). Master already in the track: nothing to integrate. The
         # track has merge commits: integrate master by merge. Else rebase as before.
         how = "rebase"
+        from . import pins as PN
+        try:
+            plist = PN.for_project(P, self.tm.setting(P, "count_pins"))
+        except Exception:                                         # noqa: BLE001
+            plist = []
         if _git(wt, "merge-base", "--is-ancestor", ref, "HEAD", check=False).returncode == 0:
             how = "none"
         elif _git(wt, "rev-list", "--merges", "-n", "1", f"{ref}..HEAD",
@@ -384,7 +405,7 @@ class MergeManager:
         if how != "none":
             cmd = ["rebase", ref] if how == "rebase" else ["merge", "--no-edit", ref]
             r = _git(wt, *cmd, check=False)
-            if r.returncode != 0 and _resolve_memory_conflicts(wt, how):
+            if r.returncode != 0 and _resolve_memory_conflicts(wt, how, pins=plist):
                 r = _git(wt, "rev-parse", "HEAD", check=False)       # resolved: carry on
             if r.returncode != 0:
                 conflicts = [l.strip() for l in _git(wt, "diff", "--name-only",
@@ -393,11 +414,45 @@ class MergeManager:
                 _git(wt, how, "--abort", check=False)
                 self._conflict(P, row, conflicts, (r.stderr or r.stdout)[-800:])
                 return
+        self._fix_pins(P, row, wt, plist)
         head = _git(wt, "rev-parse", "HEAD").stdout.strip()
         self._set(P, row, merge_stage="ff", rebased_head=head)
         self.store.event(P.id, "", "track_rebased", detail={"track": row["name"], "onto": base,
                                                            "head": head[:12], "how": how})
         self._ff(P, self.store.track(P.id, row["name"]))
+
+    def _fix_pins(self, P, row: dict, wt: str, plist: list) -> list:
+        """After the lane holds master: every count pin set to the real count, committed on
+        the lane before the merge gate reads it (pins.py). Never raises; a commit that fails
+        puts the files back."""
+        if not plist:
+            return []
+        from . import pins as PN
+        try:
+            changes = PN.fix(wt, plist)
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, "", "count_pins_failed", detail={
+                "track": row["name"], "error": f"{type(e).__name__}: {e}"[:300]})
+            return []
+        if not changes:
+            return []
+        files = sorted({c["file"] for c in changes})
+        sprint = (row.get("sprints") or [row["name"]])[-1]
+        what = ", ".join(sorted({f"{c['from']} -> {c['to']}" for c in changes}))
+        _git(wt, "add", "--", *files, check=False)
+        r = _git(wt, "commit", "-m", f"{sprint}: count pins set to the real counts ({what})",
+                 "--", *files, check=False)
+        if r.returncode != 0:
+            _git(wt, "reset", "-q", "--", *files, check=False)
+            _git(wt, "checkout", "--", *files, check=False)
+            self.store.event(P.id, "", "count_pins_failed", detail={
+                "track": row["name"], "error": (r.stderr or r.stdout or "")[-300:]})
+            return []
+        self.store.event(P.id, "", "count_pins_fixed", detail={
+            "track": row["name"], "changes": changes[:20], "digest": True,
+            "text": f"lane {row['name']}: count pins set to the real counts ({what}) in "
+                    f"{', '.join(files)}"})
+        return changes
 
     def _conflict(self, P, row: dict, files: list[str], log: str) -> None:
         """A rebase conflict: a Lead repair in the worktree when the lead manager

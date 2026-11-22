@@ -215,6 +215,7 @@ STUDIO_CALLS_DEFAULTS = {
 HELPER_MODES = ("on_demand", "proactive")
 SCOPE_DEFAULTS = ("deny", "approve")
 BUDGET_MODES = ("normal", "save_claude", "save_all")
+PLAN_CHECK_MODES = ("warn", "block", "off")
 DEFAULT_SCOPE_RULES = [
     {"name": "gate_runner_boot_and_mounted_rows", "path": "tests/GateRunner.lua",
      "blocks": ["EXPECTED_BOOT", "MOUNTED_TESTS"]},
@@ -297,6 +298,10 @@ AUTOMATION_DEFAULTS: dict = {
     # modelwatch.py: which model serves the sprints, and the pause when the paid ones are out
     "served_model_alert": True,
     "pause_when_paid_models_out": False,
+    # pushjob.py, tracks/pins.py, plancheck.py: the repository
+    "push_chunk_mb": 1500,
+    "count_pins": [],
+    "plan_check": "warn",
     # slotkeep.py: the slots' copies, disks and versions
     "slot_keep_fresh_hours": 4,
     "slot_disk_alert_pct": 80,
@@ -465,6 +470,22 @@ def automation_table(path: str, raw) -> dict:
     if out["helpers"] not in HELPER_MODES:
         raise SettingsError(f"{path}: automation.helpers must be one of {HELPER_MODES}",
                             "automation.helpers")
+    if out["plan_check"] not in PLAN_CHECK_MODES:
+        raise SettingsError(f"{path}: automation.plan_check must be one of {PLAN_CHECK_MODES}",
+                            "automation.plan_check")
+    for line in out["count_pins"]:
+        parts = [p.strip() for p in line.split("::")]
+        bad = len(parts) not in (3, 4) or not all(parts[:3])
+        if not bad:
+            try:
+                import re as _re
+                bad = _re.compile(parts[1]).groups != 1 or bool(
+                    len(parts) == 4 and parts[3] and _re.compile(parts[3]) is None)
+            except _re.error:
+                bad = True
+        if bad:
+            raise SettingsError(f"{path}: automation.count_pins: {line!r} is not `file :: regex "
+                                f"with one group :: glob[ :: regex]`", "automation.count_pins")
     if out["budget_mode"] not in BUDGET_MODES:
         raise SettingsError(f"{path}: automation.budget_mode must be one of {BUDGET_MODES}",
                             "automation.budget_mode")
@@ -940,7 +961,8 @@ _SC_DESC = {
 }
 
 _AUTO_ENUMS = {"helpers": HELPER_MODES, "scope_unlisted_default": SCOPE_DEFAULTS,
-               "ref_views_images": ("ask", "allow"), "budget_mode": BUDGET_MODES}
+               "ref_views_images": ("ask", "allow"), "budget_mode": BUDGET_MODES,
+               "plan_check": PLAN_CHECK_MODES}
 _AUTO_DESC = {
     "helpers": "on_demand: proactive helper lanes are off; a helper starts only when the "
                "primary asks for one and that primary consumes it. proactive: [lanes] apply.",
@@ -1003,6 +1025,20 @@ _AUTO_DESC = {
                                 "per day. The extra belongs to that sprint and ends with it; "
                                 "the limit here is not changed. Off = it stops and asks, with "
                                 "the suggested amount.",
+    "push_chunk_mb": "A closeout push that would send more than this (MB on disk) is sent "
+                     "in chunks through foundry-push/* staging branches, in the background, "
+                     "and the staging branches are deleted afterwards. Also used after a "
+                     "plain push the remote refused for its size. 0 = never chunk.",
+    "count_pins": "Tests that pin a count, one per line: `file :: regex with one group (the "
+                  "number) :: glob of the counted files[ :: regex a counted file must "
+                  "contain]`. After a lane is rebased each pin is set to the real count, "
+                  "and a merge conflict that is only about such a count resolves itself. "
+                  "Empty = the project's built-in list, if it has one.",
+    "plan_check": "Before a sprint's session starts its plan is checked: every repo path "
+                  "it names exists, every sprint its Depends on names exists, and its run "
+                  "table agrees with its run steps and JSON blocks. warn = the findings "
+                  "are an event and the sprint starts; block = the sprint stops with the "
+                  "findings (once per plan version); off = no check.",
     "slot_keep_fresh_hours": "While a remote Studio slot is idle (no lane bound, its lock "
                              "free), the main branch is pushed to its bare copy this often, "
                              "in the background, so a lane's first push only sends what the "

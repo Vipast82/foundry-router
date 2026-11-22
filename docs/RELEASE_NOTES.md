@@ -1,3 +1,51 @@
+## v0.181.238 - big pushes in chunks, count pins, a plan check at the start
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 20 (the
+chunked push), 21 and 22.
+
+- **A push too big for one go (20).** On 11-17 GitHub's 2 GB per-push limit
+  refused FIN-5a1's closeout push; it went through 13 `foundry-push/*` staging
+  branches by hand, and those stayed on GitHub. The coordinator now measures a
+  closeout push first. Over `[automation] push_chunk_mb` (default 1500, 0 =
+  never), or after a plain push the remote refused for its size, it pushes
+  groups of commits to `foundry-push/<branch>-<n>` and then the branch, in a
+  background thread, so the tick never waits: the closeout stays in its push
+  wait ("pushing in chunks: 3 of 13 sent"). Afterwards the staging branches
+  are deleted, and so is any older `foundry-push/*` branch that is already
+  part of the pushed head (the ones left from 11-17 go with the next chunked
+  push). A restart sends nothing twice.
+- **Count pins (21).** Two lanes each add a service and each write 53 -> 54;
+  merged, the test either conflicts or says 54 when there are 55, and the
+  merge gate's boot check fails (VQ-02). A pin is a line of
+  `[automation] count_pins` (`file :: regex with one group :: glob[ ::
+  regex]`). After a lane is rebased every pin is set to the real count and
+  committed on the lane before the merge gate; a conflict that is only about
+  the count (or the comment lines beside it) resolves itself. The
+  AnimalUprising adapter carries seven pins: GateRunner's server boot numbers
+  (services, and those with an Update), MapV2Pacing, MatchReset. On today's AU
+  master they count 54 and 29, which is what the files say.
+- **Plan check (22).** Before a sprint's session starts its plan is checked,
+  once per version of the file: every repo path it names exists (a wrong
+  folder gets a hint: `docs/evidence/FIN/map/...` "does not exist;
+  docs/evidence/FIN-0/map/... exists"), every sprint in its "Depends on"
+  exists ("FIN-5a: no such sprint; did you mean FIN-5a1?"), and a run table
+  agrees with its own run steps and JSON blocks ("CQc: the table says seed
+  31415926, its step says 20261016"). `[automation] plan_check`: `warn`
+  (default; an event, the sprint starts), `block` (the sprint stops once per
+  plan version), `off`.
+
+Not covered: moving the frames out of git (your decision, not now); one commit
+bigger than the limit cannot be split; a count conflict whose hunk also
+changes a message string still goes to the Lead repair; the plan check does
+not know which rows other sprints already did.
+
+Files: `foundry_coordinator/pushjob.py`, `plancheck.py`, `tracks/pins.py`
+(new), `engine.py`, `tracks/merge.py`,
+`projects/animaluprising/adapter.py`, `foundry_automation/schema.py`,
+`docs/COORDINATOR.md`, `crashguard.py`. 22 tests.
+
+Deploy: coordinator only.
+
 ## v0.181.237 - slot upkeep: fresh copies, disk alerts, versions
 
 Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 17, 18 and 19.

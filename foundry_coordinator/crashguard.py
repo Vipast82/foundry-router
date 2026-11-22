@@ -55,7 +55,8 @@ def step(kind: str, project: str = "", task: str = "", state: str = "") -> Itera
     global _cur
     with _lock:
         prev, _cur = _cur, {"kind": str(kind), "project": str(project), "task": str(task),
-                            "state": str(state), "since": time.time(), "uncovered_since": None}
+                            "state": str(state), "since": time.time(), "uncovered_since": None,
+                            "thread": threading.get_ident()}
     try:
         yield
     finally:
@@ -71,6 +72,8 @@ def note_command(argv) -> None:
     except Exception:                                            # noqa: BLE001
         return
     with _lock:
+        if _cur is not None and _cur.get("thread") not in (None, threading.get_ident()):
+            return                   # another thread's command (a background push), not the step's
         _cmd.update(text=text, ts=time.time())
 
 

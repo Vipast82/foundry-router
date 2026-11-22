@@ -113,7 +113,32 @@ def _watched_guards(text: str) -> set:
     return out
 
 
+# Tests that pin how many services there are (and how many have an Update). Every lane
+# that adds a service edits them; tracks/pins.py sets them to the real count after a lane is
+# rebased and resolves a conflict that is only about the count. The `loaded` / `heartbeat`
+# patterns look ahead to the server block's boot line: the client block has the same words.
+_SERVICES = "src/server/Services/*.lua"
+_SERVER_LINE = r'line = "Boot complete — \d+ services'
+COUNT_PINS = [
+    rf"tests/GateRunner.lua :: loaded = (\d+),(?=\s*heartbeat = \d+,\s*errors = \d+,\s*"
+    rf"{_SERVER_LINE}) :: {_SERVICES}",
+    rf"tests/GateRunner.lua :: heartbeat = (\d+),(?=\s*errors = \d+,\s*{_SERVER_LINE}) :: "
+    rf"{_SERVICES} :: :Update\(",
+    rf"tests/GateRunner.lua :: Boot complete — (\d+) services loaded :: {_SERVICES}",
+    rf"tests/GateRunner.lua :: services loaded, (\d+) driven by the shared Heartbeat :: "
+    rf"{_SERVICES} :: :Update\(",
+    rf'tests/lune/specs/MapV2Pacing.spec.luau :: gate:find\("(\d+) services loaded" :: '
+    rf"{_SERVICES}",
+    rf"tests/lune/specs/MatchReset.spec.luau :: T\.eq\(count\(sources\), (\d+), :: {_SERVICES}",
+    rf"tests/lune/specs/MatchReset.spec.luau :: exactly the (\d+) service files :: {_SERVICES}",
+]
+
+
 class AnimalUprisingAdapter(GenericAdapter):
+    def count_pins(self) -> list:
+        """The project's own count pins ([automation] count_pins overrides them)."""
+        return list(COUNT_PINS)
+
     # the BUILD / repair / CLOSE prompts carry the track notice themselves (2026-10-27):
     # the engine does not append its generic TRACK_BRIEF
     TRACK_AWARE = True

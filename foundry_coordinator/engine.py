@@ -878,6 +878,10 @@ class Coordinator:
         hold = modelwatch.start_hold(self, P, t, P.profile.persona("implementer", tid))
         if hold:
             return self._note(P, t, hold)
+        from . import plancheck                    # the plan names things that exist
+        stop = plancheck.at_start(self, P, t, spec)
+        if stop:
+            return self._block(P, t, stop)
         if not self.tracks.is_track(P):
             from . import studio_reserve
             why = studio_reserve.blocks(self, P)
@@ -3954,20 +3958,61 @@ class Coordinator:
                 return P.ws.remote_head(remote, branch)
             except GitError as e:
                 return f"error: {e}"
+        from . import pushjob                      # a push too big for one go (item 20)
+        from .automation import get as auto_get
         cur = remote_head()
+        job = pushjob.status(P.ws, remote, branch)
+        if job and job.get("head") == head and job["state"] != "running" and \
+                not job.get("reported"):
+            job["reported"] = True
+            self.store.event(pid, tid, "push_chunked_done" if job["state"] == "done"
+                             else "push_chunked_failed", detail={
+                                 "head": head[:12], "chunks": job["chunks"], "sent": job["sent"],
+                                 "deleted": job["deleted"][:20], "kept": job["kept"][:20],
+                                 "digest": True, "text": f"{tid}: " + pushjob.words(job)})
         if cur == head:
             results.append(VerificationResult("coordinator.published", PASS, True,
                                               f"{remote}/{branch}", f"{remote}/{branch} = {head[:12]}",
                                               head))
             return f"{remote}/{branch}@{head[:12]}"
+        if job and job["state"] == "running":
+            # the background push is still sending: the closeout stays in its push wait
+            results.append(VerificationResult("coordinator.published", FAIL, True,
+                                              f"{remote}/{branch}", pushjob.words(job), head))
+            return ""
+        if job:
+            pushjob.clear(P.ws, remote, branch)
+        try:
+            chunk_mb = max(0, int(auto_get(P, "push_chunk_mb") or 0))
+        except Exception:                                         # noqa: BLE001
+            chunk_mb = 0
         # one journaled push per commit and try (a retry after a push wait is a new try)
         key = f"push:{pid}:{tid}:{head}" + (f":retry{attempt}" if attempt else "")
         if self.store.op_begin(key, pid, tid, "push") is None:
+            m, chunked = None, False
             try:
-                out = P.ws.push(remote, branch)
-                self.store.op_update(key, "done", {"output": out[-500:]})
+                if chunk_mb:
+                    m = pushjob.measure(P.ws, remote, head, cur if isinstance(cur, str) else None)
+                if m and m["bytes"] is not None and m["bytes"] > chunk_mb * pushjob.MB:
+                    chunked = True
+                else:
+                    out = P.ws.push(remote, branch)
+                    self.store.op_update(key, "done", {"output": out[-500:]})
             except GitError as e:
                 self.store.op_update(key, "failed", {"error": str(e)[:500]})
+                chunked = bool(chunk_mb) and pushjob.size_refusal(str(e))
+            if chunked:
+                m = m or pushjob.measure(P.ws, remote, head, cur if isinstance(cur, str) else None)
+                job = pushjob.start(P.ws, remote, branch, head, m, chunk_mb * pushjob.MB)
+                self.store.op_update(key, "done", {"chunked": True})
+                mb = int((m.get("bytes") or 0) / pushjob.MB)
+                self.store.event(pid, tid, "push_chunked", detail={
+                    "head": head[:12], "mb": mb, "limit_mb": chunk_mb, "digest": True,
+                    "text": f"{tid}: the push of {head[:12]} sends about {mb} MB, over "
+                            f"{chunk_mb} MB a push: it goes in chunks in the background"})
+                results.append(VerificationResult("coordinator.published", FAIL, True,
+                                                  f"{remote}/{branch}", pushjob.words(job), head))
+                return ""
         cur = remote_head()
         ok = cur == head
         results.append(VerificationResult(
