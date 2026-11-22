@@ -278,6 +278,19 @@ async def tracks(request: Request, project: str = ""):
     return _cc(request).tracks_view(s["projects"], project)
 
 
+@router.get("/control/api/orders")
+@_guard
+async def orders(request: Request, project: str = ""):
+    """Standing orders as the coordinator's heartbeat reports them, per project (active
+    orders with what each waits for and how often it acted, the last ended ones with
+    their result), and the watch log's last lines. Read-only; orders are given and
+    cancelled through POST /control/api/actions (order_add, order_cancel, extend_time)."""
+    s = _op(request)
+    if project and s["projects"] and project not in s["projects"]:
+        raise ControlError("unknown project", "not_found", 404)
+    return _cc(request).orders_view(s["projects"], project)
+
+
 @router.get("/control/api/queue")
 @_guard
 async def queue(request: Request, project: str):

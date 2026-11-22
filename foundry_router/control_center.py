@@ -221,7 +221,18 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "memory_add", "memory_edit", "playbook_add", "playbook_edit",
                 "queue_approve", "queue_reorder", "queue_deps", "queue_requeue",
                 "prep_add", "prep_remove", "prep_reorder", "prep_run_now",
-                "build_rerun")
+                "build_rerun",
+                "order_add", "order_cancel", "extend_time")
+# Standing orders (foundry_coordinator/orders.py; payloads in its control.py
+# ORDER_KINDS) and the owner's own grant of minutes to one sprint: project-scoped,
+# operator sessions, handed only to a coordinator that declares the `orders` feature.
+# The orders and the watch log's last lines arrive as the heartbeat's `orders` and
+# `watch_log` blocks (orders_view); the Automation page's Orders tab reads them.
+ORDER_ACTIONS = ("order_add", "order_cancel", "extend_time")
+ORDER_KINDS = ("keep_going", "pause_all", "claude_agents")
+ORDER_ID_RE = re.compile(r"^so-[0-9a-f]{10}$")
+ORDER_RESET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+MAX_ORDER_MINUTES = 14 * 24 * 60
 # Repo changes (self-driving part 3, 2026-10-28): project-scoped edits of the
 # coordinator's prep queue (foundry_coordinator/prep_queue.py; payloads in its
 # control.py PREP_KINDS), handed only to a coordinator that declares the
@@ -354,6 +365,7 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
                          **{k: "playbook" for k in PLAYBOOK_ACTIONS},
                          **{k: "queue" for k in QUEUE_ACTIONS},
                          **{k: "prep_queue" for k in PREP_ACTIONS},
+                         **{k: "orders" for k in ORDER_ACTIONS},
                          # build replay R4: re-run a journal entry on a slot
                          "build_rerun": "build_rerun"}
 # observation types that only make sense inside a project: an empty project_id
@@ -732,7 +744,8 @@ class ControlCenter:
             "kilo", "coordinator_owner", "projects", "sessions_tracked", "tick", "uptime_s",
             "backoff_s", "errors", "capture_boundary", "event_stream", "monotonic_s",
             "contract", "coordinator_version", "foundry_version", "boot_id", "store_schema",
-            "features", "overall", "client_version", "tracks", "prep_queue")
+            "features", "overall", "client_version", "tracks", "prep_queue", "orders",
+            "watch_log")
             if payload.get(k) is not None})
         if isinstance(payload.get("checks"), list):
             # the coordinator's background project checks (verify / closeout), bounded
@@ -2940,6 +2953,8 @@ class ControlCenter:
             return self._create_queue_action(actor, projects, body, scopes, kind, idem, pid, tid)
         if kind in PREP_ACTIONS:
             return self._create_prep_action(actor, projects, body, scopes, kind, idem, pid)
+        if kind in ORDER_ACTIONS:
+            return self._create_order_action(actor, projects, body, scopes, kind, idem, pid)
         if not pid or not tid:
             raise ControlError("project_id and task_id are required")
         if projects and pid not in projects:
@@ -3468,6 +3483,141 @@ class ControlCenter:
             raise
         self._notify()
         return self.action_view(aid)
+
+    @staticmethod
+    def _order_payload(kind: str, body: dict) -> tuple[dict, str]:
+        """(payload, summary) of a standing-order action, validated; ControlError otherwise.
+        The coordinator checks again against its own state (the sprint exists, no such
+        order is active, the router names a reset time)."""
+        def whole(key, lo, hi, required=False):
+            v = body.get(key)
+            if v is None or v == "":
+                if required:
+                    raise ControlError(f"{key} is required")
+                return None
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v \
+                    or not lo <= int(v) <= hi:
+                raise ControlError(f"{key} must be a whole number {lo}..{hi}")
+            return int(v)
+        note = _s(body.get("note"), 500)
+        if kind == "order_cancel":
+            oid = _s(body.get("order_id"), 20)
+            if not ORDER_ID_RE.match(oid):
+                raise ControlError("order_id must be a standing order's id (so-...)")
+            why = _s(body.get("why"), 300)
+            return ({"order_id": oid, **({"why": why} if why else {})},
+                    f"cancel standing order {oid}" + (f": {why}" if why else ""))
+        if kind == "extend_time":
+            task = _s(body.get("task"), 120).strip()
+            if not task:
+                raise ControlError("task is required")
+            minutes = whole("minutes", 1, MAX_ORDER_MINUTES, required=True)
+            return ({"task": task, "minutes": minutes, **({"note": note} if note else {})},
+                    f"{minutes} more minutes for {task}" + (f": {note}" if note else ""))
+        # the request's `kind` is the action (order_add); the order's own kind is order_kind
+        ok = _s(body.get("order_kind"), 30)
+        if ok not in ORDER_KINDS:
+            raise ControlError(f"order_kind must be one of {', '.join(ORDER_KINDS)}")
+        p: dict = {"kind": ok}
+        minutes = body.get("minutes")
+        if minutes not in (None, ""):
+            if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) \
+                    or not 1 <= float(minutes) <= MAX_ORDER_MINUTES:
+                raise ControlError(f"minutes must be a number 1..{MAX_ORDER_MINUTES}")
+            p["minutes"] = float(minutes)
+        reset = _s(body.get("reset"), 40).strip().lower()
+        if reset:
+            if not ORDER_RESET_RE.match(reset):
+                raise ControlError("reset: the backend whose usage window should reset "
+                                   "(claude, gpt, or a backend's name)")
+            p["reset"] = reset
+        if "minutes" in p and "reset" in p:
+            raise ControlError("give minutes or a reset, not both")
+        if ok == "keep_going":
+            task = _s(body.get("task"), 120).strip()
+            if not task:
+                raise ControlError("keep_going needs the sprint (task)")
+            if "minutes" in p or "reset" in p:
+                raise ControlError("keep_going ends when its sprint completes: no minutes or reset")
+            p["task"] = task
+            for key, lo, hi in (("gap_minutes", 5, 720), ("per_day", 1, 48)):
+                v = whole(key, lo, hi)
+                if v is not None:
+                    p[key] = v
+            what = f"keep {task} going until it completes"
+        elif ok == "pause_all":
+            if "minutes" not in p and "reset" not in p:
+                raise ControlError("pause_all needs an end: minutes, or a backend whose usage "
+                                   "window should reset")
+            what = "pause all sprints " + (f"for {p['minutes']:g} min" if "minutes" in p
+                                           else f"until the {reset} window resets")
+        else:
+            if "reset" in p:
+                raise ControlError("claude_agents takes minutes or no end (until cancelled)")
+            p["n"] = whole("n", 1, 32, required=True)
+            what = (f"{p['n']} Claude agent{'s' if p['n'] != 1 else ''} only "
+                    + (f"for {p['minutes']:g} min" if "minutes" in p else "until cancelled"))
+        if note:
+            p["note"] = note
+        return p, f"standing order: {what}"
+
+    def _create_order_action(self, actor: str, projects: list, body: dict, scopes, kind: str,
+                             idem: str, pid: str) -> dict:
+        if scopes is not None and not {"operator", "admin"} & set(scopes or []):
+            raise ControlError("standing orders need an operator session", "forbidden", 403)
+        if not pid:
+            raise ControlError("project_id is required")
+        if projects and pid not in projects:
+            raise ControlError("this operator may not act on that project", "forbidden", 403)
+        payload, summary = self._order_payload(kind, body)
+        if not self.rate_ok(actor):
+            raise ControlError("too many control actions; wait a minute", "rate_limited", 429)
+        st = self.settings()
+        now = self.clock()
+        aid = f"act-{uuid.uuid4().hex[:16]}"
+        tid = str(payload.get("task") or "")
+        try:
+            with self._tx() as c:
+                seq = self._feed(c, "action", pid, "", aid)
+                c.execute("INSERT INTO cc_actions (action_id, idem_key, actor, kind, project_id, "
+                          "task_id, run_id, session_id, request_id, payload, summary, expected, "
+                          "status, status_detail, created_ts, expires_ts, updated_ts, seq) VALUES "
+                          "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (aid, idem, actor, kind, pid, tid, "", "", "", _j(payload), summary,
+                           _j({}), "accepted",
+                           "stored by Foundry; waiting for the coordinator to claim it", now,
+                           now + st["action_ttl_s"], now, seq))
+                c.execute("INSERT INTO cc_action_log (action_id, ts, status, actor, detail) "
+                          "VALUES (?,?,?,?,?)", (aid, now, "accepted", actor, summary))
+        except Exception as e:                                   # noqa: BLE001
+            if "UNIQUE" in str(e) and "idem" in str(e):
+                ex = self.db.query_one("SELECT action_id FROM cc_actions WHERE idem_key=?", (idem,))
+                return {**self.action_view(ex["action_id"]), "duplicate": True}
+            raise
+        self._notify()
+        return self.action_view(aid)
+
+    def orders_view(self, projects: list, project: str = "") -> dict:
+        """The `orders` block of the freshest coordinator heartbeat, per project
+        ({active, ended, kinds}), and the watch log's last lines (the Orders tab)."""
+        best, out, log = None, {}, []
+        for s in self.sources(projects):
+            if s.get("kind") != "coordinator":
+                continue
+            d = s.get("detail") if isinstance(s.get("detail"), dict) else _uj(s.get("detail"), {})
+            od = (d or {}).get("orders")
+            if not isinstance(od, dict):
+                continue
+            if best is None or (s.get("last_seen") or 0) > (best.get("last_seen") or 0):
+                best, out = s, od
+                wl = (d or {}).get("watch_log")
+                log = [_s(x, 500) for x in wl][-200:] if isinstance(wl, list) else []
+        if projects:
+            out = {k: v for k, v in out.items() if k in projects}
+        if project:
+            out = {k: v for k, v in out.items() if k == project}
+        return {"orders": out, "watch_log": log, "source": (best or {}).get("source_id"),
+                "age_s": (round(self.clock() - (best.get("last_seen") or 0)) if best else None)}
 
     def prep_view(self, projects: list, project: str = "") -> dict:
         """The `prep_queue` block of the freshest coordinator heartbeat, per project
@@ -4037,6 +4187,11 @@ class ControlCenter:
             return f"{tid} depends on {', '.join(p.get('deps') or []) or 'nothing'}"[:300]
         if kind == "queue_requeue":
             return f"re-queue {tid}: {p.get('reason') or ''}"[:300]
+        if kind in ORDER_ACTIONS:
+            try:
+                return ControlCenter._order_payload(kind, {**p, "order_kind": p.get("kind")})[1][:300]
+            except ControlError:
+                return kind.replace("_", " ")
         if kind == "prep_add":
             return (f"queue repo change ({p.get('kind')}) in {tid}: {p.get('message') or ''}"
                     + (f" after {p.get('after_task')}" if p.get("after_task") else ""))[:300]

@@ -435,6 +435,9 @@ class Coordinator:
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{pid}: studio lock sweep failed: {type(e).__name__}: {e}")
             selfheal.sweep(self, P)          # self-repair sweep (never raises; once a minute)
+            # standing orders (orders.py): an owner's order runs as a rule until its end
+            # condition is met, then reports (never raises; every 30 s)
+            __import__(f"{__package__}.orders", fromlist=["tick"]).tick(self, P)
             try:
                 # build replay: finished tasks' Blender journals by age and count (hourly)
                 build_journal.sweep(self, P)
@@ -498,6 +501,8 @@ class Coordinator:
                 training_hook.launch_auto(self.store, P_, t_, self.state_dir)
             except Exception as e:                                # noqa: BLE001
                 self.log(f"{P_.id}: training auto run failed to start: {e}")
+        # the watch log (watchlog.py): what was done by itself and why, once a minute
+        __import__(f"{__package__}.watchlog", fromlist=["tick"]).tick(self)
         self.flush()
         return acted
 

@@ -1,3 +1,68 @@
+## v0.181.231 - standing orders, and a log of what the coordinator did by itself
+
+Fourth release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: items 27 and 28.
+These two are what the watch session itself was: it held your orders in its
+notes and acted on them, and it kept the dated log of what changed and why.
+
+**Standing orders (item 28).** An order now runs inside the coordinator as a rule
+until its end condition is met, then reports. The three kinds are the three
+orders you actually gave last week:
+
+- **Keep a sprint going until it completes** ("Keep it going, need POL-7 to
+  complete", 11-18). Whenever the sprint stops on anything but a decision that
+  is yours, the order puts it back: over its minutes, it gets more (sized from
+  its open plan steps); out of sessions, attempts or review calls, a budget
+  reset; anything else, an unblock whose text tells the next session what
+  stopped it. It ends when the sprint is COMPLETE and says how often it acted.
+  It never acts while a product decision or something only you can do is open,
+  while the project is paused, the sprint is held, the Lead has a call in
+  flight, or the sprint is waiting out an outage by itself. It acts at most
+  once every 20 minutes and 8 times a day; a sprint that stops more often than
+  that gets one alert, not a loop.
+- **Pause all sprints until...** ("pause all sprints ~1.5 h until the ChatGPT
+  5-hour usage window resets", 11-19): a number of minutes, or the reset of a
+  model's usage window. The reset time is the one the router reports when the
+  order is given, and the order says which window it took ("chatgpt-codex 5h at
+  97% resets"). No new session starts; running sessions finish their turn.
+  Then the project is resumed by itself, unless someone else paused it
+  meanwhile.
+- **N Claude agents only**, for a time or until you cancel it. Held through a
+  settings deploy, and put back afterwards.
+
+Where: Automation -> **Orders** (new tab): New order, Cancel, what each active
+order is waiting for and how often it acted, the last ended ones with their
+result. Also the CLI: `orders add|list|cancel`.
+
+**More minutes for a sprint** is on the same tab: the `extend-time` grant from
+the last release as a button. Live, this sprint only.
+
+**The watch log (item 27).** One dated line for each thing the coordinator did
+by itself and why - self-repair, auto-heal and outages waited out, budget
+renewals, time extensions, each order with who gave it and its scope, each
+thing an order did, holds, Studio reservations, pauses, settings applied, Lead
+cases opened, sprints parked - and for each state change someone other than
+the engine made, such as an operator's unblock with its resolution:
+
+    2026-11-18 21:59  POL-7  ORDER from victor: keep POL-7 going until it completes
+    2026-11-18 22:14  POL-7  order 'keep POL-7 going until it completes': reset its budget and put it back - was: 59 sessions used
+    2026-11-18 22:14  POL-7  BLOCKED -> READY by order:so-3f2a91c0de (budget reset): Standing order from victor: ...
+
+It is plain text in the coordinator's state folder (`watch-log/<YYYY-MM>.md`),
+written once a minute; nothing is committed to the game repository. The Orders
+tab shows the last 60 lines and `log [--lines N]` prints them.
+
+Not in this release: the operator chat cannot give orders yet (the page and
+the CLI can), and a pause does not interrupt a session that is already running.
+
+Files: `foundry_coordinator/orders.py`, `watchlog.py` (new), `engine.py`,
+`control.py`, `cli.py`; `foundry_router/control_center.py`, `control_api.py`,
+`ui/static/automation.html`; `docs/COORDINATOR.md`. 20 tests, four of them
+the page's own script run in node.
+
+Deploy: coordinator and router both changed. The Orders tab says "no
+coordinator has reported standing orders yet" until the coordinator runs this
+release.
+
 ## v0.181.230 - budgets and time limits follow the plan's progress
 
 Third release of the `COORDINATOR_AUTOMATION_NEEDS.md` work: items 9 and 10.

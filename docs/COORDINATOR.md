@@ -289,6 +289,33 @@ Victor decided on 2026-10-21.
 | `transcript_poll_seconds` | `120` | Lane transcript ingest interval (an explicit `[lanes]` value wins). |
 | `generic_checks_cache` | `true` | Reuse the per-tick coordinator checks while HEAD / tree / inputs are unchanged. |
 
+### Standing orders and the watch log (`orders.py`, `watchlog.py`)
+
+A standing order is an owner's order that runs as a rule until its end condition is met,
+then reports. Three kinds:
+
+| Kind | What it does | Ends |
+|---|---|---|
+| `keep_going` | One sprint. Whenever it stops (BLOCKED / FAILED) on anything but a decision that is the owner's, the order puts it back: over its minutes, more minutes sized from its open plan steps; out of sessions, attempts or review calls, a budget reset; anything else, an unblock that tells the next session what stopped it. At most one action every `gap_minutes` (20) and `per_day` (8) a day; past that, one alert and nothing until the next day. | The sprint is COMPLETE. |
+| `pause_all` | The project pause: no new session starts; running sessions finish their turn. | A time (`minutes`), or the reset of a backend's usage window (`reset`: `claude`, `gpt` or a backend name; the time is the one the router reports when the order is given). The project is resumed, unless someone else paused it. |
+| `claude_agents` | `resources.claude_agents` held at `n`, re-applied every tick so a settings deploy does not undo it. | A time, or when cancelled; the old value is put back. |
+
+An order never acts while a product decision or something only a person can do is open,
+while the project is paused, the sprint is held, the Lead has a call in flight on it, or
+it is waiting out an outage by itself. Give, list and cancel orders in Automation ->
+Orders, or with `orders add|list|cancel`. "More minutes for a sprint" on the same tab (CLI
+`extend-time`) is the owner's own grant of active minutes to one sprint, live.
+
+Events: `order_added`, `order_action` (each thing an order did, with what stopped the
+sprint), `order_done`, and the notices `order_done` / `order_capped` (alert class `watch`).
+
+The watch log is one dated line per thing the coordinator did by itself and why
+(self-repair, auto-heal and outages, budget renewals, time extensions, orders, holds,
+Studio reservations, pauses, settings applied, Lead cases opened, sprints parked), and per
+state change someone other than the engine made (an operator's unblock with its
+resolution). It is plain text in `<state dir>/watch-log/<YYYY-MM>.md`, appended once a
+minute; `log [--lines N]` prints its end, and the Orders tab shows the last lines.
+
 ### Needs and services (`services.py`, Team Lead piece 5)
 
 A sprint may declare `needs` (`studio`, `blender`, `audio`, `images`, `gpu`, `backend`, `none`): a

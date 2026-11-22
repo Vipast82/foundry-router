@@ -294,6 +294,7 @@
   table.jrn { border-collapse:collapse; width:100%; font-size:12px; }
   table.jrn th, table.jrn td { border-bottom:1px solid var(--line); padding:3px 6px; text-align:left; }
   table.jrn th { color:var(--dim); font-weight:500; }
+  pre.wlog { max-height:340px; overflow:auto; margin:6px 0; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-word; }
   .dec .opts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
   .countdown { font:600 13px var(--num-font); color:var(--warn); }
   /* modal */
@@ -397,6 +398,7 @@
   <button role="tab" id="tab-rules" aria-controls="v-rules" data-view="rules">Role rules</button>
   <button role="tab" id="tab-queue" aria-controls="v-queue" data-view="queue">Queue</button>
   <button role="tab" id="tab-tracks" aria-controls="v-tracks" data-view="tracks" title="Parallel tracks: one git worktree per track, Studio shared at merge time">Tracks</button>
+  <button role="tab" id="tab-orders" aria-controls="v-orders" data-view="orders" title="Standing orders: an order that runs as a rule until its end condition is met, and the log of what the coordinator did by itself">Orders</button>
   <button role="tab" id="tab-services" aria-controls="v-services" data-view="services" title="Studio, Blender, audio and other services sprints need">Services</button>
   <button role="tab" id="tab-memory" aria-controls="v-memory" data-view="memory" title="Project memory (docs/memory) and the cross-project playbook: browse, search, add and edit, and the slice each session got">Memory</button>
   <button role="tab" id="tab-prep" aria-controls="v-prep" data-view="prep" title="Pending repo changes: patches, branches and scripts the coordinator lands on the main checkout at a safe point">Repo changes</button>
@@ -415,6 +417,7 @@
   <section id="v-rules" role="tabpanel" aria-labelledby="tab-rules" hidden></section>
   <section id="v-queue" role="tabpanel" aria-labelledby="tab-queue" hidden></section>
   <section id="v-tracks" role="tabpanel" aria-labelledby="tab-tracks" hidden></section>
+  <section id="v-orders" role="tabpanel" aria-labelledby="tab-orders" hidden></section>
   <section id="v-services" role="tabpanel" aria-labelledby="tab-services" hidden></section>
   <section id="v-memory" role="tabpanel" aria-labelledby="tab-memory" hidden></section>
   <section id="v-prep" role="tabpanel" aria-labelledby="tab-prep" hidden></section>
@@ -711,7 +714,7 @@ $("#theme-btn").onclick = () => applyTheme(document.documentElement.dataset.them
 applyTheme(store("fr-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
 
 /* ======================================================================== views */
-const VIEWS = ["ask", "routing", "settings", "rules", "queue", "tracks", "services", "memory", "prep"];
+const VIEWS = ["ask", "routing", "settings", "rules", "queue", "tracks", "orders", "services", "memory", "prep"];
 function setView(v, push = true) {
   if (!VIEWS.includes(v)) v = "routing";
   S.view = v;
@@ -720,7 +723,7 @@ function setView(v, push = true) {
     b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
   }
   for (const x of VIEWS) $("#v-" + x).hidden = x !== v;
-  $("#draftbar").hidden = v === "queue" || v === "ask" || v === "tracks" || v === "services" || v === "memory" || v === "prep";
+  $("#draftbar").hidden = v === "queue" || v === "ask" || v === "tracks" || v === "orders" || v === "services" || v === "memory" || v === "prep";
   if (push && location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
   closeDrawer();
   renderView();
@@ -737,6 +740,7 @@ function renderView() {
   renderNotes();
   if (S.view === "ask") return renderAsk();          // the chat needs no project document
   if (S.view === "tracks") return renderTracks();    // the coordinator's heartbeat, no document
+  if (S.view === "orders") return renderOrders();    // standing orders and the watch log
   if (S.view === "services") { S.svc = null; return renderServices(); }   // nor do the services
   if (S.view === "memory") return renderMemory();    // nor does the memory (the coordinator reports it)
   if (S.view === "prep") return renderPrep();        // nor do the repo changes (heartbeat block)
@@ -749,7 +753,7 @@ function renderView() {
 function renderNotes() {
   const notes = [];
   if (S.loadError) notes.push(`<div class="banner bad"><b>Settings not loaded.</b> ${esc(S.loadError)}</div>`);
-  else if (S.c1 && !S.deployedRevision && !["queue", "tracks", "services", "memory", "prep"].includes(S.view))
+  else if (S.c1 && !S.deployedRevision && !["queue", "tracks", "orders", "services", "memory", "prep"].includes(S.view))
     notes.push(`<div class="banner">Nothing is deployed for <b>${esc(S.cfgProject)}</b> yet. Start from the coordinator's own settings with <button class="act" type="button" data-act="import">Import project.toml…</button>, or edit here and deploy the first revision.</div>`);
   $("#notes").innerHTML = notes.join("");
 }
@@ -1163,6 +1167,7 @@ $("#main").addEventListener("click", e => {
     edit(dd => { delete ((dd.settings || {}).slots || {})[b.dataset.slot]; });
   }
   else if (a.startsWith("tr-")) trackClick(a, b);
+  else if (a.startsWith("so-")) orderClick(a, b);
   else if (a.startsWith("pq-")) prepClick(a, b);
   else if (a.startsWith("svc-")) servicesClick(a, b);
   else if (a) queueClick(a, b);
@@ -2028,6 +2033,93 @@ async function trackClick(a, b) {
   } catch (e) { S.tr.busy = false; toast(e.message, true); }
 }
 $("#main").addEventListener("change", e => { const b = e.target.closest("[data-act=tr-project]"); if (b) trackClick("tr-project", b); });
+
+
+/* ===================================================================== standing orders
+   GET /control/api/orders: the coordinator heartbeat's `orders` block per project (the
+   active orders with what each is waiting for and how often it acted, the last ended
+   ones with their result) and the watch log's last lines. An order is a rule that runs
+   until its end condition is met, then reports. Buttons file typed actions (order_add /
+   order_cancel / extend_time) the coordinator claims and applies on its next tick. */
+S.so = {data: null, project: "", err: ""};
+const SO_KIND = {keep_going: "Keep a sprint going until it completes", pause_all: "Pause all sprints until…", claude_agents: "Claude agents only…"};
+async function loadOrders() {
+  const r = await api("orders" + (S.so.project ? "?project=" + encodeURIComponent(S.so.project) : ""));
+  S.so.data = r;
+  const ids = Object.keys(r.orders || {});
+  const known = Array.from(new Set([...(S.ovProjects || []), ...ids]));
+  if (!S.so.project || !known.includes(S.so.project)) S.so.project = ids[0] || known[0] || "";
+}
+function orderRow(o, live) {
+  const id = esc(o.order_id);
+  return `<tr>
+    <td><b>${esc(o.order)}</b><div class="hint" style="margin:0"><span class="mono">${id}</span>${o.note ? " · " + esc(o.note) : ""}</div></td>
+    <td>${esc(o.by || "")}</td>
+    <td class="mono">${esc(when(live ? o.created_ts : o.ended_ts))}</td>
+    <td>${live ? `${o.actions} time${o.actions === 1 ? "" : "s"}${o.actions_today ? ` <span class="hint" style="margin:0">(${o.actions_today} today)</span>` : ""}${o.waiting ? `<div class="hint" style="margin:0">waiting: ${esc(o.waiting)}</div>` : ""}` : `<span class="pill ${o.status === "done" ? "ok" : ""}">${esc(o.status)}</span> ${esc(o.result || "")}`}</td>
+    <td style="white-space:nowrap">${live ? `<button class="act danger" type="button" data-act="so-cancel" data-id="${id}" title="End this order now; what it changed is put back">Cancel</button>` : ""}</td>
+  </tr>`;
+}
+async function renderOrders() {
+  const el = $("#v-orders");
+  if (!S.so.data) {
+    el.innerHTML = `<p class="hint">Loading the standing orders…</p>`;
+    try { await loadOrders(); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  }
+  const d = S.so.data || {}, all = d.orders || {}, v = all[S.so.project] || null;
+  const projects = Array.from(new Set([...(S.ovProjects || []), ...Object.keys(all)]));
+  const live = v ? (v.active || []) : [], old = v ? (v.ended || []) : [], log = d.watch_log || [];
+  el.innerHTML = `
+    <div class="row" style="margin-top:12px"><label class="fld" for="so-project">Project</label>
+      <select id="so-project" data-act="so-project">${projects.map(p => `<option ${p === S.so.project ? "selected" : ""}>${esc(p)}</option>`).join("") || "<option value=''>none reported</option>"}</select>
+      <span class="grow"></span>
+      <button class="act primary" type="button" data-act="so-new" title="Give an order that runs as a rule until its end condition is met, then reports">New order…</button>
+      <button class="act" type="button" data-act="so-time" title="More active minutes for one sprint, live; the project's limit stays">More minutes for a sprint…</button>
+      <button class="act" type="button" data-act="so-refresh">Refresh</button></div>
+    ${d.source ? `<p class="hint">Reported by ${esc(d.source)} ${fmtAge(d.age_s)} ago. An order never overtakes a decision that is yours, a held sprint or a paused project.</p>` : `<div class="banner">No coordinator has reported standing orders yet. It needs to run with <code>--control</code> on a release with standing orders.</div>`}
+    ${S.so.err ? `<div class="banner bad">${esc(S.so.err)}</div>` : ""}
+    <h2>Active${live.length ? ` (${live.length})` : ""}</h2>
+    ${live.length ? `<table class="jrn"><thead><tr><th>Order</th><th>From</th><th>Since</th><th>Acted</th><th></th></tr></thead><tbody>${live.map(o => orderRow(o, true)).join("")}</tbody></table>` : `<p class="hint">No standing order. Examples: keep a sprint going until it completes; pause all sprints until the GPT window resets; 1 Claude agent only for two hours.</p>`}
+    ${old.length ? `<h2>Ended</h2><table class="jrn"><thead><tr><th>Order</th><th>From</th><th>Ended</th><th>Result</th><th></th></tr></thead><tbody>${old.map(o => orderRow(o, false)).join("")}</tbody></table>` : ""}
+    <h2>Watch log</h2>
+    <p class="hint">What the coordinator did by itself and why, and the orders it was given. Newest last; the full log is in the coordinator's state folder under <code>watch-log</code>.</p>
+    ${log.length ? `<pre class="wlog" tabindex="0" aria-label="Watch log">${log.map(esc).join("\n")}</pre>` : `<p class="hint">Nothing logged yet.</p>`}`;
+  const pre = el.querySelector(".wlog");
+  if (pre) pre.scrollTop = pre.scrollHeight;
+}
+async function orderAction(kind, body, okText) {
+  const r = await api("actions", {method: "POST", body: {kind, project_id: S.so.project, idempotency_key: idem(), ...body}});
+  toast(okText || `${kind.replace(/_/g, " ")}: ${r.status || "accepted"}. The coordinator applies it on its next tick.`);
+  const done = await waitAction(r.action_id, 30000);
+  if (done.status === "rejected" || done.status === "failed") toast(`${done.status}: ${done.status_detail || ""}`, true);
+  return done;
+}
+async function orderClick(a, b) {
+  const refresh = () => { S.so.data = null; renderOrders(); };
+  try {
+    if (a === "so-refresh") return refresh();
+    if (a === "so-project") { S.so.project = b.value; return refresh(); }
+    if (a === "so-cancel") return formModal("Cancel this standing order?", `<p class="hint">It ends now. A project it paused is resumed and a Claude agent cap it set is put back.</p><label class="fld" for="f-why">Reason (optional)</label><input id="f-why" name="why" style="width:100%">`, "Cancel order", async f => { await orderAction("order_cancel", {order_id: b.dataset.id, why: String(f.get("why") || "")}); refresh(); }, true);
+    if (a === "so-time") return formModal("More minutes for a sprint", `<p class="hint">Active minutes for this sprint only, at once and without a restart. The project's limit is not changed. A sprint stopped on its minutes goes on.</p><label class="fld" for="f-task">Sprint</label><input id="f-task" name="task" style="width:100%" required><label class="fld" for="f-min" style="margin-top:8px">Minutes</label><input id="f-min" name="minutes" type="number" min="1" max="20160" value="240" style="width:120px" required><label class="fld" for="f-note" style="margin-top:8px">Note (optional)</label><input id="f-note" name="note" style="width:100%">`, "Give minutes", async f => { await orderAction("extend_time", {task: String(f.get("task") || "").trim(), minutes: parseInt(f.get("minutes"), 10), note: String(f.get("note") || "")}); refresh(); });
+    if (a === "so-new") return formModal("New standing order", `<label class="fld" for="f-kind">Order</label><select id="f-kind" name="kind" style="width:100%">${Object.entries(SO_KIND).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join("")}</select>
+      <label class="fld" for="f-task" style="margin-top:8px">Sprint (keep going)</label><input id="f-task" name="task" style="width:100%" placeholder="e.g. POL-7">
+      <label class="fld" for="f-n" style="margin-top:8px">Claude agents (agents only)</label><input id="f-n" name="n" type="number" min="1" max="32" style="width:120px" placeholder="1">
+      <label class="fld" for="f-min" style="margin-top:8px">For how many minutes (pause, agents)</label><input id="f-min" name="minutes" type="number" min="1" max="20160" style="width:120px">
+      <label class="fld" for="f-reset" style="margin-top:8px">…or until this model's usage window resets (pause)</label><select id="f-reset" name="reset" style="width:100%"><option value="">not used</option><option value="gpt">ChatGPT / GPT</option><option value="claude">Claude</option></select>
+      <label class="fld" for="f-note" style="margin-top:8px">Note (optional; goes in the watch log)</label><input id="f-note" name="note" style="width:100%">
+      <p class="hint">Keep going ends when the sprint is COMPLETE. A pause needs minutes or a reset. Agents without minutes stays until you cancel it.</p>`, "Give order", async f => {
+      const kind = String(f.get("kind")), body = {order_kind: kind, note: String(f.get("note") || "")};
+      const mins = parseFloat(f.get("minutes")), n = parseInt(f.get("n"), 10), reset = String(f.get("reset") || "");
+      if (kind === "keep_going") body.task = String(f.get("task") || "").trim();
+      if (kind === "claude_agents") body.n = n;
+      if (kind !== "keep_going" && mins > 0) body.minutes = mins;
+      if (kind === "pause_all" && reset && !(mins > 0)) body.reset = reset;
+      await orderAction("order_add", body);
+      refresh();
+    });
+  } catch (e) { toast(e.message, true); }
+}
+$("#main").addEventListener("change", e => { const b = e.target.closest("[data-act=so-project]"); if (b) orderClick("so-project", b); });
 
 
 /* ===================================================================== repo changes (self-driving part 3)

@@ -31,6 +31,14 @@ Commands
   cancel PROJECT TASK --reason TEXT
   pause-project PROJECT [--note]  /  resume-project PROJECT
   studio-reserve PROJECT [--minutes N] [--reason]  /  studio-release PROJECT
+  orders list [PROJECT]                    standing orders: an order that runs as a rule
+  orders add PROJECT keep_going --task T   until its end, then reports (orders.py)
+  orders add PROJECT pause_all (--minutes N | --until-reset BACKEND)
+  orders add PROJECT claude_agents --n N [--minutes N]
+                [--by NAME] [--note TEXT] [--gap-minutes N] [--per-day N]
+  orders cancel ORDER_ID [--by NAME] [--why TEXT]
+  log [--lines N]                          the watch log: what the coordinator did by
+                                           itself and why, and the orders it was given
   unblock PROJECT TASK --resolution TEXT [--reset-attempts]
   extend-time PROJECT TASK --minutes N [--by NAME] [--note TEXT]
                                            more active minutes for this sprint only, live
@@ -354,13 +362,56 @@ _WRITING = {("unblock", None), ("extend-time", None), ("approve", None), ("rejec
             ("studio-reserve", None), ("studio-release", None),
             ("tracks", "start"), ("tracks", "stop"), ("tracks", "merge"),
             ("tracks", "set-max-agents"), ("frontier", "request"), ("frontier", "return"),
-            ("prep", "add"), ("prep", "remove"), ("prep", "move"), ("prep", "run-now")}
+            ("prep", "add"), ("prep", "remove"), ("prep", "move"), ("prep", "run-now"),
+            ("orders", "add"), ("orders", "cancel")}
+
+
+def _orders_cmd(c, a) -> int:
+    from . import orders as O
+    try:
+        if a.ocmd == "list":
+            pids = [a.project] if a.project else sorted(c.projects)
+            views = {pid: O.view(c, c.projects[pid]) for pid in pids if pid in c.projects}
+            if a.json:
+                print(json.dumps(views, sort_keys=True))
+                return 0
+            for pid, v in views.items():
+                print(f"{pid}: {len(v['active'])} active")
+                for o in v["active"] + v["ended"]:
+                    tail = (f"  waiting: {o['waiting']}" if o["waiting"] else "") + \
+                        (f"  -> {o['result']}" if o["result"] else "")
+                    print(f"  {o['order_id']}  {o['status']:9}  {o['order']}  (by {o['by']}; "
+                          f"{o['actions']} action(s)){tail}")
+            return 0
+        if a.ocmd == "add":
+            if a.project not in c.projects:
+                print(f"unknown project {a.project}")
+                return 2
+            until = {}
+            if a.minutes is not None:
+                until["minutes"] = a.minutes
+            if a.until_reset:
+                until["reset"] = a.until_reset
+            params = {k: v for k, v in (("n", a.n), ("gap_minutes", a.gap_minutes),
+                                        ("per_day", a.per_day)) if v is not None}
+            o = O.add(c, c.projects[a.project], a.kind, task_id=a.task, until=until or None,
+                      params=params, by=a.by, note=a.note)
+            print(f"{o['order_id']}: {O.describe(o)}")
+            return 0
+        if a.ocmd == "cancel":
+            o = O.cancel(c, a.order_id, by=a.by, why=a.why)
+            print(f"{o['order_id']} {o['status']}: {o['result']}")
+            return 0
+    except O.OrderError as e:
+        print(f"refused: {e}")
+        return 2
+    return 2
 
 
 def _writes(a) -> bool:
     cmd = a.cmd
     sub = (getattr(a, "qcmd", None) or getattr(a, "tcmd", None) or getattr(a, "action", None)
-           or getattr(a, "pqcmd", None))
+           or getattr(a, "pqcmd", None) or getattr(a, "ocmd", None))
     return (cmd, None) in _WRITING or (cmd, sub) in _WRITING
 
 
@@ -889,6 +940,23 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x.add_argument("--dry-run", dest="dry_run", action="store_true",
                    help="list rows / CALLs / DYNARG / bridges / manual rows / carry; no Studio")
     x.add_argument("--poll", type=float, default=10.0)
+    op = sub.add_parser("orders", help="standing orders: an order that runs as a rule until "
+                                       "its end condition is met, then reports")
+    osub = op.add_subparsers(dest="ocmd", required=True)
+    x = osub.add_parser("list"); x.add_argument("project", nargs="?", default="")
+    x.add_argument("--json", action="store_true")
+    x = osub.add_parser("add"); x.add_argument("project")
+    x.add_argument("kind", choices=["keep_going", "pause_all", "claude_agents"])
+    x.add_argument("--task", default=""); x.add_argument("--minutes", type=float, default=None)
+    x.add_argument("--until-reset", default="", metavar="BACKEND",
+                   help="until this backend's usage window resets (claude, gpt, ...)")
+    x.add_argument("--n", type=int, default=None, help="claude_agents: how many")
+    x.add_argument("--gap-minutes", type=int, default=None)
+    x.add_argument("--per-day", type=int, default=None)
+    x.add_argument("--by", default="operator"); x.add_argument("--note", default="")
+    x = osub.add_parser("cancel"); x.add_argument("order_id")
+    x.add_argument("--by", default="operator"); x.add_argument("--why", default="")
+    x = sub.add_parser("log", help="the watch log"); x.add_argument("--lines", type=int, default=60)
     pqp = sub.add_parser("prep", help="pending repo changes (self-driving part 3): patches, "
                                       "branches and scripts that land on the main checkout at a "
                                       "safe point, all or nothing")
@@ -1246,6 +1314,13 @@ def _dispatch(a, c: Coordinator) -> int:
         return _studio_calls_cmd(c, a)
     if a.cmd == "prep":
         return _prep_cmd(c, a)
+    if a.cmd == "orders":
+        return _orders_cmd(c, a)
+    if a.cmd == "log":
+        from . import watchlog
+        watchlog.tick(c, force=True)
+        print("\n".join(watchlog.tail(c, a.lines)) or "(nothing logged yet)")
+        return 0
     if a.cmd == "queue":
         if a.qcmd == "approve":
             deps = [d.strip() for d in a.deps.split(",") if d.strip()]

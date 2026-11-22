@@ -78,6 +78,15 @@ QUEUE_KINDS = ("queue_approve", "queue_reorder", "queue_deps", "queue_requeue")
 # prep_remove {id}; prep_reorder {id, position}; prep_run_now {}. The queue itself
 # reaches the router as the heartbeat's `prep_queue` block.
 PREP_KINDS = ("prep_add", "prep_remove", "prep_reorder", "prep_run_now")
+# Standing orders (orders.py) and the owner's own grant of minutes, project-scoped,
+# handed only to a coordinator that declares the `orders` feature. Payloads:
+#   order_add    {kind: keep_going|pause_all|claude_agents, task?, minutes?, reset?, n?,
+#                 gap_minutes?, per_day?, note?}
+#   order_cancel {order_id, why?}
+#   extend_time  {task, minutes, note?}
+# The orders reach the router as the heartbeat's `orders` block, the log's last lines as
+# `watch_log`.
+ORDER_KINDS = ("order_add", "order_cancel", "extend_time")
 
 
 class ControlChannel:
@@ -256,6 +265,7 @@ class ControlChannel:
                                            "decision_answer", "build_rerun",
                                            *PROJECT_KINDS, *ASSISTANT_KINDS,
                                            *TRACK_KINDS, *QUEUE_KINDS, *PREP_KINDS,
+                                           *ORDER_KINDS,
                                            *(LEAD_KINDS if lead_on else ()),
                                            *(MEMORY_KINDS if mem_on else ()),
                                            *(PLAYBOOK_KINDS if pb_on else ())]}},
@@ -267,7 +277,7 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause", "tracks", "queue", "prep_queue", "build_rerun"]
+                + ["project_pause", "tracks", "queue", "prep_queue", "build_rerun", "orders"]
                 + (["lead_manager"] if lead_on else [])
                 + (["project_memory"] if mem_on else [])
                 + (["playbook"] if pb_on else []),
@@ -276,6 +286,10 @@ class ControlChannel:
                 "tracks": self._tracks_status(),
                 # self-driving part 3: the prep queue per project (Automation -> Repo changes)
                 "prep_queue": self._prep_status(),
+                # standing orders per project and the watch log's last lines
+                # (Automation -> Orders)
+                "orders": self._orders_status(),
+                "watch_log": self._watch_log(),
                 # 2026-10-27: the project checks running in the background (verify /
                 # closeout), per check, for the control center's activity view
                 "checks": self._checks_running(),
@@ -343,6 +357,8 @@ class ControlChannel:
             return self._queue_action(a, f"{a.get('actor') or 'operator'} (control center)")
         if a["kind"] in PREP_KINDS:
             return self._prep_action(a, f"{a.get('actor') or 'operator'} (control center)")
+        if a["kind"] in ORDER_KINDS:
+            return self._order_action(a, f"{a.get('actor') or 'operator'} (control center)")
         t = self.store.task(pid, tid)
         if not t:
             return self._report(a, "rejected", f"{pid}/{tid} is not on this coordinator's queue")
@@ -457,6 +473,57 @@ class ControlChannel:
         except TrackError as e:
             return self._report(a, "rejected", str(e)[:500])
         return self._report(a, "rejected", f"unsupported track action {kind!r}")
+
+    # ------------------------------------------------------------------ standing orders
+
+    def _orders_status(self) -> dict:
+        from . import orders as O
+        out = {}
+        for pid, P in sorted(self.c.projects.items()):
+            try:
+                out[pid] = O.view(self.c, P)
+            except Exception as e:                               # noqa: BLE001
+                out[pid] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return out
+
+    def _watch_log(self) -> list:
+        try:
+            from . import watchlog
+            return watchlog.tail(self.c, 60)
+        except Exception:                                        # noqa: BLE001
+            return []
+
+    def _order_action(self, a, actor):
+        """order_add / order_cancel (orders.py) and extend_time (engine.extend_time)."""
+        from . import orders as O
+        pid, p, kind = a["project_id"], a.get("payload") or {}, a["kind"]
+        P = self.c.projects[pid]
+        try:
+            if kind == "order_add":
+                until = {k: p[k] for k in ("minutes", "reset", "ts") if p.get(k) not in (None, "")}
+                params = {k: p[k] for k in ("n", "gap_minutes", "per_day") if p.get(k) is not None}
+                o = O.add(self.c, P, str(p.get("kind") or ""), task_id=str(p.get("task") or ""),
+                          until=until or None, params=params, by=actor,
+                          note=str(p.get("note") or ""))
+                return self._report(a, "applied", f"standing order {o['order_id']}: "
+                                    f"{O.describe(o)}", {"order_id": o["order_id"],
+                                                         "order": O.describe(o)})
+            if kind == "order_cancel":
+                o = O.cancel(self.c, str(p.get("order_id") or ""), by=actor,
+                             why=str(p.get("why") or ""))
+                if o["project_id"] != pid:
+                    return self._report(a, "rejected", "that order belongs to another project")
+                return self._report(a, "applied", f"{o['order_id']} {o['status']}: {o['result']}",
+                                    {"order_id": o["order_id"], "status": o["status"]})
+            if kind == "extend_time":
+                out = self.c.extend_time(pid, str(p.get("task") or a.get("task_id") or ""),
+                                         int(p.get("minutes") or 0), actor=actor,
+                                         note=str(p.get("note") or ""))
+                return self._report(a, "applied", f"{out['minutes']} more minutes; its own limit "
+                                    f"is now {out['limit']} active minutes", out)
+        except (O.OrderError, ValueError, KeyError) as e:
+            return self._report(a, "rejected", str(e)[:500])
+        return self._report(a, "rejected", f"unsupported order action {kind!r}")
 
     # ------------------------------------------------------------------ prep queue
 
