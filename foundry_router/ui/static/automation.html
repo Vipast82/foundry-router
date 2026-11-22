@@ -2092,6 +2092,7 @@ async function renderBoard() {
     <h2>Done</h2>
     <p>${seen ? `Since you marked it seen (${esc(when(seen))}): ${fresh.length ? fresh.map(r => `<span class="pill ok">${esc(r.sprint)}</span>`).join(" ") : "<span class='hint' style='margin:0'>none</span>"}<br>` : ""}In the last 24 h (${done.length}): ${done.map(r => `<span class="pill">${esc(r.sprint)}</span>`).join(" ") || "<span class='hint' style='margin:0'>none</span>"}</p>
     ${orders.length ? `<h2>Standing orders (${orders.length})</h2><ul style="margin:6px 0;padding-left:18px">${orders.map(o => `<li>${esc(o.order)} <span class="hint" style="margin:0">from ${esc(o.by)}; acted ${o.actions}×${o.waiting ? "; waiting: " + esc(o.waiting) : ""}</span></li>`).join("")}</ul>` : ""}
+    ${(b.budget || {}).mode && b.budget.mode !== "normal" ? `<h2>Budget mode</h2><p><span class="pill warn">${esc(b.budget.label)}</span> ${esc(b.budget.text)} <span class="hint" style="margin:0">Switch: Settings, Automation, budget_mode.</span></p>` : ""}
     <h2>Machine and models</h2>
     <p>${mline || "<span class='hint' style='margin:0'>no machine reading (psutil is not installed beside the coordinator)</span>"}</p>
     <p>Served in the router's last ${models.requests || 0} requests: ${modl || "<span class='hint' style='margin:0'>nothing recorded</span>"}${models.fallbacks ? ` <span class="pill warn" title="Requests that did not get the first model of their route">${models.fallbacks} fell to a later route</span>` : ""}</p>`;

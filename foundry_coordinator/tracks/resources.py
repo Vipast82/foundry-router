@@ -72,7 +72,13 @@ def claude_settings(profile) -> dict:
     if not isinstance(personas, list) or not personas:
         roles = getattr(profile, "roles", None) or {}
         personas = [roles["implementer"]] if roles.get("implementer") else []
-    return {"agents": num("claude_agents", 0, 0, 32),
+    agents = num("claude_agents", 0, 0, 32)
+    try:                                 # the budget mode switch (budget_mode.py) caps it
+        from ..budget_mode import claude_agents as _mode_cap
+        agents = _mode_cap(profile, agents)
+    except Exception:                                            # noqa: BLE001
+        pass
+    return {"agents": agents,
             "agents_over": num("claude_agents_over", 2, 1, 32),
             "usage_pct": num("claude_usage_pct", 75.0, 1.0, 100.0, float),
             "backend": str(r.get("claude_backend") or "meridian"),

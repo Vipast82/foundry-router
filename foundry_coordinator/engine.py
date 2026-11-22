@@ -444,6 +444,9 @@ class Coordinator:
             # standing orders (orders.py): an owner's order runs as a rule until its end
             # condition is met, then reports (never raises; every 30 s)
             __import__(f"{__package__}.orders", fromlist=["tick"]).tick(self, P)
+            # which model serves each working session (modelwatch.py; every 5 min)
+            __import__(f"{__package__}.modelwatch", fromlist=["sweep"]).sweep(self, P)
+            __import__(f"{__package__}.budget_mode", fromlist=["tick"]).tick(self, P)
             try:
                 # build replay: finished tasks' Blender journals by age and count (hourly)
                 build_journal.sweep(self, P)
@@ -867,6 +870,10 @@ class Coordinator:
         drain = infra.kilo_drain(self, P)          # a pending Kilo restart: let the safe point come
         if drain:
             return self._note(P, t, drain)
+        from . import modelwatch                   # every paid model out: wait, not local (off by default)
+        hold = modelwatch.start_hold(self, P, t, P.profile.persona("implementer", tid))
+        if hold:
+            return self._note(P, t, hold)
         if not self.tracks.is_track(P):
             from . import studio_reserve
             why = studio_reserve.blocks(self, P)

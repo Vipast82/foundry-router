@@ -1527,6 +1527,8 @@ class ChatEngine:
             notes = []
             if a["project"] == ROUTER_DOC and not out.get("unchanged"):
                 notes = await eng._apply_router_doc(st.deployed(a["project"])["doc"])
+            elif not out.get("unchanged"):
+                notes = await eng._apply_router_doc()      # its budget mode caps the cutoffs
             return {"result": {**out, "router_notes": notes},
                     "changed": ([] if out.get("unchanged") else
                                 [f"{a['project']}: revision {out['rev']} deployed"
@@ -1545,6 +1547,8 @@ class ChatEngine:
             notes = []
             if a["project"] == ROUTER_DOC:
                 notes = await eng._apply_router_doc(st.deployed(a["project"])["doc"])
+            else:
+                notes = await eng._apply_router_doc()
             return {"result": {**out, "router_notes": notes},
                     "changed": [f"{a['project']}: rolled back to {a['rev']} as revision {out['rev']}"]}
 
@@ -2098,31 +2102,11 @@ class ChatEngine:
                 return a
             await asyncio.sleep(min(1.5, max(0.05, seconds / 20)))
 
-    async def _apply_router_doc(self, doc: dict) -> list[str]:
-        """The _router document's per-backend cutoffs -> usage_limit_pct in
-        config.yaml, then rebuild the pool (same as automation_api)."""
-        want = ((doc or {}).get("settings") or {}).get("backends") or {}
-        notes: list[str] = []
-
-        def mutate(raw: dict) -> None:
-            backends = (((raw.get("backend_pool") or {}).get("internal") or {}).get("backends")
-                        or [])
-            names = {b.get("name") for b in backends if isinstance(b, dict)}
-            for name in want:
-                if name not in names:
-                    notes.append(f"backend {name!r} is not configured; its cutoff waits")
-            for b in backends:
-                if not isinstance(b, dict) or b.get("name") not in want:
-                    continue
-                pct = (want[b["name"]] or {}).get("cutoff_pct")
-                if pct is None:
-                    b.pop("usage_limit_pct", None)
-                else:
-                    b["usage_limit_pct"] = float(pct)
-        self.svc.config_store.save(mutate)
-        try:
-            await self.svc.rebuild_pool()
-        except Exception as e:                                   # noqa: BLE001
-            notes.append(f"pool rebuild failed: {type(e).__name__}: {e}")
+    async def _apply_router_doc(self, doc: Optional[dict] = None) -> list[str]:
+        """The cutoffs in force -> usage_limit_pct in config.yaml, then rebuild the pool
+        (same as automation_api): the _router document's cutoffs, lowered by a project's
+        budget mode (budget_caps.py). `doc` None = a project document changed."""
+        from . import budget_caps
+        notes = await budget_caps.apply(self.svc, doc)
         self._usage_cache = (0.0, None)
         return notes

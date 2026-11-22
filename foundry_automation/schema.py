@@ -214,6 +214,7 @@ STUDIO_CALLS_DEFAULTS = {
 # revamp/lead-scope (at the merge, that module can import these).
 HELPER_MODES = ("on_demand", "proactive")
 SCOPE_DEFAULTS = ("deny", "approve")
+BUDGET_MODES = ("normal", "save_claude", "save_all")
 DEFAULT_SCOPE_RULES = [
     {"name": "gate_runner_boot_and_mounted_rows", "path": "tests/GateRunner.lua",
      "blocks": ["EXPECTED_BOOT", "MOUNTED_TESTS"]},
@@ -293,6 +294,15 @@ AUTOMATION_DEFAULTS: dict = {
     "infra_backoff_seconds": 60,
     "infra_wait_notice_minutes": 30,
     "kilo_restart_drain_minutes": 60,
+    # modelwatch.py: which model serves the sprints, and the pause when the paid ones are out
+    "served_model_alert": True,
+    "pause_when_paid_models_out": False,
+    # budget_mode.py: one switch over the agent caps and the start cutoffs
+    "budget_mode": "normal",
+    "save_claude_agents": 1,
+    "save_claude_cutoff_pct": 75,
+    "save_all_agents": 1,
+    "save_all_cutoff_pct": 75,
     # budget_policy.py: budgets and time limits follow plan progress
     "budget_renewals_per_day": 1,
     "task_minutes_auto_extend": True,
@@ -448,6 +458,9 @@ def automation_table(path: str, raw) -> dict:
     if out["helpers"] not in HELPER_MODES:
         raise SettingsError(f"{path}: automation.helpers must be one of {HELPER_MODES}",
                             "automation.helpers")
+    if out["budget_mode"] not in BUDGET_MODES:
+        raise SettingsError(f"{path}: automation.budget_mode must be one of {BUDGET_MODES}",
+                            "automation.budget_mode")
     if out["scope_unlisted_default"] not in SCOPE_DEFAULTS:
         raise SettingsError(f"{path}: automation.scope_unlisted_default must be one of "
                             f"{SCOPE_DEFAULTS}", "automation.scope_unlisted_default")
@@ -920,7 +933,7 @@ _SC_DESC = {
 }
 
 _AUTO_ENUMS = {"helpers": HELPER_MODES, "scope_unlisted_default": SCOPE_DEFAULTS,
-               "ref_views_images": ("ask", "allow")}
+               "ref_views_images": ("ask", "allow"), "budget_mode": BUDGET_MODES}
 _AUTO_DESC = {
     "helpers": "on_demand: proactive helper lanes are off; a helper starts only when the "
                "primary asks for one and that primary consumes it. proactive: [lanes] apply.",
@@ -983,6 +996,35 @@ _AUTO_DESC = {
                                 "per day. The extra belongs to that sprint and ends with it; "
                                 "the limit here is not changed. Off = it stops and asks, with "
                                 "the suggested amount.",
+    "budget_mode": "One switch for how hard the sprints lean on the paid models. normal: "
+                   "the caps and cutoffs apply as set. save_claude: at most "
+                   "save_claude_agents Claude sprint sessions at once, and Claude's usage "
+                   "cutoff is at most save_claude_cutoff_pct. save_all: the same, plus at "
+                   "most save_all_agents sprints at once and every other paid model's "
+                   "cutoff at most save_all_cutoff_pct. Nothing is rewritten: back to "
+                   "normal restores everything. The order of a persona's routes is not "
+                   "changed: past a cutoff the work goes to the next route.",
+    "save_claude_agents": "Budget modes save_claude and save_all: Claude sprint sessions "
+                          "that run at once (whether or not resources.claude_agents is set).",
+    "save_claude_cutoff_pct": "Budget modes save_claude and save_all: the highest usage "
+                              "cutoff Claude's backend gets in the router while the mode "
+                              "is on (the lower of this and the value under Router "
+                              "settings; chat is held to it too). 0 = leave the cutoff.",
+    "save_all_agents": "Budget mode save_all: sprints that run at once (instead of "
+                       "max_agents, never more than it).",
+    "save_all_cutoff_pct": "Budget mode save_all: the highest usage cutoff every other "
+                           "backend with a cutoff under Router settings gets while the "
+                           "mode is on. 0 = leave the cutoffs.",
+    "served_model_alert": "Alert when a working sprint session is served by a route that is "
+                          "not the first of its persona (for example a Sonnet sprint on the "
+                          "local model), with which route it is and what the router says "
+                          "about the routes above it. One alert per session and route.",
+    "pause_when_paid_models_out": "When every paid model of a sprint's persona is at its "
+                                  "cutoff (or its account is unavailable), the sprint waits "
+                                  "for the earliest reset the router reports instead of "
+                                  "running on the local model. Sprints whose persona starts "
+                                  "on the local model are not affected. Off = they fall "
+                                  "through to the local model as before.",
     "kilo_restart_drain_minutes": "While the Foundry Client has a Kilo restart pending for "
                                   "a safe point (memory over its limit, a config reload), no "
                                   "new session starts, for at most this long, so the running "

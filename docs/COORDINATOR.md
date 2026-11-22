@@ -278,6 +278,13 @@ Victor decided on 2026-10-21.
 | `budget_renewals_per_day` | `1` | A sprint out of sessions, attempts or review calls gets every counter back to its base room by itself this many times a rolling day, only if a plan step was ticked since its last renewal (`budget_policy.py`; ledger rows `renewal:<counter>:<key>`, notice `budget_renewed`). Otherwise the stop goes to the Lead and the owner as before. `0` = never. |
 | `task_minutes_auto_extend` | `true` | A sprint over `limits.max_task_minutes` that ticked a plan step since its last extension gets minutes of its own: what its open steps need at its own pace, at most the limit again per day (task data `task_minutes_extra`, notice `time_extended`). The project limit is not changed. `extend-time PROJECT TASK --minutes N` is the owner's own grant, live. |
 | `kilo_restart_drain_minutes` | `60` | While the Foundry Client has a Kilo restart pending for a safe point (its resource watch found Kilo over `resources.kilo_restart_gb` with free RAM under `resources.kilo_restart_free_gb`, or a config reload), no new implementer session starts, for at most this long, so the running ones end and the restart happens. `0` = never hold starts. |
+| `served_model_alert` | `true` | Alert (class `watch`) when a working sprint session is served by a route that is not the first of its persona, with which route of how many and what the router says about the routes above it. One alert per session and route. In a saving budget mode a fall that the mode's cutoff caused is logged, not alerted. |
+| `pause_when_paid_models_out` | `false` | When every paid route of a sprint's persona is out (each account unavailable or at the backend's cutoff), the sprint waits for the earliest reset the router reports instead of running on the local model; no attempt is used. Off = it falls through to the local model as before. |
+| `budget_mode` | `normal` | `normal`, `save_claude` or `save_all`: one switch over the agent caps and the usage cutoffs (see "Model watch and the budget mode"). |
+| `save_claude_agents` | `1` | Saving modes: Claude sprint sessions at once. |
+| `save_claude_cutoff_pct` | `75` | Saving modes: the highest cutoff Claude's backend gets in the router. `0` = leave it. |
+| `save_all_agents` | `1` | `save_all`: sprints at once (never more than `max_agents`). |
+| `save_all_cutoff_pct` | `75` | `save_all`: the highest cutoff every other backend with a cutoff under Router settings gets. `0` = leave them. |
 | `infra_wait_notice_minutes` | `30` | One alert (class `watch`) per outage after this long, naming every sprint waiting on it. `0` = no alert; the wait stays. |
 | `lead_hard_max_calls` | `8` | Absolute lead calls per task; delegation never raises it. |
 | `lead_report_repairs` | `1` | Invalid lead reports sent back into the same session. |
@@ -357,6 +364,44 @@ answers again, every project is swept at once and again after the dead-session g
 a session the outage killed is restarted within a few minutes. One notice (`router_back`)
 then says how long the router was away, each live session with what Kilo reports for it,
 what was restarted, and what is still not right.
+
+### Model watch and the budget mode (`modelwatch.py`, `budget_mode.py`, router `budget_caps.py`)
+
+**Which model serves a sprint.** Every five minutes each working implementer session is
+looked up in the router's ledger (`served_models`). A route that is not the first of the
+session's persona raises one alert per session and route: "FIN-5 is being served by
+strata/qwen3.8-flash, route 3 of 3 of Foundry-Kilo-Implementer; expected
+meridian/claude-sonnet-5-5", followed by what the router says about each route above it. A
+persona whose first route is the local model is expected to run there and is never
+reported. Switch: `served_model_alert`.
+
+**Waiting instead of running on the local model.** With `pause_when_paid_models_out` on, a
+sprint whose persona starts on a paid model does not start while every paid route of that
+persona is out. A route is out when each of its accounts is marked unavailable or has a
+usage window at or over the backend's own cutoff (`primary_cutoff_pct` in the router's
+admission answer, not the lower cutoff for optional helper work). The sprint waits until the
+earliest reset the router reports, uses no attempt, and one notice says until when; another
+event (`paid_models_back`) says when it is over. A route the router cannot read is not
+"out": nothing is paused on a guess. It ships off, so today's fall-through to the local
+model stays until it is switched on.
+
+**The budget mode.** `budget_mode` is one switch over what used to be four places:
+
+| Mode | Coordinator (agent caps) | Router (cutoffs) |
+|---|---|---|
+| `normal` | `max_agents`, `resources.claude_agents` as set | Router settings as set |
+| `save_claude` | at most `save_claude_agents` Claude sprint sessions, counted even when `resources.claude_agents` is 0 | Claude's cutoff at most `save_claude_cutoff_pct` |
+| `save_all` | the same, and at most `save_all_agents` sprints at once | the same, and every other backend with a cutoff under Router settings at most `save_all_cutoff_pct` |
+
+Nothing is rewritten in the project's settings: the caps are read through the mode, and the
+router works the cutoffs out again from Router settings and the projects' modes each time
+either gets a new revision, so `normal` puts every value back. The order of a persona's
+routes is not changed: past a cutoff the work goes to the next route, as it does with the
+cutoffs under Router settings. The cutoff is router-wide, so chat is held to it too. With
+several projects the lowest cutoff asked for counts. A backend with no entry under Router
+settings is not touched (the deploy's notes name it). The status board shows a saving mode
+and its numbers; the switch to it and back is an event (`budget_mode_changed`) and a line in
+the watch log.
 
 ### Needs and services (`services.py`, Team Lead piece 5)
 

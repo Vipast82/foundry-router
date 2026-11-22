@@ -270,6 +270,12 @@ def build(c, P) -> dict:
                  "waiting": o["waiting"], "actions": o["actions"]}
                 for o in O.view(c, P)["active"]]
     part("orders", _orders, [])
+
+    def _budget():
+        from . import budget_mode as BM
+        d = BM.describe(P)
+        return {**d, "text": BM.words(d)}
+    part("budget", _budget, {})
     proj = c.store.project(P.id) or {}
     out["paused"] = bool(proj.get("paused"))
     out["pause_note"] = _s(proj.get("pause_note"), 200) if proj.get("paused") else ""
@@ -322,6 +328,8 @@ def text(b: dict, last_check: Optional[float] = None, models: Optional[dict] = N
         for o in od:
             L.append(f"  {o['order']} (from {o['by']}; acted {o['actions']}x)"
                      + (f"; waiting: {o['waiting']}" if o.get("waiting") else ""))
+    if (b.get("budget") or {}).get("mode", "normal") != "normal":
+        L.append("\nBudget: " + b["budget"]["text"])
     m = b.get("machine") or {}
     if m:
         L.append("\nMachine: " + ", ".join(

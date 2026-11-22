@@ -1,3 +1,63 @@
+## v0.181.235 - which model serves the sprints, and one budget mode switch
+
+Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for items 7b, 7c and 16.
+
+On 2026-11-20 Claude was backed off, GPT had no credits, and sprints written
+for Sonnet ran on the local model. Nothing said so, and nothing could be told
+to wait instead. And saving usage meant editing the agent cap, the Claude cap
+and the cutoffs in three places, then putting each back.
+
+- **Alert when a lower model serves (7b).** Every five minutes each working
+  sprint session is looked up in the router's ledger. A route that is not the
+  first of its persona raises one alert per session and route, with which
+  route of how many it is, which was expected, and what the router says about
+  each route above it. A persona that starts on the local model is never
+  reported. `[automation] served_model_alert`, on by default.
+- **Wait for the paid models (7c).** With `pause_when_paid_models_out` on, a
+  sprint whose persona starts on a paid model does not start while every paid
+  route of it is out (each account unavailable, or a usage window at or over
+  the backend's own cutoff). It waits for the earliest reset the router
+  reports, uses no attempt, and says once until when. A route the router
+  cannot read is not "out". Off by default: sprints fall through to the local
+  model as today until you switch it on.
+- **Budget mode (16).** `[automation] budget_mode`: `normal`, `save_claude`
+  or `save_all`.
+  - save Claude: at most `save_claude_agents` (1) Claude sprint sessions at
+    once, and Claude's cutoff in the router at most `save_claude_cutoff_pct`
+    (75).
+  - save all: the same, plus at most `save_all_agents` (1) sprints at once,
+    and every other backend that has a cutoff under Router settings at most
+    `save_all_cutoff_pct` (75).
+  - The presets are settings on the Automation page. Nothing in the project's
+    own settings is rewritten: back to normal restores every value.
+  - The order of a persona's routes is not changed. Past a cutoff the work
+    goes to the next route, as with the cutoffs under Router settings.
+  - The cutoff is the router's, so chat is held to it too while the mode is on.
+  - The status board shows a saving mode; the switch is in the watch log. A
+    fall to a lower route that the mode's cutoff caused is logged, not alerted.
+
+The router's admission answer now gives each route's `primary_cutoff_pct`, the
+cutoff a sprint's own calls are held to. Both places that write the cutoffs
+from settings (the Automation API and the operator chat) go through one
+function, `budget_caps.apply`, which rewrites `config.yaml` only when a cutoff
+changes.
+
+Not covered: a session that is already running when the paid models go out is
+not paused (only starts are held); a backend with no entry under Router
+settings is not capped by a mode (the deploy's notes name it); a cutoff typed
+straight into the router's own cutoff control while a saving mode is on is
+not capped until the next settings deploy; the pause can only be proven on
+the next real outage and is covered by tests until then.
+
+Files: `foundry_coordinator/modelwatch.py`, `budget_mode.py` (new),
+`engine.py`, `board.py`, `tracks/resources.py`, `tracks/manager.py`;
+`foundry_router/budget_caps.py` (new), `automation_api.py`, `chat_engine.py`,
+`facade/work_api.py`, `ui/static/automation.html`;
+`foundry_automation/schema.py`; `docs/COORDINATOR.md`. 14 tests.
+
+Deploy: router and coordinator both changed. The alert needs only the
+coordinator; the pause and the mode's cutoffs need the router too.
+
 ## v0.181.234 - Kilo is restarted before it takes the machine's memory
 
 Release of the `COORDINATOR_AUTOMATION_NEEDS.md` work for item 6.

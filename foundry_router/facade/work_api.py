@@ -301,6 +301,16 @@ async def helper_admission(request: Request, persona: str = "", backend: str = "
             d["vision"] = bool(_model_has_vision(svc.registry, m))
         except Exception:                                        # noqa: BLE001
             d["vision"] = None
+        # the cutoff a sprint's own (non-optional) calls are held to on this backend:
+        # `cutoff_pct` above is the lower one for optional helper work. A coordinator
+        # that wants to know whether the route can serve a sprint compares the windows
+        # with this one (foundry_coordinator/modelwatch.py).
+        try:
+            from ..guardrails import effective_cutoff
+            d["primary_cutoff_pct"] = (None if d.get("source") == "local" else
+                                       float(effective_cutoff(svc.config_store.config, be)))
+        except Exception:                                        # noqa: BLE001
+            d["primary_cutoff_pct"] = None
         out.append(d)
     streams = {b["backend"]: b for b in svc.ledger.backend_streams()}
 

@@ -156,6 +156,7 @@ class TrackManager:
         if ov:
             return max(1, int(ov))
         vals = []
+        from ..budget_mode import max_agents as mode_cap       # budget mode "save all"
         for P in self.c.projects.values():
             # 2026-11-09: a cap set from another process (the CLI's `tracks set-max-agents`)
             # is in the store, not in this process's profile; the stored value wins, so the
@@ -163,10 +164,10 @@ class TrackManager:
             # or the profile file changes max_agents, see after_config_apply / restore.)
             stored = self.store.meta(f"max_agents:{P.id}")
             if stored and str(stored).isdigit():
-                vals.append(int(stored))
+                vals.append(mode_cap(P, int(stored)))
                 continue
             try:
-                vals.append(int(self.setting(P, "max_agents") or 1))
+                vals.append(mode_cap(P, int(self.setting(P, "max_agents") or 1)))
             except (TypeError, ValueError):
                 pass
         return max(1, min(MAX_AGENTS_LIMIT, max(vals or [1])))

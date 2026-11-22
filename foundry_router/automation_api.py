@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -78,35 +79,12 @@ async def _body(request: Request) -> dict:
     return b
 
 
-async def _apply_router_doc(request: Request, doc: dict) -> list[str]:
-    """The _router document's per-backend cutoffs -> each backend's
-    usage_limit_pct in config.yaml, then rebuild the pool."""
-    svc = request.app.state.services
-    want = ((doc or {}).get("settings") or {}).get("backends") or {}
-    notes: list[str] = []
-
-    def mutate(raw: dict) -> None:
-        backends = (((raw.get("backend_pool") or {}).get("internal") or {}).get("backends")
-                    or [])
-        names = {b.get("name") for b in backends if isinstance(b, dict)}
-        for name in want:
-            if name not in names:
-                notes.append(f"backend {name!r} is not configured; its cutoff waits")
-        for b in backends:
-            if not isinstance(b, dict) or b.get("name") not in want:
-                continue
-            pct = (want[b["name"]] or {}).get("cutoff_pct")
-            if pct is None:
-                b.pop("usage_limit_pct", None)
-            else:
-                b["usage_limit_pct"] = float(pct)
-
-    svc.config_store.save(mutate)
-    try:
-        await svc.rebuild_pool()
-    except Exception as e:                                       # noqa: BLE001
-        notes.append(f"pool rebuild failed: {type(e).__name__}: {e}")
-    return notes
+async def _apply_router_doc(request: Request, doc: Optional[dict] = None) -> list[str]:
+    """The cutoffs in force -> each backend's usage_limit_pct in config.yaml, then rebuild
+    the pool: the _router document's per-backend cutoffs, lowered by a project's budget
+    mode (budget_caps.py). `doc` None = a project document changed, read _router's."""
+    from . import budget_caps
+    return await budget_caps.apply(request.app.state.services, doc)
 
 
 # --------------------------------------------------------------------------- admin (GUI)
@@ -176,6 +154,11 @@ async def deploy(request: Request, project: str):
                     _actor(request))
     if check_project(project) == ROUTER_DOC and not out.get("unchanged"):
         out["router_notes"] = await _apply_router_doc(request, st.deployed(project)["doc"])
+    elif not out.get("unchanged"):
+        # a project's budget mode lowers the router's cutoffs (budget_caps.py)
+        notes = await _apply_router_doc(request)
+        if notes:
+            out["router_notes"] = notes
     return out
 
 
@@ -205,6 +188,10 @@ async def rollback(request: Request, project: str):
                       reset_draft=bool(b.get("reset_draft", True)))
     if check_project(project) == ROUTER_DOC:
         out["router_notes"] = await _apply_router_doc(request, st.deployed(project)["doc"])
+    else:
+        notes = await _apply_router_doc(request)
+        if notes:
+            out["router_notes"] = notes
     return out
 
 
