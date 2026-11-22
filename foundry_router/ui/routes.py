@@ -2322,6 +2322,11 @@ async def kilo_provider_config(request: Request):
         f"http://{cfg.server.host if cfg.server.host not in ('0.0.0.0', '::', '') else 'FOUNDRY_HOST'}"
         f":{cfg.server.port}")
     block, explain = kilo_block(svc, base, request.query_params.get("prefix", "Foundry-Kilo"))
+    fmt = (request.query_params.get("format") or "kilo").lower()
+    if fmt not in AGENT_CONFIG_FORMATS:
+        return JSONResponse({"error": f"format must be one of {', '.join(AGENT_CONFIG_FORMATS)}"},
+                            status_code=400)
+    block = agent_config_block(block, fmt)
     if request.query_params.get("explain") in ("1", "true"):
         # Kilo's config schema rejects unknown keys, so the explanation is a
         # separate envelope, never part of the block itself.
@@ -2333,6 +2338,32 @@ async def kilo_provider_config(request: Request):
                           "lower it. An already-saved kilo.jsonc is not updated by changing a "
                           "persona: regenerate and merge it."}
     return block
+
+
+AGENT_CONFIG_FORMATS = ("kilo", "opencode", "opencode1")
+
+
+def agent_config_block(block: dict, fmt: str = "kilo") -> dict:
+    """The provider block for an agent CLI. kilo: kilo_block() as it is (unchanged). opencode
+    (2.x) / opencode1 (1.x): the same provider and models with OpenCode's key variable, plus
+    the keys every Foundry opencode.jsonc carries (no session sharing, no auto-update); 2.x
+    takes subagent_depth under experimental. Nothing Kilo-only is in it (OpenCode rejects
+    unknown top-level keys)."""
+    if fmt == "kilo":
+        return block
+    import copy
+    out = copy.deepcopy(block)
+    opts = out["provider"]["foundry"]["options"]
+    opts["apiKey"] = "{env:FOUNDRY_KEY_OPENCODE}"
+    depth = out.pop("subagent_depth", 1)
+    out = {"$schema": "https://opencode.ai/config.json", "share": "disabled",
+           "autoupdate": False, **out}
+    if fmt == "opencode":
+        out["update"] = "disable"
+        out["experimental"] = {"subagent_depth": depth}
+    else:
+        out["subagent_depth"] = depth
+    return out
 
 
 def kilo_block(svc, base: str, prefix: str = "Foundry-Kilo") -> tuple[dict, dict]:

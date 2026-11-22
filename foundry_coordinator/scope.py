@@ -104,7 +104,8 @@ def rule_for(P, task_id: str, path: str) -> Optional[dict]:
 # secrets (role_rules.CONFIG_FILES / the secret patterns deny them anyway)
 from foundry_automation.role_rules import SECRET_NAME_GLOBS as _SECRET_NAMES  # noqa: E402
 
-NEVER_GRANT = ("kilo.jsonc", "kilo.json", ".kilo/*", ".git/*", "tools/hooks/*", ".githooks/*",
+NEVER_GRANT = ("kilo.jsonc", "kilo.json", ".kilo/*", "opencode.jsonc", "opencode.json", ".opencode/*",
+               ".git/*", "tools/hooks/*", ".githooks/*",
                ".husky/*", ".env", ".env.*", "*.env", "*_secrets*", *_SECRET_NAMES,
                "*credential*")
 

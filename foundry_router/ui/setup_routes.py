@@ -27,6 +27,10 @@ SCOPES = ("inference", "media", "admin", "orchestration", "telemetry", "operator
 PRESETS = {
     "cline": {"scopes": ["inference"], "note": "Cline (VS Code), OpenAI-compatible provider"},
     "kilo": {"scopes": ["inference", "media"], "note": "Kilo Code / kilo serve"},
+    # v0.181.247: OpenCode beside Kilo. Grant it the same Foundry-Kilo-* personas the
+    # project's OpenCode roles use (its config reads the key as FOUNDRY_KEY_OPENCODE)
+    "opencode": {"scopes": ["inference", "media"],
+                 "note": "OpenCode / opencode serve (FOUNDRY_KEY_OPENCODE)"},
     # Direct reviews are the only inference the coordinator makes with its own
     # key; the worker and helpers run on Kilo's key. So: reviewer roles only,
     # by canonical id (legacy aliases don't authorize them). No admin, no Local.

@@ -56,7 +56,11 @@ CORRELATION_HEADERS = {"x-foundry-session": "session_id", "x-foundry-task": "tas
                        "x-foundry-parent-task": "parent_task_id"}
 # A client's own session id when it sends no x-foundry-session (Kilo and
 # OpenCode send x-session-id = their session id on every model call).
-SESSION_FALLBACK_HEADERS = ("x-session-id", "x-opencode-session", "x-session-affinity")
+# v0.181.247: x-opencode-session-id first. Kilo and OpenCode 1.x send it with the same id as
+# x-session-id (nothing changes for them); OpenCode 2.x sends a child session's own id there
+# and its PARENT's id in x-session-id (session affinity), so the child binds to itself.
+SESSION_FALLBACK_HEADERS = ("x-opencode-session-id", "x-session-id", "x-opencode-session",
+                            "x-session-affinity")
 _OPEN_PATHS = ("/", "/api/version", "/health")          # liveness probes stay open
 # Signed media links (see scope_for) — open by design, token-checked by the route.
 PUBLIC_MEDIA_PREFIX = "/media/a/"

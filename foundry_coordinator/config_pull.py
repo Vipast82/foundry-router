@@ -356,7 +356,7 @@ class ConfigPuller:
             self.log(f"config: {pid}: main kilo.jsonc Studio MCP {', '.join(out['changed'])} {what}")
             self.store.event(pid, "", "main_studio_mcp", detail={"rev": body.get("rev"), **out})
             client_requests.request(
-                self.c.state_dir, "reload_kilo", pid,
+                self.c.state_dir, client_requests.reload_kind(P.profile), pid,
                 f"router revision {body.get('rev')}: the main Studio MCP servers point {what}",
                 detail={"rev": body.get("rev"), **out}, store=self.store, clock=self.clock)
         return out
@@ -382,12 +382,30 @@ class ConfigPuller:
                      f"{', '.join(out['missing'])} (never created)")
         if out.get("applied"):
             client_requests.request(
-                self.c.state_dir, "reload_kilo", pid,
+                self.c.state_dir, client_requests.reload_kind(P.profile, out.get("path", "")),
+                pid,
                 f"role rules revision {body.get('rev')} rewrote kilo.jsonc agent blocks "
                 f"{', '.join(out['changed'])}", detail={"rev": body.get("rev"),
                                                         "changed": out["changed"],
                                                         "backup": out.get("backup")},
                 store=self.store, clock=self.clock)
+        # v0.181.247: the config file of each further agent server ([clients.<name>]: an
+        # OpenCode server beside Kilo reads opencode.jsonc) gets the same agent blocks
+        from .kilo_config import agent_config_paths
+        for path in agent_config_paths(P.profile)[1:]:
+            try:
+                more = regenerate(P.profile, body["doc"].get("role_rules"), apply=True,
+                                  path=path, store=self.store, clock=self.clock)
+            except KiloConfigError as e:
+                self.log(f"config: {pid}: {path} not regenerated: {e}")
+                continue
+            if more.get("applied"):
+                client_requests.request(
+                    self.c.state_dir, client_requests.reload_kind(P.profile, path), pid,
+                    f"role rules revision {body.get('rev')} rewrote {path} agent blocks",
+                    detail={"rev": body.get("rev"), "path": path,
+                            "changed": more.get("changed")},
+                    store=self.store, clock=self.clock)
         return out
 
     def applied(self, pid: str) -> Optional[dict]:

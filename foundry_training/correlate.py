@@ -26,6 +26,9 @@ from collections import defaultdict
 from .messages import tool_calls as norm_tool_calls
 from .store import TrainingStore
 
+# the agent CLIs whose sessions are correlated with Foundry model calls (v0.181.247)
+AGENT_ADAPTERS = ("kilo", "opencode")
+
 
 def _sig_kilo(step_events: list[dict]) -> str:
     calls = sorted((e["facts"].get("name") or "", json.dumps(e["facts"].get("arguments") or {},
@@ -45,7 +48,7 @@ def _sig_foundry(e: dict) -> str:
 def kilo_steps(events: list[dict]) -> dict:
     steps = defaultdict(list)
     for e in events:
-        if e["source_adapter"] != "kilo" or e["event_type"] not in ("assistant_message",
+        if e["source_adapter"] not in AGENT_ADAPTERS or e["event_type"] not in ("assistant_message",
                                                                     "tool_call", "reasoning"):
             continue
         key = (e["session_id"], e["facts"].get("message_id"), e["facts"].get("step") or 0)
@@ -57,7 +60,7 @@ def run(store: TrainingStore, project_id: str, explicit: dict | None = None) -> 
     ev = store.events(project_id)
     counts = defaultdict(int)
     for e in ev:
-        if e["event_type"] == "child_session" and e["source_adapter"] == "kilo" \
+        if e["event_type"] == "child_session" and e["source_adapter"] in AGENT_ADAPTERS \
                 and e["facts"].get("parent"):
             store.correlate("parent_child", project_id, e["facts"]["parent"], e["session_id"],
                             "kilo parentID", 1.0, True)
@@ -70,7 +73,7 @@ def run(store: TrainingStore, project_id: str, explicit: dict | None = None) -> 
                 store.correlate("parent_child", project_id, e["parent_session_id"],
                                 e["session_id"], "coordinator helper binding", 1.0, True)
                 counts["parent_child"] += 1
-        if e["event_type"] == "session_start" and e["source_adapter"] == "kilo" and e["task_id"]:
+        if e["event_type"] == "session_start" and e["source_adapter"] in AGENT_ADAPTERS and e["task_id"]:
             store.correlate("session_task", project_id, e["session_id"], e["task_id"],
                             "kilo session metadata (coordinator)", 1.0, True)
             counts["session_task"] += 1

@@ -1,3 +1,66 @@
+## v0.181.247 - OpenCode beside Kilo
+
+Asked: everything that talks to Kilo Code should also support the latest OpenCode, with
+current and future Kilo kept working. Neither replaces the other; either agent CLI is
+picked per project or per role. Plan (approved 2026-11-22, all five recommended answers):
+docs/plans/OPENCODE_BACKEND_PLAN.md. Operator guide: docs/OPENCODE.md.
+
+**Two OpenCode lines.** 2.3.2 (npm @opencode/cli) is the latest and has a rewritten
+`/api/*` server; 1.19.6 (npm opencode-ai) speaks the same API as Kilo. They cannot be
+installed side by side. The code is split by API dialect, not product: oc1 = Kilo and
+OpenCode 1.x, oc2 = OpenCode 2.x (and a future Kilo on the 2.x base).
+
+**Coordinator.**
+- `adapters/oc1.py`: the HTTP code of `KiloClient`, moved unchanged. `KiloClient` is now
+  that class with Kilo's spec: same requests, bodies, parsing, error texts and checks.
+- `adapters/oc2.py`: the 2.x client. It translates 2.x messages, forms and permission asks
+  into the 1.x shapes the engine, lead, helpers, evidence and context guard already read.
+- `adapters/opencode.py`: picks 1.x or 2.x by asking the server.
+- Per role: `[clients.<name>]` and `[client_roles]` build a `ClientSet`. Each role starts
+  on its own server, and every later call goes to the server that owns the session. A
+  profile with only `[client]` gets the same client object as before.
+- New CLI command `agent-config`: writes a project's first `opencode.jsonc` (sharing off,
+  no auto-update, only the Foundry provider, subagent depth 1, agent stubs). After that,
+  `kilo-config`, track files and skill allows edit it with the same code. Skills go to
+  `.opencode/skills`, and reloads are `reload_opencode` requests.
+- Every OpenCode session is also denied its own config files and shell commands that name
+  its password.
+- Telemetry: an OpenCode observer and a multi-server observer. 2.x is polled.
+
+**Foundry Client.**
+- An `opencode` component, off by default, on port 4097. Its server runs with
+  Claude-Code files, outside skills, auto-update and free models turned off.
+- A health check that tells a closed port, a wrong password and a wedged server apart.
+- The `reload_opencode` action, and settings rows on the client page.
+
+**Router.**
+- `x-opencode-session-id` is read before `x-session-id`. For Kilo and 1.x it is the same
+  id; for a 2.x child session it is the child's own id.
+- An `opencode` client-key preset.
+- `GET /admin/api/personas/kilo-config?format=opencode|opencode1`, with a format select on
+  the Default personas card. `format=kilo` is unchanged.
+- The control center accepts `opencode` as a component.
+
+**Training.** OpenCode sessions are read through the server API and normalised like
+Kilo's. They are tagged `opencode`, and correlation and episodes accept them. Default
+sources gain `opencode`.
+
+**Automation schema.**
+- `client.kind` accepts `opencode`; `client.api` is new.
+- New fields: `clients.*` (kind, url, password_env, api, provider, agent, agents,
+  worker_client, config) and `client_roles.{implementer,helper,lead}`.
+- The `skills.target` and `training.sources` texts name OpenCode.
+
+**Kilo unchanged.** The Kilo test suite runs with no Kilo test edited. Kilo's
+`kilo.jsonc` output, the `/kilo-config` export, the `kilo` component and Kilo's training
+tags are as before. No live persona, route, chain or sprint setting changed.
+
+Not done: the live pilot on the scratch project `opencode-pilot`. It needs OpenCode
+installed and the `opencode` router key approved (docs/OPENCODE.md). Also not done: the
+2.x event stream, an OpenCode memory watchdog, and an agent-kind heartbeat label.
+34 new tests: test_opencode_clients_v247, test_opencode_stack_v247,
+test_opencode_engine_v247 (a task runs to COMPLETE on a fake OpenCode 2.x server).
+
 ## v0.181.246 - code that compiles
 
 Asked: build the eighth gap in docs/BENCH_GAPS.md, code that runs, the

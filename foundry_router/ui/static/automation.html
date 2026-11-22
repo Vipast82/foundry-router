@@ -1633,11 +1633,11 @@ function renderRoleDrawer(r, rr) {
   $("#drawer").innerHTML = `<button class="ic x" type="button" id="drawer-x" aria-label="Close">✕</button>
     <h3 id="drawer-h">${esc(r.label)} · agent</h3>
     <p class="hint">${esc(ROLE_HELP[r.id] || "")}</p>
-    <fieldset><legend>Kilo agent</legend><div class="row"><label class="sr-only" for="ra-agent">Agent name</label><input id="ra-agent" class="grow mono" value="${esc(rr.agent || "")}" placeholder="(no kilo.jsonc block)"><button class="act" type="button" id="ra-agent-save">Save</button></div>
+    <fieldset><legend>Agent (Kilo / OpenCode)</legend><div class="row"><label class="sr-only" for="ra-agent">Agent name</label><input id="ra-agent" class="grow mono" value="${esc(rr.agent || "")}" placeholder="(no kilo.jsonc / opencode.jsonc block)"><button class="act" type="button" id="ra-agent-save">Save</button></div>
       <p class="hint">The kilo.jsonc agent whose permission block is generated from these rules. Empty = no block.</p></fieldset>
     <fieldset><legend>Anything not listed (agent block "*")</legend><div class="seg" role="radiogroup" aria-label="Default action">${["allow", "ask", "deny"].map(s => `<label><input type="radio" name="rdef" value="${s}" ${s === (rr.default || "deny") ? "checked" : ""}>${STATE_ICON[s]} ${s}</label>`).join("")}</div></fieldset>
     <fieldset><legend>Tools always denied</legend>${chipList("deny_tools", "", rr.deny_tools, "searxng_*")}</fieldset>
-    ${rr.extra.length ? `<fieldset><legend>Extra Kilo rules (read-only here)</legend><ul class="warns">${rr.extra.map(x => `<li class="mono">${esc(x.permission)} ${esc(x.pattern || "*")} → ${esc(x.action)}</li>`).join("")}</ul></fieldset>` : ""}`;
+    ${rr.extra.length ? `<fieldset><legend>Extra agent rules (read-only here)</legend><ul class="warns">${rr.extra.map(x => `<li class="mono">${esc(x.permission)} ${esc(x.pattern || "*")} → ${esc(x.action)}</li>`).join("")}</ul></fieldset>` : ""}`;
   wireDrawer(r.id, "");
   $("#ra-agent-save").onclick = () => { const v = $("#ra-agent").value.trim(); editRules(rr2 => { rr2.agent = v; }); announce("Agent saved"); };
   for (const i of $$("input[name=rdef]", $("#drawer"))) i.onchange = () => { editRules(rr2 => { rr2.default = i.value; }); const n = $(`#drawer input[name=rdef][value=${i.value}]`); if (n) n.focus(); };

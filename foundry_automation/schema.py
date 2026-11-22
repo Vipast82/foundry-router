@@ -802,7 +802,7 @@ class Table:
 GROUPS = [
     {"id": "identity", "label": "Project", "order": 10},
     {"id": "workspace", "label": "Workspace & scope", "order": 20},
-    {"id": "client", "label": "Coding client (Kilo)", "order": 30},
+    {"id": "client", "label": "Coding client (Kilo / OpenCode)", "order": 30},
     {"id": "roles", "label": "Roles & personas", "order": 40},
     {"id": "review", "label": "Review & approval", "order": 50},
     {"id": "lead", "label": "Lead manager", "order": 60},
@@ -821,7 +821,14 @@ TABLES = [
     Table("workspace", "Workspace", "workspace", "Where sessions may write at all."),
     Table("adapter", "Project adapter", "identity", scope="local"),
     Table("animaluprising", "Animal Uprising adapter", "identity"),
-    Table("client", "Kilo client", "client"),
+    Table("client", "Coding client", "client",
+          "The agent CLI the project's sessions run on: Kilo Code (kilo serve) or OpenCode "
+          "(opencode serve). More servers and per-role choice: [clients] and [client_roles]."),
+    Table("clients", "More agent servers", "client",
+          "Named tables, each one more Kilo or OpenCode server this project may use beside "
+          "[client] (e.g. [clients.opencode]); [client_roles] says which roles run on it."),
+    Table("client_roles", "Run this role on", "client",
+          "Role -> the [clients] table its sessions run on (unset = [client]).", strict=True),
     Table("roles", "Role personas", "roles",
           "Foundry persona per coordinator role. lead/helper/visual-lane personas live in "
           "their own tables (role_binding)."),
@@ -1306,16 +1313,42 @@ FIELDS: list[Field] = [
       "count as Claude agents (empty = the implementer role's persona).", "workspace",
       "coordinator.engine", "next_session", item_type="str"),
     # client ---------------------------------------------------------------------
-    F("client.kind", "enum", "kilo", "Coding client.", "client", "coordinator.adapters",
-      "restart", enum=["kilo", "fake", "scripted"]),
-    F("client.url", "str", "", "Kilo serve URL.", "client", "coordinator.kilo", "restart",
-      "local"),
-    F("client.password_env", "str", "", "Env var holding the Kilo server password.", "client",
+    F("client.kind", "enum", "kilo", "Coding client: kilo (Kilo Code, kilo serve) or opencode "
+      "(OpenCode, opencode serve; 2.x or 1.x).", "client", "coordinator.adapters",
+      "restart", enum=["kilo", "opencode", "fake", "scripted"]),
+    F("client.api", "enum", "auto", "OpenCode only: its server API line. auto = ask the server "
+      "(2.x answers /api/info); oc2 = OpenCode 2.x; oc1 = OpenCode 1.x (Kilo's API).", "client",
+      "coordinator.adapters", "restart", enum=["auto", "oc1", "oc2"]),
+    F("client.url", "str", "", "Agent server URL (Kilo default http://127.0.0.1:4096, OpenCode "
+      "http://127.0.0.1:4097).", "client", "coordinator.kilo", "restart", "local"),
+    F("client.password_env", "str", "", "Env var holding the agent server password "
+      "(KILO_SERVER_PASSWORD / OPENCODE_SERVER_PASSWORD).", "client",
       "coordinator.kilo", "restart", "local"),
-    F("client.provider", "str", "foundry", "Provider id in kilo.jsonc.", "client",
-      "coordinator.kilo", "restart"),
-    F("client.agent", "str", "code", "Kilo agent of the implementer session.", "client",
-      "coordinator.kilo", "next_session"),
+    F("client.provider", "str", "foundry", "Provider id in kilo.jsonc / opencode.jsonc.",
+      "client", "coordinator.kilo", "restart"),
+    F("client.agent", "str", "code", "Agent of the implementer session (Kilo: code; OpenCode: "
+      "build).", "client", "coordinator.kilo", "next_session"),
+    F("clients.*.kind", "enum", "opencode", "kilo or opencode.", "client",
+      "coordinator.adapters", "restart", enum=["kilo", "opencode"]),
+    F("clients.*.url", "str", "", "This server's URL.", "client", "coordinator.adapters",
+      "restart", "local"),
+    F("clients.*.password_env", "str", "", "Env var holding this server's password.", "client",
+      "coordinator.adapters", "restart", "local"),
+    F("clients.*.api", "enum", "auto", "OpenCode API line (auto, oc1, oc2).", "client",
+      "coordinator.adapters", "restart", enum=["auto", "oc1", "oc2"]),
+    F("clients.*.provider", "str", "foundry", "Provider id in this server's config.", "client",
+      "coordinator.adapters", "restart"),
+    F("clients.*.agent", "str", "", "The agent its sessions run as when the role asks for "
+      "client.agent (OpenCode: build).", "client", "coordinator.adapters", "next_session"),
+    F("clients.*.agents", "map", {}, "Agent name map for this server ({code = \"build\"}).",
+      "client", "coordinator.adapters", "next_session", item_type="str"),
+    F("clients.*.worker_client", "str", "", "The router client key its model calls arrive with "
+      "(OpenCode: opencode).", "client", "coordinator.adapters", "next_session"),
+    F("clients.*.config", "str", "", "Its config file (empty = <workspace>/opencode.jsonc or "
+      "kilo.jsonc).", "client", "coordinator.adapters", "next_session", "local"),
+    *[F(f"client_roles.{r}", "str", "", f"Which [clients] table the {r} sessions run on "
+        f"(empty = [client]).", "client", "coordinator.adapters", "next_session")
+      for r in ("implementer", "helper", "lead")],
     F("client.session_timeout_minutes", "int", 240, "Kilo session timeout.", "client",
       "coordinator.kilo", "next_session", min=1),
     F("client.compaction_grace_seconds", "int", 30, "Wait for Kilo's own continuation after "
@@ -1478,7 +1511,8 @@ FIELDS: list[Field] = [
       "Kept up to date with Foundry's copy; a hand copy is backed up first; a skill taken off "
       "the list is removed if Foundry installed it. Empty = off.", "fast_lane",
       "coordinator.skills_install", "next_session", item_type="str"),
-    F("skills.target", "str", ".kilo/skills", "Where Kilo reads the game's skills, relative to "
+    F("skills.target", "str", ".kilo/skills", "Where the agent reads the game's skills (Kilo: "
+      ".kilo/skills; an OpenCode project defaults to .opencode/skills), relative to "
       "the game checkout. Must be untracked in git (Foundry refuses to write into tracked "
       "files).", "fast_lane", "coordinator.skills_install", "next_session"),
     F("skills.check_seconds", "int", 300, "How often the installed skills are compared with "
@@ -1643,8 +1677,8 @@ FIELDS: list[Field] = [
       for k, t, d, desc, kw in (
         ("enabled", "bool", False, "Build training data for this project (the coordinator writes "
          "a manifest per attempt; the pipeline ingests, curates and exports).", {}),
-        ("sources", "list", ["kilo", "foundry", "coordinator", "git"], "What the pipeline "
-         "reads: kilo, foundry, coordinator, git, cline.", {"item_type": "str"}),
+        ("sources", "list", ["kilo", "opencode", "foundry", "coordinator", "git"], "What the pipeline "
+         "reads: kilo, opencode, foundry, coordinator, git, cline.", {"item_type": "str"}),
         ("artifact_roots", "list", [], "Folders screenshots may be read from.",
          {"item_type": "str"}),
         ("allowed_email_domains", "list", [], "E-mail domains kept unredacted.",

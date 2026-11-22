@@ -37,18 +37,39 @@ def load_adapter(profile, state_dir: str) -> GenericAdapter:
     return klass(profile, state_dir)
 
 
-def build_client(profile, client=None):
-    if client is not None:
-        return client
-    c = profile.client
+def build_one(profile, c: dict):
+    """One client from a [client] or [clients.<name>] table."""
     kind = c.get("kind", "kilo")
     if kind == "kilo":
         return KiloClient(c.get("url") or "http://127.0.0.1:4096",
                           password=profile.secret(c, "password"),
                           provider=c.get("provider") or "foundry")
+    if kind == "opencode":
+        from .opencode import OpenCodeClient
+        return OpenCodeClient(c.get("url") or "http://127.0.0.1:4097",
+                              password=profile.secret(c, "password"),
+                              provider=c.get("provider") or "foundry",
+                              api=c.get("api") or "auto")
     if kind == "scripted":
         return ScriptedClient(c.get("script"), project_id=profile.id)
     raise ValueError(f"client kind {kind!r} needs a client object")
+
+
+def build_client(profile, client=None):
+    """The project's coding client. Only [client]: that one client, exactly as before
+    v0.181.247. With [clients.<name>] tables: a ClientSet that runs each role on the server
+    [client_roles] names (adapters/clientset.py)."""
+    if client is not None:
+        return client
+    base = build_one(profile, profile.client)
+    raw = getattr(profile, "raw", None) or {}
+    extra = raw.get("clients") or {}
+    if not isinstance(extra, dict) or not extra:
+        return base
+    from .clientset import ClientSet
+    members = {k: (build_one(profile, t), t) for k, t in extra.items() if isinstance(t, dict)}
+    return ClientSet(base, members, roles=raw.get("client_roles") or {},
+                     default_table=profile.client)
 
 
 def build_project(profile, state_dir: str, client=None,
@@ -61,4 +82,4 @@ def build_project(profile, state_dir: str, client=None,
                    ws=Workspace(profile.workspace))
 
 
-__all__ = ["Project", "build_project", "load_adapter", "build_client", "os"]
+__all__ = ["Project", "build_project", "load_adapter", "build_client", "build_one", "os"]

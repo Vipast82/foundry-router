@@ -25,8 +25,13 @@ def _now_ms() -> int:
 
 
 class FakeKilo:
-    def __init__(self, password: str = "fake-kilo-password", unsupported: tuple = ()):
+    def __init__(self, password: str = "fake-kilo-password", unsupported: tuple = (),
+                 username: str = "kilo", config_path: str = "/config/effective"):
+        # username / config_path: FakeKilo(username="opencode", config_path="/config") stands in
+        # for OpenCode 1.x, which serves the same API under its own names (v0.181.247)
         self.password = password
+        self.username = username
+        self.config_path = config_path
         self.unsupported = set(unsupported)      # paths that 404 (capability probing)
         self.lock = threading.RLock()
         self.sessions: dict[str, dict] = {}
@@ -76,7 +81,7 @@ class FakeKilo:
                 pass
 
             def _auth(self) -> bool:
-                want = "Basic " + base64.b64encode(f"kilo:{fake.password}".encode()).decode()
+                want = "Basic " + base64.b64encode(f"{fake.username}:{fake.password}".encode()).decode()
                 if self.headers.get("authorization") != want:
                     self._send(401, {"error": "unauthorized"})
                     return False
@@ -180,7 +185,7 @@ class FakeKilo:
                 return 200, list(self.permissions.values())
             if path == "/mcp":
                 return 200, self.mcp_status
-            if path == "/config/effective":
+            if path == self.config_path:
                 return 200, self.config
             if path == "/lsp":
                 return 200, [{"id": "luau-lsp", "status": "connected"}]

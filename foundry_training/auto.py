@@ -84,13 +84,25 @@ def auto_settings(cfg) -> dict:
     a = dict(t.get("auto") or {})
     foundry = raw.get("foundry") or {}
     client = raw.get("client") or {}
+    kind = client.get("kind", "kilo")
+    oc = client if kind == "opencode" else next(
+        (t for t in (raw.get("clients") or {}).values()
+         if isinstance(t, dict) and t.get("kind") == "opencode"), None)
     return {"enabled": bool(t.get("enabled")) and bool(a.get("enabled", True)),
             "upload": bool(a.get("upload", True)),
             "foundry_url": str(a.get("foundry_url") or foundry.get("url") or ""),
             "key_env": [e for e in (a.get("key_env"), "FOUNDRY_TRAINING_KEY",
                                     foundry.get("key_env")) if e],
-            "kilo_url": str(a.get("kilo_url") or client.get("url") or ""),
-            "kilo_password_env": str(client.get("password_env") or "KILO_SERVER_PASSWORD"),
+            "kilo_url": str(a.get("kilo_url") or (client.get("url") if kind == "kilo" else "")
+                            or ""),
+            "kilo_password_env": str((client.get("password_env") if kind == "kilo" else "")
+                                     or "KILO_SERVER_PASSWORD"),
+            # v0.181.247: the project's OpenCode server ([client] kind = "opencode", or the
+            # first [clients.<name>] OpenCode table): its sessions are captured the same way
+            "opencode_url": str((oc or {}).get("url") or ("http://127.0.0.1:4097" if oc else "")),
+            "opencode_password_env": str((oc or {}).get("password_env")
+                                         or "OPENCODE_SERVER_PASSWORD"),
+            "opencode_api_line": str((oc or {}).get("api") or "auto"),
             "kinds": [k for k in (a.get("kinds") or list(DEFAULT_KINDS)) if k in KINDS],
             "targets": [x for x in (a.get("targets") or (t.get("export") or {}).get("targets")
                                     or ["chatml-tools", "canonical"])
@@ -236,6 +248,10 @@ def auto_run(pipeline, spool: str, override: Optional[dict] = None, log=print,
     if first.get("kilo_url"):
         kilo_api = {"url": first["kilo_url"],
                     "password": os.environ.get(first["kilo_password_env"], "")}
+    opencode_api = None
+    if first.get("opencode_url"):
+        opencode_api = {"url": first["opencode_url"], "api": first.get("opencode_api_line", "auto"),
+                        "password": os.environ.get(first["opencode_password_env"], "")}
     key = _key(first["key_env"])
     # a manifest written while we were running is picked up by the next pass
     for _ in range(max(1, passes)):
@@ -245,7 +261,8 @@ def auto_run(pipeline, spool: str, override: Optional[dict] = None, log=print,
             break
         try:
             report["queue"] += pipeline.process_queue(spool, foundry_url=first["foundry_url"],
-                                                      foundry_key=key, kilo_api=kilo_api)
+                                                      foundry_key=key, kilo_api=kilo_api,
+                                                      opencode_api=opencode_api)
         except Exception as e:                                    # noqa: BLE001
             report["errors"].append(f"queue: {type(e).__name__}: {e}"[:400])
             break

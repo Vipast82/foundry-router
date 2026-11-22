@@ -42,6 +42,7 @@ from typing import Iterator, Optional
 from ..schema import Event
 
 ADAPTER = "kilo"
+_ADAPTER = ADAPTER
 REQUIRED_DB = {"session": {"id", "project_id", "parent_id", "directory", "title", "version",
                            "time_created"},
                "message": {"id", "session_id", "time_created", "data"},
@@ -201,6 +202,8 @@ def project_of(session: dict, projects: list) -> tuple[str, str]:
 def normalize(session: dict, project_id: str, raw_ref: str, redaction: dict,
               store=None, artifact_roots: Optional[list] = None) -> list[Event]:
     info = session.get("info") or {}
+    # an OpenCode session (adapters/opencode.py) has the same shape and is tagged as its own
+    ADAPTER = session.get("_adapter") or _ADAPTER
     sid = info.get("id") or "unknown"
     md = ((info.get("metadata") or {}).get("coordinator") or {})
     sanitized = bool(session.get("_sanitized"))
@@ -329,7 +332,7 @@ def session_records(sessions: list[dict], projects: list,
         info = s.get("info") or {}
         pid, how = project_of(s, projects)
         yield (info.get("id") or "?", pid, s,
-               {"adapter": ADAPTER, "mode": adapter_mode, "project_by": how,
+               {"adapter": s.get("_adapter") or ADAPTER, "mode": adapter_mode, "project_by": how,
                 "sanitization": "kilo-sanitized" if s.get("_sanitized") else "none",
                 "kilo_version": info.get("version")})
 

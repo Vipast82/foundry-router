@@ -216,6 +216,22 @@ def build(cfg: dict) -> dict[str, Spec]:
                        safe_restart=bool(k.get("safe_restart", True)),
                        problem="" if kilo else "kilo was not found; set its path in Settings")
 
+    o = comps.get("opencode") or {}
+    if o:                       # always built (the manager tracks every component); `enabled` runs it
+        from foundry_automation.agent_backends import OPENCODE
+        oc = find_binary(o.get("path", ""), list(OPENCODE.binaries), list(OPENCODE.npm_fallbacks))
+        oport = int(o.get("port") or OPENCODE.default_port)
+        ocwd = expand(o.get("cwd") or "") or game
+        out["opencode"] = Spec(
+            "opencode", "OpenCode server",
+            [oc, "serve", "--hostname", "127.0.0.1", "--port", str(oport), *(o.get("args") or [])],
+            cwd=ocwd, env=o.get("env") or {}, secrets=o.get("secrets") or [],
+            health=lambda: opencode_health(oport),
+            port=oport, owner_pid=lambda: port_owner_pid(oport),
+            safe_restart=bool(o.get("safe_restart", True)),
+            problem="" if oc else "opencode was not found; install it (npm i -g @opencode/cli) "
+                                  "or set its path in Settings")
+
     c = comps["coordinator"]
     me = self_argv()
     out["coordinator"] = Spec(
@@ -382,6 +398,34 @@ def kilo_password() -> str:
         except Exception:                                        # noqa: BLE001
             _pw_cache.update(at=now, v="")
     return _pw_cache["v"]
+
+
+def opencode_password() -> str:
+    try:
+        return secrets.get("OPENCODE_SERVER_PASSWORD") or ""
+    except Exception:                                            # noqa: BLE001
+        return ""
+
+
+def opencode_health(port: int) -> tuple:
+    """OpenCode answers GET /api/info (2.x) or GET /global/health (1.x), Basic auth user
+    `opencode`. Like kilo_health: closed port, wrong password and a wedged server apart."""
+    if not port_open(port):
+        return False, f"port {port} is closed"
+    auth = basic_auth(opencode_password(), username="opencode")
+    code, body, err = get_json(f"http://127.0.0.1:{port}/api/info", auth, 3)
+    if code == 200:
+        return True, f"port {port}, OpenCode {(body or {}).get('version') or '2.x'}"
+    if code in (401, 403):
+        return False, f"port {port} is open but rejects the OpenCode server password (HTTP {code})"
+    code1, body1, err1 = get_json(f"http://127.0.0.1:{port}/global/health", auth, 3)
+    if code1 == 200:
+        return True, f"port {port}, OpenCode {(body1 or {}).get('version') or '1.x'}"
+    if code1 in (401, 403):
+        return False, f"port {port} is open but rejects the OpenCode server password (HTTP {code1})"
+    if code == 0 and code1 == 0:
+        return False, f"port {port} is open but OpenCode does not answer ({err or err1})"
+    return False, f"port {port} is open but /api/info returned HTTP {code} and /global/health "                   f"HTTP {code1}"
 
 
 def kilo_health(port: int) -> tuple:

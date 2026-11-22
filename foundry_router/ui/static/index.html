@@ -6870,7 +6870,11 @@ function profileCard(pr) {
     <h2 style="margin-top:0">Default personas: ${esc(pr.title)} <span class="pill">v${pr.version}</span></h2>
     <p class="hint">${esc(pr.description)} Updates never overwrite a persona you've edited, a persona with the same name that the profile didn't create, or the enabled switch.</p>
     <div class="row"><button class="act primary" onclick='applyProfile(${JSON.stringify(pr.id)})' ${pending ? "" : "disabled"}>${pr.installed ? "Update" : "Install"} (${pending} change${pending === 1 ? "" : "s"})</button>
-      <button class="act" onclick="showKiloConfig()" title="A Kilo / OpenCode provider block with each persona's real context/output limits and modalities">Kilo provider config</button></div>
+      <select id="agent-config-format" title="Which agent CLI the provider block is for">
+        <option value="kilo">Kilo (kilo.jsonc)</option>
+        <option value="opencode">OpenCode 2.x (opencode.jsonc)</option>
+        <option value="opencode1">OpenCode 1.x (opencode.jsonc)</option></select>
+      <button class="act" onclick="showKiloConfig()" title="A Kilo / OpenCode provider block with each persona's real context/output limits and modalities">Provider config</button></div>
     <details${pr.installed ? "" : " open"}><summary style="cursor:pointer">${pr.personas.length} personas</summary>
     <table><tr><th>persona</th><th>model</th><th>backend</th><th>kind</th><th>enabled</th><th>status</th><th></th></tr>${rows}</table></details>
     <pre id="kilo-config" class="mono" style="display:none;max-height:360px;overflow:auto;white-space:pre"></pre>
@@ -6888,13 +6892,18 @@ window.applyProfile = async id => {
 window.showKiloConfig = async () => {
   const el = $("#kilo-config");
   if (el.style.display !== "none") { el.style.display = "none"; return; }
-  const r = await api("personas/kilo-config?explain=1&base_url=" + encodeURIComponent(location.origin));
+  const fmt = ($("#agent-config-format") || {}).value || "kilo";
+  const r = await api("personas/kilo-config?explain=1&format=" + encodeURIComponent(fmt)
+    + "&base_url=" + encodeURIComponent(location.origin));
   const notes = Object.entries(r.limits || {}).map(([n, l]) =>
     `//   ${n}: context ${l.context ?? "unset"} (${l.context_source}), output ${l.output ?? "unset"}`
     + (l.unknown_windows.length ? `; window unknown for ${l.unknown_windows.join(", ")}` : "")
     + (l.unreachable_pins.length ? `; NOT REACHABLE now: ${l.unreachable_pins.join(", ")} (strict routing refuses)` : "")
     + `; ${l.validation}`).join("\n");
-  el.textContent = "// kilo.jsonc: merge into \"provider\" (set FOUNDRY_KEY_KILO to Kilo's Foundry client key)\n"
+  el.textContent = (fmt === "kilo"
+      ? "// kilo.jsonc: merge into \"provider\" (set FOUNDRY_KEY_KILO to Kilo's Foundry client key)\n"
+      : "// opencode.jsonc: merge these keys (set FOUNDRY_KEY_OPENCODE to OpenCode's Foundry client key;\n"
+        + "// share stays \"disabled\" and auto-update off; or run: foundry-coordinator agent-config PROJECT --apply)\n")
     + "// Limits: " + (r.policy || "") + "\n" + notes + "\n"
     + JSON.stringify(r.config, null, 2);
   el.style.display = "block";

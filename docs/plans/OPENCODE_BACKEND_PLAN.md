@@ -1,6 +1,8 @@
 # OpenCode beside Kilo: one agent-backend interface, two adapters
 
-**Status:** plan only, nothing built. It waits for Victor's answers to the decisions at the end.
+**Status:** approved 2026-11-22. Victor: "Yes, as recommended" to all five decisions in section 8
+(target OpenCode 2.3.2, pilot project `opencode-pilot`, per-role override, reuse the `Foundry-Kilo-*`
+personas through an `opencode` client key, port 4097). Building in the order of section 5.
 **Asked for (2026-11-22):** everything in Foundry-Router that talks to Kilo Code should also
 support the latest OpenCode, and Kilo should keep working as it does now and in future versions.
 Neither one replaces the other. Either agent CLI can be picked per project or per role.

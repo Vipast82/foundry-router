@@ -247,7 +247,7 @@ def _from_client(sev: list[dict], cfg, persona: Optional[str]) -> dict:
     msgs, cur, ids = [], None, []
     truncated, missing = [], []
     for e in sorted(sev, key=lambda e: (e["timestamp"], e["seq"] or 0)):
-        if e["source_adapter"] not in ("kilo", "cline"):
+        if e["source_adapter"] not in ("kilo", "opencode", "cline"):
             continue
         t = e["event_type"]
         f = e["facts"]
@@ -278,7 +278,7 @@ def _from_client(sev: list[dict], cfg, persona: Optional[str]) -> dict:
             # Kilo's `truncated` is the tool paging its output (stored exactly as
             # the model saw it); only a record the capture itself cut counts
             if e["capture_status"] == "truncated" and not (
-                    e["source_adapter"] == "kilo" and f.get("truncated")):
+                    e["source_adapter"] in ("kilo", "opencode") and f.get("truncated")):
                 truncated.append(e["tool_call_id"])
             if e["capture_status"] == "missing":
                 missing.append(e["tool_call_id"])

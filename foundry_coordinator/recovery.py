@@ -54,7 +54,7 @@ RECOVERY = {
 JACCARD = 0.6
 PROMPT_CAP = 6000
 DOCS_ROWS = ("PLAN", "SUMMARY", "PATHS", "API", "STATE")
-DEFAULT_SCRATCH = (".kilo/*", ".kilo/**")
+DEFAULT_SCRATCH = (".kilo/*", ".kilo/**", ".opencode/*", ".opencode/**")
 
 SCHEMA_NAME = "schema:recovery"
 _V1 = """

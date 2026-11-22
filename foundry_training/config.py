@@ -4,7 +4,7 @@ project.toml the coordinator uses (the pipeline reads only `id`,
 
 [training]
 enabled = true
-sources = ["kilo", "foundry", "coordinator", "git"]   # + "cline"
+sources = ["kilo", "opencode", "foundry", "coordinator", "git"]   # + "cline"
 artifact_roots = ["docs/evidence"]        # images may be read only from here
 allowed_email_domains = []
 local_models = ["qwen3.8-flash-next-iq3_s"]   # authorship: what counts as the local model
@@ -68,7 +68,7 @@ class TrainingProject:
     workspace: str
     path: str
     enabled: bool = True
-    sources: list = field(default_factory=lambda: ["kilo", "foundry", "coordinator", "git"])
+    sources: list = field(default_factory=lambda: ["kilo", "opencode", "foundry", "coordinator", "git"])
     artifact_roots: list = field(default_factory=list)
     allowed_email_domains: list = field(default_factory=list)
     local_models: list = field(default_factory=list)
@@ -120,7 +120,7 @@ def load(path: str) -> TrainingProject:
     return TrainingProject(
         id=str(raw.get("id") or ""), workspace=ws, path=os.path.abspath(path),
         enabled=bool(t.get("enabled", False)),
-        sources=list(t.get("sources") or ["kilo", "foundry", "coordinator", "git"]),
+        sources=list(t.get("sources") or ["kilo", "opencode", "foundry", "coordinator", "git"]),
         artifact_roots=list(t.get("artifact_roots") or []),
         allowed_email_domains=list(t.get("allowed_email_domains") or []),
         local_models=list(t.get("local_models") or []),

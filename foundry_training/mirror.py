@@ -32,7 +32,7 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_SOURCES = ("kilo", "coordinator", "git", "gate")
+DEFAULT_SOURCES = ("kilo", "opencode", "coordinator", "git", "gate")
 FIELDS = ("event_id", "schema_version", "project_id", "repository_id", "task_id", "session_id",
           "parent_session_id", "request_id", "tool_call_id", "source_adapter", "source_record_id",
           "part", "timestamp", "seq", "event_type", "actor_role", "actor_model",

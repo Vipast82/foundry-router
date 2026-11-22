@@ -931,6 +931,13 @@ def main(argv=None, clients=None, foundry=None) -> int:
                                            "the role rules (dry run unless --apply)")
     x.add_argument("project"); x.add_argument("--apply", action="store_true")
     x.add_argument("--path", default="", help="kilo.jsonc (default <workspace>/kilo.jsonc)")
+    x = sub.add_parser("agent-config", help="write the first opencode.jsonc of an OpenCode "
+                                            "project (dry run unless --apply; never overwrites)")
+    x.add_argument("project"); x.add_argument("--apply", action="store_true")
+    x.add_argument("--provider-from", default="",
+                   help="a kilo.jsonc / opencode.jsonc / router export holding provider.foundry")
+    x.add_argument("--dialect", default="", choices=["", "oc1", "oc2"],
+                   help="OpenCode API line (default: [client].api, else oc2)")
     x = sub.add_parser("config-pull", help="pull and apply the router's deployed settings now")
     x.add_argument("project", nargs="?", default="")
     x = sub.add_parser("tracks", help="parallel tracks (Team Lead): analyze, propose, start, "
@@ -1116,6 +1123,26 @@ def _kilo_config(c: Coordinator, a) -> int:
     try:
         out = regenerate(P.profile, rules, apply=a.apply, path=a.path, store=c.store)
     except KiloConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def _agent_config(c: Coordinator, a) -> int:
+    """The first opencode.jsonc of an OpenCode project (agent_config.py)."""
+    from .agent_config import AgentConfigError, write
+    from .config_pull import ConfigPuller
+    P = c.projects.get(a.project)
+    if P is None:
+        print(f"error: unknown project {a.project!r}", file=sys.stderr)
+        return 2
+    cached = ConfigPuller(c).cached(P.id)
+    rules = ((cached or {}).get("doc") or {}).get("role_rules")
+    try:
+        out = write(P.profile, provider_from=a.provider_from, dialect=a.dialect, apply=a.apply,
+                    role_rules=rules)
+    except (AgentConfigError, OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     print(json.dumps(out, indent=2))
@@ -1596,6 +1623,8 @@ def _dispatch(a, c: Coordinator) -> int:
         return 0
     elif a.cmd == "kilo-config":
         return _kilo_config(c, a)
+    elif a.cmd == "agent-config":
+        return _agent_config(c, a)
     elif a.cmd == "config-pull":
         from .config_pull import ConfigPuller
         cp = ConfigPuller(c, log=c.log)

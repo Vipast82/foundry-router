@@ -15,7 +15,8 @@ import tomli_w
 
 from . import APP_ID
 
-COMPONENTS = ("kilo", "coordinator", "supervisor", "rojo", "blender", "acestep-music",
+# "opencode" (v0.181.247): an OpenCode server beside Kilo, off by default (agent_backends.py)
+COMPONENTS = ("kilo", "opencode", "coordinator", "supervisor", "rojo", "blender", "acestep-music",
               "stable-audio", "kokoro-tts", "chatterbox-tts")
 
 # optional service components (Team Lead 5): local programs a sprint's needs can ask the
@@ -75,6 +76,17 @@ DEFAULTS: dict[str, Any] = {
         "kilo": {"enabled": True, "path": "", "port": 4096, "args": [],
                  "env": {"KILO_DISABLE_EXTERNAL_SKILLS": "true"},
                  "secrets": ["KILO_SERVER_PASSWORD"], "safe_restart": True},
+        # OpenCode (`opencode serve`, 2.x or 1.x): off by default. cwd = the project folder it
+        # serves by default (empty = workspace.game); every request names its folder anyway.
+        # env keeps Claude Code files, outside skills and auto-update out (agent_backends).
+        "opencode": {"enabled": False, "path": "", "port": 4097, "cwd": "", "args": [],
+                     "env": {"OPENCODE_DISABLE_EXTERNAL_SKILLS": "true",
+                             "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "true",
+                             "OPENCODE_DISABLE_CLAUDE_CODE": "true",
+                             "OPENCODE_DISABLE_AUTOUPDATE": "true",
+                             "OPENCODE_DISABLE_FREE_MODELS": "true"},
+                     "secrets": ["OPENCODE_SERVER_PASSWORD", "FOUNDRY_KEY_OPENCODE"],
+                     "safe_restart": True},
         "coordinator": {"enabled": True, "poll_seconds": 3, "args": [],
                         "env": {"KILO_DISABLE_EXTERNAL_SKILLS": "true"},
                         "secrets": ["KILO_SERVER_PASSWORD", "FOUNDRY_COORDINATOR_KEY"],
@@ -158,6 +170,12 @@ def validate(cfg: dict) -> list[str]:
         port = comp.get("port", 0)
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
             errs.append(f"components.{name}.port must be 0 or a port number")
+    oc = comps.get("opencode") or {}
+    oport = oc.get("port", 4097)
+    if isinstance(oport, bool) or not isinstance(oport, int) or not 1 <= oport <= 65535:
+        errs.append("components.opencode.port must be a port number")
+    elif comps["kilo"]["enabled"] and oc.get("enabled") and oport == comps["kilo"].get("port"):
+        errs.append("components.opencode.port must differ from the Kilo server's port")
     if comps["kilo"]["enabled"] and not cfg["workspace"]["game"]:
         errs.append("workspace.game is required for the Kilo server (its working folder)")
     if comps["coordinator"]["enabled"] and not cfg["workspace"]["profiles"]:

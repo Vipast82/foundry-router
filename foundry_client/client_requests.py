@@ -4,7 +4,8 @@ coordinator, the permission escalation flow). Drop a JSON file in
 
     {"action": "reload_kilo", "id": "abc", "force": false, "reason": "..."}
 
-actions: reload_kilo (safe-point restart of the Kilo server), restart_rojo,
+actions: reload_kilo (safe-point restart of the Kilo server), reload_opencode (the same for
+the OpenCode server), restart_rojo,
 restart_coordinator (safe point), apply_kilo_config (optional "project", "dry_run"),
 start_service ("component" or detail.component: start it if stopped, restart it if unhealthy).
 
@@ -26,6 +27,8 @@ from .config import expand
 ALIASES = {
     "reload_kilo": "reload_kilo", "kilo_reload": "reload_kilo", "reload_kilo_config": "reload_kilo",
     "restart_kilo": "reload_kilo", "stack_reload_kilo": "reload_kilo",
+    "reload_opencode": "reload_opencode", "restart_opencode": "reload_opencode",
+    "opencode_reload": "reload_opencode",
     "restart_rojo": "restart_rojo", "stack_restart_rojo": "restart_rojo",
     "restart_coordinator": "restart_coordinator", "stack_restart_coordinator": "restart_coordinator",
     "apply_kilo_config": "apply_kilo_config", "kilo_config_apply": "apply_kilo_config",
@@ -118,7 +121,7 @@ class RequestQueue:
             return 1
         if act == "start_service":
             return self._start_service(name, rec)
-        comp = {"reload_kilo": "kilo", "restart_rojo": "rojo",
+        comp = {"reload_kilo": "kilo", "reload_opencode": "opencode", "restart_rojo": "rojo",
                 "restart_coordinator": "coordinator"}[act]
         if comp not in m.procs or not m.cfg["components"][comp]["enabled"]:
             return self._finish(name, rec, "failed", f"{comp} is not managed by this client "

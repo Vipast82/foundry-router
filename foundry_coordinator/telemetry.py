@@ -182,6 +182,207 @@ class KiloUnavailable(RuntimeError):
     pass
 
 
+# --------------------------------------------------------------------------- OpenCode
+# v0.181.247: an OpenCode 1.x server is read by KiloObserver itself (same API; user
+# `opencode`, merged config at /config). OpenCode 2.x has another API: Oc2Observer gives the
+# same methods by way of the coordinator's Oc2Client, which already translates 2.x
+# messages, forms and permission asks into the 1.x shapes this module parses. It has no
+# translated event stream yet, so the bridge polls (the same fallback a server without
+# /event gets).
+
+class OpenCodeV1Observer(KiloObserver):
+    def __init__(self, url: str, password: str = "", username: str = "opencode",
+                 timeout: float = 15):
+        super().__init__(url, password=password, username=username, timeout=timeout)
+
+    def config(self, d: str):
+        return self.get("/config", {"directory": d}, cap="config", optional=True)
+
+
+class Oc2Observer:
+    """Read-only view of an OpenCode 2.x server in KiloObserver's method shapes."""
+
+    def __init__(self, url: str, password: str = "", username: str = "", timeout: float = 15):
+        from .adapters.oc2 import Oc2Client
+        self.client = Oc2Client(url, password=password, username=username, timeout=timeout)
+        self.url = self.client.url
+        self.caps: dict[str, bool] = {"todo": False, "event_stream": False}
+        self.secret = password
+
+    def _call(self, fn, *a, cap: str = "", optional: bool = False):
+        from .adapters.oc1 import AgentServerError
+        try:
+            v = fn(*a)
+            if cap:
+                self.caps[cap] = True
+            return v
+        except AgentServerError as e:
+            if optional and any(f"HTTP {c}" in str(e) for c in (404, 405, 501)):
+                if cap:
+                    self.caps[cap] = False
+                return None
+            raise KiloUnavailable(str(e)) from None
+
+    def health(self) -> dict:
+        return self._call(self.client.health) or {}
+
+    def statuses(self, d: str) -> dict:
+        return self._call(self.client.statuses, d) or {}
+
+    def session(self, sid: str, d: str):
+        return self._call(self.client.session, sid, d)
+
+    def messages(self, sid: str, d: str) -> list:
+        return self._call(self.client.messages, sid, d) or []
+
+    def children(self, sid: str, d: str) -> list:
+        return self._call(lambda: self.client.children(sid, directory=d)) or []
+
+    def todo(self, sid: str, d: str):
+        return None
+
+    def questions(self, d: str) -> list:
+        return self._call(self.client.questions, d, cap="question", optional=True) or []
+
+    def permissions(self, d: str) -> list:
+        return self._call(self.client.permissions, d, cap="permission", optional=True) or []
+
+    def mcp(self, d: str):
+        return self._call(lambda: self.client._req("GET", "/api/mcp", directory=d),
+                          cap="mcp", optional=True)
+
+    def config(self, d: str):
+        return self._call(self.client.effective_config, d, cap="config", optional=True)
+
+    def capability(self, name: str, path: str, d: str):
+        self.caps[name] = False
+        return None
+
+    def events(self, d: str, stop: threading.Event):
+        raise urllib.error.HTTPError(self.url + "/api/event", 501,
+                                     "OpenCode 2.x events are not translated (polling)", None,
+                                     None)
+
+
+class MultiObserver:
+    """One project's sessions spread over several agent servers ([clients.<name>]): list
+    reads go to every observer; per-session reads go to the one that has the session.
+    Events come from the default (first) observer; the others are polled."""
+
+    def __init__(self, observers: list):
+        self.parts = list(observers)
+        self.caps = self.parts[0].caps
+        self.secret = self.parts[0].secret
+        self.secrets = {o.secret for o in self.parts if o.secret}
+        self._owner: dict = {}
+
+    def health(self) -> dict:
+        return self.parts[0].health()
+
+    def statuses(self, d: str) -> dict:
+        out: dict = {}
+        for o in self.parts:
+            try:
+                out.update(o.statuses(d) or {})
+            except KiloUnavailable:
+                if o is self.parts[0]:
+                    raise
+        return out
+
+    def _owner_of(self, sid: str, d: str):
+        o = self._owner.get(sid)
+        if o is not None:
+            return o
+        for o in self.parts:
+            try:
+                if o.session(sid, d) is not None:
+                    self._owner[sid] = o
+                    return o
+            except KiloUnavailable:
+                continue
+        return self.parts[0]
+
+    def session(self, sid: str, d: str):
+        return self._owner_of(sid, d).session(sid, d)
+
+    def messages(self, sid: str, d: str) -> list:
+        return self._owner_of(sid, d).messages(sid, d)
+
+    def children(self, sid: str, d: str) -> list:
+        o = self._owner_of(sid, d)
+        kids = o.children(sid, d) or []
+        for k in kids:
+            if k.get("id"):
+                self._owner[k["id"]] = o
+        return kids
+
+    def todo(self, sid: str, d: str):
+        return self._owner_of(sid, d).todo(sid, d)
+
+    def _all(self, name: str, d: str) -> list:
+        out: list = []
+        for o in self.parts:
+            try:
+                out += getattr(o, name)(d) or []
+            except KiloUnavailable:
+                continue
+        return out
+
+    def questions(self, d: str) -> list:
+        return self._all("questions", d)
+
+    def permissions(self, d: str) -> list:
+        return self._all("permissions", d)
+
+    def mcp(self, d: str):
+        return self.parts[0].mcp(d)
+
+    def config(self, d: str):
+        return self.parts[0].config(d)
+
+    def capability(self, name: str, path: str, d: str):
+        return self.parts[0].capability(name, path, d)
+
+    def events(self, d: str, stop: threading.Event):
+        return self.parts[0].events(d, stop)
+
+
+def observer_for(table: dict, secret) -> object:
+    """The observer of one client table ([client] or [clients.<name>]). `secret(table)` is
+    its password (Profile.secret(table, "password"))."""
+    table = table or {}
+    kind = str(table.get("kind") or "kilo").lower()
+    pw = secret(table)
+    if kind == "opencode":
+        url = table.get("url") or "http://127.0.0.1:4097"
+        api = str(table.get("api") or "auto").lower()
+        if api == "oc1":
+            return OpenCodeV1Observer(url, password=pw)
+        if api == "oc2":
+            return Oc2Observer(url, password=pw)
+        from .adapters.opencode import OpenCodeClient
+        try:
+            api = OpenCodeClient(url, password=pw).detect()
+        except Exception:                                        # noqa: BLE001
+            api = "oc2"           # unreachable now: assume the current line; probes say down
+        return Oc2Observer(url, password=pw) if api == "oc2" else \
+            OpenCodeV1Observer(url, password=pw)
+    return KiloObserver(table.get("url") or "http://127.0.0.1:4096", password=pw)
+
+
+def project_observer(P) -> object:
+    """KiloObserver for a Kilo project, built exactly as before; an OpenCode observer for an
+    OpenCode project; a MultiObserver when the profile adds [clients.<name>] servers."""
+    prof = P.profile
+    sec = lambda t: prof.secret(t, "password")                   # noqa: E731
+    base = observer_for(prof.client, sec)
+    extra = (getattr(prof, "raw", None) or {}).get("clients") or {}
+    if not isinstance(extra, dict) or not extra:
+        return base
+    return MultiObserver([base] + [observer_for(t, sec) for t in extra.values()
+                                   if isinstance(t, dict)])
+
+
 # --------------------------------------------------------------------------- normalization
 
 def sanitize_server(name: str) -> str:
@@ -1314,10 +1515,7 @@ class TelemetryBridge:
         self.projects = {P.id: P for P in projects}
         self.reader = CoordReader(store_path)
         self.foundry = foundry
-        self.obs = observers or {
-            P.id: KiloObserver(P.profile.client.get("url") or "http://127.0.0.1:4096",
-                               password=P.profile.secret(P.profile.client, "password"))
-            for P in projects}
+        self.obs = observers or {P.id: project_observer(P) for P in projects}
         self.source_id = source_id or f"bridge:{socket.gethostname()}"
         self.poll_s = poll_s
         self.replay_sessions = replay_sessions
@@ -1326,6 +1524,8 @@ class TelemetryBridge:
         self.clock = clock
         self.started = clock()
         secrets_ = {o.secret for o in self.obs.values() if o.secret}
+        for o in self.obs.values():                  # every server of a MultiObserver
+            secrets_ |= set(getattr(o, "secrets", ()) or ())
         secrets_ |= {getattr(foundry, "key", "")} | set(extra_secrets)
         from foundry_training.redact import Redactor
         self.redactor = Redactor({s for s in secrets_ if s})

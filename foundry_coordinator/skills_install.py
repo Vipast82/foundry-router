@@ -36,6 +36,11 @@ _REPO = os.path.dirname(_HERE)
 def settings(profile) -> dict:
     raw = (getattr(profile, "raw", None) or {}).get("skills") or {}
     out = dict(DEFAULTS)
+    # an OpenCode project reads skills from .opencode/skills (Kilo: .kilo/skills, as before)
+    kind = (getattr(profile, "client", None) or {}).get("kind", "kilo")
+    if kind == "opencode":
+        from foundry_automation.agent_backends import OPENCODE
+        out["target"] = OPENCODE.skills_dir
     if isinstance(raw, dict):
         out.update({k: raw[k] for k in DEFAULTS if k in raw})
     names = out.get("install") or []
@@ -295,7 +300,7 @@ def refresh_kilo(engine, P, out: dict) -> dict:
         _event(engine.store, pid, "skills_kilo_skipped", {"why": str(e)[:500], "skills": changed})
     if (res["main"] or {}).get("applied"):
         client_requests.request(
-            engine.state_dir, "reload_kilo", pid,
+            engine.state_dir, client_requests.reload_kind(P.profile), pid,
             f"skills {', '.join(changed)} changed the kilo.jsonc skill allows",
             detail={"skills": changed, "backup": res["main"].get("backup")},
             store=engine.store, clock=engine.clock)

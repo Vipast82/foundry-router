@@ -211,6 +211,44 @@ class Profile:
         return os.environ.get(name, "") if name else ""
 
 
+_CLIENT_APIS = ("auto", "oc1", "oc2")
+_CLIENT_ROLES = ("implementer", "helper", "lead")
+
+
+def _client_tables(path: str, client: dict, raw: dict) -> None:
+    """[client].api, [clients.<name>] and [client_roles] (v0.181.247, OpenCode beside Kilo)."""
+    if str(client.get("api") or "auto") not in _CLIENT_APIS:
+        raise ProfileError(f"{path}: client.api must be auto, oc1 or oc2")
+    extra = raw.get("clients")
+    if extra is None:
+        extra = {}
+    if not isinstance(extra, dict):
+        raise ProfileError(f"{path}: [clients] must be a table of named client tables")
+    for name, t in extra.items():
+        if name == "default" or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", str(name)):
+            raise ProfileError(f"{path}: clients.{name}: a name of letters, digits, - or _ "
+                               f"(not 'default')")
+        if not isinstance(t, dict):
+            raise ProfileError(f"{path}: clients.{name} must be a table")
+        if t.get("kind") not in ("kilo", "opencode"):
+            raise ProfileError(f"{path}: clients.{name}.kind must be kilo or opencode")
+        if str(t.get("api") or "auto") not in _CLIENT_APIS:
+            raise ProfileError(f"{path}: clients.{name}.api must be auto, oc1 or oc2")
+        if "agents" in t and not (isinstance(t["agents"], dict) and all(
+                isinstance(v, str) for v in t["agents"].values())):
+            raise ProfileError(f"{path}: clients.{name}.agents must map agent names to names")
+    roles = raw.get("client_roles") or {}
+    if not isinstance(roles, dict):
+        raise ProfileError(f"{path}: [client_roles] must be a table")
+    for role, name in roles.items():
+        if role not in _CLIENT_ROLES:
+            raise ProfileError(f"{path}: client_roles.{role}: roles are "
+                               f"{', '.join(_CLIENT_ROLES)}")
+        if name not in ("default", "") and name not in extra:
+            raise ProfileError(f"{path}: client_roles.{role} = {name!r} names no [clients] "
+                               f"table")
+
+
 def _walk_secrets(d: Any, where: str = "") -> list[str]:
     bad = []
     if isinstance(d, dict):
@@ -353,8 +391,10 @@ def from_raw(raw: dict, path: str, digest: str = "") -> Profile:
     if not adapter and tasks.get("source") not in ("json", "toml"):
         raise ProfileError(f"{path}: give tasks.source = json|toml, or an adapter.module")
     client = dict(raw.get("client") or {})
-    if client.get("kind", "kilo") not in ("kilo", "fake", "scripted"):
-        raise ProfileError(f"{path}: client.kind must be kilo (or fake/scripted for tests)")
+    if client.get("kind", "kilo") not in ("kilo", "opencode", "fake", "scripted"):
+        raise ProfileError(f"{path}: client.kind must be kilo or opencode (or fake/scripted "
+                           f"for tests)")
+    _client_tables(path, client, raw)
     publish = dict(raw.get("publish") or {})
     if publish.get("mode", "none") not in ("none", "push", "verify_only"):
         raise ProfileError(f"{path}: publish.mode must be none, push or verify_only")

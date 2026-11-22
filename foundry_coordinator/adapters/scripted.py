@@ -22,7 +22,7 @@ import time
 import uuid
 
 from .base import CodingClient, SessionState, parse_report
-from .kilo import foundry_denial
+from .denial import foundry_denial
 
 
 def load_callable(spec: str):

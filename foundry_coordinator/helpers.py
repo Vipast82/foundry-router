@@ -34,6 +34,7 @@ from typing import Callable, Optional
 
 from . import states as S
 from .adapters.foundry import FoundryError, admitted_routes, pinned_meta
+from .adapters.clientset import for_role, worker_client_of
 from .store import add_column
 
 OPTIONAL_KINDS = ("code_proposal", "test_design", "debug_advice", "exploration")
@@ -673,10 +674,10 @@ class HelperManager:
             # Kilo accepts prompt_async before resolving the model. A local
             # filter failure otherwise leaves only a user message, which looks
             # busy until the full helper timeout. Direct lanes bypass Kilo.
-            check_model = getattr(P.client, 'model_config_problem', None)
+            check_model = getattr(for_role(P.client, 'helper'), 'model_config_problem', None)
             if u.get('mode') != 'direct' and callable(check_model):
                 try:
-                    read = getattr(P.client, 'effective_config', None)
+                    read = getattr(for_role(P.client, 'helper'), 'effective_config', None)
                     if kcfg is None and callable(read):
                         kcfg = read(P.profile.workspace)
                     problem = (check_model(P.profile.workspace, persona, kcfg)
@@ -813,7 +814,8 @@ class HelperManager:
             try:
                 P.foundry.bind(sid, pid, tid, t["run_id"], "helper", persona,
                                parent=t["session_id"] or "", meta=pin or None,
-                               purpose=u["kind"], worker_client=h["worker_client"],
+                               purpose=u["kind"],
+                               worker_client=worker_client_of(P.client, sid, h["worker_client"]),
                                assignment={"unit": u["unit_id"],
                                            "responsibility": u["responsibility"],
                                            "files": u["files"], "kind": u["kind"],

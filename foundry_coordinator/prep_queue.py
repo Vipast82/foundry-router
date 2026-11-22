@@ -717,10 +717,12 @@ def _after_action(c, P, a: str, cfg: dict, batch_id: str) -> str:
         return f"kilo.jsonc: applied={out.get('applied')} changed={out.get('changed')}"
     if a == "reload_kilo":
         from . import client_requests
-        rec = client_requests.request(c.state_dir, "reload_kilo", pid,
+        P = c.projects.get(pid) if hasattr(c, "projects") else None
+        kind = client_requests.reload_kind(P.profile) if P is not None else "reload_kilo"
+        rec = client_requests.request(c.state_dir, kind, pid,
                                       f"prep queue batch {batch_id} landed", store=c.store,
                                       clock=c.clock)
-        return f"reload_kilo requested ({rec['id']})"
+        return f"{kind} requested ({rec['id']})"
     pre, _, arg = a.partition(":")
     arg = arg.strip()
     if pre == "resume":

@@ -16,7 +16,7 @@ from collections import defaultdict
 from typing import Optional
 
 from . import correlate, curate as C, episodes as E
-from .adapters import cline, coordinator, foundry, gate, git as G, kilo
+from .adapters import cline, coordinator, foundry, gate, git as G, kilo, opencode
 from .config import TrainingProject, unbound_of
 from .ingest import Ingestor
 from .store import TrainingStore
@@ -55,8 +55,14 @@ class Pipeline:
 
     # -- ingestion ---------------------------------------------------------------------
 
+    def ingest_opencode(self, api: dict) -> dict:
+        """OpenCode sessions through its server API (1.x or 2.x), normalized like Kilo's and
+        tagged `opencode` (v0.181.247)."""
+        return self.ingest_kilo(api=api, agent="opencode")
+
     def ingest_kilo(self, exports=(), api: Optional[dict] = None, db: Optional[str] = None,
-                    directory: str = "") -> dict:
+                    directory: str = "", agent: str = "kilo") -> dict:
+        src = "opencode" if agent == "opencode" else "kilo"
         sessions = [kilo.from_export(p) for p in exports]
         snap = None
         mode = "export"
@@ -70,12 +76,16 @@ class Pipeline:
                     continue
                 seen.add(sid)
                 try:
-                    s = kilo.from_api(api["url"], sid, api.get("password", ""),
-                                      api.get("directory", ""))
+                    if src == "opencode":
+                        s = opencode.from_api(api["url"], sid, api.get("password", ""),
+                                              api.get("directory", ""), api.get("api", "auto"))
+                    else:
+                        s = kilo.from_api(api["url"], sid, api.get("password", ""),
+                                          api.get("directory", ""))
                 except Exception as e:                            # noqa: BLE001
                     # recorded, not fatal: the other sessions are still ingested
-                    self.store.gap(api.get("project_id") or "", sid, "kilo",
-                                   "kilo-session-unavailable", f"{type(e).__name__}: {e}"[:300])
+                    self.store.gap(api.get("project_id") or "", sid, src,
+                                   f"{src}-session-unavailable", f"{type(e).__name__}: {e}"[:300])
                     continue
                 sessions.append(s)
                 todo.extend(s.get("children") or [])
@@ -90,15 +100,15 @@ class Pipeline:
                 cfg = self.projects[pid]
                 return kilo.normalize(payload, pid, raw_ref, redaction, store=self.store,
                                       artifact_roots=cfg.artifact_dirs())
-            counts = self.ing.run(f"kilo:{mode}", self._filter(
-                kilo.session_records(sessions, plist, mode), "kilo"), norm)
+            counts = self.ing.run(f"{src}:{mode}", self._filter(
+                kilo.session_records(sessions, plist, mode), src), norm)
             for s in sessions:
                 pid, _ = kilo.project_of(s, plist)
                 if pid and s.get("_sanitized"):
                     self.store.gap(pid, s["info"].get("id"), "kilo", "sanitized-export",
                                    "kilo export --sanitize: text and tool data are placeholders")
             for pid in {kilo.project_of(s, plist)[0] for s in sessions}:
-                if pid and self._allowed(pid, "kilo"):
+                if pid and self._allowed(pid, src):
                     self.context_gaps(pid)
             return counts
         finally:
@@ -235,7 +245,8 @@ class Pipeline:
     # -- coordinator closeout queue -------------------------------------------------------
 
     def process_queue(self, spool: str, foundry_url: str = "", foundry_key: str = "",
-                      kilo_api: Optional[dict] = None) -> list[dict]:
+                      kilo_api: Optional[dict] = None,
+                      opencode_api: Optional[dict] = None) -> list[dict]:
         """Coordinator closeout manifests (one JSON file per finished task):
         ingest what they point at, curate, record completeness. A manifest
         is moved to done/ only after it was processed; a failure leaves it
@@ -286,6 +297,13 @@ class Pipeline:
                     self.ingest_kilo(api={**kilo_api, "sessions": kilo_sessions,
                                           "project_id": pid,
                                           "directory": kilo_api.get("directory")
+                                          or self._cfg(pid).workspace})
+                oc_sessions = [s for s in m.get("sessions") or []
+                               if (roles.get(s) or {}).get("client") == "opencode"]
+                if opencode_api and oc_sessions:
+                    self.ingest_opencode({**opencode_api, "sessions": oc_sessions,
+                                          "project_id": pid,
+                                          "directory": opencode_api.get("directory")
                                           or self._cfg(pid).workspace})
                 if foundry_url and not done_foundry:
                     self.ingest_foundry(url=foundry_url, key=foundry_key)

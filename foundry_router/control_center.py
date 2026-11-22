@@ -299,7 +299,7 @@ PLAYBOOK_FILE = re.compile(r"^(?:templates|howto|fixes|scripts|formats)/"
 CLIENT_ACTIONS = ("client_restart", "client_reload_kilo_config", "client_service_enable")
 SERVICE_COMPONENTS = ("blender", "acestep-music", "stable-audio", "kokoro-tts", "chatterbox-tts")
 CLIENT_TOGGLE = ("rojo",) + SERVICE_COMPONENTS
-CLIENT_COMPONENTS = ("kilo", "coordinator", "rojo", "supervisor") + SERVICE_COMPONENTS
+CLIENT_COMPONENTS = ("kilo", "opencode", "coordinator", "rojo", "supervisor") + SERVICE_COMPONENTS
 CLIENT_FEATURE = "stack_control"
 SOURCE_KINDS = ("bridge", "coordinator", "client")
 # launch assistant (2026-10-21): a plain-language request becomes a checked plan

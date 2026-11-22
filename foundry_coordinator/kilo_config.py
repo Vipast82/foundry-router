@@ -36,6 +36,7 @@ import shutil
 import time
 from typing import Optional
 
+from foundry_automation import agent_backends as AB
 from foundry_automation import jsonc
 from foundry_automation import role_rules as RR
 from foundry_automation import service_map as SM
@@ -126,9 +127,29 @@ def with_skill_maps(blocks: dict, agents: dict, role_rules: Optional[dict]) -> d
 
 
 def kilo_path(profile) -> str:
+    """The agent config file the coordinator edits: [config_pull] kilo_config, else the
+    project's own file for its [client] kind (`kilo.jsonc`; an OpenCode project:
+    `opencode.jsonc`, which takes the same agent / permission / mcp / instructions keys)."""
     cp = (getattr(profile, "raw", None) or {}).get("config_pull") or {}
     p = str(cp.get("kilo_config") or "")
-    return p if p else os.path.join(profile.workspace, "kilo.jsonc")
+    if p:
+        return p
+    kind = (getattr(profile, "client", None) or {}).get("kind", "kilo")
+    return os.path.join(profile.workspace, AB.spec(kind).config_name)
+
+
+def agent_config_paths(profile) -> list[str]:
+    """Every agent config file of the project: kilo_path(), then the files of the servers
+    [clients.<name>] adds (an OpenCode server beside Kilo reads opencode.jsonc)."""
+    out = [kilo_path(profile)]
+    extra = (getattr(profile, "raw", None) or {}).get("clients") or {}
+    for t in extra.values() if isinstance(extra, dict) else ():
+        if isinstance(t, dict) and t.get("kind") in AB.SPECS:
+            f = str(t.get("config") or "") or os.path.join(profile.workspace,
+                                                           AB.spec(t["kind"]).config_name)
+            if f not in out:
+                out.append(f)
+    return out
 
 
 def merge_block(old: Optional[dict], generated: dict) -> dict:

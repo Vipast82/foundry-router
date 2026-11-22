@@ -48,6 +48,7 @@ import uuid
 from typing import Any, Optional
 
 from .adapters.foundry import FoundryError
+from .adapters.clientset import for_role, worker_client_of
 from .obligations import clause_negated, directive_violations, is_model_actor, migrate_schema
 
 SCHEMA_NAME = "schema:lead"
@@ -1500,7 +1501,7 @@ class LeadManager:
             "Foundry cannot report served models: every call would be unverifiable")
         # Kilo: the persona must be a configured model with limits, not filtered,
         # and the lead agent must exist
-        client = getattr(P, "client", None)
+        client = for_role(getattr(P, "client", None), "lead")
         cfg, cfg_err = None, ""
         ecfg = getattr(client, "effective_config", None)
         if callable(ecfg):
@@ -2214,7 +2215,8 @@ class LeadManager:
                                persona, parent=t.get("session_id") or "",
                                meta={"lead_case": case["case_id"], "op": key},
                                purpose=LEAD_PURPOSE,
-                               worker_client=self.settings(P)["kilo_client"])
+                               worker_client=worker_client_of(P.client, sid,
+                                                              self.settings(P)["kilo_client"]))
             except Exception as e:                               # noqa: BLE001
                 # unbound calls would not be gated: never run them
                 self._abort(P, sid, directory)

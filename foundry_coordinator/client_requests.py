@@ -9,6 +9,7 @@ a restart-scoped setting), it writes a request file:
     {"id", "kind", "project", "reason", "ts", "safe_point": true, "detail": {...}}
 
 kinds:  reload_kilo          restart the Kilo server at a safe point
+        reload_opencode      restart the OpenCode server at a safe point (v0.181.247)
         restart_coordinator  restart the coordinator at a safe point
         start_service        start (or restart, when unhealthy) a managed service the
                              sprint needs; detail {"service", "component"}; one file per
@@ -31,7 +32,18 @@ import uuid
 from typing import Optional
 
 DIR = "client-requests"
-KINDS = ("reload_kilo", "restart_coordinator", "start_service")
+KINDS = ("reload_kilo", "reload_opencode", "restart_coordinator", "start_service")
+
+
+def reload_kind(profile, path: str = "") -> str:
+    """The reload request for an agent config file: reload_opencode for opencode.json(c) or
+    an OpenCode project, reload_kilo (as before) for everything else."""
+    name = os.path.basename(path or "").lower()
+    if name.startswith("opencode.json"):
+        return "reload_opencode"
+    if not path and ((getattr(profile, "client", None) or {}).get("kind") == "opencode"):
+        return "reload_opencode"
+    return "reload_kilo"
 
 
 def _dir(state_dir: str) -> str:
