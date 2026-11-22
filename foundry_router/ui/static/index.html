@@ -10044,6 +10044,40 @@ function pfTiers(out) {
   return t ? ` (${t})` : "";
 }
 
+async function loadLadder() {
+  const out = $("#ld-out"), form = $("#ld-form");
+  if (!out) return;
+  let d;
+  try { d = await api("bench/ladder"); } catch (e) { out.textContent = e.message; return; }
+  const fam = (d.families || []).map(f => `<li>${esc(f.sentence)}${f.stale.length
+      ? ` <span class="hint">(${esc(f.stale.join(", "))}: runs on an older version only)</span>` : ""}</li>`).join("");
+  const ppl = (d.personas || []).map(p => `<details><summary><b>${esc(p.persona)}</b>
+      <span class="hint">${esc(p.category || "no category")}; ladder ${esc(p.ladder.join(" > ") || "none")}${p.ladder_set ? " (set here)" : ""}</span>:
+      ${esc(p.verdict)}</summary><ul>${p.families.map(f => `<li>${esc(f.sentence)}</li>`).join("")}</ul></details>`).join("");
+  out.innerHTML = d.note ? `<p>${esc(d.note)}</p>`
+    : `<h5 style="margin:6px 0">By kind of work</h5><ul>${fam}</ul>
+       <h5 style="margin:6px 0">By persona</h5>${ppl || "<p>No enabled persona has a model chain.</p>"}`;
+  const th = Object.entries(d.thresholds || {}).map(([s, v]) => `<label class="nw">${esc(s)}
+      <input type="number" min="0" max="100" step="1" data-ld-th="${esc(s)}" value="${v}" style="width:60px"></label>`).join(" ");
+  const cats = Object.entries(d.category_families || {}).map(([c, v]) => `<div class="row tight">
+      <label style="min-width:110px">${esc(c)}</label><input size="70" data-ld-cat="${esc(c)}" value="${esc(v.join(", "))}"></div>`).join("");
+  const lads = (d.personas || []).map(p => `<div class="row tight">
+      <label style="min-width:200px">${esc(p.persona)}</label><input size="70" data-ld-p="${esc(p.persona)}"
+      value="${p.ladder_set ? esc(p.ladder.join(", ")) : ""}" placeholder="${esc(p.ladder.join(", ") || "its chain's local models")}"></div>`).join("");
+  form.innerHTML = `<p class="hint">Threshold per suite (default ${d.default_threshold}):</p><div class="row">${th}</div>
+    <p class="hint">Suites each benchmark category is judged on, separated by commas:</p>${cats}
+    <p class="hint">A persona's local rungs in order, separated by commas. Empty = the local models of its own chain:</p>${lads}`;
+  $("#ld-save").onclick = async () => {
+    const body = {ladder_thresholds: {}, ladder_families: {}, local_ladders: {}};
+    document.querySelectorAll("[data-ld-th]").forEach(i => {
+      if (+i.value !== d.default_threshold) body.ladder_thresholds[i.dataset.ldTh] = +i.value; });
+    document.querySelectorAll("[data-ld-cat]").forEach(i => { body.ladder_families[i.dataset.ldCat] = i.value; });
+    document.querySelectorAll("[data-ld-p]").forEach(i => { if (i.value.trim()) body.local_ladders[i.dataset.ldP] = i.value; });
+    try { await api("config/bench", {method: "POST", body}); $("#ld-msg").textContent = "saved"; loadLadder(); }
+    catch (e) { $("#ld-msg").textContent = e.message; }
+  };
+}
+
 async function tabBench() {
   const [d, md] = await Promise.all([api("bench"), api("models")]);
   const r = d.run || {}, suites = d.suites || [], runs = d.runs || [];
@@ -10106,6 +10140,19 @@ async function tabBench() {
       </div>
       <div id="pf-list"></div>
       <div id="pf-out" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <div class="card-h">Local ladder: which local model is good enough, for what</div>
+      <p class="hint" style="max-width:96ch">Each suite is a kind of work with a threshold. A model
+        passes it when the mean of its latest runs on the current version of the suite reaches the
+        threshold, and passes "through" a tier when every tier up to it does. For each persona the
+        ladder is the local models of its own chain, judged on the kinds of work of its category.
+        A report only: nothing here changes a route.</p>
+      <div id="ld-out" class="hint">reading the runs...</div>
+      <details style="margin-top:8px"><summary>Thresholds and ladders</summary>
+        <div id="ld-form"></div>
+        <div class="row tight"><button class="act" id="ld-save">Save</button>
+          <span class="hint" id="ld-msg"></span></div></details>
     </div>
     <div class="card">
       <div class="card-h">Suites <span class="hint" id="suite-msg" style="margin-left:8px"></span></div>
@@ -10351,6 +10398,7 @@ async function tabBench() {
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }
   };
+  loadLadder();
   if ($("#bench-summaries")) $("#bench-summaries").onclick = async () => {
     try {
       const out = await api("bench/summaries", {method: "POST", body: {

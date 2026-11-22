@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 log = logging.getLogger(__name__)
 
@@ -1047,6 +1047,37 @@ class BenchConfig(BaseModel):
     suite weighted 0 is still run and still shown; it is left out of the
     composite and named as excluded."""
     suite_weights: dict = Field(default_factory=dict)
+    # The all-local ladder report (benchladder.py, v0.181.245). A kind of work
+    # (a suite) is passed at this score; 70 for a suite not named here.
+    ladder_thresholds: dict = Field(default_factory=dict)
+    # persona -> its local rungs in order; a persona not named here uses the
+    # local models of its own chain. The report reads these and changes nothing.
+    local_ladders: dict = Field(default_factory=dict)
+    # benchmark category -> the suites a persona of that category is judged on;
+    # a category not named here uses benchladder.CATEGORY_FAMILIES.
+    ladder_families: dict = Field(default_factory=dict)
+
+    @field_validator("ladder_thresholds")
+    @classmethod
+    def _thresholds(cls, v):
+        out = {}
+        for k, x in (v or {}).items():
+            n = float(x)
+            if not 0 <= n <= 100:
+                raise ValueError(f"the threshold for {k} must be 0 to 100, not {x}")
+            out[str(k)] = n
+        return out
+
+    @field_validator("local_ladders", "ladder_families")
+    @classmethod
+    def _lists(cls, v):
+        out = {}
+        for k, x in (v or {}).items():
+            items = x.split(",") if isinstance(x, str) else list(x or [])
+            items = [str(i).strip() for i in items if str(i).strip()]
+            if items:
+                out[str(k)] = items
+        return out
 
 
 class A2AAgentConfig(BaseModel):

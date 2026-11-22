@@ -168,6 +168,12 @@ decision for the owner:
 
 ### 9. The all-local ladder report (plan A9)
 
+**Built in v0.181.245** as the "Local ladder" card on the Benchmark tab and
+`GET /admin/api/bench/ladder`: a threshold per suite (70 by default), each
+model's latest three runs on the current version of a suite, and per persona
+the first rung of its own chain that is good enough for each kind of work its
+category is judged on. Reports only. What was proposed:
+
 The plan asks for a rule on top of the benchmark: per kind of work, which
 local rung is good enough, and which cloud rungs could go. The cards now carry
 what that needs (tier scores per suite, speed, tokens). Missing: a threshold

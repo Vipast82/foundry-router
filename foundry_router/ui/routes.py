@@ -3147,6 +3147,18 @@ async def bench_failures(request: Request, profile_id: int = 0, suite: str = "",
     return await asyncio.to_thread(go)
 
 
+@router.get("/admin/api/bench/ladder")
+async def bench_ladder(request: Request):
+    """The all-local ladder report (v0.181.245, plan A9): per kind of work,
+    which local model passes its threshold and how far; per persona, the rung
+    of its own chain that is good enough for each kind of work it is judged on,
+    and the cloud rungs no kind of work still needs. A report: nothing in it
+    changes a route."""
+    from .. import benchladder
+    svc = _svc(request)
+    return await asyncio.to_thread(benchladder.report, svc)
+
+
 @router.post("/admin/api/config/bench")
 async def set_bench(request: Request):
     """The composite's weights, which decide the one number a profile reports
@@ -3155,7 +3167,7 @@ async def set_bench(request: Request):
     from ..errors import describe_exception
     svc = _svc(request)
     body = await request.json()
-    allowed = {"suite_weights"}
+    allowed = {"suite_weights", "ladder_thresholds", "local_ladders", "ladder_families"}
     updates = {k: v for k, v in body.items() if k in allowed}
     try:
         BenchConfig(**{**svc.config_store.config.bench.model_dump(), **updates})

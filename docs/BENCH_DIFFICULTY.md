@@ -573,6 +573,47 @@ wrong figure that happens to be on another line about the same subject.
 The whole suite on a frontier model through the subscription backend is about
 445,000 input tokens.
 
+## The all-local ladder report (v0.181.245)
+
+Not a suite: a rule on top of the suites, the ninth addition in
+`docs/BENCH_GAPS.md` and plan A9. On the Benchmark tab, the "Local ladder"
+card; on the wire, `GET /admin/api/bench/ladder` (`benchladder.report`).
+
+**The rule.** Every suite is a kind of work with a threshold, 70 unless one is
+set. A model's score on a kind of work is the mean of its latest three
+finished runs on the current version of that suite; runs on an older version
+are a different test and are named, not counted. A model passes a kind of
+work when that score reaches the threshold, and passes "through" a tier when
+every tier up to it (from the cases' own tiers, or for a suite with none,
+from what every model run on it did) reaches the threshold too.
+
+**By kind of work** it reads like the plan's example: "Grounded answers
+(threshold 70): qwen3.8-flash passes at 72.9, through medium, 31 s a case;
+hard needs claude-opus-5-5". Where no local model passes, it names the best
+local score and the cloud model that does pass.
+
+**By persona.** The ladder is the local models of the persona's own chain
+(`pinned_models`), in order, or a list set on the card. The kinds of work are
+those of its benchmark category: general_chat is judged on grounded answers,
+instructions in the data, a held rule, summaries, long-context recall and
+output a program reads; coding on code reasoning, the protocol, output a
+program reads, tool work in steps, find and use tools and the replay;
+agentic on find and use tools, tool picking, tool work in steps,
+instructions in the data, the protocol and the replay. Each list can be set
+on the card. For each kind of work the report names the first rung of the
+ladder that passes, or the first cloud model in the chain that does. A cloud
+rung that no kind of work still needs "could go" - said only when every kind
+of work the persona is judged on has been measured on its models.
+
+It is a report. Nothing in it changes a route, a persona or a chain; the
+settings it reads (`bench.ladder_thresholds`, `bench.local_ladders`,
+`bench.ladder_families`) are used by nothing else. A cloud rung in a chain
+also covers a local model that is busy or down, which a benchmark cannot
+measure, so "could go" is evidence for a decision and not the decision.
+
+On 0.181.245's release the live router held no finished runs, so the card read
+"nothing measured yet". It fills in as suites are run on the Benchmark tab.
+
 ## Rebuilding
 
 Rebuild all three suites to use this. Sonnet's protocol and replay numbers

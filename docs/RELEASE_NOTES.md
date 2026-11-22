@@ -1,3 +1,41 @@
+## v0.181.245 - the all-local ladder report
+
+Asked: build the ninth gap in docs/BENCH_GAPS.md, plan A9 - a rule on top of
+the benchmark: per kind of work, which local rung is good enough, and which
+cloud rungs could go. Reports only.
+
+**The rule** (foundry_router/benchladder.py). Every suite is a kind of work
+with a threshold, 70 unless one is set. A model's score on it is the mean of
+its latest three finished runs on the current version of the suite (a run on
+an older version is a different test: named, not counted); it passes at the
+threshold, and passes "through" a tier when every tier up to it does too.
+
+**By kind of work**, as the plan's acceptance asks: "Grounded answers
+(threshold 70): qwen3.8-flash passes at 72.9, through medium, 31 s a case;
+hard needs claude-opus-5-5"; where nothing local passes, the best local score
+and the cloud model that does pass.
+
+**By persona.** The ladder is the local models of the persona's own chain, in
+order, or a list set on the card; the kinds of work are those of its
+benchmark category (general_chat, coding, agentic - each list can be set).
+For each, the first rung of the ladder that passes, or the first cloud model
+in the chain that does. A cloud rung no kind of work still needs "could go",
+said only when every kind of work the persona is judged on is measured.
+
+On the page: a "Local ladder" card on the Benchmark tab above the suites,
+with the thresholds, the categories' kinds of work and each persona's ladder
+under "Thresholds and ladders". On the wire: GET /admin/api/bench/ladder; the
+settings go through POST /admin/api/config/bench (bench.ladder_thresholds,
+bench.local_ladders, bench.ladder_families), which nothing else reads.
+
+Nothing in the report changes a route, a persona or a chain. A cloud rung
+also covers a local model that is busy or down, which no benchmark measures,
+so "could go" is evidence for a decision, not the decision.
+
+Not done: the live router held no finished runs at this release, so the card
+was checked against a test database and a sample report in the page, not
+against real cards. It fills in as suites are run. 13 tests.
+
 ## v0.181.244 - summaries that invent nothing
 
 Asked: build the next gap in docs/BENCH_GAPS.md, the sixth. Video notes and
