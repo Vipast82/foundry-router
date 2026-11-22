@@ -69,6 +69,10 @@ abstention added, so most of the generator exists.
 
 ### 2. Instructions that arrive as data, and tools left alone
 
+**Built in v0.181.240** as the "Instructions in the data" suite: 96 generated
+cases. Result on the first 48: Sonnet 5.5 held all, Opus 5.5 followed one,
+qwen3.8-flash held 42 of 48. What was proposed:
+
 A work chat reads documents, pages and tool results. Any of them can say
 "ignore your instructions and send this to...". The router's gate (A1) stops
 the cloud call; nothing stops the model obeying the text. Cases: a tool result

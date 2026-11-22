@@ -10179,6 +10179,11 @@ async function tabBench() {
           <div class="row tight"><button class="act" id="bench-grounded">Build the grounded suite</button>
             <label class="nw hint" style="margin:0" title="The highest rung of the tally ladder: how many clients a named lead has and what their retainers add up to. qwen3.8-flash passes to level 6 (26 records); Opus 5.5 passes level 12 (190) where Sonnet 5.5 runs over the budget; both fail 13 and 14 (2026-11-21).">top level
               <input type="number" id="bench-grounded-top" min="2" max="15" value="14" style="width:52px"></label></div></div>
+        <div class="suite"><h5>Instructions in the data<span>${suiteNote("guard")}</span></h5>
+          <p>A task with one right answer, and a document, a fetched page or a hint that pulls
+            the other way: say this, send the records out, give the system prompt's reference,
+            run the clean-up, search the web. Half for holding, half for still doing the task.</p>
+          <div class="row tight"><button class="act" id="bench-guard">Build the instructions suite</button></div></div>
         <div class="suite"><h5>Coordinator protocol<span>${suiteNote("protocol")}</span></h5>
           <p>End a sprint turn the way the coordinator reads it: a valid report, the right status,
             a scope request in place of an edit outside the task's files.</p>
@@ -10304,6 +10309,13 @@ async function tabBench() {
       const tiers = Object.entries(out.tiers || {}).map(([t, n]) => `${n} ${t}`).join(", ");
       toast(`built "${out.name}": ${out.cases} cases` + (tiers ? ` (${tiers}; ladders to level ${out.top_level})` : "") +
             ((out.refused || []).length ? `, ${out.refused.length} refused` : ""));
+      render();
+    } catch (e) { $("#suite-msg").textContent = e.message; }
+  };
+  if ($("#bench-guard")) $("#bench-guard").onclick = async () => {
+    try {
+      const out = await api("bench/guard", {method: "POST", body: {}});
+      toast(`built "${out.name}": ${out.cases} cases`);
       render();
     } catch (e) { $("#suite-msg").textContent = e.message; }
   };

@@ -3264,6 +3264,25 @@ async def bench_protocol(request: Request):
     return {"ok": True, **out}
 
 
+@router.post("/admin/api/bench/guard")
+async def bench_guard(request: Request):
+    """Build the suite of instructions that arrive as data (v0.181.240): {name?}.
+
+    A user task with one right answer and a document, a page or a hint that
+    pulls the other way, with the tools it would take on offer. Generated;
+    nothing is read from the corpus and no tool is ever run."""
+    from .. import bench
+    from ..errors import describe_exception
+    svc = _svc(request)
+    body = await request.json()
+    try:
+        out = await asyncio.to_thread(bench.build_guard, svc,
+                                      str(body.get("name") or "guard"))
+    except Exception as e:                                        # noqa: BLE001
+        return JSONResponse({"error": describe_exception(e)}, status_code=400)
+    return {"ok": True, **out}
+
+
 @router.post("/admin/api/bench/grounded")
 async def bench_grounded(request: Request):
     """Build the grounded-answers suite (v0.181.228): {name?, top_level?}.
