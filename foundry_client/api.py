@@ -127,6 +127,27 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
     def check_update():
         return mgr.update.poll()
 
+    # v0.181.257 (Victor: "build this update feature in to the client, so it can update on
+    # demand / autoupdate"): selfupdate.Updater moves the deploy checkout to a release at a
+    # gap it makes, restarts the coordinator and then this client
+    @app.get("/api/update")
+    def update_status():
+        return mgr.updater.status()
+
+    @app.post("/api/update/apply")
+    async def update_apply(request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        out = mgr.updater.start(str((body or {}).get("tag") or ""))
+        return JSONResponse(out, status_code=409) if out.get("error") else out
+
+    @app.post("/api/update/cancel")
+    def update_cancel():
+        out = mgr.updater.cancel()
+        return JSONResponse(out, status_code=409) if out.get("error") else out
+
     @app.post("/api/client/restart")
     def restart_client():
         """2026-10-28 (Victor: "why can't we have a restart option from the client"): start a

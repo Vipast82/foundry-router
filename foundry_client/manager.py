@@ -90,6 +90,8 @@ class Manager:
         self.link = RouterLink(lambda: self.cfg["client"]["backend_url"], clock)
         self.update = UpdateCheck(lambda: self.cfg["client"].get("update_repo") or
                                   "Vipast82/foundry-router", clock)
+        from .selfupdate import Updater
+        self.updater = Updater(self)
         from .client_requests import RequestQueue
         self.requests = RequestQueue(self)
         from .resources import ResourceWatch
@@ -160,15 +162,19 @@ class Manager:
             self.stop_evt.wait(interval)
 
     def net_loop(self) -> None:
-        """Router link every 30 s; GitHub release check at start and every 6 h. Own thread:
-        both can block for several seconds."""
+        """Router link every 30 s; GitHub release check at start and every
+        client.update_check_minutes (v0.181.257: was a fixed 6 h), then an automatic update
+        when client.auto_update is on. Own thread: both can block for several seconds."""
         next_update = self.clock() + 20
         while not self.stop_evt.is_set():
             try:
                 self.link.poll()
-                if self.cfg["client"].get("update_check", True) and self.clock() >= next_update:
+                cl = self.cfg["client"]
+                if cl.get("update_check", True) and self.clock() >= next_update:
                     self.update.poll()
-                    next_update = self.clock() + 6 * 3600
+                    next_update = self.clock() + 60 * max(5, int(cl.get("update_check_minutes")
+                                                                 or 60))
+                    self.updater.maybe_auto()
             except Exception as e:                                # noqa: BLE001
                 self._event("client", f"background check failed: {type(e).__name__}: {e}")
             self.stop_evt.wait(30)
@@ -181,6 +187,10 @@ class Manager:
             self.net_thread = threading.Thread(target=self.net_loop, name="foundry-client-net",
                                                daemon=True)
             self.net_thread.start()
+            try:
+                self.updater.resume_on_start()     # an update the previous client left running
+            except Exception as e:                                # noqa: BLE001
+                self._event("update", f"could not resume the update: {type(e).__name__}: {e}")
 
     def shutdown(self, stop_components: bool = True) -> None:
         self.stop_evt.set()
@@ -679,7 +689,14 @@ class Manager:
             return {"overall": "error" if bad else "busy" if busy else "idle" if idle else "ok",
                     "components": comps, "config_problems": validate(self.cfg),
                     "events": self.events[-30:], "alerts": list(self.alerts.values()),
-                    "router": self.link.snapshot(), "update": self.update.snapshot()}
+                    "router": self.link.snapshot(), "update": self.update.snapshot(),
+                    "self_update": self._self_update()}
+
+    def _self_update(self) -> dict:
+        try:
+            return self.updater.status()
+        except Exception as e:                                    # noqa: BLE001
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def mcp_status(self, max_age: float = 30.0, probe: Optional[Callable] = None) -> dict:
         """{"mcp": [server probes], "services": [registry rows], "ts"}: the MCP servers Kilo can

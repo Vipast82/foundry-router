@@ -37,8 +37,14 @@ DEFAULTS: dict[str, Any] = {
         "open_settings_on_start": False,
         "unhealthy_restart_seconds": 300,               # a component unhealthy this long is restarted (0 = never)
         "safe_restart_max_wait_minutes": 60,            # a pending safe-point restart warns after this
-        "update_check": True,                           # look for a newer release on GitHub (no auto-update)
+        "update_check": True,                           # look for a newer release on GitHub
         "update_repo": "Vipast82/foundry-router",
+        # v0.181.257 (selfupdate.py): how often the release check runs, whether a newer
+        # release is installed on its own (pause new sessions, wait for a gap, move the deploy
+        # checkout, restart the coordinator and the client), and how long the gap may take
+        "update_check_minutes": 60,
+        "auto_update": False,
+        "update_gap_max_minutes": 60,
         # router relay (relay.py): heartbeat + stack actions for the operator chat.
         # router_key names the keyring entry holding the router key (operator scope)
         "relay_enabled": True,
@@ -186,7 +192,11 @@ def validate(cfg: dict) -> list[str]:
         v = c.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
             errs.append(f"client.{k} must be a whole number, 0 or more")
-    for k in ("relay_enabled", "update_check"):
+    for k, lo in (("update_check_minutes", 5), ("update_gap_max_minutes", 5)):
+        v = c.get(k)
+        if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+            errs.append(f"client.{k} must be a whole number, {lo} or more")
+    for k in ("relay_enabled", "update_check", "auto_update"):
         if not isinstance(c.get(k), bool):
             errs.append(f"client.{k} must be true or false")
     if c.get("secret_store", "auto") not in ("auto", "keyring", "file"):

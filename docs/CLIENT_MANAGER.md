@@ -105,7 +105,43 @@ answers (`/health`, else `/api/version`), its version and whether it is still wa
 port before MCP servers and probes are ready (`/health` reports `warming_up`).
 
 **Updates.** The client looks at the GitHub releases of `client.update_repo` at start and every
-6 hours and shows a banner with a link. It never downloads or installs anything.
+`client.update_check_minutes` (default 60; before v0.181.257 a fixed 6 hours).
+
+**Updating the stack (v0.181.257, `selfupdate.py`).** The status page's Updates card has
+**Update now**, and `client.auto_update` (Settings, Updates; off by default) starts the same
+update when the check finds a release newer than the deploy checkout (`workspace.deploy`)
+holds. One update:
+
+1. **Checks** the release, changing nothing: it fetches the tags; the tag must be on
+   `origin/main` and name its own release in `foundry_router/__init__.py`; it must be newer
+   than what the checkout holds; there must be no modified tracked files; and the checkout
+   must hold no file the release would throw away. A file is a local change when its content
+   at HEAD appears nowhere in the release's history. A deploy snapshot that copies main's
+   files passes; one that kept its own copy of a file is refused, with the file named. The old
+   HEAD is kept as `refs/foundry/pre-update/<id>`.
+2. **Makes a gap:** every project is paused in safe mode (actor `client-update`), so no new
+   sprint session starts. It waits until nothing of the coordinator's is working (the
+   client's safe point: sessions, Lead and repair work, the Studio gate runner), no Lead
+   upgrade is open and the upgrade supervisor holds no lock.
+   `client.update_gap_max_minutes` (default 60) caps the wait. After that the pauses are
+   released and the update fails; an automatic one tries again at the next check.
+3. **Installs:** an online backup of `coordinator.sqlite`, then
+   `git checkout --detach <tag>`.
+4. **Restarts the coordinator** and waits for a heartbeat from the new process naming the
+   new release.
+5. **Resumes** its own pauses (a pause someone else set is never cleared), and restarts the
+   upgrade supervisor.
+6. **Restarts the client:** it checks that the new code imports, then starts a fresh client,
+   which adopts every running component and finishes the update when it runs the new release.
+
+If steps 3–4 fail, the update rolls back: the checkout returns to the old HEAD, the database
+is restored only if the new build migrated it, the coordinator restarts on the old code, and
+the pauses are released. Kilo, OpenCode, Rojo and Blender are never restarted. The router runs
+on its own machine and is not updated by the client. The job is journaled in
+`<state_dir>/client-update.json`, and the last ten updates are kept there, with each step's
+log. A failed automatic update is not tried again for that release; **Update now** still can.
+API: `GET /api/update`, `POST /api/update/apply {tag?}`, `POST /api/update/cancel` (only while
+checking or waiting for the gap).
 
 **Linux.** `foundry-client install-service` writes `~/.config/systemd/user/foundry-client.service`
 (`run --headless`) and enables it; run `loginctl enable-linger $USER` once to start it at boot.
@@ -249,9 +285,9 @@ straight from this file — fix it here, not there.
   by hand after a Rojo restart; the client notices the new session id and says so on the
   status page.
 - **Version mismatch.** The router's Client tab flags a client older or newer than the
-  router. Update by installing the release that matches the router (the tab links it); the
-  client also shows its own update banner when a newer release exists. It never
-  self-updates.
+  router. Update with the Updates card's **Update now** (a source checkout), or by installing
+  the release that matches the router (an installed build; the tab links it). The client
+  also shows its own update banner when a newer release exists.
 
 ## Services and MCP probing (Team Lead piece 5)
 

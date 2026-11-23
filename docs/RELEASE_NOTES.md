@@ -1,3 +1,41 @@
+## v0.181.257 - the Foundry Client updates the stack itself
+
+Victor, 2026-11-23: "Can you build this update feature in to the client, so it can update on
+demand / autoupdate". For the timing he chose "make a gap": new sprint sessions wait while
+the running ones finish, then the update runs.
+
+Until now a release went live by hand: move the deploy checkout to the new tag, then Restart
+client. A Restart client alone leaves the coordinator running on its old code (the new client
+adopts it), which is how the coordinator stayed on v0.181.253 while the router ran .256.
+
+- **Update now:** a new Updates card on the client's status page, and the same button on the
+  "Update available" banner. The card shows the installed release, the newest one, what the
+  update is doing (and what it waits for), the last result, and a Cancel button while nothing
+  has changed yet.
+- **Automatic updates:** `client.auto_update` in Settings, Updates. It ships off. When it's
+  on, the release check (`client.update_check_minutes`, default 60; before this a fixed 6
+  hours) starts an update for a release newer than the deploy checkout holds. A failed
+  automatic update isn't tried again for that release; one that only found no gap is tried
+  again at the next check.
+- **The update** (`foundry_client/selfupdate.py`):
+  - **Check:** the release is checked before anything changes (on main, names its own
+    release, newer, no modified files, no file of the checkout's own that it would replace).
+  - **Gap:** every project is paused in safe mode, and the update waits until nothing of the
+    coordinator's is working (`client.update_gap_max_minutes`, default 60).
+  - **Install and restart:** the database is backed up, the checkout moves to the tag, and the
+    coordinator restarts and must report the new release. Then the pauses are released, the
+    upgrade supervisor restarts, and the client checks the new code imports and restarts
+    itself.
+  - **Rollback:** a failure while installing or restarting puts the old checkout and the
+    coordinator back, and restores the database only if the new build migrated it.
+  - **Not restarted:** Kilo, OpenCode, Rojo and Blender. The router is on its own machine
+    and is not part of this.
+- **The first time:** v0.181.257 itself has to be deployed the old way, because the updater
+  runs inside the client. From then on, **Update now** or automatic updates move the stack.
+- **API:** `GET /api/update`, `POST /api/update/apply {tag?}`, `POST /api/update/cancel`.
+  `/api/status` carries `self_update`.
+- **Docs:** `docs/CLIENT_MANAGER.md` ("Updating the stack").
+
 ## v0.181.256 - OpenCode follow-ups
 
 Victor approved these on 2026-11-23, after the live OpenCode pilot: the local MCP

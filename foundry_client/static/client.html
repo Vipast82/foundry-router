@@ -116,12 +116,21 @@ function renderStatus() {
   const banners = (st.alerts || []).map(a => `<div class="banner warn"><b>${esc(a.text)}</b> <span class="dim">${ago(a.ts)}</span>
       <button class="act" data-alert="${esc(a.key)}">${a.key.startsWith("restart_wait") ? "Dismiss" : "Done"}</button></div>`).join("")
     + (u.available ? `<div class="banner"><b>Update available:</b> Foundry Client ${esc(u.latest)} (you have ${esc(u.current)}).
-      <a href="${esc(u.url)}" target="_blank" rel="noopener">Release page</a> <span class="dim">Download and install it yourself; the client never updates itself.</span></div>` : "");
+      <a href="${esc(u.url)}" target="_blank" rel="noopener">Release page</a> ${(st.self_update || {}).running ? '<span class="dim">updating…</span>' : '<button class="act primary" data-do="update-apply">Update now</button>'}</div>` : "");
   const link = `<div class="card c-${r.reachable ? (r.warming_up ? "warn" : "ok") : r.reachable === false ? "fail" : "info"}"><h3><span class="dot"></span>Foundry router</h3>
       <div>${r.reachable ? (r.warming_up ? "reachable, still warming up" : "reachable") : r.reachable === false ? '<span class="bad">not reachable</span>' : "not checked yet"}
         <span class="dim">${esc(r.url || "")}${r.version ? " · v" + esc(r.version) : ""}${r.latency_ms != null ? " · " + r.latency_ms + " ms" : ""}</span></div>
       ${r.error ? `<div class="bad">${esc(r.error)}</div>` : ""}<div class="dim">${r.checked_at ? "checked " + ago(r.checked_at) : ""}${u.checked_at ? " · updates checked " + ago(u.checked_at) + (u.error ? " (" + esc(u.error) + ")" : "") : ""}</div>
       <div class="row"><button class="act" data-do="link-check">Check now</button><button class="act" data-do="update-check">Check for updates</button><button class="act" data-do="client-restart" title="Start a fresh client (new code and settings); Kilo, the coordinator, Rojo and Blender keep running">Restart client</button></div></div>`;
+  const su = st.self_update || {}, job = su.job, last = (su.history || [])[0];
+  const PH = {checking: "checking the release", making_gap: "waiting for a gap (no new sessions start)", installing: "installing", restarting_coordinator: "restarting the coordinator", resuming: "resuming the projects", restarting_supervisor: "restarting the upgrade supervisor", restarting_client: "restarting the client", verifying_client: "client restarting"};
+  const upd = `<div class="card c-${job ? "warn" : last && last.status !== "done" && last.status !== "cancelled" ? "fail" : "ok"}"><h3><span class="dot"></span>Updates</h3>
+      <div>Installed ${esc(su.installed || "?")}${u.latest ? ` <span class="dim">· newest release ${esc(u.latest)}</span>` : ""} <span class="dim">· automatic updates ${su.auto_update ? "on" : "off"}</span></div>
+      ${job ? `<div><b>Updating to ${esc(job.tag)}:</b> ${esc(PH[job.phase] || job.phase)}${job.waiting_for && job.phase === "making_gap" ? ` <span class="dim">(${esc(job.waiting_for)})</span>` : ""} <span class="dim">since ${ago(job.started_ts)}</span></div>
+        <div class="dim">${(job.log || []).slice(-4).map(l => esc(l.text)).join("<br>")}</div>` : ""}
+      ${!job && last ? `<div class="dim">Last: ${esc(last.tag)} ${esc({done: "updated", failed: "failed", rolled_back: "failed and rolled back", cancelled: "cancelled"}[last.status] || last.status)} ${ago(last.ended_ts || last.started_ts)}${last.error ? ": " + esc(last.error) : ""}</div>` : ""}
+      ${su.error ? `<div class="bad">${esc(su.error)}</div>` : ""}
+      <div class="row">${job ? (su.cancellable ? '<button class="act" data-do="update-cancel">Cancel update</button>' : "") : `<button class="act primary" data-do="update-apply" ${u.available ? "" : "title=\"No newer release found; checks the newest release again\""}>Update now</button>`}</div></div>`;
   const rs = st.resources || {};
   const mem = rs.ts ? `<div class="card c-${rs.free_gb < 2 ? "warn" : "ok"}"><h3><span class="dot"></span>Memory</h3>
       <div>${rs.free_gb} GB free of ${rs.total_gb} GB <span class="dim">checked ${ago(rs.ts)}</span></div>
@@ -129,7 +138,7 @@ function renderStatus() {
       <div class="dim">Dev / test jobs: ${(rs.jobs || []).map(j => `${esc(j.kind)} pid ${j.pid} ${j.gb} GB / ${j.limit_gb} GB, ${j.minutes} / ${j.limit_minutes} min`).join("; ") || "none running"}</div>
       <div class="dim">Biggest: ${(rs.top || []).map(t => `${esc(t.name)} ${t.gb} GB`).join(", ")}</div>
       ${(rs.stops || []).length ? `<div class="dim">Stopped: ${rs.stops.slice(-3).map(x => `${esc(x.kind)} pid ${x.pid} (${esc(x.why)}) ${ago(x.ts)}`).join("; ")}</div>` : ""}</div>` : "";
-  $("#v-status").innerHTML = banners + `<div class="cards">${st.components.filter(c => !(RETIRED_MEDIA.includes(c.name) && !c.enabled)).map(compCard).join("")}${link}${mem}</div>
+  $("#v-status").innerHTML = banners + `<div class="cards">${st.components.filter(c => !(RETIRED_MEDIA.includes(c.name) && !c.enabled)).map(compCard).join("")}${link}${upd}${mem}</div>
     <h3 style="margin-top:16px">Kilo configuration</h3>
     <div class="dim">Writes the router's role rules into the agent blocks of kilo.jsonc (a backup is kept, the file is checked afterwards) and reloads Kilo at the next safe point.</div>
     <div class="row"><button class="act" data-do="kilo-preview">Preview changes</button><button class="act primary" data-do="kilo-apply">Apply role rules to kilo.jsonc</button></div>
@@ -151,6 +160,12 @@ $("#v-status").onclick = async e => {
       setTimeout(() => location.reload(), 8000);
       return;
     }
+    if (d === "update-apply") {
+      if (!confirm("Update to the newest release? New sprint sessions wait while the running ones finish, then the coordinator and this client restart on the new code (Kilo, OpenCode, Rojo and Blender keep running). Nothing changes if a check fails.")) return;
+      try { const r = await api("update/apply", "POST", {}); toast("Update to " + r.job.tag + " started"); } catch (err) { toast("Update not started: " + err.message, true); }
+      await refresh(); return;
+    }
+    if (d === "update-cancel") { try { await api("update/cancel", "POST", {}); toast("Update cancelled"); } catch (err) { toast(err.message, true); } await refresh(); return; }
     if (d === "update-check") { const u = await api("update/check", "POST", {}); toast(u.error ? "Update check failed: " + u.error : u.available ? "Version " + u.latest + " is available" : "You have the latest version"); await refresh(); return; }
     if (d === "kilo-preview" || d === "kilo-apply") {
       if (d === "kilo-apply" && !confirm("Rewrite the agent permission blocks in kilo.jsonc from the role rules, then reload Kilo at the next safe point?")) return;
@@ -170,7 +185,8 @@ $("#v-status").onclick = async e => {
 const FIELDS = [
   ["Foundry", [["client.backend_url", "Foundry router URL", "text"], ["client.state_dir", "Coordinator state folder", "text"], ["client.api_port", "Local settings port", "number"]]],
   ["Workspace", [["workspace.game", "Game project folder (Kilo works here)", "text"], ["workspace.profiles", "Coordinator profiles folder (…/foundry_coordinator/projects)", "text"], ["workspace.deploy", "Coordinator release checkout (for the upgrade supervisor; optional)", "text"], ["workspace.kilo_config", "kilo.jsonc (empty = game folder / kilo.jsonc)", "text"], ["workspace.project", "Coordinator project for role rules (empty = the only one)", "text"]]],
-  ["Watchdog", [["client.unhealthy_restart_seconds", "Restart a component that stays unhealthy this many seconds (0 = never)", "number"], ["client.safe_restart_max_wait_minutes", "Warn when a safe-point restart has waited this many minutes (0 = never)", "number"], ["client.update_check", "Look for a newer Foundry Client release on GitHub", "bool"], ["client.relay", "Take stack requests from the Foundry router", "bool"], ["client.secret_store", "Where secrets are kept: auto (the system keyring, else a private file), keyring, or file (a mode-600 file; for a Linux machine without a desktop)", "text"]]],
+  ["Watchdog", [["client.unhealthy_restart_seconds", "Restart a component that stays unhealthy this many seconds (0 = never)", "number"], ["client.safe_restart_max_wait_minutes", "Warn when a safe-point restart has waited this many minutes (0 = never)", "number"], ["client.relay", "Take stack requests from the Foundry router", "bool"], ["client.secret_store", "Where secrets are kept: auto (the system keyring, else a private file), keyring, or file (a mode-600 file; for a Linux machine without a desktop)", "text"]]],
+  ["Updates", [["client.update_check", "Look for a newer release on GitHub", "bool"], ["client.update_check_minutes", "Check every (minutes, 5 or more)", "number"], ["client.auto_update", "Update automatically when a newer release is out: new sprint sessions wait while the running ones finish, then the deploy checkout moves to the release and the coordinator and this client restart", "bool"], ["client.update_gap_max_minutes", "Give up on an update when no gap comes within (minutes; the projects carry on)", "number"]]],
   ["Kilo server", [["components.kilo.enabled", "Run the Kilo server", "bool"], ["components.kilo.path", "kilo executable (empty = find it)", "text"], ["components.kilo.port", "Port", "number"]]],
   ["OpenCode server", [["components.opencode.enabled", "Run an OpenCode server beside Kilo (opencode serve; for projects whose client is OpenCode)", "bool"], ["components.opencode.path", "opencode executable (empty = find it)", "text"], ["components.opencode.port", "Port (Kilo uses 4096)", "number"], ["components.opencode.cwd", "Folder it serves by default (empty = game folder; each session names its own folder)", "text"]]],
   ["Coordinator", [["components.coordinator.enabled", "Run the coordinator", "bool"], ["components.coordinator.poll_seconds", "Poll seconds", "number"], ["components.supervisor.enabled", "Run the upgrade supervisor", "bool"]]],
