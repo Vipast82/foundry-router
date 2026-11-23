@@ -60,6 +60,8 @@ DEFAULTS: dict[str, Any] = {
                   # item 6: Kilo over this (its whole tree) with free RAM under that:
                   # a safe-point restart of Kilo (0 = never)
                   "kilo_restart_gb": 6, "kilo_restart_free_gb": 4,
+                  # v0.181.256: the same for the OpenCode server
+                  "opencode_restart_gb": 6, "opencode_restart_free_gb": 4,
                   "limits": {"training": {"gb": 6, "minutes": 120},
                              "studio_check": {"gb": 3, "minutes": 240},
                              "gate_ps1": {"gb": 2, "minutes": 90},

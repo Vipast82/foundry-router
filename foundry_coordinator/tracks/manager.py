@@ -435,8 +435,10 @@ class TrackManager:
                 self.store.event(P.id, "", "track_kilo_config_failed",
                                  detail={"track": row["name"], "error": str(e)[:300]})
         from ..kilo_config import kilo_path
+        from foundry_automation.agent_backends import is_opencode_config
         src = kilo_path(P.profile)
-        dst = os.path.join(row["worktree"], "kilo.jsonc")
+        dst = os.path.join(row["worktree"], os.path.basename(src) if is_opencode_config(src)
+                           else "kilo.jsonc")
         if os.path.isfile(src) and not os.path.exists(dst):
             try:
                 shutil.copyfile(src, dst)

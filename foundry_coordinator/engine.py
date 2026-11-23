@@ -411,8 +411,14 @@ class Coordinator:
         except Exception as e:                                    # noqa: BLE001
             self.log(f"background checks sweep failed: {type(e).__name__}: {e}")
         try:
-            # 2026-10-31: aborts a CLI process could not confirm (no Kilo credentials there)
-            self.lead.retry_aborts()
+            # 2026-10-31: aborts a CLI process could not confirm (no Kilo credentials there).
+            # v0.181.256: with the Lead manager off, `self.lead` is None and this logged an
+            # AttributeError every tick; an abort queued while it was on still gets retried.
+            from .lead import LeadManager
+            if self.store.meta(LeadManager.ABORT_PENDING_KEY) not in (None, "", "[]"):
+                L = self._lead_any()
+                if L is not None:
+                    L.retry_aborts()
         except Exception as e:                                    # noqa: BLE001
             self.log(f"lead abort retry failed: {type(e).__name__}: {e}")
         with crashguard.step("prep queue"):

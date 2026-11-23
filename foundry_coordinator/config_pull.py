@@ -288,6 +288,9 @@ class ConfigPuller:
         rules_changed = role_rules_changed(prev, body["doc"]) or (prev is None)
         studio_changed = (prev is None) or any(
             c["path"].startswith(("studio.", "slots.")) for c in D.diff(prev, body["doc"]))
+        # v0.181.256: the [automation] opencode_mcp_* switches (OpenCode projects only)
+        oc_mcp_changed = (prev is None) or any(
+            c["path"].startswith("automation.opencode_mcp_") for c in D.diff(prev, body["doc"]))
         prof.__dict__.update(new.__dict__)          # in place: every holder sees it
         tracks = getattr(self.c, "tracks", None)
         if tracks is not None and hasattr(tracks, "after_config_apply"):
@@ -333,6 +336,8 @@ class ConfigPuller:
             self._regenerate_kilo(pid, body)
         if studio_changed:
             self._sync_main_studio(pid, body)
+        if oc_mcp_changed:
+            self._sync_opencode_mcp(pid, body)
         self.log(f"config: {pid}: applied router revision {body.get('rev')}"
                  + (f" (restart needed for {', '.join(restart)})" if restart else ""))
         self._report(pid, body, "applied", "", restart)
@@ -359,6 +364,31 @@ class ConfigPuller:
                 self.c.state_dir, client_requests.reload_kind(P.profile), pid,
                 f"router revision {body.get('rev')}: the main Studio MCP servers point {what}",
                 detail={"rev": body.get("rev"), **out}, store=self.store, clock=self.clock)
+        return out
+
+    def _sync_opencode_mcp(self, pid: str, body: dict) -> list:
+        """v0.181.256: the local MCP servers (Blender, Roblox Studio, foundry-media) in the
+        project's opencode.jsonc follow [automation] opencode_mcp_*, then OpenCode reloads at
+        a safe point. Kilo files are never touched. Never rejects."""
+        if not self.kilo_regen(pid):
+            return []
+        P = self.c.projects[pid]
+        from .kilo_config import sync_opencode_mcp
+        try:
+            out = sync_opencode_mcp(P.profile, apply=True, clock=self.clock)
+        except Exception as e:                                    # noqa: BLE001
+            self.log(f"config: {pid}: OpenCode MCP switches not applied: {type(e).__name__}: {e}")
+            return []
+        for rec in out:
+            self.log(f"config: {pid}: {rec['path']} MCP {', '.join(rec['changed'])} "
+                     f"{'on' if rec['enabled'] else 'off'}")
+            self.store.event(pid, "", "opencode_mcp_switched",
+                             detail={"rev": body.get("rev"), **rec})
+            client_requests.request(
+                self.c.state_dir, client_requests.reload_kind(P.profile, rec["path"]), pid,
+                f"router revision {body.get('rev')}: OpenCode MCP "
+                f"{', '.join(rec['changed'])} switched", detail={"rev": body.get("rev"), **rec},
+                store=self.store, clock=self.clock)
         return out
 
     def _regenerate_kilo(self, pid: str, body: dict) -> Optional[dict]:

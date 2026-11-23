@@ -2,7 +2,9 @@
 
 Task source: a JSON or TOML file in the workspace listing tasks
   {id, title, spec | spec_file, scope: [paths/globs], deps: [ids], tags: [..],
-   allow_no_change: bool}
+   allow_no_change: bool, context: [paths/globs]}
+`context` (v0.181.256) lists unchanged files the reviewer is shown beside the diff; paths
+the spec text names outside the scope are shown too.
 Verification: the profile's [[verify.checks]].
 Prompts: built-in templates, overridable with [prompts] implement / repair /
 closeout (a file path relative to the profile, using {task} {title} {spec}
@@ -17,16 +19,26 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import tomllib
 from typing import Optional
 
 from .base import (FAIL, PASS, ReviewContractDefaults, TaskSpec, VerificationResult,
-                   duty_bullets, report_instructions, report_pointer, safe_rel, sha256_file)
+                   bound_text, duty_bullets, evidence_item, report_instructions,
+                   report_pointer, safe_rel, sha256_file)
 from .verify_cmd import run_check
 
 
 class AdapterError(RuntimeError):
     pass
+
+
+# v0.181.256: unchanged files the reviewer is shown (GenericAdapter.context_paths). The OpenCode
+# pilot's OP-2 ("document greet() from src/pilot/greet.py; do not change any code") was blocked
+# twice because the reviewer saw only the diff and could not check the doc against the code.
+CONTEXT_FILES_MAX = 8
+CONTEXT_FILE_CHARS = 12000
+_SPEC_PATH_RE = re.compile(r"(?<![\w./\\-])((?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8})(?![\w/\\-])")
 
 
 # git-ignored scratch space every implementer session may write (verification scratch,
@@ -275,6 +287,73 @@ class GenericAdapter(ReviewContractDefaults):
     def review_extra(self, spec: TaskSpec, revision: str) -> str:
         """Extra project-specific context for the reviewer (evidence excerpts)."""
         return ""
+
+    def context_paths(self, spec: TaskSpec) -> list[tuple[str, str]]:
+        """[(path, why)] of files the reviewer should read beside the diff: the task's own
+        `context` list (paths or globs, in the task file), then repository paths its spec
+        text names that are outside its scope (OP-2: "explains greet() from
+        src/pilot/greet.py"). At most CONTEXT_FILES_MAX."""
+        from ..profile import matches_any
+        scope = [s_.replace("\\", "/") for s_ in (spec.scope or [])]
+        out: list[tuple[str, str]] = []
+        seen: set = set()
+
+        def add(rel: str, why: str) -> None:
+            rel = safe_rel(rel.replace("\\", "/")) if rel else ""
+            if rel and rel not in seen and self.p.in_workspace(rel) and \
+                    len(out) < CONTEXT_FILES_MAX:
+                seen.add(rel)
+                out.append((rel, why))
+
+        for x in (spec.data or {}).get("context") or []:
+            x = str(x).replace("\\", "/")
+            if any(ch in x for ch in "*?["):
+                for path in sorted(glob.glob(os.path.join(self.p.workspace, x), recursive=True)):
+                    if os.path.isfile(path):
+                        add(os.path.relpath(path, self.p.workspace), "the task's context list")
+            else:
+                add(x, "the task's context list")
+        for m in _SPEC_PATH_RE.findall(spec.spec or ""):
+            if m in scope or (scope and matches_any(m, scope)):
+                continue                       # the task changes it: the diff shows it
+            add(m, "named in the task spec")
+        return out
+
+    def review_evidence(self, spec: TaskSpec, revision: str, ws) -> list[dict]:
+        """review_extra's text (as before), then the files context_paths() names, each read
+        from the reviewed commit (never the working tree). A context-list file missing at
+        the revision is a `missing` item; a path the spec merely mentions that does not
+        exist is left out."""
+        items = list(super().review_evidence(spec, revision, ws))
+        show = getattr(ws, "show_at", None)
+        if not callable(show):
+            return items
+        for rel, why in self.context_paths(spec):
+            try:
+                body = show(revision, rel)
+            except Exception:                                    # noqa: BLE001
+                body = None
+            if body is None:
+                if why == "the task's context list":
+                    items.append(evidence_item(f"Context file {rel}", path=rel,
+                                               revision=revision, status="missing", priority=4,
+                                               note=f"{rel} does not exist at {revision[:12]}"))
+                continue
+            if "\x00" in body:
+                continue                                         # binary: nothing to read
+            blob = ""
+            try:
+                blob = ws.blob_at(revision, rel) or ""
+            except Exception:                                    # noqa: BLE001
+                blob = ""
+            text, cut, omitted = bound_text(body, CONTEXT_FILE_CHARS)
+            items.append(evidence_item(
+                f"Context file {rel} (as of the reviewed commit)", path=rel, revision=revision,
+                blob=blob, text=f"# {rel}@{revision[:12]}\n{text}", status="ok", truncated=cut,
+                priority=4, note=f"{why}; read at the reviewed commit so the reviewer can check "
+                                 f"the change against it (the diff shows any change to it)"
+                                 + (f"; {omitted} lines cut" if cut else "")))
+        return items
 
     # -- session permissions -------------------------------------------------------------
 

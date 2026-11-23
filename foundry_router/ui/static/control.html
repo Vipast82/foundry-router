@@ -898,7 +898,9 @@ function renderConn() {
   for (const b of bridge) {
     const k = (b.detail || {}).kilo || {};
     parts.push(`<span class="pill ${b.fresh ? "ok" : "bad"}" title="${esc(b.source_id)} last heartbeat ${esc(fullTs(b.last_seen))} (expiry ${b.expiry_s}s). Event stream: ${esc(JSON.stringify((b.detail || {}).event_stream || {}))}">bridge ${b.fresh ? relAge(b.age_s) : "STALE " + relAge(b.age_s)}</span>`);
-    parts.push(`<span class="pill ${k.ok === false ? "bad" : k.ok ? "ok" : ""}" title="Kilo API as seen by the bridge${k.error ? ": " + esc(k.error) : ""}${k.version ? " · version " + esc(k.version) : ""}">kilo ${k.ok === false ? "down" : k.ok ? "ok" : "?"}</span>`);
+    const agent = String(k.agent || "kilo");   // v0.181.256: kilo, opencode or kilo+opencode
+    const agentName = agent.split("+").map(a => a === "opencode" ? "OpenCode" : a === "kilo" ? "Kilo" : a).join(" + ");
+    parts.push(`<span class="pill ${k.ok === false ? "bad" : k.ok ? "ok" : ""}" title="${esc(agentName)} API as seen by the bridge${k.error ? ": " + esc(k.error) : ""}${k.version ? " · version " + esc(k.version) : ""}">${esc(agent)} ${k.ok === false ? "down" : k.ok ? "ok" : "?"}</span>`);
     const own = (b.detail || {}).coordinator_owner || {};
     if (own.present) {
       const oa = own.beat_ts ? nowS() - own.beat_ts : null;

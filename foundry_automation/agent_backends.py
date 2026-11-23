@@ -212,4 +212,34 @@ def oc1_rules(rules) -> list[dict]:
 
 
 __all__ = ["OPENCODE_GUARD", "oc2_rules", "oc1_rules", "OC2_ACTION", "BackendSpec", "KILO", "OPENCODE", "SPECS", "DIALECTS", "KINDS", "spec",
-           "is_agent_kind", "serve_env_for", "all_protected", "all_config_names"]
+           "is_agent_kind", "serve_env_for", "all_protected", "all_config_names",
+           "OPENCODE_LOCAL_MCP", "opencode_local_mcp_on", "is_opencode_config"]
+
+
+# v0.181.256: the local MCP servers an OpenCode project's config lists switched off, and the
+# [automation] switch that lets OpenCode sessions start each (off by default: Kilo is using
+# them, and a second MCP client to Studio or Blender would fight it).
+OPENCODE_LOCAL_MCP: dict[str, tuple] = {
+    "opencode_mcp_blender": ("blender-mcp",),
+    "opencode_mcp_studio": ("Roblox_Studio", "robloxstudio-mcp"),
+    "opencode_mcp_foundry_media": ("foundry-media",),
+}
+
+
+def opencode_local_mcp_on(get) -> dict:
+    """{server name: allowed} from an [automation] getter `get(key)` (missing = off)."""
+    out: dict = {}
+    for key, names in OPENCODE_LOCAL_MCP.items():
+        try:
+            on = bool(get(key))
+        except Exception:                                        # noqa: BLE001
+            on = False
+        for n in names:
+            out[n] = on
+    return out
+
+
+def is_opencode_config(path: str) -> bool:
+    """True for an OpenCode config file name (opencode.json / opencode.jsonc)."""
+    import os
+    return os.path.basename(str(path or "")).lower() in ("opencode.json", "opencode.jsonc")

@@ -48,6 +48,23 @@ class Proc:
         self.session_id = ""          # Rojo: last seen session id (change = plugin must reconnect)
 
 
+def _server_pid(procs: dict, name: str) -> Optional[int]:
+    """An agent server component's process (kilo, opencode): ours, or the one that owns
+    its port (adopted)."""
+    pr = procs.get(name)
+    if pr is None:
+        return None
+    if pr.p is not None and pr.p.poll() is None:
+        return int(pr.p.pid)
+    if pr.adopted and pr.spec.owner_pid:
+        try:
+            pid = pr.spec.owner_pid()
+        except Exception:                                         # noqa: BLE001
+            pid = None
+        return int(pid) if isinstance(pid, int) and pid > 0 else None
+    return None
+
+
 def _norm(res) -> tuple[bool, str, dict]:
     ok, why, *rest = res
     return bool(ok), str(why), (rest[0] if rest else {}) or {}
@@ -84,7 +101,9 @@ class Manager:
             game=lambda: (self.cfg.get("workspace") or {}).get("game") or "",
             protected=self._component_pids, clock=clock,
             kilo_pid=self._kilo_pid, kilo_pending=self._kilo_pending,
-            restart_kilo=self._restart_kilo_for_memory)
+            restart_kilo=self._restart_kilo_for_memory,
+            opencode_pid=self._opencode_pid, opencode_pending=self._opencode_pending,
+            restart_opencode=self._restart_opencode_for_memory)
         from .studio import StudioReopen
         self.studio = StudioReopen(lambda: self.cfg.get("studio") or {},
                                    cfg["client"]["state_dir"],
@@ -469,18 +488,7 @@ class Manager:
 
     def _kilo_pid(self) -> Optional[int]:
         """The Kilo server's process: ours, or the one that owns its port (adopted)."""
-        pr = self.procs.get("kilo")
-        if pr is None:
-            return None
-        if pr.p is not None and pr.p.poll() is None:
-            return int(pr.p.pid)
-        if pr.adopted and pr.spec.owner_pid:
-            try:
-                pid = pr.spec.owner_pid()
-            except Exception:                                     # noqa: BLE001
-                pid = None
-            return int(pid) if isinstance(pid, int) and pid > 0 else None
-        return None
+        return _server_pid(self.procs, "kilo")
 
     def _kilo_pending(self) -> bool:
         pr = self.procs.get("kilo")
@@ -494,6 +502,24 @@ class Manager:
             return "the Kilo component is disabled"
         st = self.restart("kilo")
         self._event("kilo", f"restart asked by the resource watch: {why}")
+        return str(st.get("result") or "pending")
+
+    # v0.181.256: the same memory rule for the OpenCode server (a Bun process like Kilo)
+    def _opencode_pid(self) -> Optional[int]:
+        return _server_pid(self.procs, "opencode")
+
+    def _opencode_pending(self) -> bool:
+        pr = self.procs.get("opencode")
+        return bool(pr is not None and pr.pending_restart)
+
+    def _restart_opencode_for_memory(self, why: str) -> str:
+        """OpenCode's ordinary safe-point restart, never forced."""
+        if "opencode" not in self.procs:
+            return "the client manages no OpenCode server"
+        if not (self.cfg["components"].get("opencode") or {}).get("enabled", False):
+            return "the OpenCode component is disabled"
+        st = self.restart("opencode")
+        self._event("opencode", f"restart asked by the resource watch: {why}")
         return str(st.get("result") or "pending")
 
     def sweep_supervisors(self, force: bool = False, ps=None) -> dict:

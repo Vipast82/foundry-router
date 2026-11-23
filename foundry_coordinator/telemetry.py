@@ -82,6 +82,8 @@ def _cap(v, n: int) -> str:
 class KiloObserver:
     """Read-only client of `kilo serve`. GET requests and the event stream only."""
 
+    agent = "kilo"        # v0.181.256: the agent kind the control page labels its pill with
+
     def __init__(self, url: str, password: str = "", username: str = "kilo", timeout: float = 15):
         self.url = url.rstrip("/")
         self.timeout = timeout
@@ -186,11 +188,13 @@ class KiloUnavailable(RuntimeError):
 # v0.181.247: an OpenCode 1.x server is read by KiloObserver itself (same API; user
 # `opencode`, merged config at /config). OpenCode 2.x has another API: Oc2Observer gives the
 # same methods by way of the coordinator's Oc2Client, which already translates 2.x
-# messages, forms and permission asks into the 1.x shapes this module parses. It has no
-# translated event stream yet, so the bridge polls (the same fallback a server without
-# /event gets).
+# messages, forms and permission asks into the 1.x shapes this module parses. v0.181.256:
+# its event stream (/api/event) is translated too (adapters.oc2.to_oc1_events); a server
+# without one leaves the bridge polling (the same fallback a server without /event gets).
 
 class OpenCodeV1Observer(KiloObserver):
+    agent = "opencode"
+
     def __init__(self, url: str, password: str = "", username: str = "opencode",
                  timeout: float = 15):
         super().__init__(url, password=password, username=username, timeout=timeout)
@@ -201,6 +205,8 @@ class OpenCodeV1Observer(KiloObserver):
 
 class Oc2Observer:
     """Read-only view of an OpenCode 2.x server in KiloObserver's method shapes."""
+
+    agent = "opencode"
 
     def __init__(self, url: str, password: str = "", username: str = "", timeout: float = 15):
         from .adapters.oc2 import Oc2Client
@@ -259,9 +265,19 @@ class Oc2Observer:
         return None
 
     def events(self, d: str, stop: threading.Event):
-        raise urllib.error.HTTPError(self.url + "/api/event", 501,
-                                     "OpenCode 2.x events are not translated (polling)", None,
-                                     None)
+        """v0.181.256: the 2.x event stream (/api/event) translated to the 1.x events the
+        bridge reads (adapters.oc2.to_oc1_events). Text and reasoning stream in live; any
+        other session event makes the bridge read that session again. A server without the
+        stream (404) leaves the bridge polling, as before."""
+        it = self.client.events(d, stop)
+        first = True
+        for ev in it:
+            if first:
+                self.caps["event_stream"] = True
+                first = False
+            yield ev
+        if first:
+            self.caps["event_stream"] = True     # connected, the stream ended with no event
 
 
 class MultiObserver:
@@ -275,6 +291,12 @@ class MultiObserver:
         self.secret = self.parts[0].secret
         self.secrets = {o.secret for o in self.parts if o.secret}
         self._owner: dict = {}
+        kinds = []
+        for o in self.parts:
+            k = getattr(o, "agent", "kilo")
+            if k not in kinds:
+                kinds.append(k)
+        self.agent = "+".join(kinds)
 
     def health(self) -> dict:
         return self.parts[0].health()
@@ -1542,6 +1564,7 @@ class TelemetryBridge:
         self._full_fetch: dict[str, float] = {}
         self._idle_fetched: set[str] = set()
         self._dirty: set[str] = set()
+        self._refetch: set[str] = set()      # v0.181.256: sessions a 2.x event says changed
         self._live: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -1628,6 +1651,8 @@ class TelemetryBridge:
                     sid and self._dirty.add(sid)
             if sid:
                 self._dirty.add(sid)
+                if pr.get("oc2_refetch"):
+                    self._refetch.add(sid)
 
     # ---------------------------------------------------------------- one iteration
 
@@ -1764,7 +1789,8 @@ class TelemetryBridge:
                    "sent_ts": self.clock(), "uptime_s": round(self.clock() - self.started, 1),
                    "kilo": {"ok": all(self.kilo_ok.values()) if self.kilo_ok else None,
                             "error": self.kilo_error if not all(self.kilo_ok.values() or [True])
-                            else "", "version": self.kilo_version},
+                            else "", "version": self.kilo_version,
+                            "agent": self._agent_label()},
                    "coordinator_owner": {"present": bool(own), "id": own.get("id"),
                                          "beat_ts": own.get("beat")},
                    "projects": sorted(self.projects), "sessions_tracked": len(self.watch),
@@ -1784,6 +1810,16 @@ class TelemetryBridge:
                          f"{(r or {}).get('compat_reason') or ''} (heart-beating continues)")
             self.compat = {"state": comp, "reason": (r or {}).get("compat_reason"),
                            "server_version": (r or {}).get("server_version")}
+
+    def _agent_label(self) -> str:
+        """v0.181.256: which agent servers the "kilo" heartbeat entry covers ("kilo",
+        "opencode", "kilo+opencode"), so the control page names the right one."""
+        kinds: list = []
+        for o in self.obs.values():
+            for k in str(getattr(o, "agent", "kilo") or "kilo").split("+"):
+                if k not in kinds:
+                    kinds.append(k)
+        return "+".join(sorted(kinds)) or "kilo"
 
     def _schema(self) -> dict:
         out = {}
@@ -2239,6 +2275,8 @@ class TelemetryBridge:
             self._last["children"] = now
         with self._lock:
             dirty, self._dirty = set(self._dirty), set()
+            refetch = {x for x in self._refetch if x in watched}
+            self._refetch -= refetch
             live = {k: v for k, v in self._live.items()}
             # keep streaming parts only while their session is busy (a full read
             # follows when it settles)
@@ -2281,7 +2319,9 @@ class TelemetryBridge:
                         or (busy and now - self._full_fetch[sid] >= (30 if self.event_state.get(pid)
                                                                      == "connected" else self.poll_s))
                         or (not busy and sid not in self._idle_fetched)
-                        or sid in dirty and not busy and now - self._full_fetch.get(sid, 0) > 5)
+                        or sid in dirty and not busy and now - self._full_fetch.get(sid, 0) > 5
+                        # v0.181.256: a 2.x event (tool call, step, run end) says it changed
+                        or sid in refetch)
             if due_full and not w.get("missing"):
                 self._messages(o, d, sid, w, ctx, mcp_names, obs, commits)
                 self._full_fetch[sid] = now

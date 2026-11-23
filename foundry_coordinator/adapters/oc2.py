@@ -110,6 +110,88 @@ def _error(err) -> Optional[dict]:
     return {"name": "Error", "data": {"message": str(err)}}
 
 
+def part_id(message_id: str, ordinal, kind: str = "part") -> str:
+    """The 1.x part id of a 2.x message's content item (v0.181.256): kind and the ordinal
+    2.x gives it within that kind."""
+    return f"{message_id}:{kind}:{ordinal}"
+
+
+def _with_ids(parts: list, mid: str, session_id: str) -> list:
+    """Every part gets an id (the bridge drops parts without one: before v0.181.256 the
+    control page showed no parts of a 2.x session), its message id and session id."""
+    for i, p in enumerate(parts):
+        p.setdefault("id", part_id(mid, i))
+        p.setdefault("messageID", mid)
+        if session_id:
+            p.setdefault("sessionID", session_id)
+    return parts
+
+
+# 2.x events (GET /api/event) as the 1.x events telemetry's bridge reads (v0.181.256)
+_OC2_PART_START = {"session.text.started": "text", "session.reasoning.started": "reasoning"}
+_OC2_PART_DELTA = ("session.text.delta", "session.reasoning.delta")
+# what only says "this session changed": the bridge reads the session again on its next pass
+_OC2_STREAM_ONLY = ("session.text.delta", "session.reasoning.delta", "session.tool.input.delta",
+                    "session.compaction.delta", "session.step.first-token",
+                    "session.step.streamed", "session.tool.progress")
+
+
+def to_oc1_events(ev: dict) -> list:
+    """One 2.x event as 0..2 1.x events. Text and reasoning become `message.part.updated`
+    (started) and `message.part.delta` (each delta) with the part id the message list
+    gives them later; every other session event becomes {type, properties: {sessionID,
+    oc2_refetch: True}}, which tells the bridge to read that session again (a tool call,
+    a step, the end of a run, a permission ask or a form)."""
+    if not isinstance(ev, dict):
+        return []
+    typ = str(ev.get("type") or "")
+    data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+    form = data.get("form") if isinstance(data.get("form"), dict) else {}
+    sid = data.get("sessionID") or form.get("sessionID") or ""
+    mid = data.get("assistantMessageID") or data.get("messageID") or ""
+    if typ in _OC2_PART_START and mid and isinstance(data.get("ordinal"), int):
+        kind = _OC2_PART_START[typ]
+        part = {"id": part_id(mid, data["ordinal"], kind), "messageID": mid, "sessionID": sid,
+                "type": kind, "text": ""}
+        if ev.get("created"):
+            part["time"] = {"start": ev.get("created")}
+        return [{"type": "message.part.updated", "properties": {"part": part}}]
+    if typ in _OC2_PART_DELTA and mid and isinstance(data.get("ordinal"), int) and \
+            isinstance(data.get("delta"), str):
+        kind = "text" if typ == "session.text.delta" else "reasoning"
+        return [{"type": "message.part.delta", "properties": {
+            "sessionID": sid, "messageID": mid, "partID": part_id(mid, data["ordinal"], kind),
+            "field": "text", "delta": data["delta"]}}]
+    if not sid:
+        return []
+    return [{"type": "oc2." + typ, "properties": {
+        "sessionID": sid, "oc2_refetch": typ not in _OC2_STREAM_ONLY}}]
+
+
+def _same_dir(a: str, b: str) -> bool:
+    import os
+    norm = lambda x: os.path.normcase(os.path.normpath(str(x or "")))   # noqa: E731
+    return norm(a) == norm(b)
+
+
+def iter_sse(lines, stop=None):
+    """JSON payloads of a server-sent event stream (`data:` lines up to a blank line)."""
+    data: list = []
+    for raw in lines:
+        if stop is not None and stop.is_set():
+            return
+        line = raw.decode("utf-8", "replace").rstrip("\r\n") if isinstance(raw, bytes) \
+            else str(raw).rstrip("\r\n")
+        if line.startswith("data:"):
+            data.append(line[5:].lstrip())
+        elif not line and data:
+            try:
+                yield json.loads("\n".join(data))
+            except ValueError:
+                pass
+            data = []
+
+
 def to_oc1_message(m: dict, session_id: str = "") -> Optional[dict]:
     """One 2.x message as a 1.x `{info, parts}` message, or None for messages the 1.x
     transcript never had (agent/model/location switches, system notes, idle markers)."""
@@ -126,11 +208,11 @@ def to_oc1_message(m: dict, session_id: str = "") -> Optional[dict]:
             if isinstance(f, dict):
                 parts.append({"type": "file", "url": f.get("uri") or "", "filename": f.get("name")
                               or "", "mime": f.get("mime") or ""})
-        return {"info": info, "parts": parts}
+        return {"info": info, "parts": _with_ids(parts, mid, session_id)}
     if typ == "synthetic":
         info["role"] = "user"
-        return {"info": info, "parts": [{"type": "text", "text": m.get("text") or "",
-                                         "synthetic": True}]}
+        return {"info": info, "parts": _with_ids([{"type": "text", "text": m.get("text") or "",
+                                                   "synthetic": True}], mid, session_id)}
     if typ == "assistant":
         model = m.get("model") or {}
         info.update({"role": "assistant", "agent": m.get("agent") or "", "mode": m.get("agent") or "",
@@ -149,16 +231,25 @@ def to_oc1_message(m: dict, session_id: str = "") -> Optional[dict]:
         if m.get("retry"):
             info["retry"] = m.get("retry")
         parts = []
+        # v0.181.256: a part's id is "<message id>:<kind>:<n>", n counting that kind only:
+        # 2.x's text and reasoning events number each kind on its own (checked live on 2.3.2:
+        # the reasoning block and the text block after it both arrive with ordinal 0), so a
+        # part streamed in through the event stream and the same part read later from the
+        # message list are one part. A tool part is "<message id>:tool:<call id>".
+        seen: dict = {}
         for c in m.get("content") or []:
             if not isinstance(c, dict):
                 continue
-            if c.get("type") == "text":
-                parts.append({"type": "text", "text": c.get("text") or ""})
-            elif c.get("type") == "reasoning":
-                parts.append({"type": "reasoning", "text": c.get("text") or ""})
-            elif c.get("type") == "tool":
-                parts.append(_tool_part(c, mid, session_id))
-        return {"info": info, "parts": parts}
+            kind = c.get("type")
+            if kind in ("text", "reasoning"):
+                n = seen.get(kind, 0)
+                seen[kind] = n + 1
+                parts.append({"type": kind, "text": c.get("text") or "",
+                              "id": part_id(mid, n, kind)})
+            elif kind == "tool":
+                parts.append({**_tool_part(c, mid, session_id),
+                              "id": part_id(mid, c.get("id") or len(parts), "tool")})
+        return {"info": info, "parts": _with_ids(parts, mid, session_id)}
     if typ == "compaction":
         model = m.get("model") or {}
         info.update({"role": "assistant", "summary": True, "mode": "compaction",
@@ -170,8 +261,9 @@ def to_oc1_message(m: dict, session_id: str = "") -> Optional[dict]:
         if status == "failed":
             info["error"] = _error(m.get("error")) or {"name": "CompactionFailed", "data": {
                 "message": "Compaction failed"}}
-        return {"info": info, "parts": [{"type": "compaction", "auto": m.get("reason") == "auto"},
-                                        {"type": "text", "text": m.get("summary") or ""}]}
+        return {"info": info, "parts": _with_ids(
+            [{"type": "compaction", "auto": m.get("reason") == "auto"},
+             {"type": "text", "text": m.get("summary") or ""}], mid, session_id)}
     return None
 
 
@@ -293,6 +385,25 @@ class Oc2Client(CodingClient):
             raise AgentServerError(f"{method} {path}: HTTP {e.code} {e.read()[:300]!r}") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             raise AgentServerError(f"{method} {path}: {e}") from None
+
+    def events(self, directory: str, stop=None, timeout: float = 75):
+        """v0.181.256: the folder's 2.x events (GET /api/event, text/event-stream), as 1.x
+        events (to_oc1_events). Events of another folder are skipped. Raises
+        urllib.error.HTTPError as the server answers (404: no event stream)."""
+        req = urllib.request.Request(self.url + "/api/event", method="GET")
+        req.add_header("accept", "text/event-stream")
+        if directory:
+            req.add_header("x-opencode-directory", directory)
+        if self._auth:
+            req.add_header("authorization", self._auth)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            for ev in iter_sse(r, stop):
+                loc = ev.get("location") if isinstance(ev, dict) else None
+                if directory and isinstance(loc, dict) and loc.get("directory") and \
+                        not _same_dir(loc["directory"], directory):
+                    continue
+                for x in to_oc1_events(ev):
+                    yield x
 
     @staticmethod
     def _data(r):
@@ -682,4 +793,5 @@ def _allowed_providers(policies) -> Optional[list]:
     return out
 
 
-__all__ = ["Oc2Client", "to_oc1_message", "to_oc1_messages", "oc1_config_view"]
+__all__ = ["Oc2Client", "to_oc1_message", "to_oc1_messages", "oc1_config_view",
+           "to_oc1_events", "part_id", "iter_sse"]

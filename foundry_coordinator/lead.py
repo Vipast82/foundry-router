@@ -985,7 +985,11 @@ def ensure_repair_kilo_config(P, path: str) -> str:
     from .kilo_config import kilo_path
     if not path or not os.path.isdir(path):
         return ""
-    src, dst = kilo_path(P.profile), os.path.join(path, "kilo.jsonc")
+    from foundry_automation.agent_backends import is_opencode_config
+    src = kilo_path(P.profile)
+    # v0.181.256: an OpenCode project's file keeps its own name (OpenCode reads no kilo.jsonc)
+    name = os.path.basename(src) if is_opencode_config(src) else "kilo.jsonc"
+    dst = os.path.join(path, name)
     if not os.path.isfile(src):
         return ""
     if not os.path.isfile(dst):
@@ -998,10 +1002,10 @@ def ensure_repair_kilo_config(P, path: str) -> str:
                               capture_output=True, text=True, check=True).stdout.strip()
         excl = excl if os.path.isabs(excl) else os.path.join(path, excl)
         cur = open(excl, encoding="utf-8").read() if os.path.isfile(excl) else ""
-        if "/kilo.jsonc" not in cur.splitlines():
+        if f"/{name}" not in cur.splitlines():
             os.makedirs(os.path.dirname(excl), exist_ok=True)
             with open(excl, "a", encoding="utf-8") as f:
-                f.write(("" if cur.endswith("\n") or not cur else "\n") + "/kilo.jsonc\n")
+                f.write(("" if cur.endswith("\n") or not cur else "\n") + f"/{name}\n")
     except (OSError, subprocess.CalledProcessError):
         pass
     return dst

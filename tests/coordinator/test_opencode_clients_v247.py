@@ -355,6 +355,9 @@ def test_project_observer_is_kilos_for_a_kilo_project_and_2x_for_opencode(oc2):
     assert o.session(sid, "/w")["id"] == sid
     assert [m["info"]["role"] for m in o.messages(sid, "/w")] == ["assistant"]
     assert o.statuses("/w") == {}
+    # v0.181.256: 2.x events are read (an empty stream yields nothing; a 404 means polling)
+    assert list(o.events("/w", None)) == [] and o.caps["event_stream"] is True
+    fake.sse_events = None
     with pytest.raises(Exception):
         next(iter(o.events("/w", None)))
 

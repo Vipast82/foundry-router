@@ -6,6 +6,7 @@ OpenCode 2.3.2 OpenAPI document, behind HTTP Basic auth (user `opencode`). The f
 a request is read from the `x-opencode-directory` header. It has no /global/health, so
 client detection sees a 2.x server.
 
+`sse_events` (v0.181.256) is what GET /api/event streams; None makes it a 404.
 Tests drive it from Python: `finish(sid, text)` ends a run with an assistant message,
 `ask(sid, ...)` opens a form, `ask_permission(sid, ...)` a permission request,
 `spawn_child(...)` a child session. `on_prompt(fake, sid, text)` runs on each prompt
@@ -45,6 +46,9 @@ class FakeOpenCode2:
         self.requests: list[dict] = []           # (method, path, directory header)
         self.interrupts: list[str] = []
         self.reloads: list[str] = []
+        # v0.181.256: GET /api/event streams these 2.x events (server-sent events), then ends
+        # the response; None = no event stream (404, like a server without one)
+        self.sse_events: list | None = []
         self.config_docs = [
             {"type": "document", "path": "/home/u/.config/opencode/opencode.jsonc",
              "info": {"share": "disabled", "enabled_providers": ["foundry"],
@@ -190,6 +194,25 @@ class FakeOpenCode2:
                 self._send(code, out)
 
             def do_GET(self):
+                if urlsplit(self.path).path == "/api/event":
+                    if not self._auth():
+                        return
+                    if fake.sse_events is None:
+                        self._send(404, {"error": "not found"})
+                        return
+                    with fake.lock:
+                        fake.requests.append({"method": "GET", "path": "/api/event",
+                                              "directory": self.headers.get(
+                                                  "x-opencode-directory") or ""})
+                        evs = list(fake.sse_events)
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.end_headers()
+                    for ev in evs:
+                        self.wfile.write(f"event: {ev.get('type')}\ndata: {json.dumps(ev)}\n\n"
+                                         .encode())
+                    self.wfile.flush()
+                    return
                 self._go("GET")
 
             def do_POST(self):

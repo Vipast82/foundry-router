@@ -351,6 +351,11 @@ AUTOMATION_DEFAULTS: dict = {
     # v0.181.249: Media_Gen generate_3d_model (one picture -> a GLB) for sprints that need
     # `blender`; 'deny' keeps it off
     "media_gen_3d": "allow",
+    # v0.181.256 (Victor): the local MCP servers in an OpenCode project's opencode.jsonc are
+    # listed but switched off: Kilo is using them, and OpenCode must not open a second client
+    "opencode_mcp_blender": False,
+    "opencode_mcp_studio": False,
+    "opencode_mcp_foundry_media": False,
     # TURNAROUND_RECIPE_PLAN (D3): reference views drawn from an approved 3D sheet skip the
     # 2D decision only when the plan declares `ref_views` and this is "allow"
     "ref_views_images": "ask",
@@ -1146,6 +1151,20 @@ _AUTO_DESC = {
                         "decision for the operator (provide the assets, e.g. from ChatGPT, use "
                         "Media_Gen's image tools, or hold); 'allow' gives it Media_Gen's image "
                         "tools; 'deny' starts it without them.",
+    "opencode_mcp_blender": "OpenCode projects: let OpenCode sessions start the Blender MCP "
+                            "server (blender-mcp). Off (default): opencode.jsonc lists it "
+                            "switched off, so an OpenCode session never opens a second client "
+                            "to the Blender that Kilo is using. On: it is on in the project's "
+                            "opencode.jsonc, and a track's copy follows the track's needs like "
+                            "Kilo's. Kilo projects are not affected.",
+    "opencode_mcp_studio": "OpenCode projects: let OpenCode sessions start the Roblox Studio MCP "
+                           "servers (Roblox_Studio, robloxstudio-mcp). Off (default): listed "
+                           "switched off, so Kilo keeps the only Studio client. Kilo projects "
+                           "are not affected.",
+    "opencode_mcp_foundry_media": "OpenCode projects: let OpenCode sessions start the "
+                                  "foundry-media MCP server (ChatGPT images through the "
+                                  "router). Off (default): listed switched off. Kilo projects "
+                                  "are not affected.",
     "media_gen_3d": "A sprint that needs `blender` (3D assets): 'allow' (default) gives its "
                     "implementer Media_Gen's generate_3d_model (one picture of one object or "
                     "character -> a textured GLB, library 'game', 10-25 min a model) and the "

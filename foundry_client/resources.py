@@ -15,7 +15,11 @@ whole process tree is over `kilo_restart_gb` and free RAM is under `kilo_restart
 on two checks in a row, the client asks for Kilo's own safe-point restart: nothing is cut,
 it waits until no session works. The coordinator holds new session starts while that
 restart is pending (infra.kilo_drain), so the safe point comes. One request per
-KILO_RESTART_GAP_S; `kilo_restart_gb = 0` switches it off."""
+KILO_RESTART_GAP_S; `kilo_restart_gb = 0` switches it off.
+
+v0.181.256: the OpenCode server (also Bun) gets the same rule with its own settings,
+`opencode_restart_gb` and `opencode_restart_free_gb`; it only acts while the client runs an
+OpenCode server."""
 
 from __future__ import annotations
 
@@ -30,6 +34,8 @@ DEFAULTS = {
     "auto_stop": True,            # stop a runaway development / testing job
     "kilo_restart_gb": 6,         # restart Kilo at a safe point when its tree is over this...
     "kilo_restart_free_gb": 4,    # ...and free RAM is under this (0 = whatever is free)
+    "opencode_restart_gb": 6,     # v0.181.256: the same rule for the OpenCode server
+    "opencode_restart_free_gb": 4,
     "limits": {                   # per kind: memory (GB, the job's whole process tree) + minutes
         "training": {"gb": 6, "minutes": 120},
         "studio_check": {"gb": 3, "minutes": 240},
@@ -103,7 +109,10 @@ class ResourceWatch:
                  clock: Callable[[], float] = time.time, ps=None,
                  kilo_pid: Callable[[], Optional[int]] = lambda: None,
                  kilo_pending: Callable[[], bool] = lambda: False,
-                 restart_kilo: Callable[[str], str] = lambda why: "no restart hook"):
+                 restart_kilo: Callable[[str], str] = lambda why: "no restart hook",
+                 opencode_pid: Callable[[], Optional[int]] = lambda: None,
+                 opencode_pending: Callable[[], bool] = lambda: False,
+                 restart_opencode: Callable[[str], str] = lambda why: "no restart hook"):
         self.settings, self.alert, self.clear_alert, self.event = settings, alert, clear_alert, event
         self.game, self.protected, self.clock = game, protected, clock
         if ps is None:
@@ -115,6 +124,9 @@ class ResourceWatch:
         self.kilo_pid, self.kilo_pending, self.restart_kilo = kilo_pid, kilo_pending, restart_kilo
         self.kilo_over = 0                    # consecutive checks with Kilo over and RAM low
         self.kilo_asked = -1e18               # when a memory restart was last asked for
+        self.opencode_pid, self.opencode_pending = opencode_pid, opencode_pending
+        self.restart_opencode = restart_opencode
+        self.opencode_over, self.opencode_asked = 0, -1e18
         self.next_at = 0.0
         self.over: dict[int, int] = {}        # pid -> consecutive checks over its memory limit
         self.stops: list[dict] = []
@@ -181,8 +193,15 @@ class ResourceWatch:
 
     def kilo_gb(self) -> Optional[float]:
         """Memory of the Kilo server's whole process tree, or None (not running here)."""
+        return self._tree_gb(self.kilo_pid)
+
+    def opencode_gb(self) -> Optional[float]:
+        """The same for the OpenCode server (v0.181.256)."""
+        return self._tree_gb(self.opencode_pid)
+
+    def _tree_gb(self, pid_fn) -> Optional[float]:
         try:
-            pid = self.kilo_pid()
+            pid = pid_fn()
             if not pid:
                 return None
             p = self.ps.Process(int(pid))
@@ -192,37 +211,51 @@ class ResourceWatch:
 
     def _kilo(self, s: dict, free: float) -> dict:
         """The Kilo memory rule (module text). Returns what the status shows."""
-        gb = self.kilo_gb()
-        lim, need = float(s.get("kilo_restart_gb") or 0), float(s.get("kilo_restart_free_gb") or 0)
+        return self._server_rule("kilo", "Kilo", self.kilo_gb(), s, free, self.kilo_pending,
+                                 self.restart_kilo)
+
+    def _opencode(self, s: dict, free: float) -> dict:
+        """v0.181.256: the same rule for the OpenCode server, with its own two settings
+        (opencode_restart_gb, opencode_restart_free_gb; 0 GB = never)."""
+        return self._server_rule("opencode", "OpenCode", self.opencode_gb(), s, free,
+                                 self.opencode_pending, self.restart_opencode)
+
+    def _server_rule(self, name: str, label: str, gb: Optional[float], s: dict, free: float,
+                     pending_fn, restart_fn) -> dict:
+        lim = float(s.get(f"{name}_restart_gb") or 0)
+        need = float(s.get(f"{name}_restart_free_gb") or 0)
+        key = f"resources:{name}_memory"
         out = {"gb": gb, "limit_gb": lim, "free_below_gb": need, "pending": False}
         if gb is None:
-            self.kilo_over = 0
+            setattr(self, f"{name}_over", 0)
             return out
         try:
-            pending = bool(self.kilo_pending())
+            pending = bool(pending_fn())
         except Exception:                                         # noqa: BLE001
             pending = False
         out["pending"] = pending
         if not lim or gb <= lim or (need and free >= need):
-            self.kilo_over = 0
+            setattr(self, f"{name}_over", 0)
             if not pending:
-                self.clear_alert("resources:kilo_memory")
+                self.clear_alert(key)
             return out
-        self.kilo_over += 1
+        over = getattr(self, f"{name}_over", 0) + 1
+        setattr(self, f"{name}_over", over)
         now = self.clock()
-        if self.kilo_over < 2 or pending or now - self.kilo_asked < KILO_RESTART_GAP_S:
+        if over < 2 or pending or now - getattr(self, f"{name}_asked") < KILO_RESTART_GAP_S:
             return out
-        self.kilo_asked = now
-        why = (f"Kilo is using {gb:.1f} GB (limit {lim:g} GB) with {free:.1f} GB of RAM free"
+        setattr(self, f"{name}_asked", now)
+        why = (f"{label} is using {gb:.1f} GB (limit {lim:g} GB) with {free:.1f} GB of RAM free"
                + (f" (under {need:g} GB)" if need else ""))
         try:
-            res = str(self.restart_kilo(why) or "")
+            res = str(restart_fn(why) or "")
         except Exception as e:                                    # noqa: BLE001
             res = f"{type(e).__name__}: {e}"
-        self.event("resources", f"{why}: asked for a Kilo restart at the next safe point"
+        art = "an" if label[:1].lower() in "aeiou" else "a"
+        self.event("resources", f"{why}: asked for {art} {label} restart at the next safe point"
                                 + (f" ({res})" if res else ""))
-        self.alert("resources:kilo_memory",
-                   f"{why}. Kilo restarts at the next safe point (when no session is working); "
+        self.alert(key,
+                   f"{why}. {label} restarts at the next safe point (when no session is working); "
                    f"the coordinator holds new session starts until then.", "info")
         out.update(pending=True, asked=now)
         return out
@@ -257,9 +290,11 @@ class ResourceWatch:
         elif low and free >= low + 0.5:
             self.clear_alert("resources:low_ram")
         kilo = self._kilo(s, free)
+        opencode = self._opencode(s, free)
         self.last = {"ts": self.clock(), "free_gb": round(free, 1), "total_gb": round(total, 1),
                      "jobs": jobs, "top": top, "stops": self.stops[-10:], "kilo": kilo,
-                     "kilo_gb": kilo.get("gb")}
+                     "kilo_gb": kilo.get("gb"), "opencode": opencode,
+                     "opencode_gb": opencode.get("gb")}
         return self.last
 
     def _runaway(self, j: dict, why: str, stop: bool) -> None:
@@ -308,7 +343,8 @@ class ResourceWatch:
 
 def validate(s: dict) -> list[str]:
     errs = []
-    for k in ("interval_seconds", "low_ram_gb", "kilo_restart_gb", "kilo_restart_free_gb"):
+    for k in ("interval_seconds", "low_ram_gb", "kilo_restart_gb", "kilo_restart_free_gb",
+              "opencode_restart_gb", "opencode_restart_free_gb"):
         v = s.get(k, 0)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             errs.append(f"resources.{k} must be a number, 0 or more")

@@ -1,3 +1,111 @@
+## v0.181.256 - OpenCode follow-ups
+
+Victor approved these on 2026-11-23, after the live OpenCode pilot: the local MCP
+servers, and the five gaps the pilot left. Kilo projects behave exactly as before: every
+change below either applies only to OpenCode projects or keeps Kilo's text and values.
+
+### Local MCP servers in opencode.jsonc: listed, switched off
+
+Victor: "you can add them, but we can't use them as Kilo is still using them."
+
+- **What agent-config writes:** `agent-config` now writes full blocks for Blender
+  (`blender-mcp`), Roblox Studio (`Roblox_Studio`, `robloxstudio-mcp`) and `foundry-media`,
+  copied from Kilo's global config and the project's `kilo.jsonc`. It copies type, command
+  and timeout only, never environment values or headers. Each block is
+  `"enabled": false`, so an OpenCode session never opens a second client to a server Kilo
+  is using.
+- **Three switches, all shipping off:** `[automation] opencode_mcp_blender`,
+  `opencode_mcp_studio` and `opencode_mcp_foundry_media`. They are schema fields, so the
+  Automation page shows them and the router's draft validation accepts them. Kilo projects
+  are not affected.
+- **When a switch changes:** the coordinator sets that server's `enabled` in the
+  project's `opencode.jsonc` (with a backup, checked by reading it back), and asks the
+  Foundry Client for an OpenCode reload at a safe point. It never touches a `kilo.jsonc`.
+- **A track's copy:** a server stays off unless its switch is on, and then it follows the
+  track's needs like Kilo's.
+- **Track and repair folders:** an OpenCode project's track and Lead repair folders now
+  get an `opencode.jsonc`. Before this they got a `kilo.jsonc`, which OpenCode never
+  reads.
+- **Existing files:** an existing `opencode.jsonc` is never rewritten, so the pilot's
+  file has no local blocks. Move it aside and run `agent-config --apply` to get them.
+
+### The generic project adapter shows reviewers the files a task names
+
+OP-2 in the pilot ("explain greet() from src/pilot/greet.py; do not change any code") was
+blocked twice, because the reviewer saw only the doc diff. Reviewers now also get, read
+from the reviewed commit:
+
+- the files in a task's new `context` list (paths or globs) in the task file;
+- repository paths the spec text names outside the task's scope.
+
+The limits are 8 files and 12,000 characters each. Binary files are skipped. A listed
+file that is missing at that commit is reported as missing. The AnimalUprising adapter
+keeps its own review evidence.
+
+### A memory watchdog for the OpenCode server
+
+The Foundry Client's resource watch applies Kilo's rule to the OpenCode server (also
+Bun). When the server's whole process tree is over `resources.opencode_restart_gb` (6)
+and free RAM is under `resources.opencode_restart_free_gb` (4) on two checks in a row,
+the client asks for a safe-point restart. It asks at most once per half hour. Both
+settings are in Settings → Resource watch, and 0 GB switches the rule off.
+
+The coordinator's hold on new session starts while a restart is pending
+(`kilo_restart_drain_minutes`) now reads the component that serves the project: `kilo`,
+`opencode`, or both. Kilo projects are held exactly as before.
+
+### Lead manager off: no AttributeError every tick
+
+The tick called `self.lead.retry_aborts()` while `self.lead` was None, and logged "lead
+abort retry failed: AttributeError" every tick. It now runs only when an abort is queued,
+and an abort queued while the Lead was on is still retried.
+
+### The control page names the agent server
+
+The bridge's heartbeat says which agent servers it watches (`kilo`, `opencode` or
+`kilo+opencode`). The control page's pill reads "opencode ok" for an OpenCode project
+instead of "kilo ok".
+
+### OpenCode 2.x's event stream
+
+The bridge reads `GET /api/event` from an OpenCode 2.x server instead of only polling it:
+
+- **Live:** text and reasoning stream in as they are written.
+- **Changes:** any other session event (a tool call, a step, the end of a run, a
+  permission ask or a form) makes the bridge read that session on its next pass.
+- **Folders:** events of other folders are skipped.
+- **Fallback:** a server without the stream, or a dropped connection, falls back to
+  polling as before. Kilo's stream is read as before.
+
+Part ids:
+
+- **Pre-existing bug, now fixed:** parts read from a 2.x server had no id, and the bridge
+  drops parts without one, so the control page showed no parts at all for OpenCode 2.x
+  sessions.
+- **The new ids:** `<message>:<kind>:<n>`, with each kind counted on its own. A tool part
+  is `<message>:tool:<call id>`.
+- **Checked live on 2.3.2:** a reasoning block and the text after it both arrive with
+  ordinal 0, so streamed parts and the parts read later from the message list are the
+  same parts.
+- **Not shown live:** that the streamed text equals the stored text. The router returned
+  provider errors to the second and third check prompts while the bench ran. Those check
+  sessions were aborted.
+
+### Deploy
+
+Two parts need a restart, and they restart independently:
+
+- **Foundry Client:** the resource watch and the OpenCode settings.
+- **Coordinator:** the Lead fix, MCP sync, tracks, reviewer context, the bridge and the
+  OpenCode hold.
+
+The router serves `control.html`, so the pill label shows after a router rebuild.
+
+Tests: test_opencode_followups_v256.py (17) and client/test_resources_opencode_v256.py (4);
+the 2.x observer test now expects an event stream. Gate in three parts under the Foundry Client's
+60-minute pytest limit (-n 2): tests/ without coordinator 3977 passed, tests/coordinator
+without test_animaluprising.py 2411 passed, test_animaluprising.py 11 passed; 0 failed.
+
 ## v0.181.255 - one upgrade supervisor per coordinator
 
 Found on the workstation 2026-11-23 00:37: five `foundry_client supervisor ...

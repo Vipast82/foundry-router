@@ -291,6 +291,56 @@ def regenerate(profile, role_rules: Optional[dict] = None, apply: bool = False,
     return result
 
 
+def sync_opencode_mcp(profile, apply: bool = True, clock=time.time) -> list[dict]:
+    """v0.181.256: the local MCP servers in each OpenCode config file of the project
+    (kilo.jsonc files are never touched) follow the [automation] opencode_mcp_* switches:
+    `enabled` true while the switch is on, false while it is off (the default: Kilo is using
+    them). Only servers the file already has a full block for are changed (agent-config
+    writes them). Returns one {path, changed: [names], backup} per file that changed (or
+    would, without apply)."""
+    from .agent_config import local_mcp_allowed
+    allowed = local_mcp_allowed(profile)
+    out: list[dict] = []
+    for path in agent_config_paths(profile):
+        if not AB.is_opencode_config(path) or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        try:
+            data = jsonc.parse(text)
+        except jsonc.JsoncError as e:
+            raise KiloConfigError(f"{path} is not valid JSONC: {e}") from None
+        mcp = (data or {}).get("mcp") if isinstance(data, dict) else None
+        new, changed = text, []
+        for name, on in allowed.items():
+            blk = (mcp or {}).get(name)
+            if not isinstance(blk, dict) or not blk.get("type"):
+                continue
+            if blk.get("enabled") is not on:
+                new = jsonc.replace_value(new, ("mcp", name, "enabled"), on)
+                changed.append(name)
+        if not changed:
+            continue
+        rec = {"path": path, "changed": changed,
+               "enabled": [n for n in changed if allowed[n]], "backup": ""}
+        if apply:
+            backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(clock()))}"
+            shutil.copy2(path, backup)
+            rec["backup"] = backup
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write(new)
+            os.replace(tmp, path)
+            with open(path, encoding="utf-8") as f:
+                back = (jsonc.parse(f.read()) or {}).get("mcp") or {}
+            if any((back.get(n) or {}).get("enabled") is not allowed[n] for n in changed):
+                shutil.copy2(backup, path)
+                raise KiloConfigError(f"{path}: mcp enabled reads back differently "
+                                      f"(backup restored)")
+        out.append(rec)
+    return out
+
+
 # --------------------------------------------------------------------------- per-track file
 
 def _attr(track, name: str, default=None):
@@ -426,11 +476,13 @@ def _narrow_skills(block: dict, keep: set) -> dict:
 def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
                extra: Optional[dict] = None, official_studio: bool = True,
                docs_mcp: bool = True, skills_keep: Optional[set] = None,
-               hide_unused_builtins: bool = False) -> dict:
+               hide_unused_builtins: bool = False, mcp_off: frozenset = frozenset()) -> dict:
     """Pure part of `track_kilo_config`: {"text", "mcp": {name: enabled}, "blocks": {agent: block},
     "missing": [agents]}. Raises JsoncError on an unparseable source. `official_studio`
     False keeps the official Studio MCP server off even with the `studio` need; `docs_mcp`
-    False turns roblox-docs off; `skills_keep` (a set) hides the other roblox-* skills."""
+    False turns roblox-docs off; `skills_keep` (a set) hides the other roblox-* skills.
+    `mcp_off` (v0.181.256, OpenCode files only) names servers that stay off whatever the
+    needs: the local ones whose [automation] opencode_mcp_* switch is off."""
     needs = SM.normalize_needs(needs)
     data = jsonc.parse(text)
     if not isinstance(data, dict):
@@ -442,9 +494,10 @@ def track_text(text: str, needs, role_rules: Optional[dict], workspace: str,
     want = set(SM.mcp_for(needs))
     if not official_studio:
         want.discard(OFFICIAL_STUDIO_MCP)
+    want -= set(mcp_off)
     mcp = data.get("mcp") if isinstance(data.get("mcp"), dict) else None
     flags: dict = {}
-    for name in SM.CONTROLLED_MCP:
+    for name in list(SM.CONTROLLED_MCP) + [m for m in mcp_off if m not in SM.CONTROLLED_MCP]:
         on = name in want
         cur = (mcp or {}).get(name)
         if isinstance(cur, dict):
@@ -541,14 +594,24 @@ def track_kilo_config(track, *, profile=None, role_rules: Optional[dict] = None,
             if "blender" in needs:
                 docs = plans_need_docs_mcp(wt, sprints)
             keep = track_skills(profile, wt, sprints)
+    # v0.181.256: an OpenCode project's track gets an opencode.jsonc (OpenCode never reads a
+    # kilo.jsonc), and its local MCP servers stay off unless [automation] opencode_mcp_* allows
+    is_oc = AB.is_opencode_config(source)
+    mcp_off: frozenset = frozenset()
+    if is_oc and profile is not None:
+        from .agent_config import local_mcp_allowed
+        try:
+            mcp_off = frozenset(n for n, on in local_mcp_allowed(profile).items() if not on)
+        except Exception:                                         # noqa: BLE001
+            mcp_off = frozenset(n for names in AB.OPENCODE_LOCAL_MCP.values() for n in names)
     try:
         p = track_text(text, needs, role_rules, workspace or wt,
                        extra_agents(profile, role_rules, workspace or wt),
                        official_studio=official, docs_mcp=docs, skills_keep=keep,
-                       hide_unused_builtins=builtins)
+                       hide_unused_builtins=builtins, mcp_off=mcp_off)
     except (jsonc.JsoncError, RR.RuleError) as e:
         raise KiloConfigError(f"{source}: {e}") from None
-    target = os.path.join(wt, "kilo.jsonc")
+    target = os.path.join(wt, os.path.basename(source) if is_oc else "kilo.jsonc")
     os.makedirs(wt, exist_ok=True)
     backup = ""
     if os.path.exists(target):

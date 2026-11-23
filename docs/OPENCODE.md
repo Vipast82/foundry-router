@@ -102,8 +102,8 @@ helper = "opencode"        # roles: implementer, helper, lead
 - **How it routes:** sessions start on the server their role names. Every later call on a
   session goes to the server that started it, even after a coordinator restart. Each
   server's config file gets the role rules.
-- **Telemetry:** the control page shows sessions from both servers. It polls the OpenCode
-  2.x server, because that server's event stream is not translated yet.
+- **Telemetry:** the control page shows sessions from both servers. Events stream from the
+  profile's default server; a second server is polled.
 
 ## Safety on every OpenCode session
 
@@ -146,12 +146,44 @@ name, which replaces the live coordinator's key until that one registers again (
 minutes). That happened once during the pilot; the live key was the current one again
 straight after.
 
+## Local MCP servers (v0.181.256)
+
+`agent-config` lists Blender (`blender-mcp`), Roblox Studio (`Roblox_Studio`,
+`robloxstudio-mcp`) and `foundry-media` in `opencode.jsonc`, copied from Kilo's config
+(type, command and timeout only), all switched off: Kilo is using them, and OpenCode must
+not open a second client to the same Studio or Blender. Turn one on for OpenCode under
+Automation with `opencode_mcp_blender`, `opencode_mcp_studio` or `opencode_mcp_foundry_media`
+(all off by default):
+
+- the coordinator sets `enabled` in the project's `opencode.jsonc` and asks the Foundry
+  Client to reload OpenCode at a safe point;
+- a track's copy keeps the server off unless the switch is on, and then follows the track's
+  needs like Kilo's.
+
+A file written before v0.181.256 has no local blocks: move it aside and run `agent-config
+--apply` again.
+
+## Reviewers and unchanged files (v0.181.256)
+
+Reviewers of a generic-adapter project see, beside the diff, the files a task names. These
+are read from the reviewed commit:
+
+- the paths or globs in the task's `context` list;
+- repository paths its spec text names outside its scope.
+
+## Memory and the event stream (v0.181.256)
+
+- **Memory:** the Foundry Client restarts the OpenCode server at a safe point when its
+  process tree is over `resources.opencode_restart_gb` with free RAM under
+  `resources.opencode_restart_free_gb`, the same as Kilo's rule. New sessions wait for the
+  restart.
+- **Events:** the bridge reads OpenCode 2.x's `/api/event`. Text and reasoning stream in,
+  other session events trigger a read, and it falls back to polling if there is no stream.
+- **The control page's pill** names the server: `opencode ok`.
+
 ## What is not done yet
 
-- **A way to give reviewers unchanged files** in the generic project adapter (OP-2 above).
-- **Local MCP servers in opencode.jsonc** (blender-mcp, robloxstudio-mcp, foundry-media).
-  Remote ones are written since v0.181.249.
-- **OpenCode 2.x's event stream.** The bridge polls instead.
-- **A memory watchdog for the OpenCode server.** Kilo's watchdog is unchanged.
-- **The control page's agent heartbeat.** It still shows the project's agent server
-  under the "Kilo" label.
+- **The control page's other Kilo wording:** apart from the server pill, the session panes
+  still say "Kilo" for both servers.
+- **Streamed text matching stored text:** not shown live, because the router returned
+  errors during the bench run. Part ids were checked live.

@@ -22,6 +22,12 @@ What the file always holds, and doctor / preflight check:
   snapshot false            no snapshot question to a person
   agent stubs               every agent the role rules name, so regenerate can fill their
                             permission blocks (it never creates agents)
+  mcp                       the remote servers the coordinator switches per sprint
+                            (Media_Gen) and the local Blender / Roblox Studio / foundry-media
+                            servers, copied from Kilo's config; each starts off. A local one
+                            is on only while its [automation] opencode_mcp_* switch is on
+                            (v0.181.256): Kilo is using them, so by default OpenCode never
+                            opens a second client to them
 Nothing Kilo-only is written (OpenCode rejects unknown top-level keys).
 """
 
@@ -133,6 +139,41 @@ def remote_mcp_blocks(global_path: Optional[str] = None) -> dict:
     return out
 
 
+def local_mcp_blocks(sources: tuple = (), global_path: Optional[str] = None,
+                     allowed: Optional[dict] = None) -> dict:
+    """v0.181.256: the local MCP servers Kilo runs for Studio, Blender and images
+    (agent_backends.OPENCODE_LOCAL_MCP), copied from Kilo's global config and the given
+    project files (a kilo.jsonc; later files win) so OpenCode lists them. Only type, command
+    and timeout are copied (never environment values or headers). Each is `enabled` only
+    when its [automation] opencode_mcp_* switch is on (`allowed`, {name: bool}); off by
+    default, because Kilo is using these servers and OpenCode must not open a second client."""
+    from foundry_automation import service_map as SM
+    merged = SM.merged_mcp(global_path=global_path)
+    for src in sources:
+        if src and os.path.exists(src):
+            for k, v in SM.merged_mcp(project_path=src, global_path="").items():
+                merged.setdefault(k, {}).update(v)
+    allowed = allowed or {}
+    out: dict = {}
+    for names in AB.OPENCODE_LOCAL_MCP.values():
+        for name in names:
+            srv = merged.get(name) or {}
+            cmd = srv.get("command")
+            if srv.get("type") != "local" or not isinstance(cmd, list) or not cmd or                     not all(isinstance(a, str) for a in cmd):
+                continue
+            blk = {"type": "local", "command": list(cmd), "enabled": bool(allowed.get(name))}
+            if isinstance(srv.get("timeout"), int):
+                blk["timeout"] = srv["timeout"]
+            out[name] = blk
+    return out
+
+
+def local_mcp_allowed(profile) -> dict:
+    """{server: allowed} from the profile's [automation] opencode_mcp_* switches."""
+    from .automation import get as auto_get
+    return AB.opencode_local_mcp_on(lambda k: auto_get(profile, k))
+
+
 def target_path(profile) -> str:
     from .kilo_config import kilo_path
     return kilo_path(profile)
@@ -169,6 +210,15 @@ def write(profile, *, provider_from: str = "", dialect: str = "", apply: bool = 
                           default_agent=str(client.get("agent") or AB.OPENCODE.default_agent),
                           subagents=subs)
     cfg["mcp"] = remote_mcp_blocks(mcp_from)
+    # v0.181.256: Blender, Roblox Studio and foundry-media, listed switched off unless the
+    # project's [automation] opencode_mcp_* switch is on
+    try:
+        allowed = local_mcp_allowed(profile)
+    except Exception:                                            # noqa: BLE001
+        allowed = {}
+    cfg["mcp"].update(local_mcp_blocks(
+        (src, os.path.join(str(getattr(profile, "workspace", "") or ""), "kilo.jsonc")),
+        global_path=mcp_from, allowed=allowed))
     text = "// written by foundry-coordinator agent-config; the coordinator edits it in place\n" \
            + json.dumps(cfg, indent=2) + "\n"
     out = {"path": path, "dialect": dialect, "agents": list(cfg["agent"]), "applied": False,
@@ -190,4 +240,4 @@ def write(profile, *, provider_from: str = "", dialect: str = "", apply: bool = 
 
 
 __all__ = ["AgentConfigError", "provider_block", "opencode_config", "write", "target_path",
-           "remote_mcp_blocks"]
+           "remote_mcp_blocks", "local_mcp_blocks", "local_mcp_allowed"]

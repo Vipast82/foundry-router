@@ -248,20 +248,50 @@ def session_failure(c, P, t: dict, why: str, free: bool) -> bool:
 KILO_DRAIN_CACHE_S = 30.0
 
 
+def agent_components(P) -> list[str]:
+    """The Foundry Client components that serve this project's agent sessions: "kilo" for a
+    Kilo project (as before v0.181.256), "opencode" for an OpenCode one, both when
+    [clients.<name>] adds the other server."""
+    prof = getattr(P, "profile", None)
+    kinds = [str(((getattr(prof, "client", None) or {}).get("kind")) or "kilo").lower()]
+    extra = (getattr(prof, "raw", None) or {}).get("clients") or {}
+    for t in extra.values() if isinstance(extra, dict) else ():
+        if isinstance(t, dict):
+            kinds.append(str(t.get("kind") or "kilo").lower())
+    out = []
+    for k in kinds:
+        if k in ("kilo", "opencode") and k not in out:
+            out.append(k)
+    return out or ["kilo"]
+
+
+SERVER_LABEL = {"kilo": "Kilo", "opencode": "OpenCode"}
+
+
 def kilo_drain(c, P) -> str:
     """Why a new session must not start right now ('' = start): the Foundry Client has a
     Kilo restart pending for a safe point (memory, a config reload), and a safe point only
     comes when no session works. New starts are held for at most [automation]
     kilo_restart_drain_minutes (0 = never held), so the restart happens when the running
     sessions end their turn instead of waiting hours behind a stream of new ones. Read
-    from the client every KILO_DRAIN_CACHE_S; no client here means no hold."""
+    from the client every KILO_DRAIN_CACHE_S; no client here means no hold.
+    v0.181.256: an OpenCode project is held the same way for the client's OpenCode server."""
     try:
         limit = float(auto_get(P, "kilo_restart_drain_minutes") or 0) * 60
     except Exception:                                             # noqa: BLE001
         limit = 0
     if limit <= 0:
         return ""
-    cache = c.__dict__.setdefault("_kilo_drain", {})
+    for comp in agent_components(P):
+        why = _server_drain(c, P, comp, limit)
+        if why:
+            return why
+    return ""
+
+
+def _server_drain(c, P, comp: str, limit: float) -> str:
+    cache = c.__dict__.setdefault("_kilo_drain" if comp == "kilo" else f"_{comp}_drain", {})
+    label = SERVER_LABEL.get(comp, comp)
     now = c.clock()
     if now - float(cache.get("ts") or -1e18) >= KILO_DRAIN_CACHE_S:
         cache["ts"] = now
@@ -269,7 +299,7 @@ def kilo_drain(c, P) -> str:
         try:
             from . import client_api
             api = client_api.discover()
-            st = api.component("kilo") if api is not None else None
+            st = api.component(comp) if api is not None else None
         except Exception:                                         # noqa: BLE001
             st = None
         cache["pending"] = bool(st and st.get("pending_restart"))
@@ -284,9 +314,10 @@ def kilo_drain(c, P) -> str:
     if not cache.get("noted"):
         cache["noted"] = True
         c.store.event(P.id, "", "kilo_drain", detail={
-            "why": "the Kilo server has a restart pending for a safe point",
-            "held_for_at_most_minutes": limit / 60, "digest": True})
-    return (f"waiting: the Kilo server restarts at the next safe point; no new session starts "
+            "why": f"the {label} server has a restart pending for a safe point",
+            "held_for_at_most_minutes": limit / 60, "digest": True,
+            **({"server": comp} if comp != "kilo" else {})})
+    return (f"waiting: the {label} server restarts at the next safe point; no new session starts "
             f"until then (at most {max(1, int(-(-(limit - waited) // 60)))} more min)")
 
 
