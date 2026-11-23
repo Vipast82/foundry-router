@@ -215,3 +215,13 @@ def test_kilo_training_events_are_still_tagged_kilo():
     from foundry_training.adapters import kilo
     s = {"info": {"id": "ses_1", "time": {"created": 1000}}, "messages": []}
     assert {e.source_adapter for e in kilo.normalize(s, "p", "r", {})} == {"kilo"}
+
+
+def test_a_disabled_component_card_says_where_to_turn_it_on_once():
+    from foundry_client import config
+    html = open(os.path.join(os.path.dirname(config.__file__), "static", "client.html"),
+                encoding="utf-8").read()
+    card = html[html.index("function compCard"):html.index("function compCard") + 1500]
+    # 2026-11-23: a switched-off component read "disabled disabled" (state and detail)
+    assert "turn it on in Settings" in card
+    assert "'<span class=\"dim\">disabled</span>'} <span class=\"dim\">${esc(c.detail)}" not in card

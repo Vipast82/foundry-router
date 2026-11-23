@@ -93,7 +93,7 @@ function ago(ts) { const d = Math.max(0, Date.now() / 1000 - ts); return d < 90 
 function compCard(c) {
   const rojo = c.info && c.info.sessionId ? ` · session ${esc(String(c.info.sessionId).slice(0, 8))}` : "";
   return `<div class="card s-${esc(c.state)}"><h3><span class="dot"></span>${esc(c.label)}${c.adopted ? ' <span class="chip" title="Running before the client started; the client can still stop or restart it by its port">started outside</span>' : ""}</h3>
-      <div>${c.enabled ? esc(c.state) : '<span class="dim">disabled</span>'} <span class="dim">${esc(c.detail)}</span></div>
+      <div>${c.enabled ? esc(c.state) + ` <span class="dim">${esc(c.detail)}</span>` : '<span class="dim">disabled: turn it on in Settings (it starts when you save)</span>'}</div>
       <div class="dim">${c.pid ? "pid " + c.pid + " · up " + fmtUp(c.uptime_s) : ""}${c.restarts ? " · " + c.restarts + " restart(s)" : ""}${rojo}</div>
       ${c.last_exit && c.state !== "running" ? `<div class="dim">last exit: ${esc(c.last_exit)}</div>` : ""}
       ${c.problem && c.enabled ? `<div class="bad">${esc(c.problem)}</div>` : ""}
