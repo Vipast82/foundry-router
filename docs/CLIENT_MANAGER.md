@@ -32,7 +32,7 @@ They become one cross-platform app that anyone can install. Victor chose (2026-1
 |---|---|---|---|
 | Kilo server | `kilo serve --port 4096` (path detected or set), cwd = game workspace | `GET /config` on its port, with the Kilo password (tells a closed port, a wrong password and a wedged server apart) | safe point |
 | Coordinator | `foundry-client coordinator run --control ...` (bundled) | heartbeat file age | safe point (tick boundary) |
-| Upgrade supervisor | `foundry-client supervisor --loop ...` (bundled) | process alive | any time |
+| Upgrade supervisor | `foundry-client supervisor --loop ...` (bundled) | the loop file `<state>/supervisor.loop.json` names a live process | any time |
 | Rojo | `rojo serve <project> --port 34872` (path detected or set) | `GET /api/rojo` (session id) | any time. Studio's plugin must be reconnected by hand after a restart; the client notices the new session id and says so. |
 
 Kilo and Rojo are external programs. They are detected or configured, not
@@ -52,6 +52,15 @@ what it names.
 **Processes started outside the client** are adopted. They can be stopped and restarted by the
 pid that owns their port (Kilo, Rojo) or the pid in the coordinator heartbeat. A restart that
 could not stop the old process reports `failed: ...` and is not counted.
+
+**One upgrade supervisor.** The supervisor loop writes `<state>/supervisor.loop.json` (pid and
+process identity) and removes it when it ends. A client that starts while a loop runs (after
+**Restart client**) adopts that loop. A second `--loop` for the same state folder exits at once.
+Before v0.181.255 nothing could find a running loop, so every Restart client added one. While
+the client's own supervisor runs, it stops any other loop for the same `--state` about once a
+minute. A loop is found by its command line and needs psutil. A loop that holds
+`supervisor.lock` is in the middle of an upgrade and is left until that upgrade ends. Each stop
+is a `supervisor` event on the status page.
 
 **Coordinator safe point.** The coordinator heartbeat carries `checks` (the background check runs:
 verify, closeout, track merge gate) and `checks_running` (true while any runs). `checks: []` with

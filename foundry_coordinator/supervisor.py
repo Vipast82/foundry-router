@@ -118,6 +118,12 @@ DB_NAME = "coordinator.sqlite"
 PID_FILE = "coordinator.pid"
 HEARTBEAT_FILE = "coordinator.heartbeat"
 STOP_FILE = "coordinator.stop"
+# the running `--loop` process: {pid, created, exe, host, written_ts} (write_pid_file). The
+# Foundry Client adopts the loop it names after a "Restart client" instead of starting a
+# second one, and a second `--loop` for the same state dir exits at once (2026-11-23: five
+# loops ran, one per client restart, because nothing could find the old one).
+LOOP_FILE = "supervisor.loop.json"
+LOCK_FILE = "supervisor.lock"
 ACTOR = "supervisor"
 OWNER_STALE_S = 120           # store.claim_owner's stale window
 HB_FRESH_S = 120              # a heartbeat this recent identifies a running coordinator
@@ -531,17 +537,24 @@ class Supervisor:
     def run_once(self) -> list[dict]:
         """Advance every open request as far as it goes now."""
         out = []
-        with _Lock(os.path.join(self.state_dir, "supervisor.lock")):
+        with _Lock(os.path.join(self.state_dir, LOCK_FILE)):
             for uid in self.pending():
                 out.append(self.run(uid))
                 if out[-1]["status"] not in TERMINAL:
                     break                     # one upgrade at a time
         return out
 
-    def loop(self, interval: float = 5.0) -> None:
-        while True:
-            self.run_once()
-            time.sleep(interval)
+    def loop(self, interval: float = 5.0, sleep: Callable[[float], None] = time.sleep,
+             rounds: Optional[int] = None) -> None:
+        n = 0
+        while rounds is None or n < rounds:
+            n += 1
+            try:
+                self.run_once()
+            except LockHeld:
+                pass                          # another supervisor is mid-upgrade: wait a round
+            sleep(interval)
+
 
     def run(self, uid: str) -> dict:
         req = self.load(uid)
@@ -1249,6 +1262,10 @@ class Supervisor:
                        status="failed")
 
 
+class LockHeld(RuntimeError):
+    """Another live supervisor holds the upgrade lock or the loop file."""
+
+
 class _Lock:
     """One supervisor per state dir (a stale lock of a dead process is taken over)."""
 
@@ -1269,7 +1286,7 @@ class _Lock:
                 except (OSError, ValueError):
                     other = 0
                 if other and other != os.getpid() and pid_alive(other):
-                    raise RuntimeError(f"another supervisor (pid {other}) holds {self.path}")
+                    raise LockHeld(f"another supervisor (pid {other}) holds {self.path}")
                 try:
                     os.remove(self.path)
                 except OSError:
@@ -1281,6 +1298,49 @@ class _Lock:
             os.remove(self.path)
         except OSError:
             pass
+        return False
+
+
+def loop_pid(state_dir: str) -> Optional[int]:
+    """The pid of the `--loop` supervisor running for `state_dir`, from its loop file, or
+    None. A live pid whose identity differs from the file's (a reused pid) is not it; one
+    whose identity cannot be read is taken at its word."""
+    rec = read_pid_file(os.path.join(state_dir, LOOP_FILE))
+    if not rec or rec.get("legacy") or not rec.get("pid"):
+        return None
+    return int(rec["pid"]) if pid_matches(rec) is not False else None
+
+
+def lock_pid(state_dir: str) -> Optional[int]:
+    """The pid holding the upgrade lock (a supervisor in the middle of run_once), if alive."""
+    try:
+        with open(os.path.join(state_dir, LOCK_FILE), encoding="utf-8") as fh:
+            pid = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+    return pid if pid and pid_alive(pid) else None
+
+
+class _LoopFile:
+    """Claim the loop file for this process; release it on exit if it still names us."""
+
+    def __init__(self, state_dir: str):
+        self.path = os.path.join(state_dir, LOOP_FILE)
+
+    def __enter__(self):
+        other = loop_pid(os.path.dirname(self.path))
+        if other and other != os.getpid():
+            raise LockHeld(f"another supervisor loop (pid {other}) runs for this state folder")
+        write_pid_file(self.path)
+        return self
+
+    def __exit__(self, *exc):
+        rec = read_pid_file(self.path)
+        if rec and int(rec.get("pid") or 0) == os.getpid():
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
         return False
 
 
@@ -1319,13 +1379,22 @@ def main(argv: Optional[list] = None) -> int:
         return 0
     if not a.repo or not a.coordinator_cmd:
         ap.error("--repo and --coordinator-cmd are required with --once/--loop")
+    other = loop_pid(state) if a.loop else None
+    if other and other != os.getpid():
+        print(f"supervisor: another supervisor loop (pid {other}) runs for this state folder; "
+              f"not starting a second one", file=sys.stderr)
+        return 0
     sup = Supervisor(state, a.repo, a.coordinator_cmd, stop_cmd=a.stop_cmd or None,
                      python=a.python or None, profiles=a.profiles,
                      stop_timeout=a.stop_timeout, health_timeout=a.health_timeout,
                      safe_timeout=a.safe_timeout, test_timeout=a.test_timeout)
     try:
         if a.loop:
-            sup.loop(a.interval)
+            try:
+                with _LoopFile(state):
+                    sup.loop(a.interval)
+            except LockHeld as e:
+                print(f"supervisor: {e}; not starting a second one", file=sys.stderr)
             return 0
         res = sup.run_once()
         for r in res:

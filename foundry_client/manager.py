@@ -135,6 +135,7 @@ class Manager:
                 self.step()
                 self.requests.poll()
                 self.resources.maybe_tick()
+                self.sweep_supervisors()
             except Exception as e:                                # noqa: BLE001
                 self._event("client", f"internal error: {type(e).__name__}: {e}")
             self.stop_evt.wait(interval)
@@ -494,6 +495,39 @@ class Manager:
         st = self.restart("kilo")
         self._event("kilo", f"restart asked by the resource watch: {why}")
         return str(st.get("result") or "pending")
+
+    def sweep_supervisors(self, force: bool = False, ps=None) -> dict:
+        """Stop upgrade-supervisor loops for this coordinator state that are not the client's
+        own (older clients left them: suploops.py). Only while the client's own supervisor
+        runs, at most once a minute; a loop in the middle of an upgrade is left alone."""
+        now = self.clock()
+        if not force and now < getattr(self, "_sup_sweep_at", 0.0):
+            return {}
+        self._sup_sweep_at = now + 60
+        pr = self.procs.get("supervisor")
+        if pr is None or pr.state != "running" or not (pr.p is not None or pr.adopted):
+            return {}
+        keep = set()
+        if pr.p is not None and getattr(pr.p, "pid", None):
+            keep.add(int(pr.p.pid))
+        own = pr.spec.owner_pid() if pr.spec.owner_pid else None
+        if own:
+            keep.add(int(own))
+        if not keep:
+            return {}
+        from . import suploops
+        res = suploops.sweep(expand(self.cfg["client"]["state_dir"]), keep,
+                             lambda pid: self._kill_pid(pid, None, True), ps=ps)
+        for pid in res["stopped"]:
+            self._event("supervisor", f"stopped an extra upgrade supervisor (pid {pid}) that "
+                                      f"an earlier client left running")
+        busy = tuple(res["busy"])
+        if busy and busy != getattr(self, "_sup_busy_seen", ()):
+            self._event("supervisor", "an extra upgrade supervisor is in the middle of an "
+                                      f"upgrade (pid {', '.join(map(str, busy))}); it is "
+                                      "stopped once that upgrade ends")
+        self._sup_busy_seen = busy
+        return res
 
     def _component_pids(self) -> set:
         """The managed components' own processes: the resource watch never stops them."""

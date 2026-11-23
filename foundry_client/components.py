@@ -255,6 +255,9 @@ def build(cfg: dict) -> dict[str, Spec]:
          "--loop", *s["args"]],
         cwd=deploy, env=s.get("env") or {}, secrets=s.get("secrets") or [],
         after=s.get("after") or [],
+        # found through <state>/supervisor.loop.json, so a restarted client adopts the
+        # running loop instead of starting a second one (2026-11-23: five ran)
+        health=lambda: supervisor_health(state), owner_pid=lambda: supervisor_loop_pid(state),
         problem="" if deploy and os.path.isdir(os.path.join(deploy, ".git")) else
         "the upgrade supervisor needs a git release checkout (workspace.deploy)")
 
@@ -378,6 +381,17 @@ def _heartbeat_raw_pid(state_dir: str) -> Optional[int]:
         return int(json.loads(p.read_text(encoding="utf-8")).get("pid") or 0) or None
     except (OSError, ValueError, TypeError, AttributeError):
         return None
+
+
+def supervisor_loop_pid(state_dir: str) -> Optional[int]:
+    """The running upgrade-supervisor loop for this coordinator state, from its loop file."""
+    from foundry_coordinator.supervisor import loop_pid
+    return loop_pid(expand(state_dir))
+
+
+def supervisor_health(state_dir: str) -> tuple[bool, str]:
+    pid = supervisor_loop_pid(state_dir)
+    return (True, f"loop pid {pid}") if pid else (False, "no supervisor loop is running")
 
 
 def heartbeat_pid(state_dir: str) -> Optional[int]:

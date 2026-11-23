@@ -1,3 +1,37 @@
+## v0.181.255 - one upgrade supervisor per coordinator
+
+Found on the workstation 2026-11-23 00:37: five `foundry_client supervisor ...
+--loop` processes ran for one coordinator. Each was a venv launcher with its python
+child. Only one of them belonged to the running Foundry Client; the other four had
+outlived the Clients that started them.
+
+**Why.** "Restart client" leaves the components running so the new Client can adopt
+them, and the new Client adopts Kilo, Rojo and the coordinator through their port or
+heartbeat. The upgrade supervisor had neither a health check nor a pid to find, so
+every new Client started another loop, and every restart added one. Their upgrade
+lock kept two of them from upgrading at once. A loop that found the lock held raised
+and exited, and its Client restarted it.
+
+**Fixed.**
+- The `--loop` supervisor writes `<state>/supervisor.loop.json` (pid, process
+  identity) and removes it when it ends.
+- The Client's supervisor component checks its health and finds its pid through that
+  file. A restarted Client adopts the running loop ("started outside the client")
+  and does not start a second one.
+- A second `--loop` for the same state folder exits at once with a message.
+- A loop that finds the upgrade lock held waits a round instead of dying.
+
+**Clean-up (on).** While the Client's own supervisor runs, about once a minute it
+stops any other supervisor loop for the same `--state`. Loops are found by command
+line through psutil; a venv launcher and its child count as one loop. A loop that
+holds `supervisor.lock`, so is in the middle of an upgrade, is left until that
+upgrade ends. Each stop is a `supervisor` event on the Status page. Loops started by
+older Clients write no loop file, so the first Client on this release starts its own
+loop and then stops the four (or five) old ones.
+
+Needs a Foundry Client update and a restart. Documented in docs/CLIENT_MANAGER.md.
+10 tests; v0.181.255
+
 ## v0.181.254 - the OpenCode pilot, live
 
 Asked: get OpenCode working end to end on one non-critical project, checked live (the plan,
