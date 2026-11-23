@@ -76,8 +76,22 @@ def _tool_part(c: dict, msg_id: str, session_id: str) -> dict:
         err = st.get("error") or {}
         state["error"] = str(err.get("message") or err.get("type") or "error")
         state["output"] = _tool_output(st)
-    return {"type": "tool", "tool": c.get("name") or "", "callID": c.get("id") or "",
+    # 2.x tool names and inputs in the 1.x / Kilo vocabulary the evidence, checkpoint and
+    # training code read (checked live on 2.3.2, 2026-11-23): `shell` is 1.x `bash`, and
+    # read / write / edit take `path` where 1.x takes `filePath`. The 2.x name is kept.
+    name = c.get("name") or ""
+    tool = OC2_TOOL_NAMES.get(name, name)
+    if tool != name:
+        state["metadata"].setdefault("oc2_tool", name)
+    inp = state.get("input")
+    if isinstance(inp, dict) and "path" in inp and "filePath" not in inp \
+            and tool in ("read", "write", "edit", "patch", "multiedit", "list"):
+        state["input"] = {**inp, "filePath": inp["path"]}
+    return {"type": "tool", "tool": tool, "callID": c.get("id") or "",
             "messageID": msg_id, "sessionID": session_id, "state": state}
+
+
+OC2_TOOL_NAMES = {"shell": "bash"}
 
 
 def _error(err) -> Optional[dict]:
@@ -613,6 +627,18 @@ def oc1_config_view(cfg: dict) -> dict:
     if isinstance(out.get("providers"), dict):
         prov = dict(out.get("provider") or {})
         _deep_merge(prov, out["providers"])
+        # 2.x provider: `settings` (baseURL, apiKey, timeout) and `package` hold what 1.x
+        # calls `options` and `npm` (checked live on 2.3.2, 2026-11-23)
+        for p in prov.values():
+            if not isinstance(p, dict):
+                continue
+            if isinstance(p.get("settings"), dict):
+                opts = dict(p.get("options") or {})
+                for k, v in p["settings"].items():
+                    opts.setdefault(k, v)
+                p["options"] = opts
+            if p.get("package") and not p.get("npm"):
+                p["npm"] = str(p["package"]).split(":", 1)[-1]
         out["provider"] = prov
     if isinstance(out.get("agents"), dict):
         ag = dict(out.get("agent") or {})

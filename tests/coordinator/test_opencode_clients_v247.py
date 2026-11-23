@@ -367,3 +367,22 @@ def test_config_view_reads_enabled_providers_from_2x_policies():
     assert v["enabled_providers"] == ["foundry"] and v["snapshot"] is False
     assert "enabled_providers" not in oc1_config_view({"policies": pol[1:]})
     assert oc1_config_view({"policies": pol, "enabled_providers": ["x"]})["enabled_providers"] == ["x"]
+
+
+def test_2x_tool_names_and_paths_read_like_kilos():
+    # shapes OpenCode 2.3.2 recorded in the live pilot (2026-11-23)
+    rows = [{"type": "assistant", "id": "m1", "time": {"created": 1, "completed": 2},
+             "content": [
+                 {"type": "tool", "id": "c1", "name": "shell",
+                  "state": {"status": "completed", "input": {"command": "python verify.py"},
+                            "metadata": {"exit": 0, "status": "exited", "truncated": False},
+                            "content": [{"type": "text", "text": "ALL PASS"}]}},
+                 {"type": "tool", "id": "c2", "name": "edit",
+                  "state": {"status": "completed",
+                            "input": {"path": "docs/USAGE.md", "oldString": "a", "newString": "b"},
+                            "content": [{"type": "text", "text": "ok"}]}}]}]
+    parts = to_oc1_messages(rows, "s")[0]["parts"]
+    assert parts[0]["tool"] == "bash" and parts[0]["state"]["metadata"]["oc2_tool"] == "shell"
+    assert parts[0]["state"]["input"]["command"] == "python verify.py"
+    assert parts[0]["state"]["metadata"]["exit"] == 0 and parts[0]["state"]["output"] == "ALL PASS"
+    assert parts[1]["tool"] == "edit" and parts[1]["state"]["input"]["filePath"] == "docs/USAGE.md"
