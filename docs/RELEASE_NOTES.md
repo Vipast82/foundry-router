@@ -1,3 +1,33 @@
+## v0.181.253 - every test that can run here runs
+
+Asked: make sure everything is updated so all tests can be run. A full gate
+on the workstation skipped 16 tests, and some of those skips were not about
+the machine at all.
+
+**A test hid node and bash from the tests after it.**
+tests/test_code_checks.py loads the code-checks service and set
+`srv.shutil.which` to find nothing - and `srv.shutil` is the shutil module
+itself, so every later test in that xdist worker skipped as "node is not
+installed" or "no bash". How many skipped depended on which worker each test
+landed in. It is a monkeypatch now, undone when the test ends.
+
+**The AnimalUprising tests never found the repository.** They looked for it at
+a Linux path and at C:/Roblox/_scratch/lc-studio. They now take AU_REPO /
+AU_INDEX_REPO when set, else the operator's checkout at C:/Roblox/AnimalUprising.
+They read it and clone it with --shared into the test's own folder; the checkout
+is never written to. Woken up, three of them asserted facts about the
+repository's HEAD on 2026-10-15 (UI-01 in progress, no coordinator rule
+amendment yet); they now run against that commit (aaec4aa) on one shared clone.
+Two searched only the last 400 commits for sprints that are now older; they
+search the whole history.
+
+What still skips on the workstation: TCP_INFO (Linux only), and the browser and
+symlink tests where those are missing. The 11 AnimalUprising tests take about
+25 minutes - mostly cloning a 34,000-file repository - so a full gate is now
+better run in parts (each background run here is stopped at about 40 minutes):
+tests/ without coordinator, tests/coordinator without test_animaluprising.py,
+and test_animaluprising.py on its own.
+
 ## v0.181.252 - Media_Gen checklist fixes: follow-up references, the 3D refusal, viewer light
 
 The section 9 checklist was run on 2026-11-22 against the live router (v0.181.249) through

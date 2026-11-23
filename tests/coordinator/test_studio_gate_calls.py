@@ -168,7 +168,9 @@ def test_select_gate_ports_gate_ps1_d3_subset_and_suites():
     assert last == 9 and disp[("S46", 2)] == 5 and disp[("S04", 1)] == 9
 
 
-REAL_REPO = os.environ.get("AU_INDEX_REPO", "C:/Roblox/_scratch/lc-studio")
+REAL_REPO = os.environ.get("AU_INDEX_REPO") or next(
+    (p for p in ("C:/Roblox/_scratch/lc-studio", "C:/Roblox/AnimalUprising")
+     if os.path.isdir(p)), "C:/Roblox/_scratch/lc-studio")
 REAL_REV = "fec207b4"
 
 

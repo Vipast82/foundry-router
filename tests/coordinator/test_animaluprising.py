@@ -14,7 +14,12 @@ from foundry_coordinator.adapters.base import FAIL, PASS
 from foundry_coordinator.profile import load
 from tests.coordinator.helpers import GIT_ENV
 
-AU = os.environ.get("AU_REPO", "/home/user/animaluprising")
+# the operator's own checkout on the workstation, when there is one (read and
+# cloned with --shared, never written to)
+AU = os.environ.get("AU_REPO") or next(
+    (p for p in ("C:/Roblox/AnimalUprising", "/home/user/animaluprising")
+     if os.path.isfile(os.path.join(p, "tools", "guard", "done_check.py"))),
+    "/home/user/animaluprising")
 _AU_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "foundry_coordinator", "projects",
                        "animaluprising")
 # the local profile (git-ignored) when present, else the committed example
@@ -45,7 +50,7 @@ def _adapter(tmp, workspace):
 
 
 def _closing_commit(task):
-    out = _git(AU, "log", "--format=%H %s", "-n", "400")
+    out = _git(AU, "log", "--format=%H %s")      # the whole history: these sprints are old now
     shas = [l.split()[0] for l in out.splitlines() if l.split(" ", 1)[1].startswith(task + ":")]
     if not shas:
         pytest.skip(f"{task} not in the clone's history (shallow clone?)")
@@ -64,14 +69,31 @@ def test_plan_is_the_task_source_and_scope(tmp_path):
         a.describe("ZZ-99")
 
 
-def test_dependencies_finished_before_the_coordinator_count(tmp_path):
-    a = _adapter(tmp_path, AU)
+# The AU commit these tests were written against (2026-10-15): UI-01 in progress,
+# no coordinator rule amendment yet. Read at HEAD they were facts about a moment
+# that has passed - UI-01 is done and the amendment landed - so they are pinned.
+WRITTEN_AT = "aaec4aa16829fe2591ba658c5ec6d3ecdd204d52"
+
+
+@pytest.fixture(scope="module")
+def _written_at(tmp_path_factory):
+    """One clone at WRITTEN_AT for the tests that only read it: a clone of this
+    repo takes minutes, and these three change nothing in it."""
+    return _clone_at(tmp_path_factory.mktemp("au_then"), WRITTEN_AT)
+
+
+def _then(tmp_path, ws):
+    return _adapter(tmp_path, ws)
+
+
+def test_dependencies_finished_before_the_coordinator_count(tmp_path, _written_at):
+    a = _then(tmp_path, _written_at)
     assert a.dependency_done("AS-C16") and a.dependency_done("GF-UI1b")
     assert not a.dependency_done("UI-01")                  # in progress, no ledger row
 
 
-def test_sprints_refused_until_the_rule_amendment_exists(tmp_path):
-    a = _adapter(tmp_path, AU)
+def test_sprints_refused_until_the_rule_amendment_exists(tmp_path, _written_at):
+    a = _then(tmp_path, _written_at)
     why = a.preflight_task(a.describe("UI-01"))
     assert why and "COORDINATOR-ADVANCEMENT" in why
 
@@ -124,9 +146,9 @@ def test_the_sprints_own_frame_after_the_gate_keeps_binding(tmp_path):
     assert g.result == FAIL and "docs/evidence/OTHER-1/f.png" in g.detail
 
 
-def test_active_sprint_is_not_done(tmp_path):
-    a = _adapter(tmp_path, AU)
-    rev = _git(AU, "rev-parse", "HEAD")
+def test_active_sprint_is_not_done(tmp_path, _written_at):
+    a = _then(tmp_path, _written_at)
+    rev = WRITTEN_AT
     rows = {r.check: r.result for r in a._done_check(a.describe("UI-01"), "closeout", rev)}
     assert rows["au.done_check"] == FAIL and rows["au.done_check.SUMMARY"] == FAIL
 

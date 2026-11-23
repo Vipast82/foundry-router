@@ -340,7 +340,7 @@ def test_a_service_rule_with_no_address():
     assert any("no service address" in s for s in said)
 
 
-def test_the_service_itself_only_runs_its_own_checkers(tmp_path):
+def test_the_service_itself_only_runs_its_own_checkers(tmp_path, monkeypatch):
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "cc_server", Path(__file__).parent.parent / "contrib" / "code-checks" / "server.py")
@@ -354,7 +354,10 @@ def test_the_service_itself_only_runs_its_own_checkers(tmp_path):
     assert srv.run({"command": "", "code": "x"})[1]["error"] == "command is required"
     assert srv.run({"command": "selene {file}", "code": ""})[1]["error"] == "code is required"
     assert "larger than" in srv.run({"command": "selene {file}", "code": "x" * 2_000_000})[1]["error"]
-    srv.shutil.which = lambda name: None                 # as if nothing were installed
+    # as if nothing were installed. srv.shutil IS the shutil module: set directly,
+    # this stayed for every later test in the worker, which then skipped
+    # everything needing node or bash ("node is not installed", "no bash")
+    monkeypatch.setattr(srv.shutil, "which", lambda name: None)
     status, body = srv.run({"command": "selene {file}", "code": "local x = 1"})
     assert status == 400 and "not installed in this service" in body["error"]
 
