@@ -115,9 +115,42 @@ On top of the coordinator's rules, every OpenCode session is denied:
 The deny rules on Kilo's files stay as they were. The preflight check fails if `share`
 is not `"disabled"`.
 
+## The live pilot (2026-11-23)
+
+The scratch project `opencode-pilot` (`C:\Foundry\opencode-pilot`) ran on the workstation's
+OpenCode 2.3.2 server. It was driven by a separate pilot coordinator with its own state
+folder and profiles folder, started by `C:\Foundry\opencode-pilot-run.py`; AnimalUprising and
+the live coordinator were never touched. The implementer used `Foundry-Kilo-Implementer`
+through the router's `opencode` key, and reviews ran on `Foundry-Kilo-Review`.
+
+- **OP-1** (a module and its tests) went QUEUED → IMPLEMENTING → VERIFYING → REVIEWING →
+  APPROVED → CLOSING → COMPLETE in about 80 seconds:
+  - its commit was pushed;
+  - the session row reads client `opencode`, and the router binding was made;
+  - the review approved it.
+- **OP-2** (a doc change) ran two OpenCode sessions, the second after an operator unblock.
+  Both were implemented and verified, and both times the reviewer blocked them for the same
+  reason: the generic project adapter gives the reviewer no unchanged files. That would happen
+  on Kilo too.
+- **Training capture** read both sessions through the API. The events are tagged `opencode`,
+  with their task, messages, reasoning, tool calls and results, and tokens.
+- **What the real server showed**, and which the client now handles:
+  - 2.x stores `enabled_providers` as `policies`;
+  - provider `options` arrive as `settings`;
+  - the shell tool is `shell` (read as `bash`);
+  - read, write and edit take `path` (read as `filePath`).
+
+**Running a second coordinator on this PC:** switch off slot ssh in its process (the pilot
+launcher does). Otherwise it registers its own ssh key for the Studio slots under this PC's
+name, which replaces the live coordinator's key until that one registers again (within 10
+minutes). That happened once during the pilot; the live key was the current one again
+straight after.
+
 ## What is not done yet
 
-- **The live pilot.** It needs OpenCode installed (see the plan, section 6).
+- **A way to give reviewers unchanged files** in the generic project adapter (OP-2 above).
+- **Local MCP servers in opencode.jsonc** (blender-mcp, robloxstudio-mcp, foundry-media).
+  Remote ones are written since v0.181.249.
 - **OpenCode 2.x's event stream.** The bridge polls instead.
 - **A memory watchdog for the OpenCode server.** Kilo's watchdog is unchanged.
 - **The control page's agent heartbeat.** It still shows the project's agent server

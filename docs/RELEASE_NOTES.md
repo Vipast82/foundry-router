@@ -1,3 +1,38 @@
+## v0.181.254 - the OpenCode pilot, live
+
+Asked: get OpenCode working end to end on one non-critical project, checked live (the plan,
+docs/plans/OPENCODE_BACKEND_PLAN.md, section 6). OpenCode 2.3.2 is installed on the
+workstation, and the Foundry Client runs it on port 4097.
+
+**The pilot.** The scratch project `opencode-pilot` was run by a separate pilot coordinator,
+with its own state and profiles folders; AnimalUprising and the live coordinator were not
+touched. The implementer ran on Foundry-Kilo-Implementer through the router's `opencode`
+key.
+- **OP-1** (a module and its tests) completed in about 80 seconds: session, prompt, the
+  model's tool calls, the coordinator's verification, the review, then commit and push.
+  The session row reads client `opencode`, and the router binding was made.
+- **OP-2** (a doc change) ran two OpenCode sessions, the second after an operator unblock.
+  The reviewer blocked it both times because the generic project adapter shows reviewers no
+  unchanged files, which is the same with Kilo.
+- **Training capture** read both sessions through the API, tagged `opencode`.
+
+**What the real 2.3.2 server showed, now handled** (adapters/oc2.py):
+- `enabled_providers` comes back as `provider.use` policies, so preflight warned wrongly;
+- provider `options` come back as `settings` (doctor's worker inference-key check failed);
+- the shell tool is named `shell`, read as `bash`;
+- read, write and edit take `path`, read as `filePath`;
+- `snapshots` is read as `snapshot`.
+
+**Client page.** A switched-off component's card read "disabled disabled". It now says once
+that it is off, and that it starts when it is turned on in Settings and saved.
+
+**For a second coordinator on this PC:** switch off slot ssh in that process. The pilot's
+first start registered its own slot ssh key under this PC's name; the live coordinator's
+key was the current one again straight after. docs/OPENCODE.md says how.
+
+Not done: review context files for the generic adapter, local MCP servers in
+opencode.jsonc, the 2.x event stream, an OpenCode memory watchdog. 4 new tests.
+
 ## v0.181.253 - every test that can run here runs
 
 Asked: make sure everything is updated so all tests can be run. A full gate
