@@ -357,3 +357,13 @@ def test_project_observer_is_kilos_for_a_kilo_project_and_2x_for_opencode(oc2):
     assert o.statuses("/w") == {}
     with pytest.raises(Exception):
         next(iter(o.events("/w", None)))
+
+
+def test_config_view_reads_enabled_providers_from_2x_policies():
+    # what OpenCode 2.3.2 returned for `"enabled_providers": ["foundry"]` (checked live)
+    pol = [{"action": "provider.use", "resource": "*", "effect": "deny"},
+           {"action": "provider.use", "resource": "foundry", "effect": "allow"}]
+    v = oc1_config_view({"policies": pol, "snapshots": False})
+    assert v["enabled_providers"] == ["foundry"] and v["snapshot"] is False
+    assert "enabled_providers" not in oc1_config_view({"policies": pol[1:]})
+    assert oc1_config_view({"policies": pol, "enabled_providers": ["x"]})["enabled_providers"] == ["x"]

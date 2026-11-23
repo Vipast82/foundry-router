@@ -626,6 +626,33 @@ def oc1_config_view(cfg: dict) -> dict:
         flat = {k: v for k, v in mcp.items() if k != "servers"}
         flat.update(mcp["servers"])
         out["mcp"] = flat
+    if "enabled_providers" not in out:
+        allowed = _allowed_providers(out.get("policies"))
+        if allowed is not None:
+            out["enabled_providers"] = allowed
+    if "snapshot" not in out and isinstance(out.get("snapshots"), bool):
+        out["snapshot"] = out["snapshots"]
+    return out
+
+
+def _allowed_providers(policies) -> Optional[list]:
+    """2.x turns `enabled_providers` into policies (checked live on 2.3.2, 2026-11-23):
+    provider.use * deny, then provider.use <id> allow. The providers a deny-all policy set
+    still allows, in order, or None when no policy restricts providers."""
+    rules = [p for p in policies or [] if isinstance(p, dict) and p.get("action") == "provider.use"]
+    if not any(r.get("resource") == "*" and r.get("effect") == "deny" for r in rules):
+        return None
+    out: list = []
+    for r in rules:                                # last match wins: walk in order
+        res, eff = str(r.get("resource") or ""), r.get("effect")
+        if res == "*":
+            if eff == "deny":
+                out = []
+            continue
+        if eff == "allow" and res not in out:
+            out.append(res)
+        elif eff == "deny" and res in out:
+            out.remove(res)
     return out
 
 
