@@ -943,6 +943,12 @@ class MediaConfig(BaseModel):
         "generate_3d_model", "create_music_video", "create_parody_music_video",
         "create_short_film", "create_explainer_video", "create_tutorial_video",
         "create_presenter_video", "animate_3d_model"])
+    # v0.181.259: tools whose replies list files rather than make them (Media_Gen's
+    # list_assets, search_library ...). Their links stay links for the model to pass
+    # on; nothing is fetched or shown under the reply ("show me the pictures in the
+    # game library" copied every picture and 12 MB GLB in the listing).
+    no_fetch_tools: list[str] = Field(default_factory=lambda: [
+        "list_assets", "search_library", "media_list_jobs", "list_voices", "media_status"])
     # The "view in 3D" page for a .glb a tool made (/media/a/<token>/view) loads
     # Google's <model-viewer> from here, in the browser of the person chatting.
     # "" = no viewer: the 3D model is a download link only.

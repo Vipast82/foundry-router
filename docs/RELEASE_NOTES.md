@@ -1,3 +1,17 @@
+## v0.181.259 - a listing's links stay links
+
+Found by the same Media_Gen 5.27 chat test (v0.181.258). "Show me the pictures in the game
+library" (test 4.43) and every list_assets / search_library the model ran to find an earlier
+result made Foundry copy and show each file the listing named: eight pictures under one
+reply, and in test 5.1 three GLB models of up to 12 MB plus two detailed-mesh links, under a
+reply about something else.
+
+- **media.no_fetch_tools** (default list_assets, search_library, media_list_jobs,
+  list_voices, media_status; Settings → Media "never copy files from"): a reply from one of
+  these tools keeps its links as text for the model to pass on; nothing is copied or shown
+  under the reply. A tool that made the file (media_check_job, a generate tool) is shown as
+  before. The same rule applies to long-running tool jobs.
+
 ## v0.181.258 - Media_Gen 5.27 through chat: 3D models and documents as attachments
 
 Victor, 2026-11-24: "Need to test all the features through chat, and make sure foundry-router

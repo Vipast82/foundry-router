@@ -1795,13 +1795,14 @@ async def set_media(request: Request):
             return JSONResponse({"error": "model_viewer_url must start with https://"},
                                 status_code=400)
         updates["model_viewer_url"] = url
-    if "job_no_wait_tools" in body:
-        names = body["job_no_wait_tools"]
-        if isinstance(names, str):
-            names = names.replace("\n", ",").split(",")
-        if not isinstance(names, list):
-            return JSONResponse({"error": "job_no_wait_tools must be a list"}, status_code=400)
-        updates["job_no_wait_tools"] = [str(n).strip() for n in names if str(n).strip()]
+    for key in ("job_no_wait_tools", "no_fetch_tools"):
+        if key in body:
+            names = body[key]
+            if isinstance(names, str):
+                names = names.replace("\n", ",").split(",")
+            if not isinstance(names, list):
+                return JSONResponse({"error": f"{key} must be a list"}, status_code=400)
+            updates[key] = [str(n).strip() for n in names if str(n).strip()]
     if "attachments_fetch_hosts" in body:
         hosts = body["attachments_fetch_hosts"]
         if isinstance(hosts, str):

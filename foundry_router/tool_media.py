@@ -591,6 +591,14 @@ def forget_deleted(svc, text: str) -> list[str]:
             + ". Don't show or repeat any earlier link to them; tell the user they are gone.]"]
 
 
+def fetches_files(svc, tool: str) -> bool:
+    """v0.181.259: False for a tool in media.no_fetch_tools - a listing (Media_Gen's
+    list_assets, search_library ...) whose links stay links for the model; "show me the
+    pictures in the game library" copied every picture and 12 MB GLB it listed."""
+    names = getattr(svc.config_store.config.media, "no_fetch_tools", None) or []
+    return (tool or "").lower() not in {str(t).strip().lower() for t in names if str(t).strip()}
+
+
 async def store_result(svc, server: str, tool: str, args: Optional[dict], rich, *,
                        persona: Optional[str] = None, job_id: Optional[str] = None,
                        fetch_urls: bool = True) -> _Captured:
@@ -704,7 +712,7 @@ class ToolJobs:
             from .brain.agent import raw_call_tool_rich
             rich = await raw_call_tool_rich(mcp, server, tool, args or {}, progress_callback=relay)
             cap = await store_result(self.svc, server, tool, args, rich, persona=persona,
-                                     job_id=jid)
+                                     job_id=jid, fetch_urls=fetches_files(self.svc, tool))
             text = rich.text or "(empty tool result)"
             media.finish_tool_row(jid, status="succeeded",
                                   artifacts=[a for a in _artifacts(media, jid)],
@@ -853,7 +861,8 @@ async def run_tool(svc, mcp, server: str, tool: str, args: Optional[dict], *,
     from .brain.agent import raw_call_tool_rich
     rich = await raw_call_tool_rich(mcp, server, tool, args or {})
     rich = await wait_for_queued(svc, mcp, server, tool, rich, sink, progress)
-    cap = await store_result(svc, server, tool, args, rich, persona=persona)
+    cap = await store_result(svc, server, tool, args, rich, persona=persona,
+                             fetch_urls=fetches_files(svc, tool))
     if cap.items or cap.notes or cap.links:
         sink.extend(cap.items)
         sink.extend(cap.links)
