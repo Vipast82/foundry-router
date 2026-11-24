@@ -62,12 +62,14 @@ def test_extraction_from_openai_messages():
                                       "filename": "notes.pdf"}}]})
     atts = MA.extract(raw, msgs)
     assert [(a.msg, a.kind, a.number) for a in atts] == [
-        (2, "image", 1), (2, "image", 2), (4, "image", 3), (4, "audio", 1)]
+        (2, "image", 1), (2, "image", 2), (4, "image", 3), (4, "audio", 1), (4, "document", 1)]
     assert atts[0].mime == "image/png" and atts[0].data == PNG
     assert atts[1].mime == "image/jpeg"
     assert atts[2].url == "https://example.com/cat.png" and atts[2].data is None
     assert atts[3].data == WAV and atts[3].mime == "audio/wav"
-    # the pdf is not media: never extracted; the models' messages carry no side keys
+    # v0.181.258: the pdf is a document media-gen takes (create_podcast documents=...);
+    # the models' messages carry no side keys
+    assert atts[4].mime == "application/pdf" and atts[4].name == "notes.pdf"
     assert all("_media_urls" not in m and "_media_parts" not in m for m in msgs)
     assert msgs[2]["images"] and msgs[2]["content"] == "two pictures"
 

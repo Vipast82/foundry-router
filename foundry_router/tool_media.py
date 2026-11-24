@@ -152,6 +152,17 @@ class PendingJob:
     label: str
 
 
+def job_ended(sink: Optional[list], job_ids) -> None:
+    """v0.181.258: a later check in the same reply found these jobs done, failed or
+    cancelled: their PendingJob ("still running") is taken out of the sink. Foundry's own
+    wait had run out, the model then checked the job itself and it had finished, and the
+    "still running" line stayed under a reply that said it was done."""
+    ids = set(job_ids or ())
+    if sink is None or not ids:
+        return
+    sink[:] = [i for i in sink if not (isinstance(i, PendingJob) and i.job_id in ids)]
+
+
 @dataclass
 class _Captured:
     items: list = field(default_factory=list)
@@ -807,6 +818,10 @@ async def run_tool(svc, mcp, server: str, tool: str, args: Optional[dict], *,
         res = ToolResult([{"type": "text", "text": await job_status(svc, args, got, progress)}])
         sink.extend(got)
         res.media_items = [i for i in got if isinstance(i, MediaItem)]
+        jid = str((args or {}).get("job_id") or "").strip().strip("`")
+        row = svc.media.get(jid) if jid and getattr(svc, "media", None) else None
+        if row and row.get("status") not in (None, "running"):
+            job_ended(sink, [jid])
         return res
     jobs: Optional[ToolJobs] = getattr(svc, "tool_jobs", None)
     if jobs is not None and jobs.is_long(server) and getattr(svc, "media", None) is not None:
@@ -920,7 +935,8 @@ def _server_has_tool(svc, server: str, tool: str) -> bool:
         return False
 
 
-_ESTIMATE = re.compile(r"\babout\s+(\d+(?:\.\d+)?)(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*"
+# v0.181.258: media-gen 5.27 words animate_3d_model's estimate "roughly 15-40 minutes"
+_ESTIMATE = re.compile(r"\b(?:about|roughly|around|approximately)\s+(\d+(?:\.\d+)?)(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*"
                        r"(seconds?|secs?|minutes?|mins?|hours?|hrs?)\b", re.I)
 _UNIT_S = {"s": 1.0, "m": 60.0, "h": 3600.0}
 
@@ -932,11 +948,11 @@ def too_long_to_wait(mcfg, tool: str, text: str, wait: float) -> str:
     listed = {str(t).strip().lower() for t in (getattr(mcfg, "job_no_wait_tools", None) or [])
               if str(t).strip()}
     m = _ESTIMATE.search(text or "")
-    est = m.group(0)[len("about "):].strip() if m else ""
+    est = " ".join(m.group(0).split()) if m else ""          # "about 10-25 minutes"
     if tool.lower() in listed:
-        return f"takes about {est}" if est else "takes many minutes"
+        return f"takes {est}" if est else "takes many minutes"
     if m and float(m.group(1)) * _UNIT_S[m.group(2)[0].lower()] > wait:
-        return f"takes about {est}"
+        return f"takes {est}"
     return ""
 
 
@@ -959,6 +975,11 @@ async def wait_for_queued(svc, mcp, server: str, tool: str, rich, sink: list,
     check = (getattr(mcfg, "job_check_tool", "") or "").strip()
     wait = float(getattr(mcfg, "job_wait_seconds", 0) or 0)
     text = getattr(rich, "text", "") or ""
+    if check and tool == check and not getattr(rich, "is_error", False):
+        # the model's own check of a job: a final status ends that job's "still running" line
+        st = ((_MG_STATUS.search(text) or [None, ""])[1]).lower()
+        if st in _JOB_FINAL:
+            job_ended(sink, _MG_JOB.findall(text))
     if not check or wait <= 0 or tool == check or getattr(rich, "is_error", False):
         return rich
     m = _MG_JOB.search(text)
@@ -993,7 +1014,9 @@ async def wait_for_queued(svc, mcp, server: str, tool: str, rich, sink: list,
                      f"job.]")
         return rich
     say(f"⏳ {server} queued job {names} for {tool} — waiting up to {int(wait)}s for it here\n")
-    poll = max(0.05, float(getattr(mcfg, "fallback_poll_seconds", 3.0) or 3.0))
+    # v0.181.258: media-gen asks for a check at most every 10-15 s (this used the 3 s
+    # fallback_poll_seconds of the gpt-image fallback)
+    poll = max(0.05, float(getattr(mcfg, "job_check_every_seconds", 10) or 10))
     t0 = said = time.monotonic()
     reports: dict = {}                    # job id -> the check result that ended it
     last: dict = {}

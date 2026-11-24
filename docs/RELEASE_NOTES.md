@@ -1,3 +1,33 @@
+## v0.181.258 - Media_Gen 5.27 through chat: 3D models and documents as attachments
+
+Victor, 2026-11-24: "Need to test all the features through chat, and make sure foundry-router
+is compatible and working" (Media_Gen 5.27 guide and test plan). Running the plan's chat tests
+against the live router (v0.181.256) through Foundry-Chat found three router gaps.
+
+- **3D models and documents reach media-gen (tests 3.4, 3.5).** The attachment hook passed
+  only pictures, audio and video. A .glb, .fbx, .obj or .stl and a PDF, DOCX, TXT, MD or HTML
+  attached in a chat were dropped without a note, so "check this model for Roblox" never got
+  the model, and "make a 2 minute podcast about this" (a PDF) made a podcast about the last
+  file in the library instead. They are now uploaded like pictures and named in the line:
+  `[Attached for media tools: 3D model 1 = upload:...; document 1 = upload:...]`. A generic
+  type (octet-stream, zip) is decided by the file name; binary glTF, binary FBX and PDF are
+  also recognised by their first bytes. Anything else is still never sent.
+- **No "still running" line after the job finished (test 2.1).** Foundry's wait ran out on the
+  second of two pictures; the model then checked that job itself and got STATUS: done, but
+  "⏳ ... is still running (job 2850acf4cb07)" stayed under a reply that said both were done.
+  A check in the same reply that finds a job done, failed or cancelled now takes its line out
+  (Media_Gen's media_check_job and Foundry's own tool-job check).
+- **"roughly 15-40 minutes" is an estimate.** Only "about ..." was read, and animate_3d_model
+  says "roughly". animate_3d_model is also in the default never-wait list.
+- **The chat wait checks a job every 10 s** (media.job_check_every_seconds, 2-60, Settings →
+  Media "check every (s)"), as media-gen 5.27 asks (at most every 10-15 s); it was every 3 s.
+
+Found on the media-gen side, reported to Victor, not changed here: the state looked emptied by
+the 5.27 install (no voices, no earlier jobs or library files; voice "victor" gone); the
+private library's name shows in a refusal over chat; media_status's "Ready:" line leaves out
+about 20 tools and calls 0.46.0 the latest ComfyUI release while 0.46.3 runs; Whisper makes up
+words over a sound with no speech.
+
 ## v0.181.257 - the Foundry Client updates the stack itself
 
 Victor, 2026-11-23: "Can you build this update feature in to the client, so it can update on

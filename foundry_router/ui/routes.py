@@ -1754,6 +1754,7 @@ _MEDIA_INTS = {"max_concurrent": (1, 8), "max_queued": (1, 100), "jobs_per_5h": 
                "max_attempts": (1, 5), "dedupe_minutes": (0, 1440), "retention_days": (0, 3650),
                # v0.181.136: files tools make in a chat
                "job_wait_seconds": (0, 1800), "tool_inline_wait_seconds": (0, 1800),
+               "job_check_every_seconds": (2, 60),
                "public_link_ttl_hours": (1, 8760)}
 
 

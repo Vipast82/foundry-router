@@ -9460,6 +9460,7 @@ function mediaCard(md) {
     <div class="row"><input type="checkbox" id="md-out" ${c.tool_outputs ? "checked" : ""}><label for="md-out" title="Keep a copy of each picture, sound or video a tool makes and show it under the chat reply through a signed link that expires. Off: the chat gets only what the model writes.">show tool files in the chat</label>
       <label title="The tool that reads a queued job on a server that answers at once with a job id (Media_Gen: media_check_job). Foundry calls it while it waits, so the picture or video is in the same reply. Empty = never wait: the model reports the job id.">job check tool</label><input id="md-check" size="18" value="${esc(c.job_check_tool || "")}">
       <label title="How long a chat reply waits for a queued job before it says the job is still being made. 0 = never wait.">wait for a job (s)</label><input id="md-wait" type="number" min="0" max="1800" style="width:80px" value="${c.job_wait_seconds}">
+      <label title="While a chat waits for a queued job, how often the job is checked. Media_Gen asks for at most every 10-15 s.">check every (s)</label><input id="md-poll" type="number" min="2" max="60" style="width:60px" value="${c.job_check_every_seconds ?? 10}">
       <label title="A file larger than this is not copied; the chat gets the tool server's own link.">largest file (MB)</label><input id="md-maxmb" type="number" min="1" max="4096" style="width:80px" value="${c.tool_output_max_mb}"></div>
     <div class="row"><label title="The address the links start with: what the browser of the person chatting can reach, e.g. https://foundry.example.com. Empty = the address the chat program used to reach Foundry, which only works on the same network.">address in the links</label><input id="md-base" size="34" value="${esc(c.public_base_url || "")}" placeholder="the address the request came in on">
       <label title="How long a link keeps working.">links last (hours)</label><input id="md-ttl" type="number" min="1" max="8760" style="width:80px" value="${c.public_link_ttl_hours}">
@@ -9489,6 +9490,7 @@ function bindMediaCard() {
         attachments_fetch_hosts: $("#md-att-hosts").value,
         tool_outputs: $("#md-out").checked, job_check_tool: $("#md-check").value.trim(),
         job_wait_seconds: +$("#md-wait").value, tool_output_max_mb: +$("#md-maxmb").value,
+        job_check_every_seconds: +$("#md-poll").value,
         public_base_url: $("#md-base").value.trim(), public_link_ttl_hours: +$("#md-ttl").value,
         video_html: $("#md-vid").checked, audio_html: $("#md-aud").checked,
         tool_fetch_no_store: $("#md-nostore").checked,

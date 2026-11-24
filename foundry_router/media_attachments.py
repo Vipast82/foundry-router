@@ -1,6 +1,7 @@
-"""Chat attachments for media-gen (v0.181.117).
+"""Chat attachments for media-gen (v0.181.117; 3D models and documents v0.181.258).
 
-A picture (or audio / video) attached in a chat reaches Foundry as base64 inside the message.
+A picture (or audio / video, a 3D model: glb, gltf, fbx, obj, stl, or a document: pdf, docx,
+txt, md, html) attached in a chat reaches Foundry as base64 inside the message.
 The model can't copy megabytes of base64 into a tool argument, so "use this photo as the
 singer" or "make this picture talk" failed. media-gen (the `Media_Gen` MCP server, v5.11)
 takes media as references instead: a job id, an `upload:...` reference or a URL, and has a
@@ -51,9 +52,9 @@ CACHE_SIZE = 400
 # the private message keys the OpenAI facade sets for this module (dropped before any model)
 URL_KEY = "_media_urls"
 PART_KEY = "_media_parts"
-GUIDE = ("Attached pictures/audio have media references in [Attached for media tools: ...]; "
-         "pass those references to Media_Gen tools (image, photo, singer_image, audio, song, "
-         "video, logo...), never a file path.")
+GUIDE = ("Attached pictures/audio/video/3D models/documents have media references in "
+         "[Attached for media tools: ...]; pass those references to Media_Gen tools (image, "
+         "photo, singer_image, audio, song, video, model, documents, logo...), never a file path.")
 # v0.181.252: a follow-up turn ("make it again but with only one tail") carries no
 # attachment of its own; the model then passed its chat backend's temp file path
 RECAP = ("[Media references from earlier in this chat: {refs} — pass these to Media_Gen tools, "
@@ -66,6 +67,27 @@ _EXT = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp
         "audio/mp3": "mp3", "audio/flac": "flac", "audio/ogg": "ogg", "audio/webm": "webm",
         "audio/mp4": "m4a", "video/mp4": "mp4", "video/webm": "webm",
         "video/quicktime": "mov"}
+# v0.181.258: media-gen 5.24+ takes 3D models (check/preview/convert/rig/animate_3d_model) and
+# 5.26+ documents (create_podcast documents=...) as uploads too; they were dropped here, so
+# "check this .glb for Roblox" or "a podcast about this PDF" never reached the tool
+_MODEL_MIME = {"model/gltf-binary": "glb", "model/gltf+json": "gltf", "model/obj": "obj",
+               "model/stl": "stl", "model/x.stl-binary": "stl", "application/sla": "stl",
+               "application/vnd.ms-pki.stl": "stl", "model/vnd.fbx": "fbx",
+               "application/x-fbx": "fbx"}
+_DOC_MIME = {"application/pdf": "pdf",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+             "text/plain": "txt", "text/markdown": "md", "text/x-markdown": "md",
+             "text/html": "html"}
+_EXT.update(_MODEL_MIME)
+_EXT.update(_DOC_MIME)
+_BY_EXT = {"glb": "model/gltf-binary", "gltf": "model/gltf+json", "obj": "model/obj",
+           "stl": "model/stl", "fbx": "application/x-fbx", "pdf": "application/pdf",
+           "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+           "txt": "text/plain", "md": "text/markdown", "html": "text/html", "htm": "text/html"}
+_MODEL_EXT = {"glb", "gltf", "obj", "stl", "fbx"}
+_DOC_EXT = {"pdf", "docx", "txt", "md", "html", "htm"}
+_GENERIC = {"", "application/octet-stream", "application/zip", "binary/octet-stream"}
+LABEL = {"model": "3D model"}           # how a kind is named in the reference line
 _AUDIO_FMT = {"wav": "audio/wav", "mp3": "audio/mpeg", "flac": "audio/flac", "ogg": "audio/ogg",
               "webm": "audio/webm", "m4a": "audio/mp4", "pcm16": "audio/wav"}
 _DATA_URL = re.compile(r"^data:([^;,]*)(;[^,]*)?,(.*)$", re.S)
@@ -103,8 +125,15 @@ def cache_put(sha: str, ref: str) -> None:
 
 
 def sniff_mime(data: bytes) -> str:
-    """The media type from the first bytes ('' when not an image/audio/video we know)."""
+    """The media type from the first bytes ('' when not an image/audio/video, binary glTF,
+    binary FBX or PDF we know)."""
     h = data[:16]
+    if h.startswith(b"glTF"):
+        return "model/gltf-binary"
+    if data[:18] == b"Kaydara FBX Binary":
+        return "application/x-fbx"
+    if h.startswith(b"%PDF"):
+        return "application/pdf"
     if h.startswith(b"\x89PNG"):
         return "image/png"
     if h.startswith(b"\xff\xd8\xff"):
@@ -130,12 +159,32 @@ def sniff_mime(data: bytes) -> str:
     return ""
 
 
-def kind_of(mime: str) -> str:
+def _ext_of(name: str) -> str:
+    base = (name or "").rsplit("/", 1)[-1].split("?", 1)[0]
+    return base.rsplit(".", 1)[-1].lower() if "." in base else ""
+
+
+def kind_of(mime: str, name: str = "") -> str:
+    """image / audio / video / model (3D) / document, or '' (never sent). A generic type
+    (octet-stream, zip, none) is decided by the file name's extension."""
     m = (mime or "").split(";")[0].strip().lower()
     for k in ("image", "audio", "video"):
         if m.startswith(k + "/"):
             return k
+    ext = _ext_of(name)
+    if m.startswith("model/") or m in _MODEL_MIME or (m in _GENERIC and ext in _MODEL_EXT):
+        return "model"
+    if m in _DOC_MIME or ((m in _GENERIC or m.startswith("text/")) and ext in _DOC_EXT):
+        return "document"
     return ""
+
+
+def mime_for(kind: str, mime: str, name: str) -> str:
+    """A specific media type for a 3D model or document sent as a generic type."""
+    m = (mime or "").split(";")[0].strip().lower()
+    if kind in ("model", "document") and (m in _GENERIC or m.startswith("text/")):
+        return _BY_EXT.get(_ext_of(name), m or "application/octet-stream")
+    return m
 
 
 def decode_data(value: str) -> tuple[Optional[bytes], str]:
@@ -251,19 +300,24 @@ def extract(raw_messages: list, messages: list) -> list[Attachment]:
         for part in raw.get(PART_KEY) or []:
             if not isinstance(part, dict):
                 continue
+            name = str(part.get("name") or "")
             if part.get("url"):
-                out.append(Attachment(i, kind_of(part.get("mime") or "") or "image",
-                                      url=str(part["url"]), name=str(part.get("name") or "")))
+                out.append(Attachment(i, kind_of(part.get("mime") or "", name or
+                                                 str(part["url"])) or "image",
+                                      url=str(part["url"]), name=name))
                 continue
             data, mime = decode_data(str(part.get("data") or ""))
-            mime = (part.get("mime") or mime or (sniff_mime(data) if data else "")).lower()
-            k = kind_of(mime)
+            mime = (part.get("mime") or mime or "").lower()
+            if data and (not mime or mime in _GENERIC):
+                mime = sniff_mime(data) or mime
+            k = kind_of(mime, name)
             if not k:
                 continue                                     # not media: never sent
             if data is None:
-                out.append(Attachment(i, k, error=f"the {k}'s data could not be read"))
+                out.append(Attachment(i, k, error=f"the {LABEL.get(k, k)}'s data could not "
+                                                  f"be read"))
                 continue
-            out.append(Attachment(i, k, data=data, mime=mime, name=str(part.get("name") or "")))
+            out.append(Attachment(i, k, data=data, mime=mime_for(k, mime, name), name=name))
     counts: dict = {}
     for a in out:
         counts[a.kind] = counts.get(a.kind, 0) + 1
@@ -304,7 +358,7 @@ def openai_side_parts(content: list) -> tuple[list, list]:
                 m = _DATA_URL.match(data.strip())
                 if m:
                     mime = (m.group(1) or "").lower()
-                if kind_of(mime) or not mime:
+                if kind_of(mime, name) or not mime or mime in _GENERIC:
                     parts.append({"data": data, "mime": mime, "name": name})
             elif isinstance(f.get("file_url") or f.get("url"), str):
                 u = f.get("file_url") or f.get("url")
@@ -329,11 +383,14 @@ async def _fetch(a: Attachment, client) -> None:
         a.error = f"too large ({_human(len(data))}, the limit is 50 MB)"
         return
     mime = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
-    mime = mime if kind_of(mime) else (sniff_mime(data) or mime)
-    if not kind_of(mime):
-        a.error = "not an image, audio or video file"
+    name = a.name or a.url
+    mime = mime if kind_of(mime, name) else (sniff_mime(data) or mime)
+    kind = kind_of(mime, name)
+    if not kind:
+        a.error = "not an image, audio, video, 3D model or document file"
         return
-    a.data, a.mime, a.kind, a.fetched = data, mime, kind_of(mime), True
+    mime = mime_for(kind, mime, name)
+    a.data, a.mime, a.kind, a.fetched = data, mime, kind, True
     a.sha256 = hashlib.sha256(data).hexdigest()
     a.name = a.name or f"attachment-{a.kind}{a.number}.{_EXT.get(mime, 'bin')}"
 
@@ -433,6 +490,10 @@ async def resolve(svc, atts: list[Attachment], client=None) -> None:
 
 # ------------------------------------------------------------------ injection
 
+def _label(a: Attachment) -> str:
+    return f"{LABEL.get(a.kind, a.kind)} {a.number}"
+
+
 def inject(messages: list, atts: list[Attachment]) -> list:
     """A copy of `messages` with one line per user message that has attachments, after its
     attachments (in the text), and the guide sentence once, on the last such message.
@@ -445,11 +506,11 @@ def inject(messages: list, atts: list[Attachment]) -> list:
     last = max(by_msg)
     out = list(messages)
     for i, items in by_msg.items():
-        refs = [f"{a.kind} {a.number} = {a.ref}" for a in items if a.ref]
+        refs = [f"{_label(a)} = {a.ref}" for a in items if a.ref]
         lines = []
         if refs:
             lines.append("[Attached for media tools: " + "; ".join(refs) + "]")
-        lines += [f"[{a.kind} {a.number} couldn't be passed to media tools: {a.error}]"
+        lines += [f"[{_label(a)} couldn't be passed to media tools: {a.error}]"
                   for a in items if not a.ref]
         if i == last and any(a.ref for a in atts):
             lines.append(GUIDE)
@@ -460,7 +521,7 @@ def inject(messages: list, atts: list[Attachment]) -> list:
     # v0.181.252: the latest user message has no attachment of its own: it repeats the
     # references of the earlier ones, so a follow-up can pass the same picture again
     users = [i for i, m in enumerate(out) if (m or {}).get("role") == "user"]
-    refs = [f"{a.kind} {a.number} = {a.ref}" for a in atts if a.ref]
+    refs = [f"{_label(a)} = {a.ref}" for a in atts if a.ref]
     if users and users[-1] > last and refs and isinstance(out[users[-1]].get("content"), str):
         m = dict(out[users[-1]])
         text = m.get("content") or ""
@@ -491,7 +552,7 @@ async def apply(svc, persona: Optional[dict], raw_messages: list, messages: list
     pname = persona.get("virtual_name") or "?"
     for a in atts:
         if a.error:
-            msg = f"persona {pname}: {a.kind} {a.number} not passed to media tools: {a.error}"
+            msg = f"persona {pname}: {_label(a)} not passed to media tools: {a.error}"
             log.warning(msg)
             try:
                 svc.db.log_event("warning", "media_attachments", msg)

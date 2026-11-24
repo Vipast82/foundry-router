@@ -931,6 +931,9 @@ class MediaConfig(BaseModel):
     # under AnythingLLM's ~120 s cut-off; Open WebUI allows about 300.
     job_check_tool: str = "media_check_job"
     job_wait_seconds: int = 90
+    # v0.181.258: how often the job is checked while waiting (media-gen asks for at
+    # most every 10-15 s; it was every 3 s)
+    job_check_every_seconds: int = 10
     # v0.181.249: tools whose jobs take longer than any chat can wait (a 3D model
     # 10-25 min, a finished video 20 min and more) are never waited for: the reply
     # says the job is queued and the user asks later. A queued reply whose own
@@ -939,7 +942,7 @@ class MediaConfig(BaseModel):
     job_no_wait_tools: list[str] = Field(default_factory=lambda: [
         "generate_3d_model", "create_music_video", "create_parody_music_video",
         "create_short_film", "create_explainer_video", "create_tutorial_video",
-        "create_presenter_video"])
+        "create_presenter_video", "animate_3d_model"])
     # The "view in 3D" page for a .glb a tool made (/media/a/<token>/view) loads
     # Google's <model-viewer> from here, in the browser of the person chatting.
     # "" = no viewer: the 3D model is a download link only.

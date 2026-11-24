@@ -441,14 +441,14 @@ class _QueueServer:
 def _queued(svc, client, monkeypatch, fake, *, wait=5, tool="generate_image", has_tool=True):
     monkeypatch.setattr(tool_media, "_server_has_tool", lambda s, server, t: has_tool)
     m = svc.config_store.config.media
-    old = (m.job_wait_seconds, m.fallback_poll_seconds, svc.mcp.call_tool_rich)
-    m.job_wait_seconds, m.fallback_poll_seconds, svc.mcp.call_tool_rich = wait, 0.05, fake
+    old = (m.job_wait_seconds, m.job_check_every_seconds, svc.mcp.call_tool_rich)
+    m.job_wait_seconds, m.job_check_every_seconds, svc.mcp.call_tool_rich = wait, 0.05, fake
     said, sink = [], []
     try:
         res = run(client, tool_media.run_tool, svc, svc.mcp, "tts", tool, {"prompt": "a fox"},
                   sink=sink, progress=said.append)
     finally:
-        m.job_wait_seconds, m.fallback_poll_seconds, svc.mcp.call_tool_rich = old
+        m.job_wait_seconds, m.job_check_every_seconds, svc.mcp.call_tool_rich = old
     return res, sink, said
 
 

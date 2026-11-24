@@ -141,10 +141,14 @@ direct path (the client brings its own tools):
   only the plain ones are shown; the others stay links in the tool's text.
 - **Queued jobs.** Media_Gen answers every generate tool at once with `job_id: <id>` and
   makes the file later. In a chat Foundry now reads the job itself with
-  `job_check_tool` (`media_check_job`) every `fallback_poll_seconds` until it is done,
-  failed, or `job_wait_seconds` (90) passed, with a progress line at least every 15 s.
+  `job_check_tool` (`media_check_job`) every `job_check_every_seconds` (10, v0.181.258;
+  media-gen asks for at most every 10-15 s) until it is done, failed, or
+  `job_wait_seconds` (90) passed, with a progress line at least every 15 s.
   Done in time: the picture or video is in the same reply. Still running: the reply
-  says so and the model is told to check once when asked. Only the check tool is ever
+  says so and the model is told to check once when asked; when the model's own check in
+  the same reply finds the job finished, that "still running" line is dropped. A queued
+  reply whose estimate ("about", "roughly", "around" ... minutes) starts above the wait is
+  not waited for at all. Only the check tool is ever
   called; nothing is submitted twice. Raise `job_wait_seconds` for a chat program that
   waits longer (Open WebUI: about 300 s; AnythingLLM cuts off near 120 s). Empty
   `job_check_tool` or 0 seconds = no waiting.
