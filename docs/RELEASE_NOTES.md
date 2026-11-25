@@ -1,3 +1,20 @@
+## v0.181.260 - refusals on a limit are relayed; the animated 3D model is shown
+
+Round 2 of the Media_Gen chat test (media-gen 5.27.2, router v0.181.259), docs/MEDIA_GEN_527_CHAT_TEST.md.
+
+- **A refusal on one of the media server's limits is relayed, not worked around (test 6.4).** Asked for "a 500 second
+  sound effect", the model got "duration_seconds must be between 1 and 374 for this model (got 500)" and made 500 s of
+  rain with generate_music without telling the user. A tool error that says "must be between", "library must be one of",
+  "is a commercial library" or "licensed for non-commercial use" now carries a note: tell the user what it said and what
+  they could change, and do not use another tool, library or setting to get around the limit unless they ask. Like the
+  missing-model note, it is added once, and the same call in the same reply is not sent again. Other errors (a wrong
+  input the model can fix) are left as they are.
+- **The animated model is shown (test 5.4).** A result is shown once even when it is listed in several formats (an ogg,
+  mp3 and flac of one sound). animate_3d_model's `<name>_animated.glb` and its preview `<name>_animated.png` share that
+  name, so the picture won and the animated model never appeared in the chat. Copies are now grouped per kind
+  (picture, video, sound, 3D model): the animated .glb is shown with its download link and 3D view, and the preview
+  picture still is.
+
 ## v0.181.259 - a listing's links stay links
 
 Found by the same Media_Gen 5.27 chat test (v0.181.258). "Show me the pictures in the game

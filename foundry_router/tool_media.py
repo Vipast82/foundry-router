@@ -371,13 +371,24 @@ def pick_urls(texts: list, hosts: set) -> list[str]:
             cands.append((u, ext, lab == ext or bool(_SHOWN_SIDE.match(lab or ""))))
     if any(c[2] for c in cands):
         cands = [c for c in cands if c[2]]
-    best: dict[str, tuple[str, str, bool]] = {}
+    best: dict[tuple, tuple[str, str, bool]] = {}
     rank = {e: i for i, e in enumerate(_FORMAT_ORDER)}
     for c in cands:
-        stem = _url_stem(c[0])
+        # v0.181.260: only copies of one kind are one result: animate_3d_model's
+        # <name>_animated.glb and its preview <name>_animated.png share a stem, and the
+        # picture won, so the animated model was never shown
+        stem = (_url_stem(c[0]), _ext_kind(c[1]))
         if stem not in best or rank.get(c[1], 99) < rank.get(best[stem][1], 99):
             best[stem] = c
     return [c[0] for c in best.values()]
+
+
+def _ext_kind(ext: str) -> str:
+    if ext in ("png", "jpg", "jpeg", "webp", "gif"):
+        return "image"
+    if ext in _VIDEO_EXT or ext == "webm":
+        return "video"
+    return "model" if ext in _MODEL_EXT else "audio"
 
 
 def url_labels(texts: list) -> dict:
@@ -887,6 +898,16 @@ _REFUSAL_NOTE = ("[Foundry: this is a missing-model refusal from the media serve
                  "tool's form has a 'Download the missing files' button, or Models). Do NOT call "
                  "the tool again until the user says it is installed, and do not switch to "
                  "another model or setting to get around it unless the user asks for that.]")
+# v0.181.260: a limit the server will not go past - a range ("duration_seconds must be between
+# 1 and 374 for this model (got 500)"), a library, a licence. Round 2 of the Media_Gen chat
+# test: asked for "a 500 second sound effect", the model got that refusal and made 500 s of
+# rain with generate_music instead, without telling the user.
+_LIMIT = re.compile(r"\bmust be between\b|\blibrary must be one of\b|\bis a commercial library\b"
+                    r"|\blicensed for non-commercial use\b", re.I)
+_LIMIT_NOTE = ("[Foundry: the media server refused this request on one of its limits and "
+               "nothing was queued. Tell the user what it said and what they could change. Do "
+               "not use another tool, library or setting to get around the limit unless the "
+               "user asks for that.]")
 _REFUSED: dict = {}                    # (request, server, tool, args) -> (time, the error)
 _REFUSED_TTL = 900.0
 
@@ -905,14 +926,19 @@ def _refusal_key(server: str, tool: str, args) -> Optional[tuple]:
 
 
 def note_refusal(server: str, tool: str, args, err):
-    """The error to raise for a failed tool call: a missing-model refusal gets the
-    relay note (once) and is remembered for this request; anything else as it is."""
+    """The error to raise for a failed tool call: a missing-model refusal, or a refusal
+    on one of the server's limits (v0.181.260), gets its relay note (once) and is
+    remembered for this request; anything else as it is."""
     from .tools.mcp_client import ToolCallError
     msg = str(err)
-    if not isinstance(err, ToolCallError) or not _NOT_INSTALLED.search(msg):
+    if not isinstance(err, ToolCallError):
         return err
-    if _REFUSAL_NOTE not in msg:
-        err = ToolCallError(f"{msg}\n{_REFUSAL_NOTE}", err.result)
+    note = (_REFUSAL_NOTE if _NOT_INSTALLED.search(msg)
+            else _LIMIT_NOTE if _LIMIT.search(msg) else "")
+    if not note:
+        return err
+    if note not in msg:
+        err = ToolCallError(f"{msg}\n{note}", err.result)
     now = time.time()
     for k in [k for k, v in _REFUSED.items() if now - v[0] > _REFUSED_TTL]:
         _REFUSED.pop(k, None)
