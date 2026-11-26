@@ -21,6 +21,12 @@ and nothing ran (qwen3.8-flash-next on Strata; the model drops the closing
     </function>
     </tool_call>
 
+The model also misspells the opening tags now and then (v0.181.261): on 2026-11-26 the
+Media_Gen chat test got `<function(foundry_call_tool>` and the call went to the user as
+text. `<function(NAME>`, `<function(NAME)>`, `<function: NAME>` and `<function NAME>`
+(and the same for `<parameter`) are read as `<function=NAME>`; the space form only
+inside a <tool_call> block, since on its own it is too close to ordinary prose.
+
 It is strict about what counts: tools must have been offered in the request, every
 block must parse, and every name must be one of the offered tools. Otherwise the
 text is returned untouched (a model explaining the syntax to a user is not calling).
@@ -35,12 +41,31 @@ import json
 import re
 from typing import Any, Optional
 
-MARKERS = ("<tool_call>", "<function=")
+MARKERS = ("<tool_call>", "<function=", "<function(")
 _BLOCK = re.compile(r"<tool_call>(.*?)(?:</tool_call>|(?=<tool_call>)|\Z)", re.S)
 _BARE = re.compile(r"<function=[^>\s]+\s*>.*?(?:</function>|(?=<function=)|\Z)", re.S)
 _FUNC = re.compile(r"<function=([^>\s]+)\s*>", re.S)
 _PARAM = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)(?=</parameter>|<parameter=|</function>|\Z)", re.S)
 _JUNK = re.compile(r"</?(?:parameter|function|tool_call)[^>]*>")
+# misspelt opening tags (v0.181.261): "(" or ":" instead of "=", or a space
+_TAG_PAREN = re.compile(r"<(function|parameter)\s*(?:\(|:)\s*([A-Za-z0-9_.\-]+)\s*\)?\s*>")
+_TAG_SPACE = re.compile(r"<(function|parameter)\s+([A-Za-z0-9_.\-]+)\s*>")
+
+
+def _norm(text: str) -> str:
+    """The text with misspelt opening tags written the standard way, `<function=NAME>`
+    and `<parameter=KEY>`. "(" and ":" forms everywhere; the space form only inside
+    <tool_call> blocks."""
+    if not text or ("<function" not in text and "<parameter" not in text):
+        return text
+    text = _TAG_PAREN.sub(r"<\1=\2>", text)
+    if "<tool_call>" in text:
+        def _inner(m: re.Match) -> str:
+            a, b = m.start(1) - m.start(0), m.end(1) - m.start(0)
+            whole = m.group(0)
+            return whole[:a] + _TAG_SPACE.sub(r"<\1=\2>", m.group(1)) + whole[b:]
+        text = _BLOCK.sub(_inner, text)
+    return text
 
 
 def has_marker(text: str) -> bool:
@@ -152,6 +177,7 @@ def why_unread(content: str, tools: Optional[list]) -> str:
                 "resolved - the model called a tool it was not given")
     if not has_marker(content):
         return "no <tool_call> or <function= marker"
+    content = _norm(content)
     schemas = _schemas(tools)
     if not schemas:
         return f"{len(tools)} tool(s) offered but none had a usable name"
@@ -187,6 +213,7 @@ def only_calls(text: str) -> bool:
     a past reply the user saw as raw markup, kept in the chat history by the client."""
     if "<tool_call>" not in (text or ""):
         return False
+    text = _norm(text)
     bodies = _BLOCK.findall(text)
     return (bool(bodies) and not _BLOCK.sub("", text).strip()
             and all(b.strip().startswith(("<function=", "{")) for b in bodies))
@@ -200,12 +227,13 @@ def extract(content: str, tools: Optional[list]) -> tuple[list, str]:
     schemas = _schemas(tools)
     if not schemas:
         return [], content
-    wrapped = "<tool_call>" in content
-    bodies = _BLOCK.findall(content) if wrapped else _BARE.findall(content)
+    text = _norm(content)
+    wrapped = "<tool_call>" in text
+    bodies = _BLOCK.findall(text) if wrapped else _BARE.findall(text)
     calls = [_one(b, schemas) for b in bodies]
     if not calls or any(c is None for c in calls):
         return [], content
-    rest = (_BLOCK if wrapped else _BARE).sub("", content).strip()
+    rest = (_BLOCK if wrapped else _BARE).sub("", text).strip()
     return calls, rest
 
 

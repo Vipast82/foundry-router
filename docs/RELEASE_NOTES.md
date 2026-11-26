@@ -1,3 +1,20 @@
+## v0.181.261 - misspelt text tool calls are read
+
+Round 6 of the Media_Gen chat test (media-gen 5.28.3, router v0.181.260), docs/MEDIA_GEN_527_CHAT_TEST.md.
+
+- **A call written with `<function(` runs instead of reaching the user as markup.** Asked "is it done?" about a comic,
+  Foundry-Chat's local model (qwen3.8-flash-next on Strata) wrote its media_check_job call as text, starting with
+  `<function(foundry_call_tool>` instead of `<function=foundry_call_tool>`. The text tool-call reader
+  (toolcall_text.py, v0.181.129) knew only the `=` form. It logged "the block starts with neither { nor <function=",
+  and the chat showed the markup as the answer. Nothing ran.
+- Opening tags written `<function(NAME>`, `<function(NAME)>` or `<function: NAME>` are now read as `<function=NAME>`,
+  and the same goes for `<parameter`. The space form `<function NAME>` is read only inside a `<tool_call>` block; on
+  its own it is too close to ordinary prose.
+- Every path gets this: the pool's reply and stream reader (the stream holds `<function(` back like `<function=`),
+  the check that keeps call-only replies out of the history, and the "why unread" log line.
+- The reader stays as strict as before. Every block must parse, a name must be an offered tool (or go through
+  foundry_call_tool), and text between the tags that isn't a parameter means it wasn't a call.
+
 ## v0.181.260 - refusals on a limit are relayed; the animated 3D model is shown
 
 Round 2 of the Media_Gen chat test (media-gen 5.27.2, router v0.181.259), docs/MEDIA_GEN_527_CHAT_TEST.md.
