@@ -1,3 +1,21 @@
+## v0.181.262 - an empty tool-loop step is asked again
+
+Round 7 of the Media_Gen chat test (media-gen 5.28.4, router v0.181.261), docs/MEDIA_GEN_527_CHAT_TEST.md.
+
+- **What happened:** Foundry-Chat's local model (qwen3.8-flash-next on Strata) found create_comic with
+  foundry_find_tools. Its next step then returned no text and no tool call. The tool loop showed "(worker returned
+  empty output)" as the answer, and nothing was queued. The same request in a new chat worked. It was the first empty
+  answer in about 150 chat-test turns.
+- **What changes:** when a step of the worker's tool loop (agent.py `_worker_tool_loop`, the harness main-model and
+  worker-tool personas run in) comes back with neither text nor a tool call, the model is sent one short message:
+  "Your last turn was empty: no answer and no tool call. Continue the request: call the tool you need (for example the
+  one you just found), or give your answer."
+- This happens once per request and counts as a step. It shows as a thinking line and is recorded as a guardrail event.
+- A second empty step still ends with the placeholder, as before.
+- Reasoning in the engine's own field with no text counts as empty. Reasoning written inline in `<think>` tags is still
+  shown as the answer, as split_think has done.
+- Covers both the streamed main-mode path and the buffered one.
+
 ## v0.181.261 - misspelt text tool calls are read
 
 Round 6 of the Media_Gen chat test (media-gen 5.28.3, router v0.181.260), docs/MEDIA_GEN_527_CHAT_TEST.md.

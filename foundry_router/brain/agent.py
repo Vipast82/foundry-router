@@ -2201,6 +2201,7 @@ class AgentRunner:
         step, free_finds = 0, 0
         offer: Optional[list] = specs or None      # the tools offered on the next turn
         tool_failures = 0
+        asked_again = False         # v0.181.262: an empty step is asked again, once
         while step < cap:
             step += 1
             result = backend = None
@@ -2298,6 +2299,20 @@ class AgentRunner:
             if not result.tool_calls:
                 # No tool call => the worker produced its final answer.
                 reasoning, clean = prompts.split_think(result.content)
+                if not clean.strip() and not step_said and not asked_again and step < cap:
+                    # v0.181.262: the step came back with neither text nor a tool call.
+                    # Media_Gen chat test round 7: the local model found create_comic
+                    # with foundry_find_tools, then returned nothing, and the chat got
+                    # "(worker returned empty output)" with nothing queued. The same
+                    # request in a new chat worked. Ask once more before giving up.
+                    asked_again = True
+                    ctx.logger.record_guardrail(
+                        f"{worker} returned an empty step (no text, no tool call) at "
+                        f"step {step}; asked once more")
+                    yield AgentEvent("think", f"{worker} returned nothing on this step — "
+                                              f"asking it once more to continue.")
+                    messages.append({"role": "user", "content": prompts.EMPTY_STEP_NUDGE})
+                    continue
                 from .. import toolcall_text
                 if toolcall_text.only_calls(clean.strip()):
                     # v0.181.130: the "answer" is nothing but tool-call markup the router

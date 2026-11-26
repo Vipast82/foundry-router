@@ -131,6 +131,11 @@ def build_worker_tool_prompt(client_system: Optional[str] = None,
     return "\n\n".join(parts)
 
 
+# v0.181.262: sent once when a tool-loop step comes back with neither text nor a call
+EMPTY_STEP_NUDGE = ("Your last turn was empty: no answer and no tool call. Continue the "
+                    "request: call the tool you need (for example the one you just found), "
+                    "or give your answer.")
+
 _THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
