@@ -1,3 +1,50 @@
+## v0.181.265 - Distributed Foundry b-1: the lane agent, the lane tunnel, remote sessions (all off)
+
+Victor approved the phase b plan (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md, decisions Db1-Db5 as recommended) and
+release b-1 on 2026-11-27. **Everything ships off: with no slot set to `lanes = true`, nothing new runs and every
+project builds the same client as before.** Nothing creates a lane on a slot yet; that is B6, in release b-3.
+
+- **The lane agent (`foundry_client/lane.py`, client `[lane]` table).** With `[lane] enabled = true`, a machine's
+  Foundry Client holds lanes for a coordinator elsewhere:
+  - **Routes:** `/api/lane/health`, `git`, `read`, `stat`, `write`, and named jobs `run` / `run/<id>` /
+    `run/<id>/cancel` (`worktree-add`, `worktree-remove`, `verify`).
+  - **Token:** a separate lane token (header `X-Lane-Token`) opens only these routes. The client's own token never
+    opens them. The lane token is made fresh at each start and written with the kilo / opencode passwords to
+    `[lane] secrets_file` (mode 600).
+  - **git:** gets an argv list only, never a shell. It runs an allow-list of the subcommands the coordinator's
+    Workspace uses: no push, fetch, clone or remote. `--output`, `--ext-diff`, `--git-dir` and a
+    `--pathspec-from-file` other than stdin are refused, and `checkout` only restores paths. Only commit variables
+    (author/committer names, a project's hook overrides such as AU_ALLOW_SCOPE) reach git's environment.
+  - **Files:** paths must stay inside the lane worktree, `.git` is refused, and reads and writes are capped.
+  - **Lanes:** one writer per lane. A lane is removed only when its HEAD is the tip the junction fetched and the tree
+    is clean.
+  - **Listen addresses:** the API binds `[lane] listen`. `components.kilo/opencode.hostname` set where kilo / opencode
+    listen (default 127.0.0.1, as before).
+- **`Workspace` has one git entry point (`_proc`)** and four file calls (`read`, `stat`, `exists`, `write`).
+  `is_ancestor`, `show_at`, `blob_at`, `tree` and `file_hash` now go through them. They give the same answers as
+  before.
+- **`RemoteWorkspace` (`adapters/remote_git.py`)** is a Workspace whose git and files go to a slot's lane agent. It
+  gives the same values and `GitError`s as the local one (a parity test runs every method on both against the same
+  worktree). `commit_paths` sends its pathspec on stdin. It never pushes or talks to a remote.
+- **The lane tunnel (`foundry_coordinator/lane_tunnel.py`):**
+  - one `ssh -N -L` per lane slot for the agent, kilo and opencode, with Foundry's key and known_hosts;
+  - runs on its own thread, never the tick thread;
+  - backoff 5 s up to 2 min;
+  - the lane secrets are read once per tunnel start over ssh + `docker exec` (decision Db1) and kept in memory only:
+    never logged and never in the store, an event or the board view;
+  - a slot whose docker runs on this machine needs no ssh.
+- **Remote sessions:** a lane slot's servers become `ClientSet` members `<slot>/kilo` and `<slot>/opencode`
+  (`adapters/laneclient.py`, `TunnelledClient`), which follow the tunnel's current ports.
+  - A session whose metadata names `lane_host` starts on that slot's server of the same kind, and never falls back
+    to this machine's server.
+  - Folder calls (dispose, preflight, find, owner lookup) reach a slot member only for folders under its lane root.
+  - Engine, helper and Lead sessions all pass `lane_host`, and a guard test checks every `start_session`.
+  - A track row with `data.host` gets a `RemoteWorkspace`.
+- **Settings:** `[slots.<id>] lanes` (off), `lanes_root`, `lanes_secrets`, `agent_port`, `kilo_port`,
+  `opencode_port`, in the router's slot settings (schema SLOT_FIELDS) and slots.py DEFAULTS. The router needs a
+  rebuild to show them; until then a router revision with these keys is refused, and project.toml still works.
+- 65 tests (test_lane_agent, test_remote_workspace, test_lane_tunnel, test_lane_clients).
+
 ## v0.181.264 - doctor --platform runs on a fresh machine; the platform tests pass on Linux
 
 The first run of `.github/workflows/platform.yml` (v0.181.263) passed every step on windows-latest, including

@@ -119,7 +119,16 @@ DEFAULTS: dict[str, Any] = {
         "chatterbox-tts": {"enabled": False, "path": "", "cwd": "", "port": 0, "args": [],
                            "env": {}, "secrets": []},
     },
+    # Distributed Foundry phase b (lane.py): this machine holds lanes for the coordinator on
+    # another machine (the slot profile). Off: nothing below is used and no /api/lane route
+    # answers. root = the lane stores and worktrees; secrets_file = where the lane token and
+    # the kilo / opencode passwords are written at each start (a tmpfs on a slot), read by the
+    # coordinator over ssh; listen = the address this API binds (0.0.0.0 inside a container,
+    # whose port compose publishes on the slot host's 127.0.0.1 only).
+    "lane": {"enabled": False, "root": "", "secrets_file": "", "listen": "127.0.0.1"},
 }
+
+LANE_LISTEN = ("127.0.0.1", "0.0.0.0", "::1", "::")
 
 
 def config_dir() -> Path:
@@ -202,6 +211,17 @@ def validate(cfg: dict) -> list[str]:
             errs.append(f"client.{k} must be true or false")
     if c.get("secret_store", "auto") not in ("auto", "keyring", "file"):
         errs.append("client.secret_store must be auto, keyring or file")
+    lane = cfg.get("lane") if isinstance(cfg.get("lane"), dict) else {}
+    if not isinstance(lane.get("enabled", False), bool):
+        errs.append("lane.enabled must be true or false")
+    if lane.get("listen", "127.0.0.1") not in LANE_LISTEN:
+        errs.append("lane.listen must be one of " + ", ".join(LANE_LISTEN))
+    if lane.get("enabled") and not str(lane.get("root") or "").strip():
+        errs.append("lane.root is required when lane.enabled is on (the lane stores' folder)")
+    for name in ("kilo", "opencode"):
+        h = (comps.get(name) or {}).get("hostname", "127.0.0.1")
+        if h not in LANE_LISTEN:
+            errs.append(f"components.{name}.hostname must be one of " + ", ".join(LANE_LISTEN))
     if isinstance(cfg.get("resources"), dict):
         from .resources import validate as resources_validate
         errs += resources_validate(cfg["resources"])

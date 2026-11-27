@@ -64,12 +64,48 @@ def build_client(profile, client=None):
     base = build_one(profile, profile.client)
     raw = getattr(profile, "raw", None) or {}
     extra = raw.get("clients") or {}
-    if not isinstance(extra, dict) or not extra:
+    extra = extra if isinstance(extra, dict) else {}
+    lanes = lane_members(profile)
+    if not extra and not lanes:
         return base
     from .clientset import ClientSet
     members = {k: (build_one(profile, t), t) for k, t in extra.items() if isinstance(t, dict)}
+    members.update(lanes)
     return ClientSet(base, members, roles=raw.get("client_roles") or {},
                      default_table=profile.client)
+
+
+def lane_members(profile) -> dict:
+    """Distributed Foundry phase b: {"<slot>/kilo" | "<slot>/opencode": (client, table)} for
+    every slot with `[slots.<id>] lanes = true`; {} otherwise (today's behaviour). Also
+    starts that slot's lane tunnel (lane_tunnel.ensure)."""
+    try:
+        from .. import lane_tunnel
+        slots = lane_tunnel.ensure(profile)
+    except Exception:                                             # noqa: BLE001
+        return {}
+    if not slots:
+        return {}
+    from .laneclient import TunnelledClient, lane_root
+    raw = getattr(profile, "raw", None) or {}
+    oc_table = next((t for t in (raw.get("clients") or {}).values()
+                     if isinstance(t, dict) and t.get("kind") == "opencode"), {})
+    out = {}
+    for sid, s in slots.items():
+        for kind in ("kilo", "opencode"):
+            if (profile.client or {}).get("kind", "kilo") == kind:
+                src = profile.client
+            else:
+                src = oc_table if kind == "opencode" else {}
+            table = {**{k: v for k, v in (src or {}).items()
+                        if k in ("agent", "agents", "worker_client", "provider")},
+                     "kind": kind, "lane_host": sid, "lane_root": lane_root(s)}
+            if kind == "opencode" and not table.get("agent"):
+                table["agent"] = "build"          # OpenCode's own default agent (agent_backends)
+            client = TunnelledClient(sid, kind, lane_tunnel.MANAGER.endpoint,
+                                     provider=str(table.get("provider") or "foundry"))
+            out[f"{sid}/{kind}"] = (client, table)
+    return out
 
 
 def build_project(profile, state_dir: str, client=None,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -101,8 +102,10 @@ def cmd_run(cfg, headless: bool, no_start: bool) -> int:
         mgr.start_all()
     mgr.start_thread()
     _start_relay(mgr, cfg)
-    app = api.create_app(mgr, api.load_token())
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    lane, lane_token = _lane_host(cfg)
+    app = api.create_app(mgr, api.load_token(), lane=lane, lane_token=lane_token)
+    bind = ((cfg.get("lane") or {}).get("listen") or "127.0.0.1") if lane is not None else "127.0.0.1"
+    server = uvicorn.Server(uvicorn.Config(app, host=bind, port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     if first_run or cfg["client"].get("open_settings_on_start"):
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
@@ -139,6 +142,23 @@ def _windowless_streams() -> None:
         sys.stdout = log
     if sys.stderr is None:
         sys.stderr = log
+
+
+def _lane_host(cfg) -> tuple:
+    """(LaneHost, lane token) when [lane] is on (Distributed Foundry phase b), else (None, "").
+    A fresh token at every start, written with the kilo / opencode passwords to
+    [lane] secrets_file for the coordinator to read over ssh (never printed)."""
+    lc = cfg.get("lane") or {}
+    if not lc.get("enabled"):
+        return None, ""
+    from . import __version__, config, secrets
+    from .lane import LaneHost, ensure_secrets
+    state = config.expand(cfg["client"]["state_dir"])
+    path = config.expand(lc.get("secrets_file") or "") or str(config.config_dir() / "lane.json")
+    vals = ensure_secrets(path, {"kilo_password": secrets.get("KILO_SERVER_PASSWORD") or "",
+                                 "opencode_password": secrets.get("OPENCODE_SERVER_PASSWORD") or ""})
+    return LaneHost(config.expand(lc["root"]), os.path.join(state, "lane"),
+                    version=__version__), vals["token"]
 
 
 def _doctor_platform(as_json: bool) -> int:

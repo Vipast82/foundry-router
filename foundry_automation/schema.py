@@ -667,6 +667,21 @@ SLOT_FIELDS = [
     ("desktop_size", "str", "", "The slot desktop's size, e.g. 1920x1080 (empty = 2560x1440). "
      "Smaller means less software drawing; gate screenshots get this size. Applies when the "
      "slot's installer runs again.", None, None),
+    # Distributed Foundry phase b (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md) ----------------
+    ("lanes", "bool", False, "Lanes on this slot (Distributed Foundry, being built): the slot "
+     "runs its own lane agent, Kilo and OpenCode, and the coordinator keeps one ssh tunnel to "
+     "it. Off = the slot only runs Studio, as before. Turn on only for a slot whose installer "
+     "set the lane agent up.", None, None),
+    ("lanes_root", "str", "/srv/foundry-lanes", "Where the slot keeps lane stores and "
+     "worktrees, as its own servers see the path.", None, None),
+    ("lanes_secrets", "str", "", "The slot's lane secrets file (the lane agent token and the "
+     "Kilo / OpenCode passwords, a tmpfs), read over ssh when the tunnel opens (empty = "
+     "/run/secrets/lane/lane.json).", None, None),
+    ("agent_port", "int", 47811, "The lane agent's port on the slot host's 127.0.0.1.", None, 1),
+    ("kilo_port", "int", 4096, "The slot's Kilo server port on the slot host's 127.0.0.1.",
+     None, 1),
+    ("opencode_port", "int", 4097, "The slot's OpenCode server port on the slot host's "
+     "127.0.0.1.", None, 1),
 ]
 SLOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 

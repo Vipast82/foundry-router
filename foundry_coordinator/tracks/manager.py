@@ -270,9 +270,21 @@ class TrackManager:
         except Exception as e:                                    # noqa: BLE001
             raise TrackError(f"track {row['name']}: adapter for the worktree: {e}") from None
         TP = Project(profile=tp, adapter=adapter, client=P.client, foundry=P.foundry,
-                     ws=Workspace(row["worktree"]))
+                     ws=self._workspace(P, row))
         self._projects[key] = TP
         return TP
+
+    @staticmethod
+    def _workspace(P, row: dict):
+        """The track's workspace: its worktree here, or (Distributed Foundry phase b) on the
+        slot its row names as `host`, reached through that slot's lane agent."""
+        host = str((row.get("data") or {}).get("host") or "")
+        if not host:
+            return Workspace(row["worktree"])
+        from .. import lane_tunnel
+        from ..adapters.remote_git import LaneAgent, RemoteWorkspace
+        agent = LaneAgent(lambda: lane_tunnel.MANAGER.endpoint(host, "agent"), name=host)
+        return RemoteWorkspace(agent, P.id, row["name"], row["worktree"])
 
     @staticmethod
     def _track_fields(prof, row: dict) -> dict:
@@ -294,7 +306,9 @@ class TrackManager:
     def _track_extras(prof, row: dict) -> dict:
         # 2026-10-31: a track bound to a Studio slot has Studio (in the slot)
         return {"track": row["name"], "main_workspace": prof.workspace,
-                "slot": str((row.get("data") or {}).get("slot") or "")}
+                "slot": str((row.get("data") or {}).get("slot") or ""),
+                # Distributed Foundry phase b: the slot holding the worktree ('' = here)
+                "lane_host": str((row.get("data") or {}).get("host") or "")}
 
     def refresh_track_profiles(self, P) -> int:
         """A router revision updated P's profile in place (config_pull); each cached

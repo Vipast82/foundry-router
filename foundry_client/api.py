@@ -43,7 +43,11 @@ def load_token() -> str:
     return t
 
 
-def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> FastAPI:
+def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None,
+               lane=None, lane_token: str = "") -> FastAPI:
+    """`lane` (a lane.LaneHost) + `lane_token`: this machine holds lanes for a coordinator
+    elsewhere (Distributed Foundry phase b). The /api/lane routes then answer, to the LANE
+    token only; the client token never opens them and the lane token opens nothing else."""
     app = FastAPI(title="Foundry Client", docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
 
@@ -52,10 +56,20 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
         host = (request.headers.get("host") or "").split(":")[0]
         if host not in HOSTS:
             return JSONResponse({"error": "local access only"}, status_code=403)
+        if request.url.path.startswith("/api/lane/"):
+            if lane is None or not lane_token:
+                return JSONResponse({"error": "this machine holds no lanes ([lane] is off)"},
+                                    status_code=404)
+            if not _rnd.compare_digest(request.headers.get("x-lane-token", ""), lane_token):
+                return JSONResponse({"error": "missing or wrong lane token"}, status_code=401)
+            return await call_next(request)
         if request.url.path.startswith("/api/"):
             if not _rnd.compare_digest(request.headers.get("x-client-token", ""), token):
                 return JSONResponse({"error": "missing or wrong client token"}, status_code=401)
         return await call_next(request)
+
+    if lane is not None:
+        _lane_routes(app, mgr, lane)
 
     @app.get("/", response_class=HTMLResponse)
     def page():
@@ -258,3 +272,71 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None) -> Fas
         return {"enabled": autostart.is_enabled()}
 
     return app
+
+
+def _lane_routes(app: FastAPI, mgr, lane) -> None:
+    """The lane agent's routes (foundry_client/lane.py; the guard checked the lane token)."""
+    from .lane import LaneError
+
+    async def body_of(request: Request) -> dict:
+        try:
+            b = await request.json()
+        except ValueError:
+            b = {}
+        return b if isinstance(b, dict) else {}
+
+    def answer(fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except LaneError as e:
+            return JSONResponse({"error": str(e)}, status_code=e.status)
+
+    def comps() -> dict:
+        try:
+            return {c["name"]: {"state": c.get("state"), "healthy": c.get("healthy")}
+                    for c in mgr.status()["components"] if c["name"] in ("kilo", "opencode")}
+        except Exception:                                         # noqa: BLE001
+            return {}
+
+    @app.get("/api/lane/health")
+    def lane_health():
+        return answer(lane.health, comps())
+
+    @app.post("/api/lane/git")
+    async def lane_git(request: Request):
+        b = await body_of(request)
+        return await run_in_threadpool(answer, lane.git, b.get("project"), b.get("lane"),
+                                       b.get("argv"), b.get("timeout") or 300, b.get("env"),
+                                       b.get("input"))
+
+    @app.post("/api/lane/read")
+    async def lane_read(request: Request):
+        b = await body_of(request)
+        return await run_in_threadpool(answer, lane.read, b.get("project"), b.get("lane"),
+                                       b.get("path"), b.get("max_bytes"))
+
+    @app.post("/api/lane/stat")
+    async def lane_stat(request: Request):
+        b = await body_of(request)
+        return await run_in_threadpool(answer, lane.stat, b.get("project"), b.get("lane"),
+                                       b.get("paths"))
+
+    @app.post("/api/lane/write")
+    async def lane_write(request: Request):
+        b = await body_of(request)
+        return await run_in_threadpool(answer, lane.write, b.get("project"), b.get("lane"),
+                                       b.get("path"), b.get("data"))
+
+    @app.post("/api/lane/run")
+    async def lane_run(request: Request):
+        b = await body_of(request)
+        return answer(lane.start_job, b.get("project"), b.get("lane"), str(b.get("job") or ""),
+                      b.get("args") if isinstance(b.get("args"), dict) else {})
+
+    @app.get("/api/lane/run/{rid}")
+    def lane_run_status(rid: str, offset: int = 0):
+        return answer(lane.run_status, rid, offset)
+
+    @app.post("/api/lane/run/{rid}/cancel")
+    def lane_run_cancel(rid: str):
+        return answer(lane.cancel, rid)

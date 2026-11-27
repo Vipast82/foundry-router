@@ -36,6 +36,7 @@ Hard rules enforced here (docs/LEAD_SPRINT_MANAGER.md, the v0.123 contract):
 """
 
 from __future__ import annotations
+from .adapters.laneclient import lane_host_meta
 
 import fnmatch
 import hashlib
@@ -2195,7 +2196,8 @@ class LeadManager:
                     directory=directory, title=f"{marker} {title}"[:120], persona=persona,
                     agent=agent, metadata={"project": P.id, "task": t["task_id"],
                                            "run": t.get("run_id") or "", "role": "lead",
-                                           "case": case["case_id"], "op": key},
+                                           "case": case["case_id"], "op": key,
+                                           **lane_host_meta(P)},
                     permissions=permissions)
             except Exception as e:                               # noqa: BLE001
                 self._upd(key, status="failed", result=f"session start failed: {e}")

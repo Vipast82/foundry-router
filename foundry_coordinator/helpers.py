@@ -24,6 +24,7 @@ At a quota cutoff a running unit finishes; nothing new starts.
 """
 
 from __future__ import annotations
+from .adapters.laneclient import lane_host_meta
 
 import hashlib
 import json
@@ -801,7 +802,8 @@ class HelperManager:
                                           f"{u['responsibility'][:60]}",
                 persona=persona, agent=h["agent"],
                 metadata={"project": pid, "task": tid, "run": t["run_id"], "role": "helper",
-                          "purpose": u["kind"], "unit": u["unit_id"]},
+                          "purpose": u["kind"], "unit": u["unit_id"],
+                          **lane_host_meta(P)},
                 permissions=P.adapter.helper_permissions(spec))
             res = {"session_id": sid}
             self.store.op_update(key, "started", res)

@@ -174,6 +174,14 @@ more cores could serve two later (`lanes_max`, default 1), but this design does 
 
 ## 3. The lane agent
 
+> **As built (v0.181.265, phase b-1):** the "slot profile" is the client's `[lane]` table
+> (`enabled`, `root`, `secrets_file`, `listen`) in `foundry_client/config.py`; the routes are
+> in `foundry_client/lane.py` + `api.py` and take a separate lane token (header
+> `X-Lane-Token`), which opens only `/api/lane/*`. Inside a container the servers listen on
+> all addresses and compose publishes them on the slot host's 127.0.0.1 only (a container's
+> own loopback cannot be forwarded). Details and the other findings:
+> `docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md`.
+
 The lane agent is the **Foundry Client in headless mode with a `slot` profile**
 (`foundry-client run --headless --profile slot`). It is not a new program:
 

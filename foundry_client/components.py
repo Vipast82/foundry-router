@@ -210,7 +210,8 @@ def build(cfg: dict) -> dict[str, Spec]:
                        ["~/AppData/Roaming/npm/kilo.cmd", "~/.npm-global/bin/kilo"])
     port = int(k.get("port") or 4096)
     out["kilo"] = Spec("kilo", "Kilo server",
-                       [kilo, "serve", "--hostname", "127.0.0.1", "--port", str(port), *k["args"]],
+                       [kilo, "serve", "--hostname", str(k.get("hostname") or "127.0.0.1"), "--port", str(port),
+                        *k["args"]],
                        cwd=game, env=k.get("env") or {}, secrets=k.get("secrets") or [],
                        health=lambda: kilo_health(port),
                        port=port, owner_pid=lambda: port_owner_pid(port),
@@ -225,7 +226,8 @@ def build(cfg: dict) -> dict[str, Spec]:
         ocwd = expand(o.get("cwd") or "") or game
         out["opencode"] = Spec(
             "opencode", "OpenCode server",
-            [oc, "serve", "--hostname", "127.0.0.1", "--port", str(oport), *(o.get("args") or [])],
+            [oc, "serve", "--hostname", str(o.get("hostname") or "127.0.0.1"), "--port", str(oport),
+             *(o.get("args") or [])],
             cwd=ocwd, env=o.get("env") or {}, secrets=o.get("secrets") or [],
             health=lambda: opencode_health(oport),
             port=oport, owner_pid=lambda: port_owner_pid(oport),

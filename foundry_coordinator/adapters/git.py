@@ -46,13 +46,22 @@ class Workspace:
         except Exception:                                        # noqa: BLE001
             pass
         try:
-            r = subprocess.run(["git", "-C", self.path, *args], capture_output=True, text=True,
-                               timeout=timeout, env=env, encoding="utf-8", errors="replace")
+            rc, out, err = self._proc(list(args), timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             raise GitError(f"git {' '.join(args)} timed out") from None
-        if check and r.returncode != 0:
-            raise GitError(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()[:400]}")
-        return r.stdout
+        if check and rc != 0:
+            raise GitError(f"git {' '.join(args)}: {(err or out).strip()[:400]}")
+        return out
+
+    def _proc(self, args: list, timeout: Optional[float] = None, env: Optional[dict] = None,
+              input: Optional[str] = None) -> tuple:
+        """(returncode, stdout, stderr) of `git -C <path> args`: the ONE place this workspace
+        runs git (Distributed Foundry phase b: RemoteWorkspace replaces it with the slot's
+        lane agent). Raises subprocess.TimeoutExpired like subprocess.run."""
+        r = subprocess.run(["git", "-C", self.path, *args], capture_output=True, text=True,
+                           timeout=timeout, env=env, encoding="utf-8", errors="replace",
+                           input=input)
+        return r.returncode, r.stdout, r.stderr
 
     def head(self) -> str:
         return self.run("rev-parse", "HEAD").strip()
@@ -61,8 +70,7 @@ class Workspace:
         return self.run("rev-parse", "--abbrev-ref", "HEAD").strip()
 
     def is_ancestor(self, a: str, b: str) -> bool:
-        return subprocess.run(["git", "-C", self.path, "merge-base", "--is-ancestor", a, b],
-                              capture_output=True, env=git_env()).returncode == 0
+        return self._proc(["merge-base", "--is-ancestor", a, b], env=git_env())[0] == 0
 
     def changed_files(self, base: str, head: str) -> list[str]:
         if base == head:
@@ -86,16 +94,13 @@ class Workspace:
 
     def show_at(self, revision: str, rel: str) -> Optional[str]:
         """The file's text at `revision`, or None when it doesn't exist there."""
-        r = subprocess.run(["git", "-C", self.path, "show", f"{revision}:{rel}"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=120, env=git_env())
-        return r.stdout if r.returncode == 0 else None
+        rc, out, _ = self._proc(["show", f"{revision}:{rel}"], timeout=120, env=git_env())
+        return out if rc == 0 else None
 
     def blob_at(self, revision: str, rel: str) -> Optional[str]:
         """The git blob id of the file at `revision` (provenance), or None."""
-        r = subprocess.run(["git", "-C", self.path, "rev-parse", f"{revision}:{rel}"],
-                           capture_output=True, text=True, timeout=60, env=git_env())
-        return r.stdout.strip() if r.returncode == 0 else None
+        rc, out, _ = self._proc(["rev-parse", f"{revision}:{rel}"], timeout=60, env=git_env())
+        return out.strip() if rc == 0 else None
 
     def ls_tree_at(self, revision: str, rel_dir: str) -> list[tuple[str, str]]:
         """[(path, blob)] of files under `rel_dir` at `revision` (recursive)."""
@@ -141,21 +146,55 @@ class Workspace:
         return res
 
     def file_hash(self, rel: str) -> str:
-        p = os.path.join(self.path, rel)
-        if not os.path.exists(p):
+        st = self.stat([rel]).get(rel) or {}
+        if not st.get("exists"):
             return "missing"
-        if os.path.isdir(p):
+        if st.get("kind") == "dir":
             return "dir"
         h = hashlib.sha256()
-        with open(p, "rb") as f:
-            h.update(f.read())
+        h.update(self.read(rel) or b"")
         return h.hexdigest()[:16]
+
+    # -- files in the working tree (phase b: the same four calls reach a slot's lane) --
+
+    def read(self, rel: str, max_bytes: Optional[int] = None) -> Optional[bytes]:
+        """The file's bytes (at most `max_bytes`), or None when it is not a file."""
+        p = os.path.join(self.path, rel)
+        if not os.path.isfile(p):
+            return None
+        with open(p, "rb") as f:
+            return f.read() if max_bytes is None else f.read(max_bytes)
+
+    def stat(self, rels: list) -> dict:
+        """{rel: {"exists", "kind" (file|dir|other), "size", "mtime"}} for each path."""
+        out = {}
+        for rel in rels:
+            p = os.path.join(self.path, rel)
+            try:
+                st = os.stat(p)
+            except OSError:
+                out[rel] = {"exists": False, "kind": "", "size": 0, "mtime": 0.0}
+                continue
+            kind = "dir" if os.path.isdir(p) else ("file" if os.path.isfile(p) else "other")
+            out[rel] = {"exists": True, "kind": kind, "size": st.st_size, "mtime": st.st_mtime}
+        return out
+
+    def exists(self, rel: str) -> bool:
+        return bool((self.stat([rel]).get(rel) or {}).get("exists"))
+
+    def write(self, rel: str, data: bytes) -> None:
+        """Write a file the coordinator itself makes in the working tree (atomic replace)."""
+        p = os.path.join(self.path, rel)
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = f"{p}.tmp{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, p)
 
     def tree(self, revision: str) -> Optional[str]:
         """The root tree id of `revision` (a content address: equal trees = equal code)."""
-        r = subprocess.run(["git", "-C", self.path, "rev-parse", f"{revision}^{{tree}}"],
-                           capture_output=True, text=True, timeout=60, env=git_env())
-        return r.stdout.strip() if r.returncode == 0 else None
+        rc, out, _ = self._proc(["rev-parse", f"{revision}^{{tree}}"], timeout=60, env=git_env())
+        return out.strip() if rc == 0 else None
 
     def operator_commits(self, base: str, head: str) -> set:
         """Commits in base..head made from an operator's Claude Code chat: their message has

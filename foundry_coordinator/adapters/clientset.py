@@ -42,6 +42,14 @@ class Member:
         amap = self.table.get("agents") if isinstance(self.table.get("agents"), dict) else {}
         self.agent_map = {str(k): str(v) for k, v in amap.items()}
         self.worker_client = str(self.table.get("worker_client") or "")
+        # Distributed Foundry phase b: a member on a slot (laneclient.TunnelledClient) serves
+        # only the lane folders under its lane root; a local member serves every folder
+        self.lane_host = str(self.table.get("lane_host") or "")
+        self.lane_root = str(self.table.get("lane_root") or "") if self.lane_host else ""
+
+    def serves(self, directory: str) -> bool:
+        from .laneclient import serves
+        return serves(self.lane_root, directory)
 
     def agent_for(self, agent: str) -> str:
         if agent in self.agent_map:
@@ -78,6 +86,22 @@ class ClientSet(CodingClient):
         key = self.roles.get(role or "")
         return self.members.get(key) if key in self.members else self.default
 
+    def member_for(self, role: str, lane_host: str = "") -> Member:
+        """The role's member; for a session of a lane on a slot (`lane_host`), that slot's
+        member of the same kind (`<slot>/kilo` or `<slot>/opencode`). Never falls back to a
+        local server: the session's folder exists only on the slot."""
+        m = self.member_for_role(role)
+        if not lane_host:
+            return m
+        name = str(getattr(m.client, "name", "kilo"))
+        kind = "opencode" if name.startswith("opencode") else "kilo"
+        key = f"{lane_host}/{kind}"
+        if key not in self.members:
+            from .oc1 import AgentServerError
+            raise AgentServerError(f"lane host {lane_host} has no {kind} server here "
+                                   f"([slots.{lane_host}] lanes is off?)")
+        return self.members[key]
+
     def for_role(self, role: str):
         """The client object a role's sessions run on (for config checks before a start)."""
         return self.member_for_role(role).client
@@ -93,6 +117,8 @@ class ClientSet(CodingClient):
         if m is None:
             m = self.default
             for cand in self.members.values():
+                if directory and not cand.serves(directory):
+                    continue
                 ex = getattr(cand.client, "exists", None)
                 try:
                     if callable(ex) and ex(sid, directory=directory):
@@ -112,7 +138,8 @@ class ClientSet(CodingClient):
     # -- CodingClient ---------------------------------------------------------------------------
 
     def start_session(self, *, directory, title, persona, agent, metadata, permissions) -> str:
-        m = self.member_for_role(str((metadata or {}).get("role") or ""))
+        m = self.member_for(str((metadata or {}).get("role") or ""),
+                            str((metadata or {}).get("lane_host") or ""))
         sid = m.client.start_session(directory=directory, title=title, persona=persona,
                                      agent=m.agent_for(agent), metadata=metadata,
                                      permissions=permissions)
@@ -167,6 +194,8 @@ class ClientSet(CodingClient):
 
     def find_session(self, directory: str, marker: str) -> str:
         for m in self.members.values():
+            if not m.serves(directory):
+                continue
             fn = getattr(m.client, "find_session", None)
             try:
                 sid = fn(directory, marker) if callable(fn) else ""
@@ -182,6 +211,8 @@ class ClientSet(CodingClient):
     def dispose(self, directory: str) -> bool:
         ok = True
         for m in self.members.values():
+            if not m.serves(directory):
+                continue
             fn = getattr(m.client, "dispose", None)
             if callable(fn):
                 try:
@@ -195,6 +226,8 @@ class ClientSet(CodingClient):
     def preflight(self, directory: str) -> list:
         out = []
         for k, m in self.members.items():
+            if not m.serves(directory):
+                continue
             for row in m.client.preflight(directory) or []:
                 st, check, detail = row
                 out.append((st, check if k == "default" else f"{k}: {check}", detail))

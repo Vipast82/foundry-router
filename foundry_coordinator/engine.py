@@ -76,6 +76,9 @@ TRACK_STUDIO_BLOCKER = re.compile(r"studio\.lock|\bstudio\b|\brojo\b|playtest|st
                                   r"\bgate\b[^.\n]{0,40}\b(?:run|lock|studio)", re.I)
 
 
+from .adapters.laneclient import lane_host_meta  # noqa: E402
+
+
 def _nothing_left_to_repair(results: list) -> None:
     """`repair_changed` fails a repair session that committed nothing. When every
     other required check passes at this head, the earlier findings no longer apply
@@ -1150,7 +1153,8 @@ class Coordinator:
             sid = P.client.start_session(
                 directory=directory, title=f"{P.id} {tid} {phase} #{attempt}", persona=persona,
                 agent=agent, metadata={"project": P.id, "task": tid, "run": run_id,
-                                       "phase": phase, "attempt": attempt, "role": role},
+                                       "phase": phase, "attempt": attempt, "role": role,
+                                       **lane_host_meta(P)},
                 permissions=self._session_rules(P, spec, phase, role))
             self.store.op_update(key, "started", {"session_id": sid})
             try:

@@ -71,7 +71,10 @@ DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundr
             "official_mcp": "/usr/local/bin/studio-mcp-official",
             "community_mcp": "/usr/local/bin/robloxstudio-mcp", "enabled": True,
             "checkout_timeout_s": 600, "host": "", "ssh": SSH_DEFAULT,
-            "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": ""}
+            "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": "",
+            # Distributed Foundry phase b (lane_tunnel.py): off = Studio only, as before
+            "lanes": False, "lanes_root": "/srv/foundry-lanes", "lanes_secrets": "",
+            "agent_port": 47811, "kilo_port": 4096, "opencode_port": 4097}
 # 2026-11-14 item 24b: the slot's Lune spec caches ([studio_calls] shared_lune_cache), ONE FOLDER PER
 # LANE under this base: the runner keeps one entry per spec name, so lanes with different trees that
 # shared one folder would overwrite each other. In /home/studio (the persistent studio-home volume),
