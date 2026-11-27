@@ -141,6 +141,19 @@ def _windowless_streams() -> None:
         sys.stderr = log
 
 
+def _doctor_platform(as_json: bool) -> int:
+    """`doctor --platform`: this machine's OS and tools (docs/DISTRIBUTED_FOUNDRY.md §9)."""
+    from . import doctor as D
+    d = D.platform_checks()
+    if as_json:
+        print(json.dumps(d, indent=2))
+    else:
+        for c in d["checks"]:
+            print(f"{c['status'].upper():<5} {c['label']:<20} {c['detail']}")
+        print("PLATFORM OK" if d["ok"] else "PLATFORM NOT READY: fix the FAIL lines above")
+    return 0 if d["ok"] else 1
+
+
 def main(argv=None) -> int:
     _windowless_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -188,6 +201,9 @@ def main(argv=None) -> int:
     k.add_argument("--no-reload", action="store_true", help="do not reload Kilo afterwards")
     sub.add_parser("import-legacy-secrets")
     a = ap.parse_args(argv or ["run"])
+    if a.cmd == "doctor" and getattr(a, "platform", False):
+        # before the client's config and secret store: a fresh machine has neither yet
+        return _doctor_platform(getattr(a, "json", False))
     cfg = config.load()
     secrets.configure(cfg)
     if a.cmd in (None, "run"):
@@ -239,16 +255,6 @@ def main(argv=None) -> int:
                   + (f" (restart pending: {c['pending_reason']})" if c["pending_restart"] else ""))
             return 1
         return 0
-    if a.cmd == "doctor" and getattr(a, "platform", False):
-        from . import doctor as D
-        d = D.platform_checks()
-        if getattr(a, "json", False):
-            print(json.dumps(d, indent=2))
-        else:
-            for c in d["checks"]:
-                print(f"{c['status'].upper():<5} {c['label']:<20} {c['detail']}")
-            print("PLATFORM OK" if d["ok"] else "PLATFORM NOT READY: fix the FAIL lines above")
-        return 0 if d["ok"] else 1
     if a.cmd == "doctor":
         try:
             d = _api(cfg, "/api/doctor", timeout=60)

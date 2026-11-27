@@ -1,3 +1,16 @@
+## v0.181.264 - doctor --platform runs on a fresh machine; the platform tests pass on Linux
+
+The first run of `.github/workflows/platform.yml` (v0.181.263) passed every step on windows-latest, including
+installing Kilo 7.8.32 and OpenCode 2.3.2 from the slot Dockerfile's pins. On ubuntu-24.04 the platform tests failed.
+
+- **The test fix:** `test_windows_answers` sets `sys.platform` to win32, and `job_shell()` then asks `shutil.which`
+  for PowerShell. On Linux, `shutil.which` takes its own Windows path when it sees win32, and that path cannot run
+  there. The test now stubs the lookup. The layer itself was right.
+- **`foundry-client doctor --platform` no longer loads the client's config or secret store first.** A fresh slot
+  or junction has neither yet, and this check is meant to run before they exist. A test fails if it loads them again.
+- Gate: only the client and platform tests are affected; tests/platform_layer + tests/client passed (169). The
+  coordinator parts are unchanged since v0.181.263's gate.
+
 ## v0.181.263 - Distributed Foundry phase a: one platform layer, both clients in the slot image
 
 Victor approved the Distributed Foundry design (docs/DISTRIBUTED_FOUNDRY.md, decisions D1-D7 as recommended) and

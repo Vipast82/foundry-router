@@ -61,6 +61,12 @@ def test_the_cli_entry_point(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     from foundry_client import __main__ as M
+
+    def no_config():
+        raise AssertionError("doctor --platform must not need the client's config")
+    # a fresh slot has no client config or secret store yet
+    from foundry_client import config as CFG
+    monkeypatch.setattr(CFG, "load", no_config)
     rc = M.main(["doctor", "--platform", "--json"])
     d = json.loads(capsys.readouterr().out)
     assert rc == (0 if d["ok"] else 1)

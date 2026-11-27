@@ -43,6 +43,9 @@ def test_a_modules_own_sys_reference_wins():
 
 
 def test_windows_answers(monkeypatch):
+    # shutil.which itself takes its Windows path (_winapi) when sys.platform says win32, which
+    # cannot run on Linux: the PowerShell lookup is stubbed here (pwsh found on PATH)
+    monkeypatch.setattr(P.shutil, "which", lambda n: "/x/pwsh" if n == "pwsh" else None)
     monkeypatch.setattr(sys, "platform", "win32")
     assert P.no_window_flags() == P.CREATE_NO_WINDOW
     assert P.no_window_kw() == {"creationflags": P.CREATE_NO_WINDOW}
@@ -51,6 +54,7 @@ def test_windows_answers(monkeypatch):
     assert P.service_kind() == "scheduled-task"
     assert P.default_root() == "C:\\Foundry"
     argv = P.job_shell("echo hi")
+    assert argv[0] == "/x/pwsh"
     assert argv[-2:] == ["-Command", "echo hi"] and "-NoProfile" in argv
 
 
