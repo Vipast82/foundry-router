@@ -67,9 +67,22 @@ jobs:
       # and the router's lane keys, on both OSes (paths, locks, git and processes differ)
       - name: Lane tests
         run: >-
-          python -m pytest -q tests/client/test_lane_agent.py
+          python -m pytest -q --junitxml=lane-junit.xml tests/client/test_lane_agent.py
           tests/coordinator/test_remote_workspace.py tests/coordinator/test_lane_tunnel.py
           tests/coordinator/test_lane_clients.py tests/test_lane_keys.py
+      # each failing test as an annotation: readable from the public checks API without a
+      # sign-in (job logs need one), so a failure on one OS can be read from the workstation
+      - name: Failures as annotations
+        if: failure()
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          for case in ET.parse("lane-junit.xml").iter("testcase"):
+              for bad in list(case.iter("failure")) + list(case.iter("error")):
+                  text = (bad.get("message") or "") + " | " + (bad.text or "")[-1500:]
+                  text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                  print(f"::error title={case.get('classname')}.{case.get('name')}::{text}")
+          PY
       - name: Both coding clients (versions and integrity from the slot Dockerfile)
         run: |
           df=contrib/studio-slot/Dockerfile
