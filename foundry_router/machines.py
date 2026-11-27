@@ -434,7 +434,16 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
             "host_settings": _host_view(settings, svc.machines.host_info(m["name"]))
             if m["kind"] == "slot" else None,
             "host_keys": [{"type": k.split()[0], "fingerprint": fingerprint(k)}
-                          for k in svc.machines.host_keys(m["name"])]}
+                          for k in svc.machines.host_keys(m["name"])],
+            "lanes": _lanes_view(svc, m) if m["kind"] == "slot" else None}
+
+
+def _lanes_view(svc, m: dict) -> Optional[dict]:
+    try:
+        from . import lane_keys
+        return lane_keys.state(svc, m)
+    except Exception:                                            # noqa: BLE001
+        return None
 
 
 VNC_SECRET = "SLOT_VNC_PASSWORD"          # entrypoint.sh reads its default file name
@@ -849,9 +858,33 @@ async def revoke_machine(request: Request, name: str):
         for c in raw.get("clients") or []:
             if c.get("name") in names:
                 c["enabled"] = False
+        if m["kind"] == "slot":                  # Distributed Foundry: its lane keys too
+            from . import lane_keys
+            lane_keys.disable(raw, m["slot"] or name)
     svc.config_store.save(mutate)
     svc.machines.event(name, "revoked", _addr())
     return {"ok": True}
+
+
+@router.post(A + "/{name}/lanes")
+@_guard
+async def machine_lanes(request: Request, name: str):
+    """{on: true|false, rotate?: true}: a slot's own model keys for its Kilo / OpenCode
+    (Distributed Foundry phase b, lane_keys.py). On needs the secret store unlocked."""
+    svc = _svc(request)
+    m = svc.machines.get(name)
+    if not m:
+        raise MachineError(f"no machine {name!r}", "not_found", 404)
+    b = await _body(request)
+    from . import lane_keys
+    try:
+        if b.get("on") is True or str(b.get("on")).lower() in ("1", "true", "on"):
+            out = lane_keys.turn_on(svc, m, _actor(), rotate=bool(b.get("rotate")))
+        else:
+            out = lane_keys.turn_off(svc, m, _actor())
+    except lane_keys.LaneKeyError as e:
+        raise MachineError(str(e), e.code, e.status) from None
+    return out
 
 
 @router.delete(A + "/{name}")
@@ -867,6 +900,9 @@ async def delete_machine(request: Request, name: str, remove_slot: bool = True):
                                 note=f"Access → Machines: slot {m['slot']} removed")
 
     names = set(ws_key_names(name)) if m["kind"] == "workstation" else {name}
+    if m["kind"] == "slot":                      # Distributed Foundry: its lane keys too
+        from . import lane_keys
+        lane_keys.turn_off(svc, m, _actor())
 
     def mutate(raw):
         raw["clients"] = [c for c in raw.get("clients") or [] if c.get("name") not in names]

@@ -75,7 +75,9 @@ def test_the_opencode_member_takes_the_projects_opencode_table(fm):
     m = lane_members(profile(LANE, clients={"oc": {"kind": "opencode", "agent": "plan",
                                                    "worker_client": "opencode"}}))
     t = m["slot-4/opencode"][1]
-    assert t["agent"] == "plan" and t["worker_client"] == "opencode"
+    assert t["agent"] == "plan"
+    # v0.181.266: the slot's server calls the router with the slot's own lane key
+    assert t["worker_client"] == "slot-4-opencode" and m["slot-4/kilo"][1]["worker_client"] == "slot-4-kilo"
 
 
 def test_tunnelled_client_follows_the_endpoint(fm):

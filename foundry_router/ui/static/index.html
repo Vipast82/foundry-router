@@ -5124,6 +5124,7 @@ async function tabMachines() {
         ${lp ? `<div>last secrets pull ${when(lp.ts)} · ${esc(lp.outcome)}</div>` : ""}</td>
       <td class="nw"><button class="act" data-mc-code="${esc(m.name)}">New code</button>
         ${m.kind === "slot" ? `<button class="act" data-mc-vnc="${esc(m.name)}" title="VNC, CPU limit, desktop size">Settings</button>` : ""}
+        ${m.kind === "slot" ? `<button class="act" data-mc-lanes="${esc(m.name)}" data-on="${m.lanes && m.lanes.on ? 1 : 0}" title="Distributed Foundry (being built): the slot's own model keys for its Kilo and OpenCode, ${esc(Object.keys((m.lanes || {}).keys || {}).join(" and "))}">${m.lanes && m.lanes.on ? "Lanes: on" : "Lanes: off"}</button>` : ""}
         ${m.key === "enabled" ? `<button class="act" data-mc-revoke="${esc(m.name)}">Revoke</button>` : ""}
         <button class="act danger" data-mc-del="${esc(m.name)}">Delete</button></td></tr>`;
   }).join("");
@@ -5314,6 +5315,16 @@ async function tabMachines() {
     const n = b.dataset.wsDel;
     if (confirm(`Remove ${n}'s ssh key? Slots stop allowing it within 5 minutes. If ${n}'s coordinator is still running, it registers again.`))
       api(`machines/workstations/${encodeURIComponent(n)}`, {method: "DELETE"}).then(() => { toast("Removed"); render(); }).catch(e => toast(e.message, true));
+  });
+  document.querySelectorAll("[data-mc-lanes]").forEach(b => b.onclick = () => {
+    const n = b.dataset.mcLanes, on = b.dataset.on === "1";
+    const msg = on
+      ? `Turn lanes off for ${n}? Its two lane keys (${n}-kilo, ${n}-opencode) and their values are deleted; its Kilo and OpenCode can no longer call the router.`
+      : `Turn lanes on for ${n}? This makes two client keys, ${n}-kilo and ${n}-opencode, with the personas the kilo and opencode keys have now, and puts their values in the secret store (group lane-${n}) for ${n}'s own key to pull. Nothing uses them until the slot runs its lane agent.`;
+    if (!confirm(msg)) return;
+    api(`machines/${encodeURIComponent(n)}/lanes`, {method: "POST", body: {on: !on}})
+      .then(r => { toast(on ? "Lanes off: keys deleted" : (r.changed ? "Lanes on: keys made" : "Lanes were already on")); render(); })
+      .catch(e => toast(e.message, true));
   });
   document.querySelectorAll("[data-mc-revoke]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcRevoke;

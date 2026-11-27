@@ -15,6 +15,14 @@ on:
       - "foundry_coordinator/**"
       - "tests/platform_layer/**"
       - "tests/client/test_doctor_platform.py"
+      - "tests/client/test_lane_agent.py"
+      - "tests/coordinator/test_remote_workspace.py"
+      - "tests/coordinator/test_lane_tunnel.py"
+      - "tests/coordinator/test_lane_clients.py"
+      - "tests/test_lane_keys.py"
+      - "foundry_router/lane_keys.py"
+      - "foundry_router/machines.py"
+      - "foundry_router/secrets_api.py"
       - "contrib/studio-slot/Dockerfile"
       - ".github/workflows/platform.yml"
   pull_request:
@@ -55,6 +63,13 @@ jobs:
           pip install -e ".[client]"
       - name: Platform tests
         run: python -m pytest -q tests/platform_layer tests/client/test_doctor_platform.py
+      # Distributed Foundry phase b: the lane agent, RemoteWorkspace, the tunnel, slot clients
+      # and the router's lane keys, on both OSes (paths, locks, git and processes differ)
+      - name: Lane tests
+        run: >-
+          python -m pytest -q tests/client/test_lane_agent.py
+          tests/coordinator/test_remote_workspace.py tests/coordinator/test_lane_tunnel.py
+          tests/coordinator/test_lane_clients.py tests/test_lane_keys.py
       - name: Both coding clients (versions and integrity from the slot Dockerfile)
         run: |
           df=contrib/studio-slot/Dockerfile

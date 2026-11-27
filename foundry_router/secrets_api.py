@@ -169,6 +169,18 @@ async def pull_bundle(request: Request, project: str = "", slot: str = ""):
         names = [n for n in names if n in wanted] if names else wanted
     try:
         served = store.bundle(groups, names or None) if (names or not wanted) else []
+        # Distributed Foundry phase b (lane_keys.py): a slot's own model keys, group
+        # lane-<slot>, only for a key whose `slots` list names that slot explicitly
+        if slot and slot in slots:
+            from .lane_keys import LaneKeyError, lane_group
+            try:
+                lane = store.bundle([lane_group(slot)])
+            except LaneKeyError:
+                lane = []
+            if lane:
+                have = {x["name"] for x in lane}
+                served = sorted([x for x in served if x["name"] not in have] + lane,
+                                key=lambda x: x["name"])
     except SecretStoreError as e:
         if e.code != "uninitialized":
             if e.status == 503:
@@ -214,8 +226,13 @@ def _keys_view(cfg) -> list[dict]:
 def readers(keys: list[dict], group: str, name: str) -> list[str]:
     """Names of the enabled keys that can read group/name."""
     out = []
+    from .lane_keys import GROUP_PREFIX, is_lane_group
     for k in keys:
         if not k["enabled"]:
+            continue
+        if is_lane_group(group):                 # a slot's lane keys: that slot's own key only
+            if group[len(GROUP_PREFIX):] in [str(x).lower() for x in k.get("slots") or []]:
+                out.append(k["name"])
             continue
         if group != SHARED and group not in k["projects"]:
             continue

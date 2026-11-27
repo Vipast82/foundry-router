@@ -1,8 +1,10 @@
 # Distributed Foundry, phase b: the lane agent, the tunnel and remote sessions
 
 Status: **approved 2026-11-27 with Db1-Db5 as recommended** (Victor: "Approve, build b-1").
-**b-1 (B1 + B3 + B4) is built in v0.181.265**, all behind `[slots.<id>] lanes` (off); b-2..b-5
-are not started. Nothing creates a lane on a slot yet (that is B6, release b-3).
+**b-1 (B1 + B3 + B4) is built in v0.181.265**, all behind `[slots.<id>] lanes` (off).
+**b-2 (B5, the slot lane keys) is built in v0.181.266**: a button on Access → Machines, off for
+every slot until pressed. b-3..b-5 are not started. Nothing creates a lane on a slot yet (that is
+B6, release b-3).
 Design: `docs/DISTRIBUTED_FOUNDRY.md` (§3, §4). Overall plan: `docs/plans/DISTRIBUTED_FOUNDRY_PLAN.md`.
 Line references are on `main` at `016931a` (v0.181.264).
 
@@ -162,6 +164,22 @@ Each item lists its files, what it does, and its tests. Every item ships off by 
 - **Tests:** enrollment with and without the box; persona lists copied; the bundle names; a disabled
   key removes the files.
 - **Estimate:** 1 day. **Victor approves the keys** (P2).
+- **As built (v0.181.266):**
+  - **The switch:** a **Lanes: off/on** button on each slot row of Access → Machines
+    (`POST /admin/api/machines/<slot>/lanes {on, rotate?}`, `foundry_router/lane_keys.py`)
+    takes the place of an enrollment box. Keys made at enrollment would need the secret store
+    unlocked during every install; with the button, re-enrolling (New code) keeps the lane keys.
+  - **Where the values live:** in the secret store, group `lane-<slot>`. The bundle serves that
+    group only to a key whose `slots` list names the slot, so no other slot's key can read them.
+  - **Personas:** each key copies the persona allow-list of the same kind's key. When that key
+    does not exist, it copies the other one (OpenCode uses the Foundry-Kilo personas). With
+    neither, turning lanes on is refused, because an empty list would allow every persona.
+  - **Refused, nothing made:** when the store is locked, or a key of that name exists that is not
+    a lane key.
+  - **Repeating and rotating:** turning on again changes nothing; `rotate` makes new values.
+  - **Revoke** disables both keys. **Delete** and **Lanes: off** remove the keys and their values.
+  - **Coordinator fix:** a slot member's `worker_client` is now `<slot>-<kind>`, so the router
+    trusts a remote session's purpose.
 
 ### B6. The pilot path: a worktree on the slot, its sessions, fetch back
 

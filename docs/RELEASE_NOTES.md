@@ -1,3 +1,33 @@
+## v0.181.266 - Distributed Foundry b-2: a slot's own model keys (Lanes button, off)
+
+Release b-2 of docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md (Victor 2026-11-27: "Yes, build b-2"). **Nothing changes
+until the new button is pressed for a slot.** It is a router change: the button appears after Victor rebuilds the
+router.
+
+- **Access → Machines → a slot → Lanes: off / on** (`POST /admin/api/machines/<slot>/lanes {on, rotate?}`,
+  `foundry_router/lane_keys.py`). On makes two client keys for the slot's own Kilo and OpenCode:
+  - `<slot>-kilo` has inference and media; `<slot>-opencode` has inference;
+  - both are limited to the slot's project and the slot;
+  - each copies the persona allow-list of the existing `kilo` / `opencode` key. When the same kind's key is missing
+    it copies the other one (OpenCode uses the Foundry-Kilo personas). When neither exists, it is refused: an
+    empty list would allow every persona.
+- **Where the values go:** into the secret store, group `lane-<slot>`, as FOUNDRY_KEY_KILO / FOUNDRY_KEY_OPENCODE
+  (files foundry_key_kilo.txt / foundry_key_opencode.txt). The slot's own key then pulls them with its bundle into
+  its tmpfs. The bundle serves the group only to a key whose `slots` list names that slot, so no other slot's key
+  can read it. Values are never shown, listed or logged. The Secrets page counts only the slot's own key as a
+  reader.
+- **When it is refused, nothing is made:** while the secret store is locked, or when a key of that name exists that
+  is not a lane key. A key like that is never replaced, and Lanes: off never deletes it.
+- **Repeating and rotating:** pressing On again changes nothing; `rotate` makes new values.
+- **Revoke, off, delete:** **Revoke** also disables the slot's lane keys. **Lanes: off** and **Delete** remove the
+  keys and their values. **New code** (re-enrolling) keeps them.
+- **Fix (coordinator, from v0.181.265):** a slot member's `worker_client` is now `<slot>-kilo` / `<slot>-opencode`,
+  the key its server calls the router with. Before, it was this machine's key name, and the router would have
+  marked a remote session's purpose "unverified".
+- **CI:** `.github/workflows/platform.yml` now also runs the lane tests (agent, RemoteWorkspace, tunnel, slot
+  clients, lane keys) on ubuntu and windows.
+- 11 tests (tests/test_lane_keys.py) + 1 changed (test_lane_clients).
+
 ## v0.181.265 - Distributed Foundry b-1: the lane agent, the lane tunnel, remote sessions (all off)
 
 Victor approved the phase b plan (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md, decisions Db1-Db5 as recommended) and

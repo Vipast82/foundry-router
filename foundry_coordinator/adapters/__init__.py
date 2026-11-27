@@ -97,9 +97,13 @@ def lane_members(profile) -> dict:
                 src = profile.client
             else:
                 src = oc_table if kind == "opencode" else {}
+            # worker_client: the router key the slot's server calls with is the slot's own
+            # lane key (foundry_router/lane_keys.py), not this machine's kilo / opencode key;
+            # the router trusts a session's purpose only from that client (v0.181.266)
             table = {**{k: v for k, v in (src or {}).items()
-                        if k in ("agent", "agents", "worker_client", "provider")},
-                     "kind": kind, "lane_host": sid, "lane_root": lane_root(s)}
+                        if k in ("agent", "agents", "provider")},
+                     "kind": kind, "lane_host": sid, "lane_root": lane_root(s),
+                     "worker_client": f"{sid}-{kind}"}
             if kind == "opencode" and not table.get("agent"):
                 table["agent"] = "build"          # OpenCode's own default agent (agent_backends)
             client = TunnelledClient(sid, kind, lane_tunnel.MANAGER.endpoint,
