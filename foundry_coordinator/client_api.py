@@ -14,6 +14,7 @@ deterministic repairs (autoheal.repair): restart Rojo when it is down or stale.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -29,7 +30,7 @@ TIMEOUT = 5.0
 
 
 def config_dir() -> Path:
-    if sys.platform == "win32":
+    if _plat.is_windows():
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / "FoundryClient"
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")

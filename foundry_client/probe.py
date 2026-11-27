@@ -1,5 +1,6 @@
 """Small blocking helpers shared by the health checks, the doctor and the router link."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import base64
 import json
@@ -11,7 +12,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+NO_WINDOW = _plat.NO_WINDOW
 
 
 def get_json(url: str, headers: Optional[dict] = None, timeout: float = 2.0
@@ -50,7 +51,7 @@ def port_owner_pid(port: int) -> Optional[int]:
     except Exception:                                            # noqa: BLE001 (access denied ...)
         pass
     try:
-        if sys.platform == "win32":
+        if _plat.is_windows():
             out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
                                  timeout=15, creationflags=NO_WINDOW).stdout
             for line in out.splitlines():
@@ -76,7 +77,7 @@ def pid_alive(pid: int) -> bool:
         return psutil.pid_exists(pid)
     except ImportError:
         pass
-    if sys.platform == "win32":
+    if _plat.is_windows():
         try:
             out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
                                  text=True, timeout=15, creationflags=NO_WINDOW).stdout

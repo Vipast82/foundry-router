@@ -30,6 +30,7 @@ The three operations that change files on a slot are commands, not automatic ste
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import os
 import re
@@ -46,7 +47,7 @@ CHECK_EVERY_S = 600.0
 ALERT_AGAIN_S = 24 * 3600.0
 KEEP_REF = "refs/heads/slot/_keep"
 CMD_TIMEOUT_S = 60.0
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_NO_WINDOW = _plat.NO_WINDOW
 
 
 def _run(argv: list, timeout: float = CMD_TIMEOUT_S, stdout=None) -> tuple:

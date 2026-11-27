@@ -6,6 +6,7 @@ without stopping its components, so the new one adopts them ("started outside th
 client") and no Kilo session, coordinator or Blender is interrupted."""
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import os
 import subprocess
@@ -26,7 +27,7 @@ while time.time() < deadline:
     finally:
         s.close()
     time.sleep(0.5)
-flags = (0x00000008 | 0x00000200) if sys.platform == "win32" else 0
+flags = (0x00000008 | 0x00000200) if _plat.is_windows() else 0
 subprocess.Popen([exe, "-m", "foundry_client", "run"], cwd=cwd, creationflags=flags,
                  close_fds=True)
 """
@@ -36,7 +37,7 @@ def spawn_successor(port: int, exe: str = "", cwd: str = "", popen=subprocess.Po
     """Start the detached helper; returns its pid."""
     exe = exe or sys.executable
     cwd = cwd or os.getcwd()
-    flags = (0x00000008 | 0x00000200) if sys.platform == "win32" else 0  # DETACHED | NEW_GROUP
+    flags = (0x00000008 | 0x00000200) if _plat.is_windows() else 0  # DETACHED | NEW_GROUP
     p = popen([exe, "-c", HELPER, str(int(port)), cwd, exe], cwd=cwd, creationflags=flags,
               close_fds=True)
     return int(getattr(p, "pid", 0) or 0)

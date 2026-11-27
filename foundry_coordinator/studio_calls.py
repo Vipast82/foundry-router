@@ -36,6 +36,7 @@ task's findings, so the next BUILD session gets only those.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import argparse
 import base64
@@ -112,7 +113,7 @@ def _studio_rank(path: str) -> int:
 # without them each outputs commit made the gate look stale -> ~60 PASS runs in 35 min
 EXEMPT = ("docs/progress/{task}_*", "docs/memory/**", "docs/evidence/{task}/*.png",
           "docs/evidence/{task}/*.jpg", "docs/evidence/{task}/*.jpeg")
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_NO_WINDOW = _plat.NO_WINDOW
 
 
 def defaults() -> dict:
@@ -275,7 +276,7 @@ def _module_cmd(mod: str) -> list:
 
 
 def _kill_tree(pid: int) -> None:
-    if os.name == "nt":
+    if _plat.is_windows():
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))], capture_output=True,
                        timeout=20, creationflags=_NO_WINDOW)
     else:
@@ -350,7 +351,7 @@ def playtest_keeps_lock(c, P, tid: str, line: str) -> bool:
 def run_step(cmd: list, cwd: str, timeout: float, env: Optional[dict] = None) -> tuple:
     """(rc, output) of one step; on timeout the whole process tree is killed (rc 124)."""
     kw = {"creationflags": _NO_WINDOW | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)} \
-        if os.name == "nt" else {"start_new_session": True}
+        if _plat.is_windows() else {"start_new_session": True}
     try:
         p = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
@@ -862,7 +863,7 @@ class StudioCalls:
         env["FOUNDRY_GATE_RUN_ID"] = run_id
         env["PYTHONIOENCODING"] = "utf-8"
         flags = 0
-        if os.name == "nt":
+        if _plat.is_windows():
             flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | _NO_WINDOW
         with open(log, "w", encoding="utf-8") as lf:
             lf.write("$ " + " ".join(cmd) + "\n")

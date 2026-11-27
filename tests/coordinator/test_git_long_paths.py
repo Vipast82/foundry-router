@@ -16,6 +16,7 @@ Each test builds its paths to a fixed depth, so it fails on the old code with an
 
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -46,7 +47,7 @@ def deep_repo(tmp_path, length: int):
 
 
 def test_git_env_turns_on_longpaths_once_and_keeps_what_is_there(monkeypatch):
-    monkeypatch.setattr(G.os, "name", "nt")
+    monkeypatch.setattr(sys, "platform", "win32")   # read through foundry_platform (v0.181.263)
     env = G.git_env({"PATH": "x"}, GIT_TERMINAL_PROMPT="0")
     assert env["GIT_CONFIG_PARAMETERS"] == G.LONGPATHS and env["GIT_TERMINAL_PROMPT"] == "0"
     # appended to parameters already set, never twice, and GIT_CONFIG_COUNT is untouched
@@ -62,7 +63,7 @@ def test_git_env_turns_on_longpaths_once_and_keeps_what_is_there(monkeypatch):
 
 
 def test_git_env_changes_nothing_off_windows(monkeypatch):
-    monkeypatch.setattr(G.os, "name", "posix")
+    monkeypatch.setattr(sys, "platform", "linux")   # read through foundry_platform (v0.181.263)
     assert "GIT_CONFIG_PARAMETERS" not in G.git_env({"PATH": "x"})
 
 

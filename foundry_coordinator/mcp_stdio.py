@@ -19,6 +19,7 @@ hold a JSON argv list that replaces the default command.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import base64
 import collections
@@ -32,8 +33,8 @@ from typing import Optional
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "foundry-studio-gate", "version": "1"}
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-_NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
+CREATE_NO_WINDOW = _plat.CREATE_NO_WINDOW
+_NO_WINDOW = _plat.no_window_kw()
 COMMUNITY_PACKAGE = "@chrrxs/robloxstudio-mcp@3.4.2"
 CONNECT_WAIT_S = 30.0          # how long a fresh community server waits for the Studio plugin
 NPX = r"C:\Program Files\nodejs\npx.cmd"     # Windows default when npx.cmd is not on PATH
@@ -42,7 +43,7 @@ NPX = r"C:\Program Files\nodejs\npx.cmd"     # Windows default when npx.cmd is n
 def npx_path() -> str:
     """npx: from PATH (any OS), else Windows' usual install folder (LINUX_WORKSTATION_PLAN W1)."""
     import shutil
-    if os.name == "nt":
+    if _plat.is_windows():
         return shutil.which("npx.cmd") or shutil.which("npx") or NPX
     return shutil.which("npx") or "npx"
 
@@ -52,7 +53,7 @@ def kill_tree(pid: int, timeout: float = 15.0) -> bool:
     its process group when it leads one, else the pid). True when the kill ran."""
     if not pid:
         return False
-    if os.name == "nt":
+    if _plat.is_windows():
         try:
             r = subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))], capture_output=True,
                                timeout=timeout, **_NO_WINDOW)
@@ -133,7 +134,7 @@ class McpClient:
                 p.stdin.close()
         except OSError:
             pass
-        if os.name == "nt":
+        if _plat.is_windows():
             # cmd.exe wraps node / mcp.bat: kill the whole tree while the parent is
             # still alive (once cmd.exe has exited its children can no longer be
             # found by pid and would be orphaned). The servers hold no state.
@@ -331,7 +332,7 @@ def official_command() -> list:
     o = _override("FOUNDRY_MCP_OFFICIAL")
     if o:
         return o
-    if os.name != "nt":
+    if not _plat.is_windows():
         raise McpError("no Roblox Studio on this machine (Studio runs on Windows, or in a Studio "
                        "container): set FOUNDRY_MCP_OFFICIAL, or give the project a Studio slot")
     return ["cmd.exe", "/d", "/c",
@@ -342,7 +343,7 @@ def community_command(package: str = COMMUNITY_PACKAGE) -> list:
     o = _override("FOUNDRY_MCP_COMMUNITY")
     if o:
         return o
-    if os.name == "nt":                       # npx.cmd is a batch file: it needs cmd.exe
+    if _plat.is_windows():                       # npx.cmd is a batch file: it needs cmd.exe
         return ["cmd.exe", "/d", "/c", npx_path(), "-y", package]
     return [npx_path(), "-y", package]
 

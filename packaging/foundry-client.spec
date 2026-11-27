@@ -9,7 +9,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 hidden = (collect_submodules("foundry_coordinator") + collect_submodules("foundry_automation")
           + collect_submodules("foundry_client") + collect_submodules("uvicorn")
-          + collect_submodules("keyring.backends") + ["foundry_router", "tomli_w"])
+          + collect_submodules("keyring.backends") + ["foundry_router", "foundry_platform", "tomli_w"])
 if sys.platform == "win32":
     hidden += ["pystray._win32"]
 else:

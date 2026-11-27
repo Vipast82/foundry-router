@@ -2,6 +2,7 @@
 answers {id, label, status, detail}; status is ok | warn | fail | info (info = optional and
 not set up)."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import os
 import re
@@ -242,7 +243,7 @@ def _key_available(argv: list, env: dict, cfg: dict) -> bool:
 def _user_env_has_key() -> bool:
     """FOUNDRY_KEY set as a user environment variable (Windows registry; new processes get it
     even when this one started before it was set). Only presence is checked."""
-    if sys.platform != "win32":
+    if not _plat.is_windows():
         return False
     try:
         import winreg
@@ -301,3 +302,89 @@ def _launcher_self_check(argv: list, env: dict) -> tuple:
         return "ok", f"{base} {how}; its {flag} passed"
     return "fail", (f"FOUNDRY_KEY not confirmed: {base} {flag} failed (exit {r.returncode}); "
                     f"run it by hand to see why")
+
+
+# ---------------------------------------------------------------------------- --platform
+
+# Tools a Foundry machine (junction or lane host) needs, with what each is for. "need" = fail
+# when missing; "want" = warn (only some roles use it). docs/DISTRIBUTED_FOUNDRY.md §9.
+PLATFORM_TOOLS = (
+    ("git", ["git"], "need", "every checkout, worktree and hand-back"),
+    ("ssh", ["ssh"], "need", "the slots (and from phase b the lane tunnels)"),
+    ("node", ["node"], "need", "Kilo, OpenCode and the Studio MCP servers"),
+    ("kilo", ["kilo", "kilo.cmd"], "want", "Kilo Code sessions ([client] kind = \"kilo\")"),
+    ("opencode", ["opencode", "opencode.cmd", "opencode.exe"], "want",
+     "OpenCode sessions ([client] kind = \"opencode\")"),
+    ("rokit", ["rokit"], "want", "the game's toolchain (lune, selene, stylua, wally)"),
+    ("lune", ["lune"], "want", "Lune tests"),
+)
+
+
+def platform_checks(which=None, version=None) -> dict:
+    """`foundry-client doctor --platform`: what this machine is and which tools it has, without
+    a running client. Read-only. {"ok", "facts", "checks"}; ok is False only for a fail."""
+    import shutil
+    import tempfile
+    which = which or shutil.which
+    version = version or _version
+    facts = _plat.facts()
+    checks = [_c("os", "operating system", "info",
+                 f"{facts['os']} {facts['release']} ({facts['machine']}), Python {facts['python']}, "
+                 f"starts at boot as a {facts['service']}")]
+    shell = _plat.job_shell("")[0]
+    found = which(shell)
+    checks.append(_c("shell", "job shell", "ok" if found else "fail",
+                     f"{os.path.basename(shell)} ({found})" if found else
+                     f"{shell} was not found: install it (Windows: PowerShell 7, winget install "
+                     f"Microsoft.PowerShell; Linux: bash)"))
+    for tid, names, level, why in PLATFORM_TOOLS:
+        exe = next((which(n) for n in names if which(n)), "")
+        if not exe:
+            checks.append(_c(tid, tid, "fail" if level == "need" else "warn",
+                             f"{tid} was not found on the PATH; it is needed for {why}"))
+            continue
+        v = version(exe) or (_ssh_version(exe) if tid == "ssh" else "")
+        checks.append(_c(tid, tid, "ok", f"{v or 'found'} ({exe})"))
+    enc = str(facts.get("preferred_encoding") or "").lower()
+    checks.append(_c("encoding", "text encoding",
+                     "ok" if enc in ("utf-8", "utf8") else "info",
+                     f"the system's default is {facts.get('preferred_encoding')}; Foundry always "
+                     f"reads and writes UTF-8 itself" + ("" if enc in ("utf-8", "utf8") else
+                     ", but tools started without an encoding may not")))
+    try:
+        with tempfile.TemporaryDirectory(prefix="fp-") as d:
+            with _plat.file_lock(os.path.join(d, "doctor.lock"), timeout=5):
+                pass
+        checks.append(_c("locks", "file locks", "ok", "an exclusive file lock works here"))
+    except Exception as e:                                       # noqa: BLE001
+        checks.append(_c("locks", "file locks", "fail",
+                         f"a file lock could not be taken: {type(e).__name__}: {e}"[:200]))
+    if _plat.is_windows():
+        checks.append(_long_paths_check())
+    return {"ok": not any(c["status"] == "fail" for c in checks), "facts": facts,
+            "checks": checks}
+
+
+def _ssh_version(exe: str) -> str:
+    """ssh has no --version: `ssh -V` prints it on stderr."""
+    try:
+        r = subprocess.run([exe, "-V"], capture_output=True, text=True, timeout=8,
+                           creationflags=NO_WINDOW)
+        return ((r.stderr or r.stdout or "").strip().splitlines() or [""])[0][:60]
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _long_paths_check() -> dict:
+    """Windows: long paths on (track worktrees nest deep; git needs core.longpaths too)."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+            on = int(winreg.QueryValueEx(k, "LongPathsEnabled")[0]) == 1
+    except OSError:
+        on = False
+    return _c("long_paths", "long paths", "ok" if on else "warn",
+              "Windows long paths are on" if on else
+              "Windows long paths are off: deep worktree paths can fail (set LongPathsEnabled = 1 "
+              "under HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem, as administrator)")

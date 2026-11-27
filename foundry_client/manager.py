@@ -2,6 +2,7 @@
 with backoff when one dies or hangs, safe-point restarts for the Kilo server and
 coordinator, rotating logs. One thread; the API and tray only call its methods."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -21,7 +22,7 @@ from .probe import pid_alive
 from .update import UpdateCheck
 
 BACKOFF = (2, 5, 15, 30, 60, 120)
-NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0      # CREATE_NO_WINDOW
+NO_WINDOW = _plat.NO_WINDOW      # CREATE_NO_WINDOW
 START_GRACE = 90          # seconds a new process may take to become healthy
 STOP_WAIT = 10            # seconds to wait for a killed process to go away
 
@@ -467,7 +468,7 @@ class Manager:
     @staticmethod
     def _kill_pid(pid: int, p: Optional[subprocess.Popen], tree: bool = True) -> None:
         try:
-            if sys.platform == "win32":
+            if _plat.is_windows():
                 # W1.9: the coordinator's process tree holds the DETACHED studio_gate
                 # runner (and its MCP children) while a gate runs; `/T` on the coordinator
                 # killed it mid-playtest. The coordinator is stopped alone; every other

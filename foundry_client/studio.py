@@ -37,6 +37,7 @@ v0.181.229, from the Studio update of 2026-11-17 (0.747 -> 0.748):
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import calendar
 import json
@@ -174,7 +175,7 @@ class WinBackend:
     """The few Win32 calls the reopen needs (ctypes, no extra dependency)."""
 
     def __init__(self):
-        if sys.platform != "win32":
+        if not _plat.is_windows():
             raise RuntimeError("Studio auto-reopen runs on Windows only")
         import ctypes
         from ctypes import wintypes

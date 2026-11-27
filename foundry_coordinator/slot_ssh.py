@@ -22,6 +22,7 @@ counts, the last error).
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -32,7 +33,7 @@ import time
 from typing import Callable, Optional
 
 INTERVAL = 600                       # seconds between registrations (also on every start)
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_NO_WINDOW = _plat.NO_WINDOW
 _dir: Optional[str] = None
 
 

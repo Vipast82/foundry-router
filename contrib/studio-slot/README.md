@@ -63,6 +63,7 @@ processes rendering in software; 8 GB ran out of memory).
 | Studio | Vinegar 1.9.4 (built from its checksum-verified tarball), Debian Wine 10, `renderer = "D3D11"`, WebView2 `--no-sandbox` |
 | Rojo | 7.7.1 CLI + the matching Studio plugin (GitHub release) |
 | Studio MCP | Roblox's `StudioMCP.exe` under Wine (`studio-mcp-official`) and `@chrrxs/robloxstudio-mcp@3.4.2` on Node 22.21 (+ its `MCPPlugin.rbxmx`) |
+| Coding clients | Kilo Code CLI `@kilocode/cli@7.8.32` and OpenCode `@opencode/cli@2.3.2` (pinned, registry integrity checked). Installed, not started: the lane agent starts them from Distributed Foundry phase b (`docs/DISTRIBUTED_FOUNDRY.md`) |
 | Gate runner | Python 3.13 + Pillow; Foundry mounted read-only at `/opt/foundry` (the deployed release) |
 | AU toolchain | PowerShell 7.6.9 (`tools/gate.ps1`), rokit 1.2.0 → lune, selene, stylua, wally from AU's `rokit.toml` |
 | Blender | 4.5.12 LTS (same build as the build PC, hash 84afd5f785f7), numpy, ffmpeg |

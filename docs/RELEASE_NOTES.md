@@ -1,3 +1,35 @@
+## v0.181.263 - Distributed Foundry phase a: one platform layer, both clients in the slot image
+
+Victor approved the Distributed Foundry design (docs/DISTRIBUTED_FOUNDRY.md, decisions D1-D7 as recommended) and
+phase a of its plan (docs/plans/DISTRIBUTED_FOUNDRY_PLAN.md) on 2026-11-27. Phases b-f each need their own go-ahead.
+**No behaviour changes in this release.**
+
+- **`foundry_platform/` (new, stdlib only):** the one place that knows which OS Foundry runs on. It has
+  `is_windows()` / `is_linux()` / `os_kind()`, the no-console process flags (`NO_WINDOW`, `no_window_kw()`,
+  `detached_kw()`), the job shell (`bash -lc` or `pwsh -NoProfile -Command`), `script_ext()`, `service_kind()`,
+  `default_root()` / `lanes_root()`, UTF-8 `read_text` / atomic `write_text`, and `file_lock()` (flock on Linux,
+  msvcrt on Windows, with a timeout).
+- **76 OS checks in 27 files of the coordinator and the client now go through it.** That covers every
+  `os.name == "nt"`, every `sys.platform == "win32"` and the eight copies of `0x08000000 if ... else 0`. Each
+  replacement is the same test, read at call time, so tests that patch `sys.platform` still see their patch. A guard
+  test fails if a new `os.name` / `sys.platform` / `0x08000000` appears outside the layer (a recorded value in
+  `foundry_client/move.py` is allowed).
+- **`foundry-client doctor --platform [--json]`** works without a running client. It reports the OS, the job shell,
+  git, ssh, node, kilo, opencode, rokit and lune, the text encoding, whether file locks work and, on Windows, long
+  paths. Every line is in plain words, and it ends with PLATFORM OK or PLATFORM NOT READY. A missing git / ssh / node
+  fails; a missing coding client or game tool warns.
+- **Slot image (contrib/studio-slot/Dockerfile):** Kilo Code CLI 7.8.32 and OpenCode 2.3.2 are installed, the
+  workstation's versions. Each registry integrity must match the pinned value before npm installs. Nothing starts
+  them yet (that is phase b). The image has not been rebuilt on any slot: that waits for the spare slot.
+- **CI:** `.github/workflows/platform.yml` runs the platform tests, both clients' install (same versions and
+  integrity as the Dockerfile) and `doctor --platform` on ubuntu-24.04 and windows-latest, on pushes that touch them.
+  The weekly full Linux suite (tests-linux.yml) is unchanged.
+- **Packaging:** `foundry_platform` is in pyproject's packages and in the client's PyInstaller hidden imports. The
+  slot's Foundry push already sends every top-level package with an `__init__.py`.
+- 19 tests (tests/platform_layer, tests/client/test_doctor_platform.py). `is_windows(sysmod)` takes a module's own `sys` for foundry_client/autostart.py, whose tests swap that reference. Three
+  tests that set `os.name` on a module (test_git_long_paths x2, test_mcp_stdio x1) now set `sys.platform`, which is
+  what the layer reads; before this they passed on Windows only by coincidence.
+
 ## v0.181.262 - an empty tool-loop step is asked again
 
 Round 7 of the Media_Gen chat test (media-gen 5.28.4, router v0.181.261), docs/MEDIA_GEN_527_CHAT_TEST.md.

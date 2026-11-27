@@ -29,6 +29,7 @@ fast_lane_gate_error. What was repaired is journaled in the auto_heal event.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -379,7 +380,7 @@ def pid_alive(pid) -> bool:
         return False
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if _plat.is_windows():
         import ctypes
         k = ctypes.windll.kernel32
         h = k.OpenProcess(0x1000, False, pid)              # PROCESS_QUERY_LIMITED_INFORMATION
@@ -453,7 +454,7 @@ def stop_playtest(P, log: str = "") -> str:
                          cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL,
                          stdout=out or subprocess.DEVNULL,
                          stderr=subprocess.STDOUT if out else subprocess.DEVNULL,
-                         creationflags=0x08000000 if os.name == "nt" else 0)
+                         creationflags=_plat.NO_WINDOW)
     except OSError as e:
         return f"stop-playtest: {e}"[:200]
     finally:

@@ -40,6 +40,7 @@ task falls back to the ordinary CHANGES_REQUIRED path.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import base64
 import hashlib
@@ -301,8 +302,8 @@ class FastLane:
         env["FOUNDRY_GATE_RUN_ID"] = run_id
         env["PYTHONIOENCODING"] = "utf-8"             # stdout is a log file: never cp1252
         flags = 0
-        if os.name == "nt":
-            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x08000000
+        if _plat.is_windows():
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | _plat.CREATE_NO_WINDOW
         with open(log, "w", encoding="utf-8") as lf:
             lf.write("$ " + " ".join(cmd) + "\n")
             lf.flush()
@@ -595,9 +596,9 @@ class FastLane:
 
     @staticmethod
     def _kill_tree(pid: int) -> None:
-        if os.name == "nt":
+        if _plat.is_windows():
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))], capture_output=True,
-                           timeout=20, creationflags=0x08000000)
+                           timeout=20, creationflags=_plat.CREATE_NO_WINDOW)
         else:
             try:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
@@ -614,7 +615,7 @@ class FastLane:
             subprocess.Popen([sys.executable, "-m", gm, "--repo", P.profile.workspace, "stop-playtest"],
                              cwd=ROUTER_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
-                             creationflags=0x08000000 if os.name == "nt" else 0)
+                             creationflags=_plat.NO_WINDOW)
         except OSError as e:
             self.store.event(P.id, tid, "warning", detail={"fast_lane": f"stop-playtest: {e}"[:300]})
 

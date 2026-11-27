@@ -1,6 +1,7 @@
 """What each managed component is: how to start it, how to tell it is healthy, and
 whether a restart must wait for a safe point (no live coding session)."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -48,7 +49,7 @@ def self_argv() -> list:
     processes and commands use the console one so their output reaches the logs."""
     if getattr(sys, "frozen", False):
         d = Path(sys.executable).parent
-        con = d / ("foundry-client.exe" if sys.platform == "win32" else "foundry-client")
+        con = d / ("foundry-client.exe" if _plat.is_windows() else "foundry-client")
         return [str(con if con.is_file() else sys.executable)]
     return [console_python(sys.executable), "-m", "foundry_client"]
 
@@ -59,7 +60,7 @@ def console_python(exe: str) -> str:
     briefly flashing window; started from python.exe with CREATE_NO_WINDOW the child
     owns one hidden console that its own children reuse."""
     p = Path(exe)
-    if sys.platform == "win32" and p.name.lower() == "pythonw.exe":
+    if _plat.is_windows() and p.name.lower() == "pythonw.exe":
         con = p.with_name("python.exe")
         if con.is_file():
             return str(con)
@@ -105,7 +106,7 @@ def pid_alive(pid) -> bool:
         return False
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if _plat.is_windows():
         import ctypes
         k = ctypes.windll.kernel32
         h = k.OpenProcess(0x1000, False, pid)              # PROCESS_QUERY_LIMITED_INFORMATION

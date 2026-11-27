@@ -1,0 +1,70 @@
+# The platform layer on both OSes (docs/DISTRIBUTED_FOUNDRY.md §7.1, phase a): foundry_platform,
+# `foundry-client doctor --platform`, and the two coding clients the slot image pins (Kilo and
+# OpenCode, the same versions and integrity as contrib/studio-slot/Dockerfile). Fast (~3 min a
+# job), so it runs on every push that touches these files. The whole suite on Linux stays in
+# tests-linux.yml (weekly).
+name: Platform (Linux + Windows)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main, cline]
+    paths:
+      - "foundry_platform/**"
+      - "foundry_client/**"
+      - "foundry_coordinator/**"
+      - "tests/platform_layer/**"
+      - "tests/client/test_doctor_platform.py"
+      - "contrib/studio-slot/Dockerfile"
+      - ".github/workflows/platform.yml"
+  pull_request:
+    paths:
+      - "foundry_platform/**"
+      - "foundry_client/**"
+      - "foundry_coordinator/**"
+      - "tests/platform_layer/**"
+      - "contrib/studio-slot/Dockerfile"
+      - ".github/workflows/platform.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.21.0"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -e ".[client]"
+      - name: Platform tests
+        run: python -m pytest -q tests/platform_layer tests/client/test_doctor_platform.py
+      - name: Both coding clients (versions and integrity from the slot Dockerfile)
+        run: |
+          df=contrib/studio-slot/Dockerfile
+          arg() { sed -n "s/^ARG $1=//p" "$df" | tr -d '\r'; }    # CRLF on the Windows checkout
+          kv=$(arg KILO_VERSION); ki=$(arg KILO_INTEGRITY)
+          ov=$(arg OPENCODE_VERSION); oi=$(arg OPENCODE_INTEGRITY)
+          test "$(npm view "@kilocode/cli@$kv" dist.integrity)" = "$ki"
+          test "$(npm view "@opencode/cli@$ov" dist.integrity)" = "$oi"
+          npm install -g "@kilocode/cli@$kv" "@opencode/cli@$ov"
+          kilo --version | grep -F "$kv"
+          opencode --version | grep -F "$ov"
+      - name: doctor --platform
+        run: python -m foundry_client doctor --platform

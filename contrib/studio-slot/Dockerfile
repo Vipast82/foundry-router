@@ -78,6 +78,19 @@ ARG MCP_VERSION=3.4.2
 RUN npm install -g "@chrrxs/robloxstudio-mcp@${MCP_VERSION}" \
     && mkdir -p /opt/studio-slot/plugins \
     && cp "$(npm root -g)/@chrrxs/robloxstudio-mcp/studio-plugin/MCPPlugin.rbxmx" /opt/studio-slot/plugins/
+# Both coding clients (docs/DISTRIBUTED_FOUNDRY.md §6, phase a): the lane agent (phase b) runs the
+# one a project or lane names, `kilo serve` on 4096 / `opencode serve` on 4097, on 127.0.0.1 only.
+# Nothing starts them yet. Pinned to the workstation's versions; the registry's integrity must
+# match the pinned value (npm then checks each tarball, the platform package included, against it).
+# Bump both lines together with the workstation's install.
+ARG KILO_VERSION=7.8.32
+ARG KILO_INTEGRITY=sha512-lbW+z4wMioOFejeJy0eSEdaYj9BdOt/QUbQMVLFmuaqJSluBSxlmJPSEaHCKrwU/7NVEH1wnA/K1o1Ol9nWz2A==
+ARG OPENCODE_VERSION=2.3.2
+ARG OPENCODE_INTEGRITY=sha512-U/DD6X8kgnEFM3VYT7+QN/UJotW++qOxTJtPEUiNzKwu9tNHtAC1jOtup1gpk773j0AFNmMBbLNou4YkdvlRKA==
+RUN test "$(npm view "@kilocode/cli@${KILO_VERSION}" dist.integrity)" = "${KILO_INTEGRITY}" \
+    && test "$(npm view "@opencode/cli@${OPENCODE_VERSION}" dist.integrity)" = "${OPENCODE_INTEGRITY}" \
+    && npm install -g "@kilocode/cli@${KILO_VERSION}" "@opencode/cli@${OPENCODE_VERSION}" \
+    && kilo --version && opencode --version
 COPY --from=vinegar /out/ /
 # Studio sign-in: the roblox-studio-auth link from the browser opens Vinegar
 RUN update-desktop-database /usr/share/applications \

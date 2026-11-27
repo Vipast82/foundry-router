@@ -54,6 +54,7 @@ Fail closed everywhere: UNKNOWN (tool error, timeout, unparsable output) never c
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import argparse
 import base64
@@ -113,7 +114,7 @@ LOCK_NAME = "runner.lock"        # .plan/tmp/gate/runner.lock: one runner drives
 SAFE_PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
 STORY_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 CREATE_NO_WINDOW = M.CREATE_NO_WINDOW
-_NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
+_NO_WINDOW = _plat.no_window_kw()
 
 # The edit VM keeps a required ModuleScript's result for the Studio session, so a step
 # that requires a check module after its source changed ran the old code (2026-11-08:
@@ -4900,7 +4901,7 @@ def _run_bots(a, sprint, run_id, runs, out, official, community, run_cmd) -> int
 def _pid_alive(pid: int) -> bool:
     if not pid:
         return False
-    if os.name == "nt":
+    if _plat.is_windows():
         import ctypes
         k = ctypes.windll.kernel32
         h = k.OpenProcess(0x1000, False, int(pid))          # PROCESS_QUERY_LIMITED_INFORMATION
@@ -4994,7 +4995,7 @@ def start_background(argv: list, repo: str, sprint: str, out=print) -> int:
     env["PYTHONPATH"] = pkg_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["PYTHONIOENCODING"] = "utf-8"          # stdout is a file: never cp1252 (M9)
     kw = {}
-    if os.name == "nt":
+    if _plat.is_windows():
         kw["creationflags"] = 0x00000008 | 0x00000200 | CREATE_NO_WINDOW  # DETACHED | NEW_GROUP
     else:
         kw["start_new_session"] = True

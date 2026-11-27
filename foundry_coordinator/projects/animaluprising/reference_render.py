@@ -19,6 +19,7 @@ Exit codes: 0 every frame rendered at the exact size, 1 some frame failed, 2 set
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import argparse
 import json
@@ -147,7 +148,7 @@ def browser_argv(browser: str, url: str, out_png: str, w: int, h: int, profile_d
 def default_run(argv: list, timeout: float) -> tuple:
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                           creationflags=_plat.NO_WINDOW)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return 124, f"timed out after {timeout:.0f}s"

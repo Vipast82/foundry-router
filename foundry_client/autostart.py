@@ -11,6 +11,7 @@ Windows itself asks for the account password in the console: this code never
 takes, sees or stores a password. Linux: install-service (systemd --user) plus
 `loginctl enable-linger`."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import os
 import shutil
@@ -35,7 +36,7 @@ def _launch_argv() -> list:
 
 def _windowless_argv() -> list:
     argv = _launch_argv()
-    if not getattr(sys, "frozen", False) and sys.platform == "win32":
+    if not getattr(sys, "frozen", False) and _plat.is_windows(sys):
         # pythonw: no console window at logon
         py = Path(argv[0])
         w = py.with_name("pythonw.exe")
@@ -63,7 +64,7 @@ def _linux_path() -> Path:
 
 
 def path() -> Path:
-    return _win_path() if sys.platform == "win32" else _linux_path()
+    return _win_path() if _plat.is_windows(sys) else _linux_path()
 
 
 def is_enabled() -> bool:
@@ -74,7 +75,7 @@ def enable() -> Path:
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     root = _root()
-    if sys.platform == "win32":
+    if _plat.is_windows(sys):
         cd = f'cd /d "{root}"\r\n' if root else ""
         p.write_text(f'@echo off\r\n{cd}start "" {_launch_line()}\r\n', encoding="utf-8",
                      newline="")
@@ -124,7 +125,7 @@ def service_text() -> str:
 def install_service(activate: bool = True) -> Path:
     """Write ~/.config/systemd/user/foundry-client.service and enable it. For a start at
     boot without a login, run `loginctl enable-linger $USER` once."""
-    if sys.platform == "win32":
+    if _plat.is_windows(sys):
         raise RuntimeError("systemd units are for Linux; on Windows use install-autostart")
     p = service_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +214,7 @@ def boot_task_xml(user: str) -> str:
 
 
 def boot_enabled() -> bool:
-    if sys.platform != "win32":
+    if not _plat.is_windows(sys):
         return False
     try:
         r = _RUN(["schtasks", "/Query", "/TN", BOOT_TASK], capture_output=True, timeout=20)
@@ -227,7 +228,7 @@ def enable_boot(user: str = "", xml_dir: Optional[Path] = None) -> dict:
     `user` in this console (/RP *): the prompt and the answer stay between the
     person and Windows. The at-logon entry is removed (a second start at sign-in
     would only open the settings page of the running client)."""
-    if sys.platform != "win32":
+    if not _plat.is_windows(sys):
         raise RuntimeError("--at-boot is for Windows; on Linux use install-service and "
                            "`loginctl enable-linger $USER`")
     user = user or boot_user()
@@ -256,7 +257,7 @@ def enable_boot(user: str = "", xml_dir: Optional[Path] = None) -> dict:
 
 def disable_boot() -> bool:
     """Delete the boot task; True when one was there."""
-    if sys.platform != "win32" or not boot_enabled():
+    if not _plat.is_windows(sys) or not boot_enabled():
         return False
     r = _RUN(["schtasks", "/Delete", "/TN", BOOT_TASK, "/F"], capture_output=True, timeout=30)
     return r.returncode == 0
@@ -269,7 +270,7 @@ def mode() -> str:
         parts.append("boot")
     if is_enabled():
         parts.append("logon")
-    if sys.platform != "win32" and service_path().is_file():
+    if not _plat.is_windows(sys) and service_path().is_file():
         parts.append("service")
     return "+".join(parts) or "off"
 

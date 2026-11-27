@@ -31,7 +31,7 @@ version = { attr = "foundry_router.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["foundry_router*", "foundry_coordinator*", "foundry_training*", "foundry_automation*",
-           "foundry_client*"]
+           "foundry_client*", "foundry_platform*"]
 
 [project.scripts]
 foundry-coordinator = "foundry_coordinator.cli:main"

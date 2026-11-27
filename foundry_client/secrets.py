@@ -4,6 +4,7 @@ LINUX_WORKSTATION_PLAN D-L5; client.secret_store = auto | keyring | file). Value
 write-only from the UI: the API reports which are set, never their values. They reach a
 component only through its environment at start."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -152,7 +153,7 @@ def import_windows_clixml(path: str, names=(), single: str = "") -> list[str]:
     PowerShell Export-Clixml file (DPAPI, current user) and store them in the keyring.
     `names`: keys of a saved hashtable; `single`: the name for a file that holds one
     SecureString. Returns the names imported. Values never reach a console or log."""
-    if sys.platform != "win32" or not os.path.isfile(path):
+    if not _plat.is_windows() or not os.path.isfile(path):
         return []
     jobs = [(n, "$v=$s[$env:FC_NAME]") for n in names] + ([(single, "$v=$s")] if single else [])
     done = []

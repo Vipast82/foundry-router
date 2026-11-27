@@ -21,6 +21,7 @@ Capture failure policy (`[training.capture] on_failure`):
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -113,8 +114,8 @@ def _spawn(cmd: list, log_path: str, env: dict):
     import subprocess
     import sys
     kw = {}
-    if sys.platform == "win32":
-        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    if _plat.is_windows():
+        kw["creationflags"] = _plat.CREATE_NO_WINDOW
     else:
         kw["start_new_session"] = True
     with open(log_path, "a", encoding="utf-8") as log:   # the child keeps its own handle

@@ -23,6 +23,7 @@ patched function.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -51,7 +52,7 @@ def set_registry(state_dir: str) -> None:
 
 def _win_job():
     """A new job object that kills its processes when its last handle closes, or None."""
-    if os.name != "nt":
+    if not _plat.is_windows():
         return None
     try:
         import ctypes
@@ -211,9 +212,9 @@ def run(cmd, *, timeout: Optional[float] = None, capture_output: bool = False,
         kw["stderr"] = subprocess.PIPE
     if input is not None:
         kw["stdin"] = subprocess.PIPE
-    if os.name != "nt":
+    if not _plat.is_windows():
         kw.setdefault("start_new_session", True)
-        if sys.platform.startswith("linux") and "preexec_fn" not in kw:
+        if _plat.is_linux() and "preexec_fn" not in kw:
             kw["preexec_fn"] = _pdeathsig
     job = _win_job()
     proc = subprocess.Popen(cmd, **kw)
@@ -242,7 +243,7 @@ def _kill(proc, job) -> None:
     if job is not None:
         _win_close(job, kill=True)
     try:
-        if os.name != "nt":
+        if not _plat.is_windows():
             import signal
             os.killpg(proc.pid, signal.SIGKILL)
         else:

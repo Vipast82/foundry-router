@@ -45,6 +45,7 @@ release whose automatic update failed is not tried again automatically (Update n
 can); one that only found no gap is tried again at the next check.
 """
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -72,7 +73,7 @@ ROLLBACK_PHASES = ("installing", "restarting_coordinator")
 # phases a cancel can still stop (nothing has changed yet)
 CANCELLABLE = ("checking", "making_gap")
 HISTORY = 10
-NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+NO_WINDOW = _plat.NO_WINDOW
 TAG_RE = re.compile(r"^v?\d+(\.\d+){1,3}$")
 
 

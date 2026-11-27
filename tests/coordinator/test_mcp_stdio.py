@@ -273,7 +273,7 @@ def test_linux_commands_have_no_windows_shell(monkeypatch):
     import shutil
     monkeypatch.delenv("FOUNDRY_MCP_OFFICIAL", raising=False)
     monkeypatch.delenv("FOUNDRY_MCP_COMMUNITY", raising=False)
-    monkeypatch.setattr(M.os, "name", "posix")
+    monkeypatch.setattr(sys, "platform", "linux")   # read through foundry_platform (v0.181.263)
     monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/npx" if n == "npx" else None)
     assert M.community_command() == ["/usr/bin/npx", "-y", "@chrrxs/robloxstudio-mcp@3.4.2"]
     with pytest.raises(M.McpError, match="no Roblox Studio on this machine"):

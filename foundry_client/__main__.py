@@ -7,6 +7,7 @@
   foundry-client remove-autostart                  removes the sign-in entry and the boot task
   foundry-client install-service | remove-service   systemd --user unit (Linux, headless)
   foundry-client doctor                            checks of this workstation (running client)
+  foundry-client doctor --platform [--json]        this machine's OS and tools (no client needed)
   foundry-client apply-kilo-config [--dry-run]     role rules -> kilo.jsonc, then reload Kilo
   foundry-client import-legacy-secrets             one-time: old PowerShell credential files
   foundry-client coordinator <args...>             the bundled coordinator CLI
@@ -177,7 +178,10 @@ def main(argv=None) -> int:
     sub.add_parser("remove-autostart", help="remove the sign-in entry and the boot task")
     sub.add_parser("install-service")
     sub.add_parser("remove-service")
-    sub.add_parser("doctor")
+    dr = sub.add_parser("doctor")
+    dr.add_argument("--platform", action="store_true",
+                    help="check this machine's OS and tools only (works without a running client)")
+    dr.add_argument("--json", action="store_true", help="with --platform: print JSON")
     k = sub.add_parser("apply-kilo-config")
     k.add_argument("--dry-run", action="store_true")
     k.add_argument("--project", default="")
@@ -235,6 +239,16 @@ def main(argv=None) -> int:
                   + (f" (restart pending: {c['pending_reason']})" if c["pending_restart"] else ""))
             return 1
         return 0
+    if a.cmd == "doctor" and getattr(a, "platform", False):
+        from . import doctor as D
+        d = D.platform_checks()
+        if getattr(a, "json", False):
+            print(json.dumps(d, indent=2))
+        else:
+            for c in d["checks"]:
+                print(f"{c['status'].upper():<5} {c['label']:<20} {c['detail']}")
+            print("PLATFORM OK" if d["ok"] else "PLATFORM NOT READY: fix the FAIL lines above")
+        return 0 if d["ok"] else 1
     if a.cmd == "doctor":
         try:
             d = _api(cfg, "/api/doctor", timeout=60)

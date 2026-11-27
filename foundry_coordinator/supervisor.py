@@ -77,6 +77,7 @@ but then only a fresh heartbeat with the same pid identifies the process.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import argparse
 import json
@@ -132,8 +133,8 @@ CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x000
 DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
 # a hidden console instead of none: with DETACHED_PROCESS a venv launcher's real
 # interpreter (and every console tool it runs) would pop a visible window
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-_NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
+CREATE_NO_WINDOW = _plat.CREATE_NO_WINDOW
+_NO_WINDOW = _plat.no_window_kw()
 
 
 class StepFailed(RuntimeError):
@@ -248,7 +249,7 @@ _WAIT_TIMEOUT = 0x102
 def pid_alive(pid: int) -> bool:
     if not pid or pid <= 0:
         return False
-    if os.name == "nt":
+    if _plat.is_windows():
         import ctypes
         k = _kernel32()
         h = k.OpenProcess(_SYNCHRONIZE | _QUERY_LIMITED, False, int(pid))
@@ -278,7 +279,7 @@ def process_identity(pid: int) -> Optional[dict]:
     has another creation time."""
     if not pid or pid <= 0:
         return None
-    if os.name == "nt":
+    if _plat.is_windows():
         import ctypes
         from ctypes import wintypes
         k = _kernel32()
@@ -395,7 +396,7 @@ def _git(cwd: str, *args: str, check: bool = True, timeout: float = 120) -> subp
 def _split(cmd):
     if isinstance(cmd, (list, tuple)):
         return list(cmd)
-    return cmd if os.name == "nt" else shlex.split(cmd)
+    return cmd if _plat.is_windows() else shlex.split(cmd)
 
 
 def schema_versions(db_path: str) -> dict:
@@ -851,7 +852,7 @@ class Supervisor:
     def _terminate(self, pid: int) -> None:
         """Terminate exactly one process (never its tree)."""
         try:
-            if os.name == "nt":
+            if _plat.is_windows():
                 os.kill(pid, signal.SIGTERM)             # TerminateProcess on this pid only
             else:
                 os.kill(pid, signal.SIGKILL)
@@ -881,7 +882,7 @@ class Supervisor:
                 json.dump({"upgrade_id": upgrade_id, "supervisor_pid": os.getpid(), "pid": pid,
                            "ts": time.time()}, fh)
             os.replace(tmp, self.stop_path)
-            if os.name != "nt":
+            if not _plat.is_windows():
                 try:
                     os.kill(pid, signal.SIGTERM)
                 except OSError:
@@ -959,7 +960,7 @@ class Supervisor:
               "stdin": subprocess.DEVNULL,
               "env": dict(os.environ, FOUNDRY_COORD_STATE=self.state_dir,
                           FOUNDRY_SUPERVISOR_TAG=tag)}
-        if os.name == "nt":
+        if _plat.is_windows():
             kw["creationflags"] = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         else:
             kw["start_new_session"] = True

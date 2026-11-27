@@ -1,6 +1,7 @@
 """Client settings (client.toml). No secrets here: they live in the OS keyring
 (secrets.py) and are injected into a component's environment when it starts."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import copy
 import os
@@ -122,7 +123,7 @@ DEFAULTS: dict[str, Any] = {
 
 
 def config_dir() -> Path:
-    if sys.platform == "win32":
+    if _plat.is_windows():
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / "FoundryClient"
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")

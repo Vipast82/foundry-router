@@ -1,6 +1,7 @@
 """Git operations on a project workspace (read-mostly; one push helper)."""
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import hashlib
 import os
@@ -25,7 +26,7 @@ def git_env(base: Optional[dict] = None, **extra) -> dict:
     (appended to what is already there), so argv and the repo's config stay as they are;
     the AU gate's GIT_CONFIG_COUNT keys are a separate list and are untouched."""
     env = dict(os.environ if base is None else base, **extra)
-    if os.name == "nt":
+    if _plat.is_windows():
         have = env.get("GIT_CONFIG_PARAMETERS", "")
         if "core.longpaths" not in have.lower():
             env["GIT_CONFIG_PARAMETERS"] = f"{have} {LONGPATHS}".strip()

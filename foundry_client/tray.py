@@ -2,6 +2,7 @@
 component failed, grey = nothing enabled. Falls back to headless when the desktop
 has no tray (e.g. GNOME without the AppIndicator extension)."""
 from __future__ import annotations
+import foundry_platform as _plat
 
 import os
 import subprocess
@@ -30,7 +31,7 @@ def icon_image(state: str, size: int = 64):
 
 def open_folder(path: str) -> None:
     path = expand(path)
-    if sys.platform == "win32":
+    if _plat.is_windows():
         os.startfile(path)                                       # noqa: S606
     else:
         subprocess.Popen(["xdg-open", path])

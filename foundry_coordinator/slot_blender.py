@@ -22,6 +22,7 @@ to a local Blender (outputs from two machines could differ).
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import collections
 import io
@@ -46,7 +47,7 @@ SEND_CAP = 512 * 1024 * 1024         # uncommitted changes sent at most (bytes)
 BACK_CAP = 4 * 1024 * 1024 * 1024    # outputs taken back at most (bytes)
 CONFIG = os.path.join(".foundry", "blender.json")
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_NO_WINDOW = _plat.NO_WINDOW
 _DELETE_LIST = ".foundry-blender-delete"
 
 
@@ -414,7 +415,7 @@ def default_local_exe() -> str:
     """This PC's Blender when blender.local_exe is empty: the Windows install path, or on Linux
     (LINUX_WORKSTATION_PLAN W3) `blender` on the PATH, else /opt/blender/blender (the
     workstation installer's and the slot image's place)."""
-    if os.name == "nt":
+    if _plat.is_windows():
         return LOCAL_EXE
     import shutil
     return shutil.which("blender") or "/opt/blender/blender"
@@ -463,7 +464,7 @@ def local_try(jobs: int, worker: str = LOCAL):
     for n in range(1, max(1, int(jobs)) + 1):
         f = open(os.path.join(local_lock_dir(), f"{safe}-{n}.lock"), "a+")
         try:
-            if os.name == "nt":
+            if _plat.is_windows():
                 import msvcrt
                 f.seek(0)
                 msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
@@ -790,7 +791,7 @@ def deny_rules(profile) -> list:
     pool (the drop-in runs it then)."""
     if not pooled(profile):
         return []
-    pats = LOCAL_BLENDER if os.name == "nt" else LOCAL_BLENDER_POSIX
+    pats = LOCAL_BLENDER if _plat.is_windows() else LOCAL_BLENDER_POSIX
     return [{"permission": "bash", "pattern": p, "action": "deny"} for p in pats]
 
 
@@ -808,7 +809,7 @@ def wrapper_paths(profile, state_dir: str = "") -> tuple[str, str]:
     ws = os.path.realpath(str(getattr(profile, "workspace", "") or ""))
     h = hashlib.sha256(ws.lower().encode("utf-8")).hexdigest()[:10]
     base = os.path.join(wrapper_dir(), f"{getattr(profile, 'id', 'project')}-{h}")
-    return base + ".json", base + (".cmd" if os.name == "nt" else ".sh")
+    return base + ".json", base + (".cmd" if _plat.is_windows() else ".sh")
 
 
 def prepare(profile, state_dir: str, task_id: str = "", run_id: str = "") -> Optional[dict]:
@@ -895,7 +896,7 @@ def _prepare_pool(profile, state_dir: str, task_id: str, run_id: str) -> dict:
 def _write_dropin(cmd_path: str, cfg_path: str, workspace: str, state_dir: str) -> None:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = {"workspace": workspace}
-    if os.name == "nt":
+    if _plat.is_windows():
         text = ("@echo off\r\n"
                 "rem foundry-blender for this worktree (SLOT_BLENDER_PLAN B2): use it wherever you\r\n"
                 "rem would run blender.exe; Blender runs on the slot and the outputs come back.\r\n"
@@ -910,7 +911,7 @@ def _write_dropin(cmd_path: str, cfg_path: str, workspace: str, state_dir: str) 
                 f"exec {shlex.quote(sys.executable)} -m foundry_coordinator.slots blender "
                 f"--config {shlex.quote(cfg_path)} --repo {shlex.quote(cfg['workspace'])} -- \"$@\"\n")
     _write(cmd_path, text)
-    if os.name != "nt":
+    if not _plat.is_windows():
         os.chmod(cmd_path, 0o755)
 
 
@@ -927,7 +928,7 @@ def relative_args(repo: str, args: list) -> tuple[list, str]:
     root = os.path.realpath(repo)
     out = []
     for a in args:
-        if re.match(r"^[A-Za-z]:[\\/]", a) or (os.name != "nt" and a.startswith("/")
+        if re.match(r"^[A-Za-z]:[\\/]", a) or (not _plat.is_windows() and a.startswith("/")
                                                and os.path.exists(a)):
             p = os.path.realpath(a)
             if p == root or p.startswith(root + os.sep):

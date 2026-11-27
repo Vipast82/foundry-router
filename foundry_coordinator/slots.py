@@ -42,6 +42,7 @@ No Windows path is mounted into a remote slot.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import argparse
 import io
@@ -77,7 +78,7 @@ DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundr
 # outside the checkout, so `git clean` never empties it. "~/" = the slot's $HOME.
 SLOT_LUNE_CACHE = "~/.cache/au-lune-spec-cache"
 FOUNDRY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_NO_WINDOW = _plat.NO_WINDOW
 
 
 # ----------------------------------------------------------------------------- config
@@ -500,7 +501,7 @@ def prepare_fetch(profile, slot_id: str, state_dir: str = "") -> dict:
         cfg["ssh"] = s["ssh"]
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.name == "nt":
+    if _plat.is_windows():
         text = ("@echo off\r\n"
                 "rem foundry-slot-fetch for this worktree: copies files Studio wrote on the slot\r\n"
                 f'set "PYTHONPATH={root}"\r\n'
@@ -515,7 +516,7 @@ def prepare_fetch(profile, slot_id: str, state_dir: str = "") -> dict:
         with open(tmp, "w", encoding="utf-8", newline="") as f:
             f.write(body)
         os.replace(tmp, path)
-    if os.name != "nt":
+    if not _plat.is_windows():
         os.chmod(cmd_path, 0o755)
     return {"command": cmd_path, "config": cfg_path, "repo": cfg["repo"]}
 

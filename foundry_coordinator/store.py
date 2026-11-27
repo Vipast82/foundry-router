@@ -12,6 +12,7 @@ project's review or verification can never satisfy another's.
 """
 
 from __future__ import annotations
+import foundry_platform as _plat
 
 import json
 import os
@@ -127,7 +128,7 @@ def _owner_dead(owner_id: str) -> bool:
         return not psutil.pid_exists(int(pid))
     except ImportError:
         pass
-    if os.name == "nt":
+    if _plat.is_windows():
         import ctypes
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         h = k32.OpenProcess(0x1000, False, int(pid))              # QUERY_LIMITED_INFORMATION
