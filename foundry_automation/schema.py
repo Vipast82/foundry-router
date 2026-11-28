@@ -384,6 +384,9 @@ AUTOMATION_DEFAULTS: dict = {
     # whose Studio checks measure frames or performance run their Studio work on the
     # workstation (main, or an unbound track whose merge runs the Studio batch)
     "workstation_only_sprints": [],
+    # Distributed Foundry phase b (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B6): a track bound
+    # to a slot with `lanes` on gets its worktree and sessions ON the slot. Off = as before
+    "remote_lanes": False,
     # 2026-11-03 PT-3: the owner's concept-art chat drops images into an inbox folder of the
     # main checkout mid-sprint; they are the owner's deliveries, never a session's stray files
     "owner_inbox": [],
@@ -1225,6 +1228,11 @@ _AUTO_DESC = {
                                      "Studio goes before pending main-checkout sprints.",
     "merge_red_repair": "When a track merge's Studio check is red, the Lead reopens each red "
                         "sprint on the main checkout with the failing rows as its assignment.",
+    "remote_lanes": "Lanes on slots (Distributed Foundry, being built): a track started with "
+                    "--slot on a slot whose `lanes` setting is on keeps its worktree, coding "
+                    "sessions and checks on that slot; the coordinator fetches its commits "
+                    "back. Off = every worktree is on this machine, as before. Until phase d "
+                    "such a lane is not merged into the main branch, and it has no Studio.",
     "workstation_only_sprints": "Sprint ids (globs, e.g. AS-V*) whose Studio checks measure "
                                 "frames or performance: never placed on a track bound to a "
                                 "Studio slot (the slots render in software, ~36 fps). They run "

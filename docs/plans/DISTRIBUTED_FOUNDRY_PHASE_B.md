@@ -3,8 +3,13 @@
 Status: **approved 2026-11-27 with Db1-Db5 as recommended** (Victor: "Approve, build b-1").
 **b-1 (B1 + B3 + B4) is built in v0.181.265**, all behind `[slots.<id>] lanes` (off).
 **b-2 (B5, the slot lane keys) is built in v0.181.266**: a button on Access → Machines, off for
-every slot until pressed. b-3..b-5 are not started. Nothing creates a lane on a slot yet (that is
-B6, release b-3).
+every slot until pressed.
+**b-3 (B2 + B6 + B7 + B8) is built in v0.181.267**, behind `[automation] remote_lanes` and the
+slot's `lanes` (both off). Its image change and the pilot (B9, release b-4) wait for the spare
+slot-4. b-4 and b-5 are not started.
+- **As built in b-3:** a remote lane is refused when the project has a custom adapter, or when
+  the lane needs Studio or Blender (phase c). Such a lane is fetched but never merged into the
+  main branch (phase d). Its local MCP servers are off on the slot.
 Design: `docs/DISTRIBUTED_FOUNDRY.md` (§3, §4). Overall plan: `docs/plans/DISTRIBUTED_FOUNDRY_PLAN.md`.
 Line references are on `main` at `016931a` (v0.181.264).
 

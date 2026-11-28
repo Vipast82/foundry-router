@@ -20,6 +20,11 @@ on:
       - "tests/coordinator/test_lane_tunnel.py"
       - "tests/coordinator/test_lane_clients.py"
       - "tests/test_lane_keys.py"
+      - "tests/coordinator/test_lane_fetch.py"
+      - "tests/coordinator/test_lane_b3.py"
+      - "tests/coordinator/test_lane_track.py"
+      - "contrib/studio-slot/**"
+      - "foundry_training/**"
       - "foundry_router/lane_keys.py"
       - "foundry_router/machines.py"
       - "foundry_router/secrets_api.py"
@@ -45,6 +50,10 @@ jobs:
         os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    # the router's data folder defaults to /data (its Docker volume), which a Linux runner may
+    # not create; Windows made C:\data. The router's own tests need it writable.
+    env:
+      FOUNDRY_DATA_DIR: ${{ runner.temp }}/foundry-data
     defaults:
       run:
         shell: bash
@@ -70,6 +79,8 @@ jobs:
           python -m pytest -q --junitxml=lane-junit.xml tests/client/test_lane_agent.py
           tests/coordinator/test_remote_workspace.py tests/coordinator/test_lane_tunnel.py
           tests/coordinator/test_lane_clients.py tests/test_lane_keys.py
+          tests/coordinator/test_lane_fetch.py tests/coordinator/test_lane_b3.py
+          tests/coordinator/test_lane_track.py
       # each failing test as an annotation: readable from the public checks API without a
       # sign-in (job logs need one), so a failure on one OS can be read from the workstation
       - name: Failures as annotations

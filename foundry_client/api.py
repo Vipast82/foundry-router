@@ -337,6 +337,13 @@ def _lane_routes(app: FastAPI, mgr, lane) -> None:
     def lane_run_status(rid: str, offset: int = 0):
         return answer(lane.run_status, rid, offset)
 
+    @app.post("/api/lane/run_status")
+    async def lane_run_status_post(request: Request):
+        """The same as GET /api/lane/run/<id>, for callers that only POST (RemoteWorkspace's
+        LaneAgent): {id, offset}."""
+        b = await body_of(request)
+        return answer(lane.run_status, str(b.get("id") or ""), int(b.get("offset") or 0))
+
     @app.post("/api/lane/run/{rid}/cancel")
     def lane_run_cancel(rid: str):
         return answer(lane.cancel, rid)

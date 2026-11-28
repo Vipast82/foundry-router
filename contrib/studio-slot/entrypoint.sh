@@ -211,5 +211,11 @@ if [ "${START_VINEGAR:-1}" = "1" ]; then
     fi
 fi
 
+# Lanes on this slot (Distributed Foundry phase b): the lane agent, with this slot's own Kilo
+# and OpenCode, when compose adds docker-compose.lanes.yml (SLOT_LANES=1). Off: nothing new runs.
+if [ "${SLOT_LANES:-0}" = "1" ]; then
+    lane-agent >>"$HOME/lane-agent.log" 2>&1 &
+fi
+
 echo "studio-slot ready: open http://localhost:6080/vnc.html"
 wait

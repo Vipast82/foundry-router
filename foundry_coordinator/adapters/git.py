@@ -166,17 +166,19 @@ class Workspace:
             return f.read() if max_bytes is None else f.read(max_bytes)
 
     def stat(self, rels: list) -> dict:
-        """{rel: {"exists", "kind" (file|dir|other), "size", "mtime"}} for each path."""
+        """{rel: {"exists", "kind" (file|dir|other), "size", "mtime", "mtime_ns"}} per path."""
         out = {}
         for rel in rels:
             p = os.path.join(self.path, rel)
             try:
                 st = os.stat(p)
             except OSError:
-                out[rel] = {"exists": False, "kind": "", "size": 0, "mtime": 0.0}
+                out[rel] = {"exists": False, "kind": "", "size": 0, "mtime": 0.0,
+                            "mtime_ns": 0}
                 continue
             kind = "dir" if os.path.isdir(p) else ("file" if os.path.isfile(p) else "other")
-            out[rel] = {"exists": True, "kind": kind, "size": st.st_size, "mtime": st.st_mtime}
+            out[rel] = {"exists": True, "kind": kind, "size": st.st_size, "mtime": st.st_mtime,
+                        "mtime_ns": st.st_mtime_ns}
         return out
 
     def exists(self, rel: str) -> bool:

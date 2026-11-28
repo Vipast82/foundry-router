@@ -142,6 +142,8 @@ def seats(c, P) -> list:
         t = tasks.get(cur)
         st = {"seat": name, "kind": kind, "lane": r["name"], "lane_state": r["state"],
               "idle": not (t and t["state"] in S.ACTIVE and t["state"] not in (S.QUEUED, S.READY))}
+        if (r.get("data") or {}).get("host"):            # Distributed Foundry phase b
+            st["host"] = str(r["data"]["host"])
         if t:
             st.update(_row(c, pid, t, now))
             if st["idle"]:
@@ -175,6 +177,15 @@ def seats(c, P) -> list:
                 seat["upkeep"] = slotkeep.words(kept[seat["seat"]])
                 if kept[seat["seat"]].get("behind"):
                     seat["behind"] = kept[seat["seat"]]["behind"]
+    except Exception:                                            # noqa: BLE001
+        pass
+    try:
+        from . import lane_tunnel
+        tun = lane_tunnel.MANAGER.view()
+        for seat in out:
+            tv = tun.get(seat.get("seat")) if seat.get("kind") == "slot" else None
+            if tv:
+                seat["lane_tunnel"] = tv["state"] + (f": {tv['error']}" if tv.get("error") else "")
     except Exception:                                            # noqa: BLE001
         pass
     return out

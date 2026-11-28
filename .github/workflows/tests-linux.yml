@@ -16,6 +16,9 @@ jobs:
   pytest:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # the router's data folder defaults to /data (its Docker volume): not writable on a runner
+    env:
+      FOUNDRY_DATA_DIR: ${{ runner.temp }}/foundry-data
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

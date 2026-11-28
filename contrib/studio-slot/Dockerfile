@@ -36,9 +36,17 @@ RUN dpkg --add-architecture i386 && apt-get update && apt-get install -y --no-in
         pci.ids x11-xserver-utils \
         wine wine64 \
         git xdotool x11-utils imagemagick libicu76 \
-        python3 python3-pil python3-numpy ffmpeg \
+        python3 python3-pil python3-numpy python3-venv ffmpeg \
         libxi6 libxxf86vm1 libxfixes3 libxrender1 libsm6 \
     && rm -rf /var/lib/apt/lists/*
+# the lane agent's Python (Distributed Foundry phase b): the Foundry Client runs headless from
+# /opt/foundry with these, the versions the workstation runs (requirements.txt for the first
+# three). Used only when the slot holds lanes (SLOT_LANES=1, lane-agent.sh).
+RUN python3 -m venv /opt/foundry-venv \
+    && /opt/foundry-venv/bin/pip install --no-cache-dir -q \
+        "fastapi==0.115.6" "uvicorn==0.34.0" "pydantic==2.10.4" "tomli-w==1.2.0" \
+        "psutil==7.2.2" "msgpack==1.2.3" \
+    && /opt/foundry-venv/bin/python -c "import fastapi, uvicorn, tomli_w, psutil"
 # Blender 4.5 LTS, the same release as the build PC (docs/ENVIRONMENT.md: 4.5.12), for AU's
 # asset pipeline (tools/blender/*.py run with `blender -b`); checksum from download.blender.org
 ARG BLENDER_VERSION=4.5.12
@@ -115,6 +123,8 @@ COPY studio-mcp-official.sh /usr/local/bin/studio-mcp-official
 COPY studio-reopen.sh /usr/local/bin/studio-reopen
 COPY slot-checkout.sh /usr/local/bin/slot-checkout
 COPY rojo-seed.sh /usr/local/bin/rojo-seed
+# the lane agent (Distributed Foundry phase b): started by entrypoint.sh only with SLOT_LANES=1
+COPY lane-agent.sh /usr/local/bin/lane-agent
 # pulls this slot's secrets + settings from the router (Setup → Secrets) into /run/secrets
 COPY slot-secrets.py /usr/local/bin/slot-secrets
 COPY studio-auth.desktop /usr/share/applications/studio-auth.desktop
@@ -124,7 +134,7 @@ RUN rm -f /usr/share/novnc/index.html
 COPY novnc-index.html /usr/share/novnc/index.html
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/studio-auth-handler \
         /usr/local/bin/studio-mcp-official /usr/local/bin/studio-reopen /usr/local/bin/slot-checkout \
-        /usr/local/bin/rojo-seed /usr/local/bin/slot-secrets \
+        /usr/local/bin/rojo-seed /usr/local/bin/slot-secrets /usr/local/bin/lane-agent \
     && update-desktop-database /usr/share/applications \
     && sed -i '/<\/applications>/e cat /etc/studio-slot/openbox-studio.xml' /etc/xdg/openbox/rc.xml \
     && grep -q 'title="Place1 - Roblox Studio"' /etc/xdg/openbox/rc.xml

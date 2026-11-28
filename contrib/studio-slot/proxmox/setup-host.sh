@@ -310,6 +310,25 @@ fi
 if [ "$CPU_SET" -eq 0 ] && [ "$COMPOSE_FILES" != docker-compose.yml ]; then
     CPUS=$(( NPROC - 2 )); [ "$CPUS" -ge 4 ] || CPUS=4; [ "$CPUS" -le "$NPROC" ] || CPUS=$NPROC
 fi
+# Lanes on this slot (Distributed Foundry phase b, docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B2):
+# the slot's `lanes` setting (Automation → Settings → Studio slots). On: the lane store
+# /srv/foundry-lanes/<project>.git (bare, borrowing the game copy's objects) and the compose
+# override that starts the lane agent, Kilo and OpenCode (ports on this host's 127.0.0.1 only).
+LANES_TXT="off (Studio only)"
+if [ "$(py get settings.lanes)" = True ]; then
+    install -d -m 755 -o "$USER_NAME" -g "$USER_NAME" /srv/foundry-lanes
+    LSTORE="/srv/foundry-lanes/$PROJECT.git"
+    if [ ! -d "$LSTORE" ]; then
+        if runuser -u "$USER_NAME" -- git clone -q --bare --shared "$ROOT/AnimalUprising.git" "$LSTORE"; then
+            ok "lane store $LSTORE (shares $ROOT/AnimalUprising.git's objects)"
+        else
+            warn "could not make the lane store $LSTORE; lanes stay off until this runs again"
+        fi
+    fi
+    if [ -d "$LSTORE" ]; then
+        COMPOSE_FILES="$COMPOSE_FILES:docker-compose.lanes.yml"; LANES_TXT="on ($LSTORE)"
+    fi
+fi
 # a trial override from 2026-11-01 (it also added /dev/dri) would add the device twice
 OVR="$COMPOSE_DIR/docker-compose.override.yml"
 [ -f "$OVR" ] && head -1 "$OVR" | grep -q '^# TRIAL' && rm -f "$OVR"
@@ -337,6 +356,7 @@ chown "$USER_NAME:$USER_NAME" "$ROOT/slot.env"; chmod 600 "$ROOT/slot.env"
 ln -sf "$ROOT/slot.env" "$COMPOSE_DIR/.env"
 ok "$ROOT/slot.env: $CPUS of $NPROC CPUs, ${MEM_G} GB, desktop $SIZE, place ${PLACE:-none}"
 ok "Studio draws with $GPU_TXT"
+ok "lanes: $LANES_TXT"
 if [ "$BUILD" = 0 ]; then
     rm -f "$ENROLL" "$API"
     echo; echo "--no-build: stopped before the build. Build and start later with:"

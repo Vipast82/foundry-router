@@ -89,6 +89,15 @@ def finalize(store, P, t: dict, outcome: str, state_dir: str) -> dict:
     d = spool_dir(P.profile, state_dir)
     os.makedirs(d, exist_ok=True)
     name = f"{pid}__{tid}__{int(time.time() * 1000)}.json"
+    # Distributed Foundry phase b (B7): a lane on a slot keeps its sessions on the slot's own
+    # Kilo / OpenCode; they are read now through the lane tunnel into files beside the
+    # manifest, which the pipeline ingests like `kilo export` files (nothing is dropped)
+    exports, missing = export_remote_sessions(P, sessions, os.path.join(d, "remote",
+                                                                         name[:-len(".json")]))
+    if exports:
+        m["session_exports"] = exports
+    if missing:
+        m["completeness"]["gaps"] = gaps = gaps + missing
     tmp = os.path.join(d, "." + name + ".tmp")
     with open(tmp, "w") as f:
         json.dump(m, f, indent=1, default=str)
@@ -96,6 +105,53 @@ def finalize(store, P, t: dict, outcome: str, state_dir: str) -> dict:
     store.event(pid, tid, "training_queued", detail={"manifest": name, "outcome": outcome,
                                                       "gaps": gaps})
     return m
+
+
+def export_remote_sessions(P, sessions: list, dest: str, endpoint=None) -> tuple:
+    """({session id: export file}, [gap texts]) for the sessions of a lane whose worktree is
+    on a slot (P.profile.lane_host); ({}, []) for a local one. Each session and its children
+    (helpers) are read from the slot's server through the lane tunnel, in the shape
+    `kilo export` writes; a session that cannot be read is a named gap, never dropped silently."""
+    host = str(getattr(P.profile, "__dict__", {}).get("lane_host") or "")
+    if not host or not sessions:
+        return {}, []
+    if endpoint is None:
+        from . import lane_tunnel
+        endpoint = lane_tunnel.MANAGER.endpoint
+    from foundry_training.adapters import kilo as K
+    from foundry_training.adapters import opencode as O
+    out, gaps = {}, []
+    todo = [(s["session_id"], str(s.get("client") or "kilo")) for s in sessions]
+    seen = set()
+    while todo:
+        sid, kind = todo.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        kind = "opencode" if kind.startswith("opencode") else "kilo"
+        ep = endpoint(host, kind)
+        if not ep:
+            gaps.append(f"remote session {sid} on {host}: not exported (the lane tunnel is down)")
+            continue
+        try:
+            if kind == "opencode":
+                data = O.from_api(ep["url"], sid, ep.get("password", ""), P.profile.workspace)
+            else:
+                data = K.from_api(ep["url"], sid, ep.get("password", ""), P.profile.workspace)
+        except Exception as e:                                    # noqa: BLE001
+            gaps.append(f"remote session {sid} on {host}: not exported ({type(e).__name__}: "
+                        f"{e})"[:300])
+            continue
+        os.makedirs(dest, exist_ok=True)
+        path = os.path.join(dest, f"{kind}__{sid}.json")
+        data = {**data, "_lane_host": host, "_client": kind}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, default=str)
+        os.replace(tmp, path)
+        out[sid] = path
+        todo.extend((k, kind) for k in data.get("children") or [] if isinstance(k, str))
+    return out, gaps
 
 
 # ---------------------------------------------------------------------------- automatic run

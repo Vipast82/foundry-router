@@ -1688,9 +1688,8 @@ class Coordinator:
                 return ""
             ticked = re.compile(r"^\s*(?:[-*]|\d+[.)])\s*\[[xX]\]", re.M)
             before = len(ticked.findall(P.ws.show_at(start, plan) or ""))
-            with open(os.path.join(P.profile.workspace, plan), encoding="utf-8",
-                      errors="replace") as f:
-                now = len(ticked.findall(f.read()))
+            # P.ws.read: the plan as it is in the worktree, here or on a slot (phase b)
+            now = len(ticked.findall((P.ws.read(plan) or b"").decode("utf-8", "replace")))
         except Exception:                                         # noqa: BLE001
             return ""
         return f"{now - before} plan step(s) ticked" if now > before else ""
@@ -2488,12 +2487,15 @@ class Coordinator:
         except Exception:                                         # noqa: BLE001
             return ""
         stats = []
-        for p in sorted(data.get("baseline_dirty") or {}):
-            try:
-                st = os.stat(os.path.join(P.profile.workspace, p))
-                stats.append((p, st.st_size, st.st_mtime_ns))
-            except OSError:
-                stats.append((p, None, None))
+        names = sorted(data.get("baseline_dirty") or {})
+        try:
+            got = P.ws.stat(names) if names else {}            # here or on a slot (phase b)
+        except Exception:                                         # noqa: BLE001
+            got = {}
+        for p in names:
+            st = got.get(p) or {}
+            stats.append((p, st["size"], st["mtime_ns"]) if st.get("exists")
+                         else (p, None, None))
         body = _json.dumps([head, phase, bool(intermediate), t.get("base_sha"),
                             data.get("task_base"), sorted(map(list, status)), stats,
                             sorted(spec.scope), bool(data.get("findings")),
@@ -3906,14 +3908,12 @@ class Coordinator:
             rel = str(rel).replace("\\", "/")
             if not P.profile.in_workspace(rel):
                 return "", f"template path {rel!r} leaves the workspace"
-            path = os.path.join(P.profile.workspace, *rel.split("/"))
             try:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
                 # surrogateescape: bytes a template read the same way are written back
-                # unchanged (a non-UTF-8 byte in an evidence log)
-                with open(path, "w", encoding="utf-8", newline="", errors="surrogateescape") as f:
-                    f.write(str(content))
-            except OSError as e:
+                # unchanged (a non-UTF-8 byte in an evidence log). P.ws.write: the worktree
+                # here or on a slot (Distributed Foundry phase b)
+                P.ws.write(rel, str(content).encode("utf-8", "surrogateescape"))
+            except (OSError, GitError) as e:
                 return "", f"cannot write {rel}: {e}"
         sha, err = BK.commit(self, P, t, list(files), text, kind)
         return sha, err

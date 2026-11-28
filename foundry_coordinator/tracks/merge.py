@@ -317,6 +317,13 @@ class MergeManager:
         if not row or row.get("state") != "merging":
             return
         data = dict(row.get("data") or {})
+        if data.get("host"):
+            # Distributed Foundry phase b: a lane on a slot is fetched here but not merged into
+            # the main branch until phase d (the merge worktree, design D4)
+            self.tm.lane_fetch(P, row)
+            self._wait(P, row, f"a lane on slot {data['host']} is merged from Distributed "
+                               f"Foundry phase d; its commits are on {row.get('branch')} here")
+            return
         stage = data.get("merge_stage") or "wait"
         if _repair_running(data):
             self._drive_repair(P, row)             # the Lead repairs the conflict

@@ -38,6 +38,14 @@ def run_check(check, workspace: str, task_id: str, sha: str, base: str,
         return _res(check, UNKNOWN, log, f"command not found: {e}", sha, t0, "")
     except subprocess.TimeoutExpired:
         return _res(check, UNKNOWN, log, f"timed out after {check.timeout_seconds}s", sha, t0, "")
+    ev_ok = True
+    if check.evidence:
+        ev_ok = os.path.exists(os.path.join(workspace, check.evidence.format(**subs)))
+    return _judge(check, cmd, workspace, sha, subs, output, code, log, t0, ev_ok)
+
+
+def _judge(check, cmd, workspace, sha, subs, output, code, log, t0, evidence_ok):
+    """The verdict from a finished command (a local run and a run on a slot share it)."""
     with open(log, "w", encoding="utf-8") as f:
         f.write(f"$ {' '.join(cmd)}\n# cwd {workspace}\n# revision {sha}\n{output}\n# exit {code}\n")
     problems = []
@@ -49,13 +57,49 @@ def run_check(check, workspace: str, task_id: str, sha: str, base: str,
         m = re.search(check.fail_regex, output, re.M)
         if m:
             problems.append(f"output matches {check.fail_regex!r}: {m.group(0)[:120]!r}")
-    if check.evidence:
-        ev = check.evidence.format(**subs)
-        if not os.path.exists(os.path.join(workspace, ev)):
-            problems.append(f"evidence file {ev} missing")
+    if check.evidence and not evidence_ok:
+        problems.append(f"evidence file {check.evidence.format(**subs)} missing")
     tail = "\n".join(output.strip().splitlines()[-15:])
     detail = ("; ".join(problems) + "\n" + tail) if problems else tail
     return _res(check, FAIL if problems else PASS, log, detail, sha, t0, output)
+
+
+def run_check_remote(check, agent, project_id: str, lane: str, workspace: str, task_id: str,
+                     sha: str, base: str, state_dir: str, sleep=None) -> VerificationResult:
+    """run_check for a lane whose worktree is on a slot (Distributed Foundry phase b): the
+    command runs there as the lane agent's `verify` job; the log, the verdict and the evidence
+    pointer are made here exactly as for a local run. {python} is the slot's python3."""
+    from ..lane_fetch import wait_job
+    subs = {"task": task_id, "sha": sha, "base": base or "", "workspace": workspace,
+            "python": "python3"}
+    cmd = [c.format(**subs) for c in check.command]
+    out_dir = evidence_dir(state_dir, project_id, task_id, sha)
+    log = os.path.join(out_dir, re.sub(r"[^\w.-]", "_", check.name) + ".log")
+    t0 = time.time()
+    kw = {"sleep": sleep} if sleep else {}
+    job = wait_job(agent, project_id, lane, "verify",
+                   {"argv": cmd, "timeout": check.timeout_seconds,
+                    "env": {"FOUNDRY_COORD_TASK": task_id, "FOUNDRY_COORD_SHA": sha}},
+                   wait_s=float(check.timeout_seconds) + 120, **kw)
+    if job["state"] in ("unreachable", "waiting"):
+        return _res(check, UNKNOWN, log, f"the slot did not finish the check ({job['state']}): "
+                    f"{job['output'][-300:]}", sha, t0, "")
+    # newlines as a local run sees them (subprocess text mode turns \r\n into \n), so the
+    # same pass_regex / fail_regex judge the same output on either machine
+    output, code = job["output"].replace("\r\n", "\n"), job["rc"]
+    if code == 124:
+        return _res(check, UNKNOWN, log, f"timed out after {check.timeout_seconds}s", sha, t0, "")
+    if code == 127 or code is None:
+        return _res(check, UNKNOWN, log, f"command not found on the slot: {cmd[0]}", sha, t0, "")
+    ev_ok = True
+    if check.evidence:
+        rel = check.evidence.format(**subs)
+        try:
+            st = agent.call("stat", {"project": project_id, "lane": lane, "paths": [rel]})
+            ev_ok = bool(((st.get("stats") or {}).get(rel) or {}).get("exists"))
+        except Exception:                                         # noqa: BLE001
+            ev_ok = False
+    return _judge(check, cmd, workspace, sha, subs, output, int(code), log, t0, ev_ok)
 
 
 def _res(check, result, log, detail, sha, t0, output) -> VerificationResult:

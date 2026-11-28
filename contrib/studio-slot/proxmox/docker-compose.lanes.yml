@@ -1,0 +1,26 @@
+# Lanes on this slot (Distributed Foundry phase b, docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B2).
+# setup-host.sh adds this file to COMPOSE_FILE when the slot's `lanes` setting is on
+# (Automation → Settings → Studio slots, or Access → Machines). Without it the slot runs Studio
+# only, exactly as before.
+#
+# The lane agent (the Foundry Client, [lane] on), Kilo and OpenCode listen on all addresses
+# INSIDE the container; these ports are published on the slot host's 127.0.0.1 only, so the LAN
+# cannot reach them. The coordinator reaches them through one ssh -L tunnel per slot
+# (foundry_coordinator/lane_tunnel.py), like noVNC on a slot without "VNC on the LAN".
+services:
+  studio-slot:
+    ports:
+      - "127.0.0.1:${SLOT_AGENT_PORT:-47811}:47811"
+      - "127.0.0.1:${SLOT_KILO_PORT:-4096}:4096"
+      - "127.0.0.1:${SLOT_OPENCODE_PORT:-4097}:4097"
+    environment:
+      SLOT_LANES: "1"
+      SLOT_LANES_ROOT: "/srv/foundry-lanes"
+    volumes:
+      # the lane stores and worktrees: the SAME path inside the container and on the host, so
+      # git's absolute paths (worktree links, the store's alternates) hold on both sides; the
+      # coordinator fetches lane branches from the host path over ssh
+      - "/srv/foundry-lanes:/srv/foundry-lanes"
+      # the slot's game copy again, at its host path: lane stores borrow its objects
+      # (git clone --bare --shared), and alternates name this absolute path
+      - "/srv/studio-slot/AnimalUprising.git:/srv/studio-slot/AnimalUprising.git:ro"

@@ -63,6 +63,7 @@ def _git(cwd: str, *args, check: bool = True, timeout: int = 300) -> subprocess.
 
 class TrackManager:
     def __init__(self, c, clock: Callable[[], float] = time.time):
+        self._fetched: dict = {}                           # (project, lane) -> last fetch
         self.c = c
         self.store = c.store
         self.clock = clock
@@ -478,6 +479,7 @@ class TrackManager:
         sprints = self._check_sprints(P, sprints)
         if slot:
             self._refuse_workstation_only(P, sprints, slot)
+        remote = self._remote_lane_slot(P, slot)
         if needs is None:
             plans = [AN.plan_from_spec(P.adapter.describe(s)) for s in sprints]
             try:
@@ -485,6 +487,8 @@ class TrackManager:
             except Exception:                                     # noqa: BLE001
                 pass
             needs = AN._normalize(n for p in plans for n in p.needs)
+        if remote:
+            return self._create_remote(P, name, kind, sprints, needs, actor, slot, remote)
         if slot and "studio" not in (needs or []):
             # 2026-11-01: a slot track's kilo.jsonc enables (and points at the slot) only the
             # Studio MCP servers its needs turn on. Blender plans read as `blender` alone, so
@@ -530,6 +534,132 @@ class TrackManager:
             "track": name, "branch": branch, "worktree": row["worktree"], "base": base[:12],
             "sprints": sprints, "needs": list(needs or []), "kilo_config": kc, "actor": actor})
         return row
+
+    # ------------------------------------------------------------------ lanes on slots
+    #
+    # Distributed Foundry phase b (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B6): a track on a
+    # slot with `lanes` on, in a project with [automation] remote_lanes on, keeps its worktree,
+    # sessions and checks ON the slot (lane_fetch.py); its commits are fetched back here.
+
+    REMOTE_FETCH_EVERY_S = 60.0
+
+    def _remote_lane_slot(self, P, slot: str) -> dict:
+        """The slot's settings (+ id) when this track goes to the slot as a remote lane."""
+        if not slot:
+            return {}
+        from .. import slots as SL
+        s = SL.configured(P.profile).get(slot) or {}
+        if s.get("lanes") is not True:
+            return {}
+        try:
+            from ..automation import get as auto_get
+            on = auto_get(P, "remote_lanes") is True
+        except Exception:                                         # noqa: BLE001
+            on = False
+        return {**s, "id": slot} if on else {}
+
+    def _lane_agent(self, sid: str):
+        from .. import lane_tunnel
+        from ..adapters.remote_git import LaneAgent
+        return LaneAgent(lambda: lane_tunnel.MANAGER.endpoint(sid, "agent"), name=sid)
+
+    def _create_remote(self, P, name: str, kind: str, sprints: list, needs, actor: str,
+                       slot: str, s: dict) -> dict:
+        from .. import lane_fetch as LF
+        if getattr(P.profile, "adapter", ""):
+            raise TrackError(f"a lane on slot {slot} needs the generic adapter until phase c "
+                             f"(this project uses {P.profile.adapter})")
+        if needs is None:
+            plans = [AN.plan_from_spec(P.adapter.describe(x)) for x in sprints]
+            needs = AN._normalize(n for pl in plans for n in pl.needs)
+        bad = sorted({n for n in (needs or []) if n in ("studio", "blender")})
+        if bad:
+            raise TrackError(f"a lane on slot {slot} has no {' or '.join(bad)} yet (phase c): "
+                             f"start the track without lanes, or turn [automation] remote_lanes off")
+        base = self.base_sha(P)
+        branch = f"track/{name}"
+        res = LF.create(P.profile.workspace, s, self._lane_agent(slot), P.id, name, base, branch)
+        if not res["ok"]:
+            raise TrackError(f"lane {name} on {slot}: {res['detail']}")
+        data = {"created_ts": self.clock(), "slot": slot, "host": slot}
+        row = self.store.add_track(P.id, name, kind, res["worktree"], branch, base,
+                                   list(needs or []), sprints, actor, data=data)
+        kc = self._remote_kilo_config(P, row)
+        row = self.store.update_track(P.id, name, data={**row["data"], "kilo_config": kc})
+        self.store.event(P.id, "", "track_created", detail={
+            "track": name, "branch": branch, "worktree": row["worktree"], "base": base[:12],
+            "sprints": sprints, "needs": list(needs or []), "kilo_config": kc, "actor": actor,
+            "host": slot, "remote": res["detail"]})
+        return row
+
+    def _remote_kilo_config(self, P, row: dict) -> str:
+        """The lane's kilo.jsonc / opencode.jsonc, made here as for a local track and written
+        into the worktree on the slot. Local MCP servers are off on the slot (their commands
+        are this machine's); remote (url) servers stay as they are."""
+        import tempfile
+        from .. import kilo_config as KC
+        from foundry_automation import jsonc
+        from foundry_automation.agent_backends import is_opencode_config
+        src = KC.kilo_path(P.profile)
+        name = os.path.basename(src) if is_opencode_config(src) else "kilo.jsonc"
+        with tempfile.TemporaryDirectory(prefix="lane-cfg-") as tmp:
+            fake = {**row, "worktree": tmp, "data": {**(row.get("data") or {}), "slot": ""}}
+            try:
+                path = KC.track_kilo_config(fake, profile=P.profile, workspace=row["worktree"])
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, "", "track_kilo_config_failed",
+                                 detail={"track": row["name"], "error": str(e)[:300]})
+                return ""
+        try:
+            data = jsonc.parse(text)
+            for mname, block in ((data.get("mcp") or {}) if isinstance(data, dict) else {}).items():
+                if isinstance(block, dict) and block.get("type", "local") == "local" \
+                        and block.get("enabled") is not False:
+                    text = jsonc.replace_value(text, ("mcp", mname), {**block, "enabled": False})
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, "", "track_kilo_config_failed",
+                             detail={"track": row["name"], "error": f"mcp: {e}"[:300]})
+            return ""
+        try:
+            self._workspace(P, row).write(name, text.encode("utf-8"))
+        except Exception as e:                                    # noqa: BLE001
+            self.store.event(P.id, "", "track_kilo_config_failed",
+                             detail={"track": row["name"], "error": f"write on the slot: {e}"[:300]})
+            return ""
+        return row["worktree"].rstrip("/") + "/" + name
+
+    def lane_fetch(self, P, row: dict, force: bool = False) -> dict:
+        """Fetch a remote lane's commits here (fast-forward only); throttled to once a minute
+        unless `force`. {} for a local track."""
+        host = str((row.get("data") or {}).get("host") or "")
+        if not host:
+            return {}
+        P = self.main_of(P)
+        last = self._fetched.get((P.id, row["name"]), -1e18)
+        if not force and self.clock() - last < self.REMOTE_FETCH_EVERY_S:
+            return {}
+        self._fetched[(P.id, row["name"])] = self.clock()
+        from .. import lane_fetch as LF
+        from .. import slots as SL
+        s = SL.configured(P.profile).get(host)
+        if not s:
+            return {"ok": False, "detail": f"slot {host} is not configured any more"}
+        out = LF.fetch(P.profile.workspace, s, host, P.id, row["name"], row.get("branch") or "")
+        if out.get("moved") or not out.get("ok"):
+            kind = ("track_lane_fetched" if out.get("ok") else
+                    "track_lane_diverged" if out.get("diverged") else "track_lane_fetch_failed")
+            self.store.event(P.id, "", kind, detail={"track": row["name"], "host": host,
+                                                     "detail": out.get("detail", "")[:300],
+                                                     "tip": (out.get("tip") or "")[:12]})
+        if out.get("diverged") and not (row.get("data") or {}).get("diverged_notice"):
+            self.store.merge_track_data(P.id, row["name"], diverged_notice=self.clock())
+            self.store.event(P.id, "", "operator_notice", detail={
+                "kind": "lane_diverged", "alert_class": "watch", "track": row["name"],
+                "title": f"lane {row['name']} on {host}: branches differ",
+                "text": f"{out.get('detail')}. Nothing was overwritten; decide which tip to keep."})
+        return out
 
     def _movable(self, P, t: dict) -> bool:
         """A main-queue sprint that never started (QUEUED / READY, attempt 0, no session):
@@ -774,6 +904,8 @@ class TrackManager:
                     self.store.event(P.id, s, "warning", detail={
                         "track_stop": f"{type(e).__name__}: {e}"[:300]})
         self.merger.abort(P, row, f"stopped by {actor}")
+        if (row.get("data") or {}).get("host"):
+            self._stop_remote(P, row)
         self.resources.release_studio(P, name, "track stopped")
         self.resources.release_for_track(P, name)
         self.store.merge_track_data(P.id, name, stopped={"by": actor, "reason": reason,
@@ -783,6 +915,23 @@ class TrackManager:
                                                            "reason": reason,
                                                            "cancelled": cancelled})
         return row
+
+    def _stop_remote(self, P, row: dict) -> None:
+        """A remote lane stops: its commits are fetched here first and its uncommitted files
+        copied to <state>/lane-saves/<track>/<time>/. The worktree stays on the slot (as a
+        local track's stays here), so nothing is discarded."""
+        got = self.lane_fetch(P, row, force=True)
+        dest = os.path.join(self.c.state_dir, "lane-saves", row["name"],
+                            time.strftime("%Y%m%d-%H%M%S"))
+        from .. import lane_fetch as LF
+        try:
+            saved = LF.save_dirty(self._workspace(P, row), dest)
+        except Exception as e:                                    # noqa: BLE001
+            saved = {"ok": False, "detail": str(e)[:300]}
+        self.store.event(P.id, "", "track_lane_stopped", detail={
+            "track": row["name"], "host": (row.get("data") or {}).get("host"),
+            "fetch": (got or {}).get("detail", ""), "saved": saved.get("detail", ""),
+            "saves": saved.get("dir", "")})
 
     def remove_worktree(self, P, row: dict, why: str = "") -> bool:
         """`git worktree remove --force` (the branch is kept). False when it fails."""
@@ -832,6 +981,12 @@ class TrackManager:
         row = self.store.track(P.id, row["name"]) or row      # a decision sweep may have moved it
         if row["state"] not in LIVE_STATES:
             return
+        if (row.get("data") or {}).get("host"):
+            try:
+                self.lane_fetch(P, row)                    # once a minute, fast-forward only
+            except Exception as e:                                # noqa: BLE001
+                self.store.event(P.id, "", "track_lane_fetch_failed",
+                                 detail={"track": row["name"], "detail": str(e)[:300]})
         if row["state"] == "running":
             # 2026-10-29: a sprint cancelled before it ever started (MV2-1, queued by mistake)
             # leaves the track; it never fails it (the failed track moved MV2-0 to the main
@@ -1000,10 +1155,18 @@ class TrackManager:
                                                          "stopped", "merge_requested_by")
                                    if d.get(k) is not None},
                          "kilo_config": d.get("kilo_config") or "",
+                         # Distributed Foundry phase b: where the worktree is ('' = here)
+                         "host": d.get("host") or "",
                          "lease": (self.resources.lease(P) or {}).get("track") == r["name"]})
         quiet, why = self.main_quiescent(P)
+        try:
+            from .. import lane_tunnel
+            tunnels = lane_tunnel.MANAGER.view()
+        except Exception:                                         # noqa: BLE001
+            tunnels = {}
         return {"max_agents": self.max_agents(),
                 "max_agents_override": getattr(self.c, "max_writers_override", None),
                 "agents_running": self.agents_running(),
                 "main": {"sprint": self.main_running_sprint(P), "quiescent": quiet, "why": why},
-                "tracks": rows, "studio": self.resources.studio_view(P)}
+                "tracks": rows, "studio": self.resources.studio_view(P),
+                "lane_tunnels": tunnels}

@@ -1,3 +1,54 @@
+## v0.181.267 - Distributed Foundry b-3: a lane's worktree, sessions and checks on its slot (all off)
+
+Release b-3 of docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md (Victor 2026-11-27: "Yes, build b-3"). **Nothing changes
+while `[automation] remote_lanes` (new, off) or the slot's `lanes` (off) is off.** The slot image change is not
+built on any slot yet. It and the pilot (B9, release b-4) wait for the spare slot-4.
+
+- **B2, the slot runs the lane agent:**
+  - `contrib/studio-slot/lane-agent.sh` (new) starts the Foundry Client headless with `[lane]` on, supervising the
+    slot's own `kilo serve` (4096) and `opencode serve` (4097).
+  - It writes the client's settings and a per-start secret store in tmpfs: fresh server passwords, plus the slot's
+    model keys from `slot-secrets`. Nothing is echoed.
+  - `entrypoint.sh` starts it only with `SLOT_LANES=1`.
+  - `proxmox/docker-compose.lanes.yml` (new) sets that, mounts `/srv/foundry-lanes` and the game copy at the same
+    paths on host and container, and publishes the agent, Kilo and OpenCode ports on the slot host's 127.0.0.1 only.
+  - `setup-host.sh` adds that file and makes the lane store `/srv/foundry-lanes/<project>.git` (`--shared` with the
+    game copy) when the slot's `lanes` setting is on.
+  - The Dockerfile gets a venv for the client (`/opt/foundry-venv`: fastapi, uvicorn, pydantic, tomli-w, psutil,
+    msgpack, the workstation's versions).
+- **B6, a lane on a slot (`foundry_coordinator/lane_fetch.py`, the track manager):**
+  - **When:** with both switches on, `tracks create --slot <id>` pushes the base to the slot's lane store, has the
+    agent make the worktree there, and writes the lane's kilo.jsonc / opencode.jsonc there. Local MCP servers are off
+    on the slot (their commands are this machine's); remote ones stay as they were. The track row records `host`.
+  - **Fetching:** the lane's commits are fetched every minute, fast-forward only. A tip that is not a fast-forward
+    keeps both (`refs/lanes/<slot>/<lane>`) and raises one notice.
+  - **Stop:** fetches first and copies uncommitted files to `<state>/lane-saves/<lane>/<time>/`. The worktree stays
+    on the slot.
+  - **Merge:** such a lane waits with "merged from phase d", and is never merged into the main branch yet.
+  - **Refused, nothing made:** a project with a custom adapter (until phase c), and a lane that needs Studio or
+    Blender (phase c).
+- **The engine's direct worktree reads now go through `P.ws`:** the plan-tick count, the dirty-file stats in the
+  check cache key, and the closeout template writes. They read or write the same files as before on a local
+  workspace.
+- **Checks on the slot:** `GenericAdapter.verify` runs a remote lane's `[[verify.checks]]` as the agent's `verify`
+  job (`run_check_remote`), judged here exactly as a local run (one shared `_judge`, CRLF as a local run sees it).
+  The agent's job gets FOUNDRY_COORD_TASK / _SHA. A missing command is UNKNOWN (127), never PASS. Evidence is looked
+  for on the slot.
+- **B7, training records of remote sessions:** at closeout, the training hook reads each remote session and its
+  children through the lane tunnel into `kilo export`-shaped files beside the manifest (`session_exports`). The
+  pipeline ingests those and does not ask this machine's servers for them. A session that cannot be read is a named
+  gap in the manifest, never dropped silently.
+- **B8, where a lane lives:**
+  - `tracks status` shows `on <slot> (remote)` and each lane tunnel's state.
+  - The board's lane seats carry `host`, and its slot seats carry `lane_tunnel`.
+  - `[automation] remote_lanes` is on the Automation settings page.
+- **Agent:** `POST /api/lane/run_status`.
+- **CI:**
+  - `platform.yml` runs the new lane tests on both OSes;
+  - `FOUNDRY_DATA_DIR` is set for the Linux jobs. b-2's Linux failures were the router tests' default `/data`,
+    which a runner cannot create (the new failure annotations showed it). `tests-linux.yml` gets the same.
+- 31 tests (test_lane_fetch, test_lane_b3, test_lane_track).
+
 ## v0.181.266 - Distributed Foundry b-2: a slot's own model keys (Lanes button, off)
 
 Release b-2 of docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md (Victor 2026-11-27: "Yes, build b-2"). **Nothing changes

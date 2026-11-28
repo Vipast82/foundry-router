@@ -221,6 +221,18 @@ class GenericAdapter(ReviewContractDefaults):
     # -- verification ----------------------------------------------------------------
 
     def verify(self, spec: TaskSpec, phase: str, revision: str, base: str) -> list:
+        host = str(getattr(self.p, "__dict__", {}).get("lane_host") or "")
+        if host:
+            # Distributed Foundry phase b: the lane's worktree is on a slot; its checks run
+            # there (the lane agent's verify job), judged here as a local run is
+            from .. import lane_tunnel
+            from .remote_git import LaneAgent
+            from .verify_cmd import run_check_remote
+            agent = LaneAgent(lambda: lane_tunnel.MANAGER.endpoint(host, "agent"), name=host)
+            lane = str(self.p.__dict__.get("track") or "")
+            return [run_check_remote(c, agent, self.p.id, lane, self.p.workspace, spec.task_id,
+                                     revision, base, self.state_dir)
+                    for c in self.p.checks if c.phase == phase]
         return [run_check(c, self.p.workspace, spec.task_id, revision, base, self.state_dir,
                           self.p.id) for c in self.p.checks if c.phase == phase]
 

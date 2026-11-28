@@ -1389,7 +1389,11 @@ def _tracks(c: Coordinator, a) -> int:
                 for t in st["tracks"]:
                     print(f"  {t['name']:<14} {t['state']:<8} {t['current_sprint'] or '-':<10} "
                           f"needs {', '.join(t['needs']) or '-'}  "
+                          + (f"on {t['host']} (remote)  " if t.get("host") else "")
                           + ", ".join(f"{s['task_id']} {s['state']}" for s in t["sprints"]))
+                for sid, tv in sorted((st.get("lane_tunnels") or {}).items()):
+                    print(f"lane tunnel {sid}: {tv['state']}"
+                          + (f" ({tv['error']})" if tv.get("error") else ""))
                 sv = st["studio"]
                 print(f"studio: {sv['in_use'] or 'idle'}; lease "
                       f"{(sv['lease'] or {}).get('track') or '-'}")

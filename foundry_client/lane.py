@@ -195,10 +195,12 @@ class LaneHost:
             try:
                 st = os.stat(p)
             except OSError:
-                out[rel] = {"exists": False, "kind": "", "size": 0, "mtime": 0.0}
+                out[rel] = {"exists": False, "kind": "", "size": 0, "mtime": 0.0,
+                            "mtime_ns": 0}
                 continue
             kind = "dir" if os.path.isdir(p) else ("file" if os.path.isfile(p) else "other")
-            out[rel] = {"exists": True, "kind": kind, "size": st.st_size, "mtime": st.st_mtime}
+            out[rel] = {"exists": True, "kind": kind, "size": st.st_size, "mtime": st.st_mtime,
+                        "mtime_ns": st.st_mtime_ns}
         return {"stats": out}
 
     def write(self, project: str, lane: str, path: str, data: str) -> dict:
@@ -281,11 +283,19 @@ class LaneHost:
         run["state"] = "cancelled" if run["cancel"] else ("done" if rc == 0 else "failed")
 
     def _sub(self, argv: list, run: dict, log, cwd: Optional[str] = None,
-             timeout: float = 1800) -> int:
+             timeout: float = 1800, env: Optional[dict] = None) -> int:
         if run["cancel"]:
             return 130
-        p = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
-                             stdin=subprocess.DEVNULL, **_plat.no_window_kw())
+        extra = {k: str(v) for k, v in (env or {}).items() if env_allowed(k)}
+        try:
+            p = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL,
+                                 env={**os.environ, **extra} if extra else None,
+                                 **_plat.no_window_kw())
+        except FileNotFoundError as e:
+            log.write(f"LANE command not found: {e}\n".encode("utf-8"))
+            log.flush()
+            return 127                       # as a shell says it (verify: UNKNOWN, never PASS)
         run["proc"] = p
         try:
             return p.wait(timeout=timeout)
@@ -366,7 +376,8 @@ class LaneHost:
             raise LaneError("verify needs argv (a list) or command (a string)")
         t = max(1.0, min(float(args.get("timeout") or 1800), 4 * 3600.0))
         say(f"LANE verify {k_of(project, lane)}: {' '.join(cmd)[:300]}")
-        return self._sub(cmd, run, log, cwd=wt, timeout=t)
+        env = args.get("env") if isinstance(args.get("env"), dict) else None
+        return self._sub(cmd, run, log, cwd=wt, timeout=t, env=env)
 
     def _forget(self, k: str) -> None:
         with self._lock:

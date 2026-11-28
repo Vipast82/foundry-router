@@ -144,6 +144,30 @@ The slot is ready. On the first gate, Foundry:
 | remove a slot | **Delete**: removes its key and its settings; the LXC itself is untouched (`pct destroy <id>` on Proxmox) |
 | check from the slot | `docker exec studio-slot slot-secrets --status`, `docker logs studio-slot` |
 
+## Lanes on a slot (Distributed Foundry, being built: phase b)
+
+A slot can also hold **lanes**: the lane's worktree, its Kilo / OpenCode sessions and its
+checks run on the slot, and the coordinator fetches the commits back
+(`docs/DISTRIBUTED_FOUNDRY.md`). Everything is off until you turn on all of the following, in
+this order. Only on a spare slot until the pilot (release b-4) has passed:
+
+1. Access → Machines → the slot → **Lanes: on**. This makes the slot's two model keys
+   (`<slot>-kilo`, `<slot>-opencode`) and needs the secret store unlocked.
+2. Automation → Settings → Studio slots → the slot → **lanes** on.
+3. **New code**, then run `setup-host.sh` again on the slot host. With lanes on, it makes
+   `/srv/foundry-lanes/<project>.git` and adds `docker-compose.lanes.yml`: the lane agent,
+   Kilo and OpenCode, on the slot host's 127.0.0.1 only.
+4. Automation → Settings → the project → **remote_lanes** on.
+5. `tracks start <project> <name> <sprints> --slot <slot>` makes the lane on the slot.
+
+To check:
+- `tracks status` shows `on <slot> (remote)` and `lane tunnel <slot>: up`;
+- on the slot, `docker exec studio-slot tail ~/lane-agent.log`.
+
+Until phase c a lane on a slot has no Studio or Blender and needs the generic adapter. Until
+phase d it is fetched to `track/<name>` but not merged. Turn any switch off to go back: new
+lanes are then made on this machine as before.
+
 ## Moving a slot from this PC to Proxmox (slot-1)
 
 1. Access → Machines → Add a Studio slot: `slot-1`, the LXC's IP, the **same** place

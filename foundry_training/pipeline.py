@@ -291,15 +291,26 @@ class Pipeline:
                     self.ingest_coordinator(db)
                     done_dbs.add(db)
                 roles = m.get("session_roles") or {}
+                # Distributed Foundry phase b: sessions that ran on a slot were read into
+                # files by the coordinator (training_hook.export_remote_sessions)
+                remote = {str(k): str(v) for k, v in (m.get("session_exports") or {}).items()
+                          if isinstance(v, str) and os.path.isfile(v)}
+                for kind in ("kilo", "opencode"):
+                    files = [v for v in remote.values()
+                             if os.path.basename(v).startswith(kind + "__")]
+                    if files:
+                        self.ingest_kilo(exports=files, agent=kind)
                 kilo_sessions = [s for s in m.get("sessions") or []
-                                 if (roles.get(s) or {}).get("client", "kilo") == "kilo"]
+                                 if (roles.get(s) or {}).get("client", "kilo") == "kilo"
+                                 and s not in remote]
                 if kilo_api and kilo_sessions:
                     self.ingest_kilo(api={**kilo_api, "sessions": kilo_sessions,
                                           "project_id": pid,
                                           "directory": kilo_api.get("directory")
                                           or self._cfg(pid).workspace})
                 oc_sessions = [s for s in m.get("sessions") or []
-                               if (roles.get(s) or {}).get("client") == "opencode"]
+                               if (roles.get(s) or {}).get("client") == "opencode"
+                               and s not in remote]
                 if opencode_api and oc_sessions:
                     self.ingest_opencode({**opencode_api, "sessions": oc_sessions,
                                           "project_id": pid,
