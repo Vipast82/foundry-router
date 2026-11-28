@@ -26,10 +26,17 @@ For `install`, make the one-time code first: router → Access → Machines → 
 The keys go to a mode-600 file in the `junction-data` volume (`--secret-store file`, as decision
 D-L5 chose for an LXC). The game and the Foundry release are cloned into the volume.
 
+`install` ends with the Kilo role rules (the coordinator's `kilo-config` for each project here)
+and `doctor --platform`. Run it again to repair or upgrade: an installed junction needs no code
+(press Enter at the code question). Pass `--router http://<router>:11435` (no address is assumed).
+
 **Studio for main sprints (optional):**
-1. Make the Studio's own key on Access → Machines (Add a Studio slot `studio-main`, this machine's
-   IP, the TEST place).
-2. Put that key in `install/junction/studio-main-key/slot-key.txt` (mode 600).
+1. On Access → Machines, Add a Studio slot `studio-main` (this machine's IP, the TEST place): it
+   shows a one-time code.
+2. `docker compose run --rm junction studio-enrol --router http://<router>:11435` and give it the
+   code: the slot's key, the router address (and an https router's fingerprint) go into the
+   `junction-data` volume (`/srv/foundry/studio-main/`, mode 600, read by the Studio container);
+   nothing is copied by hand.
 3. Set `STUDIO_MAIN_OPEN` to the TEST place's `roblox-studio:` link.
 4. Start it with `docker compose --profile studio up -d`, then sign Studio in once through noVNC
    (`ssh -L 6081:127.0.0.1:6081 ...`).

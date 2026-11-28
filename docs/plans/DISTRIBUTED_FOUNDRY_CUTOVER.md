@@ -32,9 +32,9 @@ On the spare slot-4 with `distributed-pilot`, following the runbook in the sessi
 1. Access → Machines → slot-3 → **Lanes: on**. This makes `slot-3-kilo` / `slot-3-opencode` and
    needs the secret store unlocked.
 2. Automation → Settings → Studio slots → slot-3 → **lanes** on.
-3. **New code** for slot-3, then `setup-host.sh` again on its host, when slot-3 holds no lane. It
-   builds the image with Kilo, OpenCode and the lane agent, and makes
-   `/srv/foundry-lanes/animaluprising.git`.
+3. `setup-host.sh` again on its host, when slot-3 holds no lane: no code needed (press Enter at
+   the code question; it keeps slot-3's key and reads its settings again). It builds the image
+   with Kilo, OpenCode and the lane agent, and makes `/srv/foundry-lanes/animaluprising.git`.
 4. Automation → Settings → animaluprising → **remote_lanes** on.
 5. The next track started with `--slot slot-3` is a lane on slot-3. Tracks already running stay as
    they are: only new tracks become remote.
@@ -62,9 +62,12 @@ this PC to Proxmox"), then step 1 for it. Otherwise it stays a Studio-only slot.
 ## Step 4 (optional). A Windows slot
 
 1. A Windows VM with a GPU, its own Roblox place and its own signed-in Studio.
-2. Access → Machines → Add a Studio slot `slot-w`, then `install\slot.ps1` on the VM. The script
-   makes Git for Windows' bash its OpenSSH shell and runs the lane agent on 127.0.0.1.
-3. The slot's settings: `os = windows`, `studio = native`, `lanes = true`.
+2. Access → Machines → Add a Studio slot `slot-w` with **OS: Windows** and its ssh user (the
+   router sets `os = windows`, `studio = native` and shows the PowerShell line), then
+   `install\slot.ps1 -Router <url>` on the VM. The script makes Git for Windows' bash its OpenSSH
+   shell, keeps the workstation keys in step (scheduled task "Foundry slot keys") and runs the
+   lane agent on 127.0.0.1.
+3. The slot's settings: `lanes = true` (Lanes: on).
 4. **What it can take:** lanes without Studio needs (the native-Studio gate is not built). Its
    first use is measuring what the Linux slots cannot: frame timing, dressed boss models, window
    captures. That is a separate decision about the `workstation_only_sprints` rule.

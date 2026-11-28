@@ -10,7 +10,12 @@
 # Prints "SLOT-CHECKOUT <sha> OK" when Studio is ready to be gated.
 set -euo pipefail
 ref="${1:?usage: slot-checkout <ref>}"
-CO="${AU_CHECKOUT:-$HOME/work/AnimalUprising}"
+# the game's folder name: AnimalUprising for that project and when none is set (every slot so
+# far), else the slot's project id (foundry_coordinator/slots.py game_repo_name)
+_p="${FOUNDRY_PROJECT:-}"
+case "${_p,,}" in ''|animaluprising) GAME_NAME=AnimalUprising ;; *) GAME_NAME="$_p" ;; esac
+AU_SOURCE="${AU_SOURCE:-/work/$GAME_NAME}"
+CO="${AU_CHECKOUT:-$HOME/work/$GAME_NAME}"
 export PATH="$HOME/.rokit/bin:$PATH"
 # 2026-11-11: a plain clone from the mounted mirror copies the whole history (12 GB for AU);
 # slot-3's three copies filled its disk and it went read-only mid gate. The copy borrows the
@@ -38,13 +43,13 @@ slot-secrets >&2 || true
 first=0
 if [ ! -d "$CO/.git" ]; then
     mkdir -p "$(dirname "$CO")"
-    git clone -q --no-checkout --shared "${AU_SOURCE:-/work/AnimalUprising}" "$CO"
+    git clone -q --no-checkout --shared "$AU_SOURCE" "$CO"
     first=1
 fi
 # a checkout cut off earlier (disk full or read-only) leaves index.lock: one older than
 # 10 min has no git behind it (gates run one at a time on a slot)
 find "$CO/.git/index.lock" -mmin +10 -delete 2>/dev/null || true
-au_share "$CO" "${AU_SOURCE:-/work/AnimalUprising}" || true
+au_share "$CO" "$AU_SOURCE" || true
 cd "$CO"
 git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
 target=$(git rev-parse --verify -q "origin/$ref^{commit}" || git rev-parse --verify "$ref^{commit}")

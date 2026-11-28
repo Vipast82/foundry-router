@@ -1,0 +1,65 @@
+# A generic project profile for the Foundry development coordinator: the TEMPLATE a project
+# without its own profile folder starts from.
+#
+# The workstation installers (install/workstation.sh, install/workstation.ps1) copy this file to
+# foundry_coordinator/projects/<your project id>/project.toml when that folder has no
+# project.example.toml of its own, with the id, the game's path, branch and remote, and the
+# router address filled in. By hand: copy it to projects/<id>/project.toml and change the lines
+# marked EDIT. The router's settings (Automation → Settings) overlay this file, so most values
+# are changed there once the project runs.
+#
+# Secrets are never stored here: only environment-variable NAMES (key_env, password_env).
+schema_version = 1
+id = "my-game"                               # EDIT: lower-case letters, digits, . _ -
+name = "my-game"
+version = "1"
+
+[workspace]
+path = "/srv/foundry/game/my-game"           # EDIT: the game repository checkout
+# where sessions may write at all; each sprint's own scope is always narrower
+allowed_dirs = ["src", "tests", "docs"]
+branch = "main"
+remote = "origin"
+
+# No [adapter]: the generic adapter (foundry_coordinator/adapters/project.py, GenericAdapter)
+# reads the tasks from a file in the game repository and runs the [[verify.checks]] below. A
+# project with its own document formats or tools adds a narrow adapter instead
+# (projects/animaluprising/adapter.py is one).
+[tasks]
+source = "toml"
+file = "foundry/tasks.toml"                  # EDIT: [[tasks]] id, title, spec | spec_file, scope
+
+[client]
+# The coding client this project's sessions run on: "kilo" (kilo serve, port 4096) or
+# "opencode" (opencode serve, port 4097). The installers enable the matching server on the
+# workstation and write its config (kilo.jsonc; opencode.jsonc for OpenCode).
+kind = "kilo"
+url = "http://127.0.0.1:4096"
+password_env = "KILO_SERVER_PASSWORD"        # OpenCode: OPENCODE_SERVER_PASSWORD
+provider = "foundry"                         # the provider id in kilo.jsonc / opencode.jsonc
+agent = "code"
+session_timeout_minutes = 240
+
+[client.permissions.external_directory]
+# read sources the coding session may reach outside the workspace (the installer adds its root)
+
+[roles]
+# Foundry persona ids (Foundry → Setup → Personas). EDIT to the personas you have.
+implementer = "Foundry-Kilo-Local"
+reviewer = "Foundry-Kilo-Review"
+
+[foundry]
+url = "http://127.0.0.1:11435"               # EDIT: your Foundry router
+key_env = "FOUNDRY_COORDINATOR_KEY"          # a clients: key with scopes [inference, orchestration]
+require_binding = true
+
+[review]
+required = true
+
+[publish]
+mode = "none"                                # none | push | verify_only
+
+# [[verify.checks]]                          # EDIT: the project's own test command
+# name = "tests"
+# command = ["python", "-m", "pytest", "-q"]
+# timeout_seconds = 900

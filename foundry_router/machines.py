@@ -21,6 +21,20 @@ Nobody copies a key by hand.
 
 Revoking a machine disables its client key. A new code re-enrolls it (a fresh key; the old one
 stops working).
+
+An installer run again WITHOUT a code repairs or upgrades the machine with the enrolment it has
+(no new keys): it reads its settings again with its own key,
+    GET /v1/foundry/secrets/enrollment                 a slot (its secrets-scope key)
+    GET /v1/foundry/control/workstation-enrollment     a workstation (its coordinator key)
+which answer what the enrollment answered, without any key.
+
+Several projects on one workstation: "Add a workstation" with the name of an enrolled
+workstation and another project ADDS that project. Its code then extends the workstation's
+keys to the new project (the keys stay as they are; the machine keeps working for the first
+project); "New code" stays the deliberate re-enrolment that rotates every key.
+
+Windows machines: Add takes "os" ("linux" default | "windows") and "ssh_user"; both are on the
+machine row and in its view, and the install commands carry a "windows" PowerShell line.
 """
 
 from __future__ import annotations
@@ -45,10 +59,13 @@ HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"          # no 0/O, 1/I/L
 FAIL_WINDOW_S, FAIL_MAX = 600, 10
 KINDS = ("slot", "workstation")                         # chat client: a later phase
-# a workstation's three client keys (LINUX_WORKSTATION_PLAN W3): <name>, <name>-kilo, <name>-relay
+OSES = ("linux", "windows")
+# a workstation's client keys (LINUX_WORKSTATION_PLAN W3): <name>, <name>-kilo, <name>-relay,
+# and <name>-opencode for a project whose coding client is OpenCode ([client] kind)
 WS_KEYS = (("", ["inference", "orchestration"], ("FOUNDRY_COORDINATOR_KEY",)),
            ("-kilo", ["inference", "media"], ("FOUNDRY_KEY_KILO", "FOUNDRY_KEY")),
-           ("-relay", ["operator"], ("FOUNDRY_CLIENT_KEY",)))
+           ("-relay", ["operator"], ("FOUNDRY_CLIENT_KEY",)),
+           ("-opencode", ["inference", "media"], ("FOUNDRY_KEY_OPENCODE",)))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS machines (
@@ -114,12 +131,29 @@ def code_hash(code: str) -> str:
     return hashlib.sha256(("foundry-enroll:" + norm_code(code)).encode()).hexdigest()
 
 
-def derived_slot(host: str, settings: dict) -> dict:
-    """A remote slot's push targets and host folder from its host (setup-host.sh's layout)."""
+def game_repo_name(project: str) -> str:
+    """The game mirror's folder name on a slot host (<name>.git): AnimalUprising for that
+    project (and for none, as every slot so far), else the project id. The same rule as
+    foundry_coordinator/slots.py, setup-host.sh and slot.ps1."""
+    p = str(project or "").strip()
+    return "AnimalUprising" if p.lower() in ("", "animaluprising") else p
+
+
+def derived_slot(host: str, settings: dict, project: str = "", os_name: str = "linux") -> dict:
+    """A remote slot's push targets and host folder from its host (setup-host.sh's layout). A
+    Windows slot (install/slot.ps1) gets only its host: the coordinator derives its scp-style
+    URLs (foundry_coordinator/slots.py)."""
     out = dict(settings)
+    name = game_repo_name(project)
     if host:
         out.setdefault("host", host)
-        out.setdefault("au_push_url", f"ssh://{host}/srv/studio-slot/AnimalUprising.git")
+        if os_name == "windows":
+            if name != "AnimalUprising":         # slots.py's Windows default is AU's mirror
+                out.setdefault("au_push_url", f"{host}:C:/Foundry/studio-slot/{name}.git")
+            return out
+        out.setdefault("au_push_url", f"ssh://{host}/srv/studio-slot/{name}.git")
+        if name != "AnimalUprising":             # the container's checkout (entrypoint.sh)
+            out.setdefault("repo", f"/home/studio/work/{name}")
         out.setdefault("foundry_push_url", f"ssh://{host}/srv/studio-slot/foundry.git")
         out.setdefault("foundry_host_dir", "/srv/studio-slot/foundry")
     return out
@@ -142,6 +176,16 @@ class Machines:
             db.execute("ALTER TABLE machines ADD COLUMN host_info TEXT NOT NULL DEFAULT '{}'")
         except Exception:                                        # noqa: BLE001 (already there)
             pass
+        # the machine's OS and ssh user (Windows slots and workstations), every project of a
+        # workstation (several projects on one install), and what its next code does
+        # ('add' = extend the keys to the project, '' / 'rotate' = fresh keys)
+        for col in ("os TEXT NOT NULL DEFAULT 'linux'", "ssh_user TEXT NOT NULL DEFAULT ''",
+                    "projects TEXT NOT NULL DEFAULT '[]'",
+                    "enroll_mode TEXT NOT NULL DEFAULT ''"):
+            try:
+                db.execute("ALTER TABLE machines ADD COLUMN " + col)
+            except Exception:                                    # noqa: BLE001 (already there)
+                pass
 
     def event(self, machine: str, event: str, addr: str = "", detail: str = "") -> None:
         self.db.execute("INSERT INTO machine_events (ts, machine, event, addr, detail) VALUES "
@@ -165,6 +209,33 @@ class Machines:
                         "kind=excluded.kind, project=excluded.project, slot=excluded.slot, "
                         "host=excluded.host, note=excluded.note",
                         (name, kind, project, slot, host, note[:200], self.clock(), actor[:80]))
+
+    def set_meta(self, name: str, os_name: Optional[str] = None, ssh_user: Optional[str] = None,
+                 projects: Optional[list] = None, enroll_mode: Optional[str] = None) -> None:
+        sets, args = [], []
+        for col, v in (("os", os_name), ("ssh_user", ssh_user), ("enroll_mode", enroll_mode)):
+            if v is not None:
+                sets.append(col + "=?")
+                args.append(str(v)[:64])
+        if projects is not None:
+            sets.append("projects=?")
+            args.append(json.dumps(sorted({str(p) for p in projects if p})))
+        if sets:
+            self.db.execute("UPDATE machines SET " + ", ".join(sets) + " WHERE name=?",
+                            (*args, name))
+
+    @staticmethod
+    def projects_of(m: Optional[dict]) -> list:
+        """Every project of a machine row: its `projects` list, else its one project."""
+        m = m or {}
+        try:
+            v = json.loads(m.get("projects") or "[]")
+        except ValueError:
+            v = []
+        out = sorted({str(p) for p in v if isinstance(p, str) and p})
+        if m.get("project") and m["project"] not in out:
+            out = sorted(out + [m["project"]])
+        return out
 
     def mint(self, name: str, minutes: int) -> tuple[str, float]:
         code = new_code()
@@ -385,23 +456,44 @@ def _install_commands(request: Request, m: dict, code: str) -> dict:
     url = f"http://{host}:{_cfg(request).server.port}" if host else ""
     raw = (f"https://raw.githubusercontent.com/Vipast82/foundry-router/v{__version__}/"
            "contrib/studio-slot/proxmox")
+    inst = f"https://raw.githubusercontent.com/Vipast82/foundry-router/v{__version__}/install"
+    windows = _windows_command(request, inst, "workstation.ps1" if m.get("kind") == "workstation"
+                               else "slot.ps1", url)
     if m.get("kind") == "workstation":
-        inst = f"https://raw.githubusercontent.com/Vipast82/foundry-router/v{__version__}/install"
         return {
             "router_url": url,
             "proxmox_host": f"curl -fsSLO {inst}/create-workstation-lxc.sh && "
                             "bash create-workstation-lxc.sh",
             "inside_lxc": (f"apt-get update -qq && apt-get install -y -qq curl && "
-                           f"curl -fsSLO {inst}/workstation.sh && bash workstation.sh"),
+                           f"curl -fsSLO {inst}/workstation.sh && bash workstation.sh"
+                           + (f" --router {url}" if url else "")),
+            "windows": windows,
             "code": code,
         }
     return {
         "router_url": url,
         "proxmox_host": f"curl -fsSLO {raw}/create-slot-lxc.sh && bash create-slot-lxc.sh",
         "inside_lxc": (f"apt-get update -qq && apt-get install -y -qq curl && "
-                       f"curl -fsSLO {raw}/setup-host.sh && bash setup-host.sh"),
+                       f"curl -fsSLO {raw}/setup-host.sh && bash setup-host.sh"
+                       + (f" --router {url}" if url else "")),
+        "windows": windows,
         "code": code,
     }
+
+
+def _windows_command(request: Request, inst: str, script: str, url: str) -> str:
+    """The PowerShell line for a Windows machine (an administrator's PowerShell): download the
+    release's install/<script> and run it against this router. An https-only router gets its
+    https address and certificate fingerprint (-Fingerprint), as the Linux installers do."""
+    tls = _tls(request)
+    router, fp = url, ""
+    if tls["enabled"] and not tls["allow_http"] and url:
+        host = url.split("://", 1)[-1].rsplit(":", 1)[0]
+        router, fp = f"https://{host}:{tls['port']}", tls["fingerprint"]
+    run = f"powershell -ExecutionPolicy Bypass -File {script}"
+    run += f" -Router {router}" if router else ""
+    run += f" -Fingerprint {fp}" if fp else ""
+    return f"irm {inst}/{script} -OutFile {script}; {run}"
 
 
 def _view(svc, m: dict, act_seen: dict) -> dict:
@@ -424,6 +516,9 @@ def _view(svc, m: dict, act_seen: dict) -> dict:
     return {**extra, **{k: m.get(k) for k in ("name", "kind", "project", "slot", "host", "note",
                                      "created_ts", "created_by", "enrolled_ts", "enrolled_addr",
                                      "enrolled_hostname")},
+            "os": m.get("os") or "linux", "ssh_user": m.get("ssh_user") or "",
+            "projects": Machines.projects_of(m),
+            "code_adds_project": m.get("enroll_mode") == "add",
             "code_pending": bool(m.get("code_hash")) and float(m.get("code_expires") or 0) > time.time(),
             "code_expires": m.get("code_expires") if m.get("code_hash") else None,
             "key": ("none" if c is None else "enabled" if c.enabled else "disabled"),
@@ -587,23 +682,67 @@ def _slot_settings_from(b: dict) -> dict:
     return out
 
 
+SLOT_HOST_ROOT = "/srv/studio-slot"
+
+
+def _host_share(svc, project: str, slot: str, ip: str, host: str) -> dict:
+    """Several slots on one Linux host: a NEW slot on a host that already has one gets its own
+    folder (/srv/studio-slot/<slot>, setup-host.sh reads it from foundry_host_dir), container,
+    noVNC and lane ports and lane folder. The host's first slot, and a slot already in the
+    settings, keep the single-slot layout (nothing changes for them)."""
+    from .secrets_api import slot_settings
+    if slot_settings(svc, project, slot):
+        return {}
+    others = [x for x in svc.machines.list() if x["kind"] == "slot" and x["name"] != slot
+              and (x.get("host") or "").split("@")[-1] == ip
+              and (x.get("os") or "linux") == "linux"]
+    if not others:
+        return {}
+    n = len(others)
+    root = f"{SLOT_HOST_ROOT}/{slot}"
+    return {"container": f"studio-{slot}", "vnc_port": 6080 + n, "agent_port": 47811 + n,
+            "kilo_port": 4096 + 2 * n, "opencode_port": 4097 + 2 * n,
+            "lanes_root": f"/srv/foundry-lanes/{slot}",
+            "au_push_url": f"ssh://{host}{root}/{game_repo_name(project)}.git",
+            "foundry_push_url": f"ssh://{host}{root}/foundry.git",
+            "foundry_host_dir": f"{root}/foundry"}
+
+
+def _os_and_user(b: dict) -> tuple[str, str]:
+    """("linux" | "windows", the ssh user or "") from an Add body: os defaults to linux;
+    ssh_user (the older name `user` too) is the account the coordinator logs in as."""
+    os_name = str(b.get("os") or "linux").strip().lower()
+    if os_name not in OSES:
+        raise MachineError("os: linux or windows")
+    user = str(b.get("ssh_user") or b.get("user") or "").strip()
+    if user and not HOST_RE.match(user):
+        raise MachineError("ssh_user: an account name (letters, digits, . _ -)")
+    return os_name, user
+
+
 @router.post(A)
 @_guard
 async def add_machine(request: Request):
-    """{kind: slot, project, slot, ip, user?, place_link? | place_id, universe_id, container?,
-    note?} -> the machine, its settings and a one-time code (shown once)."""
+    """{kind: slot, project, slot, ip, os?: linux|windows, ssh_user? (or user), place_link? |
+    place_id, universe_id, container?, note?} -> the machine, its settings and a one-time code
+    (shown once). os = windows: the slot's settings get os = windows and studio = native (no
+    container; install/slot.ps1) and ssh_user is the Windows account slot.ps1 runs as."""
     svc = _svc(request)
     cfg = svc.config_store.config
     b = await _body(request)
     kind = str(b.get("kind") or "slot")
     if kind not in KINDS:
         raise MachineError(f"kind: one of {', '.join(KINDS)}")
+    os_name, ssh_user = _os_and_user(b)
     if kind == "workstation":
-        return _add_workstation(request, svc, cfg, b)
+        return _add_workstation(request, svc, cfg, b, os_name, ssh_user)
     project = str(b.get("project") or "").strip()
     slot = str(b.get("slot") or "").strip()
     ip = str(b.get("ip") or "").strip()
-    user = str(b.get("user") or "studio").strip()
+    if os_name == "windows" and not ssh_user:
+        raise MachineError("ssh_user: the Windows account install/slot.ps1 runs as (an "
+                           "administrator; the coordinator logs in as it over ssh)")
+    user = ssh_user or "studio"
     if not project:
         raise MachineError("project: which game this slot works for")
     if not SLOT_RE.match(slot):
@@ -618,12 +757,22 @@ async def add_machine(request: Request):
                            "rename or delete it on Clients & Keys first", "name_taken", 409)
     # off until its installer reports the container ready (POST /v1/foundry/secrets/ready), so
     # no gate is sent to a slot that is still being built
-    settings = derived_slot(f"{user}@{ip}", {"container": "studio-slot",
-                                             **_slot_settings_from(b), "enabled": False})
+    base = ({"os": "windows", "studio": "native"} if os_name == "windows"
+            else {"container": "studio-slot"})
+    if os_name == "linux":
+        base.update(_host_share(svc, project, slot, ip, f"{user}@{ip}"))
+    settings = derived_slot(f"{user}@{ip}", {**base, **_slot_settings_from(b), "enabled": False},
+                            project, os_name)
+    if os_name == "windows":                 # no container (and none left from a Linux slot)
+        settings.update(os="windows", studio="native", container="")
+    elif svc.machines.get(name) and (svc.machines.get(name).get("os") or "linux") == "windows":
+        settings.update(os="linux", studio="container")      # a Windows slot added again as Linux
     rev = svc.automation.put_slot(project, slot, settings, _actor(),
-                                  note=f"Access → Machines: slot {slot} on {ip}")
+                                  note=f"Access → Machines: slot {slot} on {ip}"
+                                       + (" (Windows)" if os_name == "windows" else ""))
     svc.machines.add(name, kind, project, slot, f"{user}@{ip}", str(b.get("note") or ""),
                      _actor())
+    svc.machines.set_meta(name, os_name=os_name, ssh_user=ssh_user, projects=[project])
     code, exp = svc.machines.mint(name, cfg.machines.code_minutes)
     svc.machines.event(name, "added", _addr(), f"{project}/{slot} on {ip}, settings rev "
                                                f"{rev.get('rev')}")
@@ -638,11 +787,15 @@ def ws_key_names(name: str) -> list[str]:
     return [name + suffix for suffix, _, _ in WS_KEYS]
 
 
-def _add_workstation(request: Request, svc, cfg, b: dict) -> JSONResponse:
-    """{kind: workstation, name, project, ip?, note?, studio?: bool, place_id? | place_link?,
-    universe_id?} -> the machine and its one-time code. With `studio`, a Studio slot
-    `<name>-studio` on the same IP is added too (off until its own installer reports ready);
-    the workstation's enrollment hands its code to install/workstation.sh."""
+def _add_workstation(request: Request, svc, cfg, b: dict, os_name: str = "linux",
+                     ssh_user: str = "") -> JSONResponse:
+    """{kind: workstation, name, project, ip?, os?, ssh_user?, note?, studio?: bool, place_id? |
+    place_link?, universe_id?} -> the machine and its one-time code. With `studio`, a Studio
+    slot `<name>-studio` on the same IP is added too (off until its own installer reports
+    ready); the workstation's enrollment hands its code to install/workstation.sh.
+
+    The name of an ENROLLED workstation with another project adds that project: the code then
+    extends its keys to it instead of rotating them (the first project keeps working)."""
     name = str(b.get("name") or "").strip()
     project = str(b.get("project") or "").strip()
     ip = str(b.get("ip") or "").strip()
@@ -656,9 +809,15 @@ def _add_workstation(request: Request, svc, cfg, b: dict) -> JSONResponse:
     if studio and not ip:
         raise MachineError("ip: needed for a Studio on this workstation (its slot is reached "
                            "over ssh like any slot)")
+    if studio and os_name == "windows":
+        raise MachineError("studio: a Windows workstation uses its own Roblox Studio (the Studio "
+                           "slot beside a workstation is the Linux slot image)")
     known = svc.machines.get(name)
     if known and known["kind"] != "workstation":
         raise MachineError(f"{name!r} is already a {known['kind']} on Machines", "name_taken", 409)
+    # another project for an enrolled workstation: add it (keys extended at enrolment)
+    adding = bool(known and known.get("enrolled_ts") and project
+                  not in Machines.projects_of(known))
     for n in ws_key_names(name):
         if _client(cfg, n) is not None and known is None:
             raise MachineError(f"a client key named {n!r} already exists (not a machine): "
@@ -673,17 +832,26 @@ def _add_workstation(request: Request, svc, cfg, b: dict) -> JSONResponse:
             raise MachineError(f"a client key named {slot!r} already exists (not a machine)",
                                "name_taken", 409)
         settings = derived_slot(f"studio@{ip}", {"container": "studio-slot",
-                                                 **_slot_settings_from(b), "enabled": False})
+                                                 **_slot_settings_from(b), "enabled": False},
+                                project)
         svc.automation.put_slot(project, slot, settings, _actor(),
                                 note=f"Access → Machines: the main Studio of workstation {name}")
         svc.machines.add(slot, "slot", project, slot, f"studio@{ip}",
                          f"main Studio of workstation {name}", _actor())
+        svc.machines.set_meta(slot, os_name="linux", ssh_user="studio", projects=[project])
         svc.machines.event(slot, "added", _addr(), f"{project}/{slot} on {ip} (workstation {name})")
-    svc.machines.add(name, "workstation", project, slot, ip, str(b.get("note") or ""), _actor())
+    elif adding and known.get("slot"):
+        slot = known["slot"]                 # the Studio added with the first project stays
+    svc.machines.add(name, "workstation", project, slot, ip or (known or {}).get("host") or "",
+                     str(b.get("note") or (known or {}).get("note") or ""), _actor())
+    svc.machines.set_meta(name, os_name=os_name, ssh_user=ssh_user,
+                          projects=sorted(set(Machines.projects_of(known)) | {project}),
+                          enroll_mode="add" if adding else "rotate")
     code, exp = svc.machines.mint(name, cfg.machines.code_minutes)
-    svc.machines.event(name, "added", _addr(), f"workstation for {project}"
-                                               + (f" on {ip}" if ip else "")
-                                               + (f", Studio slot {slot}" if slot else ""))
+    svc.machines.event(name, "project_added" if adding else "added", _addr(),
+                       f"workstation for {project}" + (f" on {ip}" if ip else "")
+                       + (f", Studio slot {slot}" if slot else "")
+                       + (" (its code adds the project; the keys stay)" if adding else ""))
     m = svc.machines.get(name)
     return JSONResponse({"machine": _view(svc, m, {}), "code": code, "code_expires": exp,
                          "install": _install_commands(request, m, code)},
@@ -723,15 +891,71 @@ def _ws_game(svc, project: str) -> dict:
             "branch": str(ws.get("branch") or "main"), "remote": str(ws.get("remote") or "origin")}
 
 
+def _coding_clients(svc, project: str) -> tuple[str, list]:
+    """(the project's [client] kind, every coding client its settings name) from the deployed
+    settings: kilo unless [client] kind or a [clients.*] server says opencode."""
+    try:
+        st = ((svc.automation.deployed(project) or {}).get("doc") or {}).get("settings") or {}
+    except Exception:                                            # noqa: BLE001
+        st = {}
+    kind = str((st.get("client") or {}).get("kind") or "kilo")
+    kinds = {kind}
+    for t in (st.get("clients") or {}).values() if isinstance(st.get("clients"), dict) else []:
+        if isinstance(t, dict) and t.get("kind") in ("kilo", "opencode"):
+            kinds.add(t["kind"])
+    return kind, sorted(kinds & {"kilo", "opencode"}) or ["kilo"]
+
+
+def _ws_answer(request: Request, svc, m: dict, project: str, keys: dict, addr: str,
+               studio: Optional[dict], repo: bool = True) -> dict:
+    """What a workstation's installer gets (the enrollment answer, and the repair answer
+    without keys): its project's game, the router's Kilo block, the coding client."""
+    name = m["name"]
+    repo_key, repo_why = _ws_repo_key(svc, project, addr, name) if repo else (None, "")
+    from . import __version__
+    host = (request.headers.get("host") or "").split(":")[0]
+    router_http = f"http://{host}:{svc.config_store.config.server.port}" if host else ""
+    try:
+        from .ui.routes import kilo_block
+        kilo, _ = kilo_block(svc, router_http or "http://FOUNDRY_HOST:11435")
+    except Exception:                                            # noqa: BLE001
+        kilo = {}
+    try:
+        roles = ((svc.automation.deployed(project) or {}).get("doc") or {}) \
+            .get("settings", {}).get("roles") or {}
+    except Exception:                                            # noqa: BLE001
+        roles = {}
+    kind, kinds = _coding_clients(svc, project)
+    return {"machine": name, "kind": "workstation", "project": project, "keys": keys,
+            "projects": Machines.projects_of(m), "os": m.get("os") or "linux",
+            "router_version": __version__, "router_http": router_http,
+            "kilo_provider": kilo, "implementer": str(roles.get("implementer") or ""),
+            "client_kind": kind, "coding_clients": kinds,
+            "game": {**_ws_game(svc, project), "repo_key": repo_key,
+                     "repo_key_problem": repo_why},
+            "studio": studio, "ssh_authorized_keys": authorized_keys(svc),
+            "tls": _tls(request)}
+
+
 def _enroll_workstation(request: Request, svc, m: dict, addr: str, hostname: str) -> JSONResponse:
+    """Fresh keys for every project of the workstation, or (a code made by adding a project to
+    an enrolled workstation) its enabled keys extended to that project: those stay as they are
+    and are not in the answer (`keys_kept`), the missing ones are made."""
     name = m["name"]
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    made, keys = [], {}
+    projects = Machines.projects_of(m)
+    adding = m.get("enroll_mode") == "add"
+    have = {c.name: c for c in svc.config_store.config.clients}
+    made, keys, kept = [], {}, []
     for suffix, scopes, envs in WS_KEYS:
+        c = have.get(name + suffix)
+        if adding and c is not None and c.enabled:
+            kept.append(name + suffix)
+            continue
         key = client_keys.generate_key()
         made.append({"name": name + suffix, "key_hash": client_keys.hash_key(key),
                      "key_hint": client_keys.hint(key), "scopes": list(scopes),
-                     "projects": [m["project"]] if m["project"] else [], "slots": [],
+                     "projects": list(projects), "slots": [],
                      "secret_names": [], "enabled": True,
                      "note": f"workstation {name} ({hostname or addr}, enrolled {now[:10]})",
                      "created": now})
@@ -743,55 +967,56 @@ def _enroll_workstation(request: Request, svc, m: dict, addr: str, hostname: str
         raw.setdefault("clients", [])
         if raw["clients"] is None:
             raw["clients"] = []
+        for c in raw["clients"]:
+            if c.get("name") in kept:
+                c["projects"] = sorted(set(c.get("projects") or []) | set(projects))
         raw["clients"] = [c for c in raw["clients"] if c.get("name") not in names] + made
     svc.config_store.save(mutate)
     svc.machines.enrolled(name, addr, hostname)
-    svc.machines.event(name, "enrolled", addr, hostname)
-    repo_key, repo_why = _ws_repo_key(svc, m["project"], addr, name)
+    svc.machines.set_meta(name, enroll_mode="")
+    svc.machines.event(name, "project_added" if adding else "enrolled", addr,
+                       f"{hostname} ({m['project']}; keys kept: {len(kept)}, made: {len(made)})"
+                       if adding else hostname)
     studio = None
-    if m.get("slot") and svc.machines.get(m["slot"]):
+    # a code that adds a project leaves the Studio slot's own enrolment alone
+    if m.get("slot") and svc.machines.get(m["slot"]) and not adding:
         code, exp = svc.machines.mint(m["slot"], svc.config_store.config.machines.code_minutes)
         svc.machines.event(m["slot"], "code_made", addr, f"by workstation {name}'s enrollment")
         studio = {"slot": m["slot"], "code": code, "code_expires": exp}
     try:
         svc.control.raise_alert(
             f"machine_enrolled:{name}:{int(time.time())}", "machine_enrolled", "info",
-            f"Workstation {name} enrolled",
+            f"Workstation {name} " + ("added a project" if adding else "enrolled"),
             f"Workstation {name} ({m['project']}) enrolled from {hostname or '?'} at {addr or '?'} "
-            "and got its three keys. If you didn't run its installer, revoke it on Access -> "
-            "Machines.", {"project_id": m["project"]})
+            + (f"and its keys now cover {', '.join(projects)}. " if adding else
+               "and got its keys. ")
+            + "If you didn't run its installer, revoke it on Access -> Machines.",
+            {"project_id": m["project"]})
     except Exception:                                            # noqa: BLE001
         pass
-    from . import __version__
-    host = (request.headers.get("host") or "").split(":")[0]
-    router_http = f"http://{host}:{svc.config_store.config.server.port}" if host else ""
-    try:
-        from .ui.routes import kilo_block
-        kilo, _ = kilo_block(svc, router_http or "http://FOUNDRY_HOST:11435")
-    except Exception:                                            # noqa: BLE001
-        kilo = {}
-    try:
-        roles = ((svc.automation.deployed(m["project"]) or {}).get("doc") or {})             .get("settings", {}).get("roles") or {}
-    except Exception:                                            # noqa: BLE001
-        roles = {}
-    body = {"machine": name, "kind": "workstation", "project": m["project"], "keys": keys,
-            "router_version": __version__, "router_http": router_http,
-            "kilo_provider": kilo, "implementer": str(roles.get("implementer") or ""),
-            "game": {**_ws_game(svc, m["project"]), "repo_key": repo_key,
-                     "repo_key_problem": repo_why},
-            "studio": studio, "ssh_authorized_keys": authorized_keys(svc),
-            "tls": _tls(request)}
+    body = _ws_answer(request, svc, m, m["project"], keys, addr, studio)
+    body["keys_kept"] = kept
     return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
 
 @router.post(A + "/{name}/code")
 @_guard
 async def new_machine_code(request: Request, name: str):
-    """A fresh one-time code (reinstall / re-enroll). Enrolling with it replaces the key."""
+    """A fresh one-time code (reinstall / re-enroll). Enrolling with it replaces the key (every
+    key of a workstation). A workstation whose added project was not enrolled yet keeps that:
+    its new code still only adds the project; {"rotate": true} makes it a re-enrolment."""
     svc = _svc(request)
     m = svc.machines.get(name)
     if not m:
         raise MachineError(f"no machine {name!r}", "not_found", 404)
+    try:
+        b = await request.json()
+    except Exception:                                            # noqa: BLE001 (no body)
+        b = {}
+    rotate = isinstance(b, dict) and (b.get("rotate") is True
+                                      or str(b.get("rotate")).lower() in ("1", "true", "on"))
+    if m["kind"] == "workstation" and (rotate or m.get("enroll_mode") != "add"):
+        svc.machines.set_meta(name, enroll_mode="rotate")
     code, exp = svc.machines.mint(name, svc.config_store.config.machines.code_minutes)
     svc.machines.event(name, "code_made", _addr())
     return JSONResponse({"code": code, "code_expires": exp,
@@ -997,7 +1222,7 @@ async def enroll(request: Request):
     from . import __version__
     from .secrets_api import slot_settings
     body = {"machine": name, "kind": m["kind"], "project": m["project"], "slot": m["slot"],
-            "key": key, "router_version": __version__,
+            "key": key, "router_version": __version__, "os": m.get("os") or "linux",
             "settings": slot_settings(svc, m["project"], m["slot"]),
             "vnc": _vnc_view(svc, m, slot_settings(svc, m["project"], m["slot"])),
             "ssh_authorized_keys": authorized_keys(svc),
@@ -1134,6 +1359,51 @@ async def workstation_active(request: Request):
             pass
     return {"active": active, "holder": {k: holder.get(k) for k in
                                          ("client", "name", "addr", "last_ts")}}
+
+
+@router.get("/v1/foundry/control/workstation-enrollment")
+async def workstation_enrollment(request: Request, project: str = "", repo_key: bool = False):
+    """The enrollment answer again, WITHOUT keys, for an enrolled workstation's installer run
+    without a code (repair / upgrade): its coordinator key (<name>, orchestration) asks;
+    `project` (default the machine's) must be one its key covers. `repo_key=true` adds the
+    game's repo key (only when the installer has to clone the game again)."""
+    svc = _svc(request)
+    c = client_auth.current()
+    m = svc.machines.get(str(c.get("client_id") or ""))
+    if not m or m["kind"] != "workstation":
+        return _err(MachineError("this key is not an enrolled workstation's coordinator key",
+                                 "forbidden", 403))
+    project = str(project or m["project"] or "").strip()
+    allowed = c.get("projects") or []
+    if not project or (allowed and project not in allowed):
+        return _err(MachineError(f"this key does not cover project {project!r}: add the project "
+                                 "to the workstation on Access → Machines and use its code",
+                                 "forbidden", 403))
+    svc.machines.event(m["name"], "repair_read", _addr(), project)
+    body = _ws_answer(request, svc, m, project, {}, _addr(), None, repo=bool(repo_key))
+    body.update(repair=True, keys_kept=ws_key_names(m["name"]))
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/v1/foundry/secrets/enrollment")
+async def slot_enrollment(request: Request):
+    """The enrollment answer again, WITHOUT the key, for an enrolled slot's installer run
+    without a code (repair / upgrade; setup-host.sh, slot.ps1): its own secrets-scope key."""
+    svc = _svc(request)
+    try:
+        m = _slot_caller(svc)
+    except MachineError as e:
+        return _err(e)
+    from . import __version__
+    from .secrets_api import slot_settings
+    s = slot_settings(svc, m["project"], m["slot"])
+    svc.machines.event(m["name"], "repair_read", _addr(), f"{m['project']}/{m['slot']}")
+    return JSONResponse({"machine": m["name"], "kind": "slot", "project": m["project"],
+                         "slot": m["slot"], "os": m.get("os") or "linux",
+                         "router_version": __version__, "settings": s,
+                         "vnc": _vnc_view(svc, m, s), "ssh_authorized_keys": authorized_keys(svc),
+                         "tls": _tls(request), "repair": True},
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.post(A + "/active")

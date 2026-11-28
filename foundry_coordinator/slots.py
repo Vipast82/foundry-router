@@ -89,6 +89,17 @@ _NO_WINDOW = _plat.NO_WINDOW
 
 # ----------------------------------------------------------------------------- config
 
+def game_repo_name(project: str) -> str:
+    """The game's folder name on a slot (the host's <name>.git mirror and the container's
+    ~/work/<name> checkout): AnimalUprising for that project and when none is given (every
+    slot so far), else the project id. setup-host.sh, slot.ps1, entrypoint.sh and
+    foundry_router/machines.py use the same rule. The router writes a slot's au_push_url (and,
+    for another game, its repo) from it when the slot is added on Access → Machines; the
+    defaults below are AnimalUprising's for a slot configured by hand."""
+    p = str(project or "").strip()
+    return "AnimalUprising" if p.lower() in ("", "animaluprising") else p
+
+
 def configured(profile) -> dict:
     """{slot_id: settings} from the profile's [slots] table (enabled ones only)."""
     raw = (getattr(profile, "raw", None) or {}).get("slots") or {}

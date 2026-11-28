@@ -32,6 +32,103 @@ def test_every_machine_pins_the_same_coding_clients():
         assert re.search(rf"^{name}={re.escape(arg(df, name))}\b", ws, re.M), name
 
 
+def pins() -> dict:
+    out = {}
+    for ln in text(ROOT / "install" / "pins.env").splitlines():
+        m = re.match(r"^([A-Z0-9_]+)=(.*)$", ln)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def test_one_pins_file_and_every_copy_agrees():
+    """install/pins.env is the one list; the Dockerfile's ARG defaults, workstation.sh's lines,
+    the PowerShell installers' $Pins tables and CI's Node version are copies of it."""
+    p = pins()
+    assert {"NODE_VERSION", "KILO_VERSION", "KILO_INTEGRITY", "OPENCODE_VERSION",
+            "OPENCODE_INTEGRITY", "PWSH_VERSION", "PWSH_SHA256", "ROKIT_VERSION", "ROKIT_SHA256",
+            "BLENDER_VERSION", "BLENDER_SHA256", "PYTHON_WINDOWS_VERSION"} <= set(p)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", p[k]) for k in ("PWSH_SHA256", "ROKIT_SHA256",
+                                                               "BLENDER_SHA256"))
+    df = text(ROOT / "contrib" / "studio-slot" / "Dockerfile")
+    for name in ("NODE_VERSION", "KILO_VERSION", "KILO_INTEGRITY", "OPENCODE_VERSION",
+                 "OPENCODE_INTEGRITY", "PWSH_VERSION", "PWSH_SHA256", "ROKIT_VERSION",
+                 "ROKIT_SHA256", "BLENDER_VERSION", "BLENDER_SHA256"):
+        assert arg(df, name) == p[name], f"Dockerfile ARG {name}"
+    ws = text(ROOT / "install" / "workstation.sh")
+    for name in ("NODE_VERSION", "KILO_VERSION", "KILO_INTEGRITY", "OPENCODE_VERSION",
+                 "OPENCODE_INTEGRITY", "PWSH_VERSION", "PWSH_SHA256", "ROKIT_VERSION",
+                 "ROKIT_SHA256", "BLENDER_VERSION", "BLENDER_SHA256"):
+        assert re.search(rf"^{name}={re.escape(p[name])}(\s|$)", ws, re.M), f"workstation.sh {name}"
+    assert '. "$PINS"' in ws                                  # and it reads the file beside it
+    for ps in ("workstation.ps1", "slot.ps1"):
+        t = text(ROOT / "install" / ps)
+        table = re.findall(r'^\s+([A-Z0-9_]+) = "([^"]*)"$', t, re.M)
+        assert table, ps
+        for k, v in table:
+            assert p.get(k) == v, f"{ps} {k}"
+        assert 'Read-Pins (Join-Path $PSScriptRoot "pins.env") $Pins' in t
+        assert 'Read-Pins (Join-Path $app "install\\pins.env") $Pins' in t
+    ci = text(ROOT / ".github" / "workflows" / "platform.yml")
+    assert f'node-version: "{p["NODE_VERSION"]}"' in ci
+    assert "pins=install/pins.env" in ci
+    jd = text(J / "Dockerfile")
+    assert "COPY install/workstation.sh install/pins.env /opt/foundry-install/" in jd
+
+
+def test_npm_installs_check_the_registry_integrity_everywhere():
+    df = text(ROOT / "contrib" / "studio-slot" / "Dockerfile")
+    assert 'dist.integrity)" = "${KILO_INTEGRITY}"' in df
+    ws = text(ROOT / "install" / "workstation.sh")
+    assert 'npm view "$1@$2" dist.integrity' in ws
+    assert 'npm_pinned "@kilocode/cli" "$KILO_VERSION" "$KILO_INTEGRITY"' in ws
+    assert 'npm_pinned "@opencode/cli" "$OPENCODE_VERSION" "$OPENCODE_INTEGRITY"' in ws
+    assert 'npm install -g --silent "@kilocode' not in ws
+    for ps in ("workstation.ps1", "slot.ps1"):
+        t = text(ROOT / "install" / ps)
+        assert '& npm view "$($p[0])@$($p[1])" dist.integrity' in t, ps
+        assert "does not have the pinned integrity" in t, ps
+
+
+def test_winget_pins_a_version_where_it_takes_one():
+    for ps in ("workstation.ps1", "slot.ps1"):
+        t = text(ROOT / "install" / ps)
+        assert 'if ($w[1]) { $wargs += @("--version", $w[1]) }' in t
+        assert '@("OpenJS.NodeJS.LTS", $Pins.NODE_VERSION)' in t
+        assert '@("Python.Python.3.12", $Pins.PYTHON_WINDOWS_VERSION)' in t
+    assert '@("Microsoft.PowerShell", $Pins.PWSH_VERSION)' in text(ROOT / "install" / "workstation.ps1")
+
+
+def test_workstation_sh_repairs_without_a_code_and_restarts_after_new_keys():
+    ws = text(ROOT / "install" / "workstation.sh")
+    assert "--repair) MODE=repair" in ws and "--reenrol|--reenroll) MODE=enrol" in ws
+    assert "workstation fetch --check" in ws and 'workstation fetch --out "$ENROLL"' in ws
+    assert 'if [ "$WAS_ACTIVE" = 1 ] && [ "$KEYS_CHANGED" = 1 ]; then' in ws
+    assert "systemctl --user restart foundry-client.service" in ws
+    # a running coordinator's checkout moves the client's own way, never by a forced checkout
+    i_update = ws.index("workstation update --tag")
+    i_force = ws.index('checkout -q --force "v$VERSION"')
+    assert ws.index("elif client_active; then") < i_update < i_force
+    # the version self-match keeps its download private
+    assert "NEWDIR=$(mktemp -d /tmp/workstation.XXXXXX)" in ws
+
+
+def test_workstation_ps1_matches_the_router_and_checks_what_it_runs():
+    t = text(ROOT / "install" / "workstation.ps1")
+    for flag in ("[string]$Fingerprint", "[string]$Import", "[switch]$AtBoot", "[switch]$Repair",
+                 "[switch]$Matched"):
+        assert flag in t, flag
+    assert "/install/workstation.ps1" in t                                  # the self-match
+    assert "(Get-FileHash $new).Hash -ne (Get-FileHash $PSCommandPath).Hash" in t
+    assert "apply-kilo-config --no-reload" in t and "install-autostart --at-boot" in t
+    assert "workstation import $Import --root $Root --passphrase-stdin" in t
+    assert "rokit install --no-trust-check" in t
+    assert "workstation restart" in t and "workstation update --tag" in t
+    # the docstring no longer claims a rokit download
+    head = t[:t.index("[CmdletBinding()]")]
+    assert "rokit is NOT downloaded here" in head
+
+
 def test_the_image_installs_the_tools_without_a_router():
     df = text(J / "Dockerfile")
     assert "workstation.sh --tools-only" in df and "kilo --version && opencode --version" in df
@@ -50,8 +147,27 @@ def test_the_junction_keeps_its_ports_and_settings_on_this_host():
     assert 'profiles: ["studio"]' in dc                 # its Studio is opt-in
     ep = text(J / "junction-entrypoint.sh")
     assert "--secret-store file" in ep and "--no-start" in ep and "persist_home" in ep
-    for cmd in ("install)", "run)", "doctor)", "shell)"):
+    for cmd in ("install)", "run)", "doctor)", "shell)", "studio-enrol)"):
         assert cmd in ep
+
+
+def test_the_junction_install_ends_with_the_role_rules_and_doctor():
+    ep = text(J / "junction-entrypoint.sh")
+    block = ep[ep.index("    install)"):ep.index("    studio-enrol)")]
+    assert block.index("workstation.sh") < block.index("kilo-config") < block.index("doctor --platform")
+
+
+def test_studio_main_enrols_with_a_code_and_assumes_no_router():
+    dc = text(J / "docker-compose.yml")
+    assert 'FOUNDRY_URL: "${FOUNDRY_URL:-}"' in dc
+    assert 'FOUNDRY_URL_FILE: "/srv/foundry/studio-main/router.txt"' in dc
+    assert 'FOUNDRY_SLOT_KEY_FILE: "/srv/foundry/studio-main/slot-key.txt"' in dc
+    assert "studio-main-key" not in dc                   # no hand-copied key any more
+    ep = text(J / "junction-entrypoint.sh")
+    assert '"/v1/foundry/enroll"' in ep and 'data.get("slot") != "studio-main"' in ep
+    assert 'private("slot-key.txt", data["key"])' in ep and "os.chown(p, 1000, 1000)" in ep
+    # the slot image reads the router address from that file when FOUNDRY_URL is empty
+    assert 'os.environ.get(name + "_FILE")' in text(ROOT / "contrib" / "studio-slot" / "slot-secrets.py")
 
 
 def _gnu_bash() -> str:
@@ -87,7 +203,9 @@ def test_the_windows_installers_parse(script):
 
 def test_the_windows_junction_never_prints_its_keys():
     t = text(ROOT / "install" / "workstation.ps1")
-    assert "Remove-Item -Force $enrollFile" in t and "icacls $enrollFile" in t
+    # the answer lives in a private folder (this user and SYSTEM) that is removed at the end
+    assert '$enrollFile = Join-Path $work "enroll.json"' in t
+    assert "icacls $work /inheritance:r" in t and "Remove-Item -Recurse -Force $work" in t
     for ln in t.splitlines():
         if "Write-Host" in ln or ln.strip().startswith(("Ok ", "Warn ")):
-            assert ".keys" not in ln and "$raw" not in ln, ln
+            assert not re.search(r"\.keys\b(?!_)", ln) and "$raw" not in ln, ln

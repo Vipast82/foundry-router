@@ -61,6 +61,9 @@ DEFAULTS: dict[str, Any] = {
         "deploy": "",                                   # coordinator release checkout, if any
         "kilo_config": "",                              # kilo.jsonc (empty = <game>/kilo.jsonc)
         "project": "",                                  # coordinator project id (empty = the only one)
+        # several projects on one install (foundry_client/workstation.py): {id = {game,
+        # kilo_config}} per project; the fields above stay the default project's
+        "projects": {},
     },
     # resource watch (resources.py): free RAM + the development / testing jobs the stack runs
     "resources": {"enabled": True, "interval_seconds": 60, "low_ram_gb": 2, "auto_stop": True,
@@ -131,6 +134,19 @@ DEFAULTS: dict[str, Any] = {
 LANE_LISTEN = ("127.0.0.1", "0.0.0.0", "::1", "::")
 
 
+def project_workspace(cfg: dict, project: str = "") -> dict:
+    """The workspace of one project: the default fields (workspace.game, kilo_config, ...)
+    for the default project or an unknown id, and [workspace.projects.<id>] laid over them for
+    another project of this install. A settings file without projects reads as before."""
+    ws = dict(cfg.get("workspace") or {})
+    projects = ws.get("projects") if isinstance(ws.get("projects"), dict) else {}
+    if project and project != ws.get("project") and isinstance(projects.get(project), dict):
+        own = projects[project]
+        ws = {**ws, "game": own.get("game") or ws.get("game") or "",
+              "kilo_config": own.get("kilo_config") or "", "project": project}
+    return ws
+
+
 def config_dir() -> Path:
     if _plat.is_windows():
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
@@ -198,6 +214,11 @@ def validate(cfg: dict) -> list[str]:
         errs.append("workspace.game is required for the Kilo server (its working folder)")
     if comps["coordinator"]["enabled"] and not cfg["workspace"]["profiles"]:
         errs.append("workspace.profiles is required for the coordinator")
+    wsp = cfg["workspace"].get("projects", {})
+    if not isinstance(wsp, dict) or not all(
+            isinstance(v, dict) and all(isinstance(x, str) for x in v.values())
+            for v in wsp.values()):
+        errs.append("workspace.projects must map project ids to {game, kilo_config} tables")
     for k in ("unhealthy_restart_seconds", "safe_restart_max_wait_minutes"):
         v = c.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:

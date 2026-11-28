@@ -62,8 +62,12 @@ PLUGDIR="$HOME/.local/share/vinegar/prefixes/studio/drive_c/users/$(id -un)/AppD
 # The slot's own AU checkout (gate runs check out the commit under test there), cloned
 # once from the mounted read-only checkout (AU_SOURCE) into the home volume (AU_CHECKOUT).
 # Its "origin" is the mount, so `git fetch` picks up new commits and track branches.
-AU_SOURCE="${AU_SOURCE:-/work/AnimalUprising}"
-AU_CHECKOUT="${AU_CHECKOUT:-$HOME/work/AnimalUprising}"
+# The game's folder name: AnimalUprising for that project and when none is set (every slot so
+# far), else the slot's project id (foundry_coordinator/slots.py game_repo_name).
+_p="${FOUNDRY_PROJECT:-}"
+case "${_p,,}" in ''|animaluprising) GAME_NAME=AnimalUprising ;; *) GAME_NAME="$_p" ;; esac
+AU_SOURCE="${AU_SOURCE:-/work/$GAME_NAME}"
+AU_CHECKOUT="${AU_CHECKOUT:-$HOME/work/$GAME_NAME}"
 # the mount is owned by another user: git needs both the folder and its .git listed
 for d in "$AU_SOURCE" "$AU_SOURCE/.git"; do
     git config --global --get-all safe.directory | grep -qxF "$d" || \

@@ -74,8 +74,10 @@ def test_the_settings_know_os_and_studio():
 def test_the_windows_installer_makes_bash_the_ssh_shell():
     text = (ROOT / "install" / "slot.ps1").read_text(encoding="utf-8")
     assert "DefaultShell" in text and "Git\\bin\\bash.exe" in text
-    assert "studio-slot\\AnimalUprising.git" in text and 'secrets_file = $(Q (Join-Path $laneDir' \
-        in text
+    # the game copy is the project's (AnimalUprising.git for AU); client.toml is merged from
+    # these values (`workstation settings`), never written over
+    assert '$mirror = Join-Path $slotDir "$game.git"' in text
+    assert 'secrets_file = (Join-Path $laneDir "lane.json")' in text
     assert 'listen = "127.0.0.1"' in text                              # never the LAN
     for ln in text.splitlines():
         if "Write-Host" in ln or ln.strip().startswith("Ok ") or ln.strip().startswith("Warn "):

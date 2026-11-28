@@ -42,7 +42,8 @@ MEM=$(ask "Memory, MB (16 GB fits Studio + a solo playtest)" "16384")
 CORES=$(ask "CPU cores" "6")
 IGPU=n
 if [ -e /dev/dri/renderD128 ]; then IGPU=$(ask "Pass the Intel iGPU into the slot (faster rendering)? y/n" "n"); fi
-ROUTER=$(ask "Foundry router address" "http://192.168.0.112:11435")
+read -r -p "Foundry router address (e.g. http://192.168.0.10:11435): " ROUTER
+[ -n "$ROUTER" ] || die "no router address"
 ROUTER="${ROUTER%/}"; case "$ROUTER" in http://*|https://*) ;; *) ROUTER="http://$ROUTER" ;; esac
 read -r -s -p "Enrollment code from Access → Machines (typing is hidden): " CODE; echo
 [ -n "$CODE" ] || die "no enrollment code"

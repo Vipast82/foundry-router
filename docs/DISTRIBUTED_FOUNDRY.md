@@ -97,7 +97,7 @@ checkout is older (v0.181.253), so some line numbers differ there. Counts ("160 
 
 | Claim | Where |
 |---|---|
-| The slot image: Debian 13, Vinegar 1.9.4 + Wine, Rojo 7.7.1, Node 22.21, robloxstudio-mcp 3.4.2, PowerShell 7.6.9, rokit, Blender 4.5.12, Python 3. **No Kilo, no OpenCode** | `contrib/studio-slot/Dockerfile:7-127`; `README.md:58-71` |
+| The slot image: Debian 13, Vinegar 1.9.4 + Wine, Rojo 7.7.1, Node 22.21, robloxstudio-mcp 3.4.2, PowerShell 7.6.9, rokit, Blender 4.5.12, Python 3, and both coding clients (Kilo 7.8.32, OpenCode 2.3.2, checked against the npm registry's integrity; phase a). Every version is in `install/pins.env`, the one pins file the installers, the image's ARG defaults and CI agree with (a test) | `contrib/studio-slot/Dockerfile`; `install/pins.env`; `tests/test_junction_install.py` |
 | The slot installer targets a Proxmox **LXC** (`create-slot-lxc.sh` runs `setup-host.sh` inside it) and works on any Debian 13 machine. The brief calls the slots VMs; the design works for either | `contrib/studio-slot/proxmox/setup-host.sh:1-24` |
 | The slot's own key has the `secrets` scope only (no inference) | `foundry_router/ui/setup_routes.py:51`; `contrib/studio-slot/slot-secrets.py:13`, `:24` |
 | A Linux workstation installer exists (`install/workstation.sh`, `create-workstation-lxc.sh`), with headless client, systemd unit and enrollment | `install/workstation.sh:1-42`; `foundry_client/__main__.py:3-8`; `foundry_client/autostart.py:103-128` |
@@ -350,7 +350,7 @@ the logic asks which OS a slot runs.
 
 **Tests on both:** a GitHub Actions matrix (`ubuntu-latest`, `windows-latest`) runs the unit tests
 of `foundry_platform`, the agent routes and `RemoteWorkspace` against a scripted git repo. A
-scripted smoke run (§9, `foundry-client doctor --lane`) runs on a real spare Linux slot and a real
+scripted smoke run (§9, `foundry-client doctor --platform` and the lane checks) runs on a real spare Linux slot and a real
 spare Windows slot before each release that touches this code.
 
 ### 7.2 Mixed fleets
@@ -403,11 +403,15 @@ One command per piece, each idempotent, each ending with the same health check
 
 | Piece | Linux | Windows |
 |---|---|---|
-| New slot | `bash setup-host.sh` (exists; gains the lane agent, Kilo and OpenCode in the image) | `install\slot.ps1` (new): Git, Node 22, Python, Kilo, OpenCode, rokit, Blender, Studio; OpenSSH server; scheduled task; enrollment code |
-| Junction container | `install/junction/docker compose up -d` (new, built from `install/workstation.sh`, which exists) | today's PC: `install\workstation.ps1` (new wrapper around what the client does now) |
-| Add a slot to the coordinator | router → Access → Machines → Add a Studio slot (exists), then tick **Lanes on this slot** (new) | same |
+| New slot | `bash setup-host.sh --router <url>` (the lane agent, Kilo and OpenCode are in the image) | `install\slot.ps1 -Router <url>` (DRAFT until the Linux pilot, Db5): Git, Node 22, Python 3.12 (winget at the pins), Kilo and OpenCode (npm, integrity checked); the OpenSSH server with Git for Windows' bash as its shell; the scheduled task "Foundry slot keys" (every 5 minutes, `install\slot-keys-win.py`); the game copy and the lane store; the client with `[lane]` on at sign-in; `doctor --platform`. Roblox Studio is installed and signed in by hand |
+| Junction | `install/junction`: `docker compose run --rm junction install`, then `up -d`; or `install/workstation.sh` on a Linux PC / LXC | `install\workstation.ps1 -Router <url>` |
+| Repair / upgrade | every installer run again **without a code** (Enter at the code question, or `--repair` / `-Repair`): it reads its settings again with the machine's own key | same |
+| Add a slot to the coordinator | router → Access → Machines → Add a Studio slot (OS: Linux or Windows; the router shows the command for that OS), then **Lanes: on** | same |
+| Several projects on one workstation | Add a workstation with the enrolled workstation's name and the other project: its code adds the project (keys kept) | same |
 | Switch a project's client | Automation → Settings → Client (`[client] kind`), Reload | same |
-| Check everything | `foundry-client doctor` (exists; gains `--lane` checks: tunnel, agent, kilo/opencode, a scratch worktree add/remove, a 1-file commit, a fetch back, Studio MCP ping) | same |
+| Check everything | `foundry-client doctor` (a running client) and `foundry-client doctor --platform` (this machine's OS and tools, no client needed); there is no `doctor --lane` | same |
+
+Tool versions for every row: `install/pins.env`.
 
 ## 10. Security and secrets
 

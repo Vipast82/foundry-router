@@ -15,12 +15,13 @@ services:
       - "127.0.0.1:${SLOT_OPENCODE_PORT:-4097}:4097"
     environment:
       SLOT_LANES: "1"
-      SLOT_LANES_ROOT: "/srv/foundry-lanes"
+      SLOT_LANES_ROOT: "${SLOT_LANES_ROOT:-/srv/foundry-lanes}"
     volumes:
       # the lane stores and worktrees: the SAME path inside the container and on the host, so
       # git's absolute paths (worktree links, the store's alternates) hold on both sides; the
-      # coordinator fetches lane branches from the host path over ssh
+      # coordinator fetches lane branches from the host path over ssh (a second slot on this
+      # host keeps its lanes in /srv/foundry-lanes/<slot>, its lanes_root setting, inside this)
       - "/srv/foundry-lanes:/srv/foundry-lanes"
       # the slot's game copy again, at its host path: lane stores borrow its objects
       # (git clone --bare --shared), and alternates name this absolute path
-      - "/srv/studio-slot/AnimalUprising.git:/srv/studio-slot/AnimalUprising.git:ro"
+      - "${SLOT_ROOT:-/srv/studio-slot}/${SLOT_GAME:-AnimalUprising}.git:${SLOT_ROOT:-/srv/studio-slot}/${SLOT_GAME:-AnimalUprising}.git:ro"

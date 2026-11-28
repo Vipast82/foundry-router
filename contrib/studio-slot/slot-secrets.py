@@ -49,7 +49,16 @@ def log(msg: str) -> None:
 
 
 def env(name: str, default: str = "") -> str:
-    return (os.environ.get(name) or default).strip()
+    """The variable, else the first line of the file <name>_FILE names (the junction's
+    studio-main: the router address its `studio-enrol` wrote into the junction volume)."""
+    v = (os.environ.get(name) or "").strip()
+    if not v and os.environ.get(name + "_FILE"):
+        try:
+            with open(os.environ[name + "_FILE"], encoding="utf-8") as f:
+                v = (f.readline() or "").strip()
+        except OSError:
+            v = ""
+    return v or default.strip()
 
 
 def on_tmpfs(path: str) -> bool:

@@ -101,10 +101,10 @@ jobs:
                   text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
                   print(f"::error title={case.get('classname')}.{case.get('name')}::{text}")
           PY
-      - name: Both coding clients (versions and integrity from the slot Dockerfile)
+      - name: Both coding clients (versions and integrity from install/pins.env)
         run: |
-          df=contrib/studio-slot/Dockerfile
-          arg() { sed -n "s/^ARG $1=//p" "$df" | tr -d '\r'; }    # CRLF on the Windows checkout
+          pins=install/pins.env       # the one pins file (the Dockerfile's ARGs equal it: a test)
+          arg() { sed -n "s/^$1=//p" "$pins" | tr -d '\r'; }    # CRLF on the Windows checkout
           kv=$(arg KILO_VERSION); ki=$(arg KILO_INTEGRITY)
           ov=$(arg OPENCODE_VERSION); oi=$(arg OPENCODE_INTEGRITY)
           test "$(npm view "@kilocode/cli@$kv" dist.integrity)" = "$ki"

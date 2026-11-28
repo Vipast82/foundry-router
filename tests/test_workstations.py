@@ -34,14 +34,14 @@ def test_add_and_enroll_a_workstation_gives_three_scoped_keys_once(app, client):
     assert out["machine"]["kind"] == "workstation" and out["code"].startswith("FNDR-")
     assert "workstation.sh" in out["install"]["inside_lxc"]
     assert out["machine"]["keys"] == {"ws-linux": "none", "ws-linux-kilo": "none",
-                                      "ws-linux-relay": "none"}
+                                      "ws-linux-relay": "none", "ws-linux-opencode": "none"}
     e = client.post("/v1/foundry/enroll", json={"code": out["code"], "hostname": "ws1"})
     assert e.status_code == 200, e.text
     e = e.json()
     assert e["kind"] == "workstation" and e["project"] == "animaluprising"
     k = e["keys"]
     assert set(k) == {"FOUNDRY_COORDINATOR_KEY", "FOUNDRY_KEY_KILO", "FOUNDRY_KEY",
-                      "FOUNDRY_CLIENT_KEY"}
+                      "FOUNDRY_CLIENT_KEY", "FOUNDRY_KEY_OPENCODE"}
     assert k["FOUNDRY_KEY_KILO"] == k["FOUNDRY_KEY"] != k["FOUNDRY_COORDINATOR_KEY"]
     assert e["game"] == {"id": "animaluprising", "clone_url": "git@github.com:me/game.git",
                          "branch": "master", "remote": "origin", "repo_key": None,

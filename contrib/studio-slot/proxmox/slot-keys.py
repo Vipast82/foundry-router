@@ -227,12 +227,18 @@ def apply_cpu_limit(host: dict, gpu: bool = False) -> str:
 
 
 def main(argv=None) -> int:
+    global ROOT
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--router", default="")
     ap.add_argument("--fingerprint", default="")
-    ap.add_argument("--key-file", default=f"{ROOT}/slot-key/slot-key.txt")
+    ap.add_argument("--key-file", default="")
     ap.add_argument("--user", default="studio")
+    # several slots on one host: each has its own folder (/srv/studio-slot/<slot>, setup-host.sh)
+    # and its own timer running this with --root; a host with one slot keeps /srv/studio-slot
+    ap.add_argument("--root", default=ROOT)
     a = ap.parse_args(argv)
+    ROOT = a.root.rstrip("/") or ROOT
+    a.key_file = a.key_file or f"{ROOT}/slot-key/slot-key.txt"
     conf = env_file(f"{ROOT}/slot.env")
     router = a.router or conf.get("FOUNDRY_URL", "")
     fp = a.fingerprint or conf.get("FOUNDRY_TLS_FINGERPRINT", "")

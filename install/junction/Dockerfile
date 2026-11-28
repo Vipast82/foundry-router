@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git openssh-client python3 python3-venv python3-pip xz-utils unzip \
         procps docker-cli tini \
     && rm -rf /var/lib/apt/lists/*
-COPY install/workstation.sh /opt/foundry-install/workstation.sh
-# the packages, the `foundry` user and every tool, at workstation.sh's pins (no router needed)
+COPY install/workstation.sh install/pins.env /opt/foundry-install/
+# the packages, the `foundry` user and every tool, at install/pins.env's pins (no router needed)
 RUN bash /opt/foundry-install/workstation.sh --tools-only \
     && kilo --version && opencode --version && pwsh -NoLogo -NoProfile -Command 'exit 0'
 COPY install/junction/junction-entrypoint.sh /opt/foundry-install/junction-entrypoint.sh

@@ -511,8 +511,11 @@ def project_ids(profiles: str) -> list[str]:
     return out
 
 
-def kilo_config_path(cfg: dict) -> str:
-    ws = cfg["workspace"]
+def kilo_config_path(cfg: dict, project: str = "") -> str:
+    """kilo.jsonc of the default project, or of `project` when this install holds several
+    ([workspace.projects.<id>], foundry_client/workstation.py)."""
+    from .config import project_workspace
+    ws = project_workspace(cfg, project)
     return expand(ws.get("kilo_config") or "") or (
         os.path.join(expand(ws["game"]), "kilo.jsonc") if ws.get("game") else "")
 

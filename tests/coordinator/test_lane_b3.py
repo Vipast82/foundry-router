@@ -240,7 +240,9 @@ def test_the_lane_compose_publishes_on_the_hosts_loopback_only():
              ln.strip().startswith("- \"0") or ":47811" in ln or ":4096" in ln or ":4097" in ln]
     assert ports and all(p.startswith('- "127.0.0.1:') for p in ports), ports
     assert '"/srv/foundry-lanes:/srv/foundry-lanes"' in text
-    assert "/srv/studio-slot/AnimalUprising.git:/srv/studio-slot/AnimalUprising.git:ro" in text
+    # the slot's own folder and game mirror (setup-host.sh's slot.env); AU's by default
+    assert ("${SLOT_ROOT:-/srv/studio-slot}/${SLOT_GAME:-AnimalUprising}.git:"
+            "${SLOT_ROOT:-/srv/studio-slot}/${SLOT_GAME:-AnimalUprising}.git:ro") in text
 
 
 def test_the_slot_starts_the_agent_only_with_lanes_on():

@@ -257,8 +257,10 @@ def test_slot_keys_rewrites_only_its_own_block():
 def test_installer_sets_up_the_key_refresh():
     root = Path(__file__).resolve().parents[1] / "contrib" / "studio-slot" / "proxmox"
     setup = (root / "setup-host.sh").read_text(encoding="utf-8")
-    assert "/usr/local/sbin/foundry-slot-keys --router" in setup
-    assert "systemctl enable --now foundry-slot-keys.timer" in setup
+    assert '/usr/local/sbin/foundry-slot-keys --root "$ROOT" --router' in setup
+    # foundry-slot-keys.timer for the host's first slot, -<slot> for a slot in its own folder
+    assert 'UNIT=foundry-slot-keys; [ "$SHARED" = 0 ] || UNIT="foundry-slot-keys-$SLOT"' in setup
+    assert 'systemctl enable --now "$UNIT.timer"' in setup
     assert "OnUnitActiveSec=5min" in setup
     # Foundry is downloaded (step 3) before the ssh step uses its slot-keys.py (step 4)
     assert setup.index('bold "3/6 Foundry') < setup.index('bold "4/6 ssh access')

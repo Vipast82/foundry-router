@@ -17,8 +17,11 @@ existing router there with one backup file.
 
 As root on the new machine:
 
-    curl -fsSLO https://raw.githubusercontent.com/Vipast82/foundry-router/main/install/router.sh
+    curl -fsSLO https://raw.githubusercontent.com/Vipast82/foundry-router/v0.181.270/install/router.sh
     bash router.sh
+
+Use a release tag in the address (the newest is on the project's Releases page), not `main`: the
+tag is the installer that release was tested with.
 
 It asks the following; Enter accepts the default shown:
 
