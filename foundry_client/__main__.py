@@ -103,8 +103,9 @@ def cmd_run(cfg, headless: bool, no_start: bool) -> int:
     mgr.start_thread()
     _start_relay(mgr, cfg)
     lane, lane_token = _lane_host(cfg)
-    app = api.create_app(mgr, api.load_token(), lane=lane, lane_token=lane_token)
     bind = ((cfg.get("lane") or {}).get("listen") or "127.0.0.1") if lane is not None else "127.0.0.1"
+    # bound to more than loopback (a slot's container), only the lane routes answer others
+    app = api.create_app(mgr, api.load_token(), lane=lane, lane_token=lane_token, bind=bind)
     server = uvicorn.Server(uvicorn.Config(app, host=bind, port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     if first_run or cfg["client"].get("open_settings_on_start"):

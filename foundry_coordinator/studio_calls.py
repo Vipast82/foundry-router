@@ -925,6 +925,24 @@ class StudioCalls:
         self.c._note(P, t, f"scripted Studio gate waits (pre-flight): {why[:200]}")
         return False
 
+    def _lane_tip(self, P, t: dict) -> str:
+        """The lane's tip, fetched here now (a forced lane fetch, at most one try a minute while
+        it fails), or "" when it is not here: the gate then waits and is asked again; it never
+        pushes a commit this machine does not have."""
+        tm = self.c.tracks
+        main = tm.main_of(P)
+        name = str(getattr(P.profile, "__dict__", {}).get("track") or "")
+        row = tm.store.track(main.id, name) if name else None
+        try:
+            out = tm.lane_fetch(main, row, force=True, retry_gap=60) if row else {}
+        except Exception as e:                                    # noqa: BLE001
+            out = {"ok": False, "detail": f"{type(e).__name__}: {e}"[:300]}
+        if out.get("ok") and out.get("tip"):
+            return str(out["tip"])
+        self.c._note(P, t, "scripted Studio gate waits: the lane's last commits are not here "
+                           f"yet ({str(out.get('detail') or 'no lane row')[:200]})")
+        return ""
+
     def _start(self, P, t: dict, pend: dict) -> bool:
         tid = t["task_id"]
         if self.c._held(P, t, "scripted Studio gate start"):
@@ -948,6 +966,14 @@ class StudioCalls:
         if self._slot(P) is None and not self._preflight(P, t):
             return False
         head = P.ws.head()
+        if self._slot(P) is not None and str(getattr(P.profile, "__dict__", {})
+                                               .get("lane_host") or ""):
+            # Distributed Foundry: a lane on a slot pushes its commit to the slot's game copy
+            # from its read mirror here, so that commit must be here first (2026-11-27 review:
+            # it pushed the slot's HEAD, which the mirror may not have had yet)
+            head = self._lane_tip(P, t)
+            if not head:
+                return False                      # the request stays: asked again next tick
         req = dict(pend.get("req") or {})
         tier = req.get("tier") or self._tier(P, tid)
         bots = req.get("kind") == "bots"

@@ -193,3 +193,66 @@ def test_the_machines_page_has_the_lanes_button():
     html = (pathlib.Path(__file__).resolve().parents[1] / "foundry_router" / "ui" / "static"
             / "index.html").read_text(encoding="utf-8")
     assert "data-mc-lanes" in html and "machines/${encodeURIComponent(n)}/lanes" in html
+
+
+# ---------------------------------------------------------------------------- review 2026-11-27
+
+def test_on_again_copies_the_personas_again(app, client):
+    """Lanes on copied the kilo key's personas once; a later change to that key never reached
+    the slot's lane keys. Every turn-on re-syncs them (no new key, no new value)."""
+    k2, _ = setup(app, client)
+    client.post("/admin/api/secrets/init", json={"passphrase": PASS})
+    _lanes(client, "slot-2", on=True)
+    h1 = _clients(app)["slot-2-kilo"].key_hash
+    v1 = _bundle(client, k2, "slot-2")["FOUNDRY_KEY_KILO"]["value"]
+
+    def mutate(raw):
+        for c in raw["clients"]:
+            if c["name"] == "kilo":
+                c["personas"] = ["Foundry-Kilo-Implementer", "Foundry-Kilo-Local",
+                                 "Foundry-Kilo-Lead"]
+    _svc(app).config_store.save(mutate)
+    r = _lanes(client, "slot-2", on=True)
+    assert r.status_code == 200 and r.json()["changed"] is True
+    c = _clients(app)
+    assert c["slot-2-kilo"].personas == c["slot-2-opencode"].personas == [
+        "Foundry-Kilo-Implementer", "Foundry-Kilo-Local", "Foundry-Kilo-Lead"]
+    assert c["slot-2-kilo"].key_hash == h1
+    assert _bundle(client, k2, "slot-2")["FOUNDRY_KEY_KILO"]["value"] == v1
+    assert _lanes(client, "slot-2", on=True).json()["changed"] is False
+
+
+def test_rotate_saves_the_config_first_and_rolls_back_a_failed_store_write(app, client,
+                                                                            monkeypatch):
+    k2, _ = setup(app, client)
+    client.post("/admin/api/secrets/init", json={"passphrase": PASS})
+    _lanes(client, "slot-2", on=True)
+    hashes = {n: _clients(app)[n].key_hash for n in ("slot-2-kilo", "slot-2-opencode")}
+    values = {n: v["value"] for n, v in _bundle(client, k2, "slot-2").items()}
+    store, cfg = _svc(app).secret_store, _svc(app).config_store
+    order = []
+    real_save, real_set = cfg.save, store.set_value
+    monkeypatch.setattr(cfg, "save", lambda fn: order.append("config") or real_save(fn))
+    sets = []
+
+    def set_value(g, name, value, actor=""):
+        order.append("store")
+        sets.append(name)
+        if len(sets) == 2:                                    # the second value fails
+            raise RuntimeError("disk full")
+        return real_set(g, name, value, actor=actor)
+    monkeypatch.setattr(store, "set_value", set_value)
+    r = _lanes(client, "slot-2", on=True, rotate=True)
+    assert r.status_code == 500 and r.json()["error"]["code"] == "store_failed"
+    assert order[:2] == ["config", "store"]                   # the config first
+    monkeypatch.setattr(store, "set_value", real_set)
+    # rolled back: the config's hashes and the store's values still belong together
+    assert {n: _clients(app)[n].key_hash for n in hashes} == hashes
+    got = {n: v["value"] for n, v in _bundle(client, k2, "slot-2").items()}
+    assert got == values
+    assert client_keys.hash_key(got["FOUNDRY_KEY_KILO"]) == hashes["slot-2-kilo"]
+    # and a rotate that works makes both new, matching
+    assert _lanes(client, "slot-2", on=True, rotate=True).status_code == 200
+    v2 = _bundle(client, k2, "slot-2")["FOUNDRY_KEY_KILO"]["value"]
+    assert v2 != values["FOUNDRY_KEY_KILO"]
+    assert client_keys.hash_key(v2) == _clients(app)["slot-2-kilo"].key_hash

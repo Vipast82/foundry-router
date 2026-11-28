@@ -65,23 +65,31 @@ def _judge(check, cmd, workspace, sha, subs, output, code, log, t0, evidence_ok)
 
 
 def run_check_remote(check, agent, project_id: str, lane: str, workspace: str, task_id: str,
-                     sha: str, base: str, state_dir: str, sleep=None) -> VerificationResult:
+                     sha: str, base: str, state_dir: str, sleep=None,
+                     slot_os: str = "") -> VerificationResult:
     """run_check for a lane whose worktree is on a slot (Distributed Foundry phase b): the
     command runs there as the lane agent's `verify` job; the log, the verdict and the evidence
-    pointer are made here exactly as for a local run. {python} is the slot's python3."""
+    pointer are made here exactly as for a local run, from the job's whole output.
+
+    The agent runs only a check registered for the lane when it was made (foundry_client/
+    lane.py): the job names the check and sends its unfilled template, and the agent fills the
+    placeholders itself. {python} is the slot's: "python" on a Windows slot (`slot_os`),
+    "python3" elsewhere."""
     from ..lane_fetch import wait_job
     subs = {"task": task_id, "sha": sha, "base": base or "", "workspace": workspace,
-            "python": "python3"}
-    cmd = [c.format(**subs) for c in check.command]
+            "python": "python" if slot_os == "windows" else "python3"}
+    cmd = [c.format(**subs) for c in check.command]       # for the log here; the slot fills its own
     out_dir = evidence_dir(state_dir, project_id, task_id, sha)
     log = os.path.join(out_dir, re.sub(r"[^\w.-]", "_", check.name) + ".log")
     t0 = time.time()
     kw = {"sleep": sleep} if sleep else {}
     job = wait_job(agent, project_id, lane, "verify",
-                   {"argv": cmd, "timeout": check.timeout_seconds,
+                   {"check": check.name, "command": [str(c) for c in check.command],
+                    "subs": {"task": task_id, "sha": sha or "", "base": base or ""},
+                    "timeout": check.timeout_seconds,
                     "env": {"FOUNDRY_COORD_TASK": task_id, "FOUNDRY_COORD_SHA": sha}},
                    wait_s=float(check.timeout_seconds) + 120, **kw)
-    if job["state"] in ("unreachable", "waiting"):
+    if job["state"] in ("unreachable", "waiting", "lost", "refused"):
         return _res(check, UNKNOWN, log, f"the slot did not finish the check ({job['state']}): "
                     f"{job['output'][-300:]}", sha, t0, "")
     # newlines as a local run sees them (subprocess text mode turns \r\n into \n), so the

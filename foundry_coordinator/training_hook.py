@@ -25,6 +25,7 @@ import foundry_platform as _plat
 
 import json
 import os
+import re
 import time
 
 
@@ -107,6 +108,9 @@ def finalize(store, P, t: dict, outcome: str, state_dir: str) -> dict:
     return m
 
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
 def export_remote_sessions(P, sessions: list, dest: str, endpoint=None) -> tuple:
     """({session id: export file}, [gap texts]) for the sessions of a lane whose worktree is
     on a slot (P.profile.lane_host); ({}, []) for a local one. Each session and its children
@@ -121,29 +125,43 @@ def export_remote_sessions(P, sessions: list, dest: str, endpoint=None) -> tuple
     from foundry_training.adapters import kilo as K
     from foundry_training.adapters import opencode as O
     out, gaps = {}, []
+    # the slot's server knows the lane by its folder THERE (phase c: P.profile.workspace is the
+    # read mirror here), as the lane's checks do (adapters/project.py verify)
+    directory = str(getattr(P.profile, "__dict__", {}).get("remote_workspace")
+                    or P.profile.workspace)
     todo = [(s["session_id"], str(s.get("client") or "kilo")) for s in sessions]
     seen = set()
+    root = os.path.realpath(dest)
     while todo:
         sid, kind = todo.pop()
         if sid in seen:
             continue
         seen.add(sid)
         kind = "opencode" if kind.startswith("opencode") else "kilo"
+        # a child id comes from the slot: it names a file here, so only a plain id may
+        if not isinstance(sid, str) or not _SESSION_ID_RE.match(sid):
+            gaps.append(f"remote session {str(sid)[:80]!r} on {host}: not exported (not a "
+                        f"session id)")
+            continue
         ep = endpoint(host, kind)
         if not ep:
             gaps.append(f"remote session {sid} on {host}: not exported (the lane tunnel is down)")
             continue
         try:
             if kind == "opencode":
-                data = O.from_api(ep["url"], sid, ep.get("password", ""), P.profile.workspace)
+                data = O.from_api(ep["url"], sid, ep.get("password", ""), directory)
             else:
-                data = K.from_api(ep["url"], sid, ep.get("password", ""), P.profile.workspace)
+                data = K.from_api(ep["url"], sid, ep.get("password", ""), directory)
         except Exception as e:                                    # noqa: BLE001
             gaps.append(f"remote session {sid} on {host}: not exported ({type(e).__name__}: "
                         f"{e})"[:300])
             continue
         os.makedirs(dest, exist_ok=True)
         path = os.path.join(dest, f"{kind}__{sid}.json")
+        if os.path.dirname(os.path.realpath(path)) != root:
+            gaps.append(f"remote session {sid} on {host}: not exported (its name leads outside "
+                        f"the spool)")
+            continue
         data = {**data, "_lane_host": host, "_client": kind}
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

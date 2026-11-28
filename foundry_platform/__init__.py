@@ -80,6 +80,75 @@ def detached_kw() -> dict:
     return {"start_new_session": True}
 
 
+def group_kw() -> dict:
+    """Popen keywords for a child whose whole process tree kill_tree() can end: POSIX a new
+    session (its own process group), Windows no console window (taskkill /T follows the
+    parent ids there, so no group is needed)."""
+    if is_windows():
+        return {"creationflags": CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
+def kill_tree(proc, timeout: float = 5.0) -> None:
+    """End `proc` (a Popen) and every process it started. POSIX: SIGTERM to its process group
+    when it leads one (started with group_kw()), SIGKILL after `timeout`; else the process
+    alone. Windows: `taskkill /T /F` on its tree, then Popen.kill() in case taskkill is
+    missing. Never raises; a process that already ended is left alone."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:                                             # noqa: BLE001
+        return
+    pid = int(getattr(proc, "pid", 0) or 0)
+    if is_windows():
+        if pid:
+            try:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30, **no_window_kw())
+            except (OSError, subprocess.SubprocessError):
+                pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=timeout)
+        except Exception:                                         # noqa: BLE001
+            pass
+        return
+    import signal
+    try:
+        group = os.getpgid(pid) if pid else 0
+    except OSError:
+        group = 0
+    leads = bool(group) and group == pid
+    try:
+        if leads:
+            os.killpg(group, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:                                             # noqa: BLE001
+        pass
+    try:
+        if leads:
+            os.killpg(group, signal.SIGKILL)       # children that ignored SIGTERM, too
+        elif proc.poll() is None:
+            proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:                                             # noqa: BLE001
+        pass
+
+
 def job_shell(script: str, login: bool = True) -> list:
     """argv that runs a job script in the platform's job shell: `bash -lc` on POSIX,
     PowerShell 7 (`pwsh`, else Windows PowerShell) on Windows. The script is passed as one
@@ -204,5 +273,5 @@ def facts() -> dict:
 
 __all__ = ["CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "NO_WINDOW",
            "is_windows", "is_linux", "is_macos", "os_kind", "no_window_flags", "no_window_kw",
-           "detached_kw", "job_shell", "script_ext", "service_kind", "default_root",
+           "detached_kw", "group_kw", "kill_tree", "job_shell", "script_ext", "service_kind", "default_root",
            "lanes_root", "read_text", "write_text", "LockTimeout", "file_lock", "facts"]

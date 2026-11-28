@@ -20,16 +20,26 @@ A slot with no `host` (its docker runs on this machine, or a test) needs no ssh:
 endpoints are its published 127.0.0.1 ports directly.
 
 Nothing here runs on the tick thread: `MANAGER.configure()` starts one daemon thread that
-checks the tunnels every few seconds. With no slot set to lanes, nothing starts.
+checks the tunnels every few seconds. With no slot set to lanes, or the project's
+[automation] remote_lanes off, nothing starts and no secrets are read.
+
+A tunnel is healthy when ssh runs, the forwarded port accepts AND the agent answers
+GET /api/lane/health with the token held here (every HEALTH_EVERY_S). A slot's agent makes a
+new token at every start, so a 401 re-reads the secrets once (the tunnel stays); no answer
+twice, or a 401 the new secrets do not cure, restarts the tunnel. ssh's own messages go to
+<state>/logs/lane-tunnel-<slot>.log (never a pipe nobody reads: a full pipe stops ssh).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import Callable, Optional
 
 import foundry_platform as _plat
@@ -37,17 +47,52 @@ import foundry_platform as _plat
 from . import slots as SL
 
 CHECK_EVERY_S = 5.0
+HEALTH_EVERY_S = 30.0
+HEALTH_TIMEOUT_S = 10.0
+HEALTH_MISSES = 2                 # no answer this many checks in a row: the tunnel restarts
+REFRESH_GAP_S = 10.0              # secrets re-read at most this often per slot on a 401
+LOG_MAX_BYTES = 1024 * 1024
 BACKOFF_S = (5, 10, 20, 40, 80, 120)
 SECRETS_FILE = "/run/secrets/lane/lane.json"
 WINDOWS_SECRETS_FILE = "C:/Foundry/secrets/lane/lane.json"     # install/slot.ps1
 PORTS = {"agent": 47811, "kilo": 4096, "opencode": 4097}
 SECRETS_TIMEOUT_S = 30
 READY_WAIT_S = 10
+# the settings a tunnel is made from: two projects may share a slot's tunnel only when these
+# are the same (the tunnel manager is keyed by slot id)
+TUNNEL_KEYS = ("host", "ssh", "container", "os", "lanes_secrets", "agent_port", "kilo_port",
+               "opencode_port")
 
 
 def lane_slots(profile) -> dict:
-    """{slot id: settings} of the enabled slots with `lanes = true`."""
+    """{slot id: settings} of the enabled slots with `lanes = true`, in a project with
+    [automation] remote_lanes on; {} otherwise (no tunnel, no secrets read)."""
+    try:
+        from .automation import get as auto_get
+        if auto_get(profile, "remote_lanes") is not True:
+            return {}
+    except Exception:                                             # noqa: BLE001
+        return {}
     return {sid: s for sid, s in SL.configured(profile).items() if s.get("lanes") is True}
+
+
+def default_log_dir() -> str:
+    """<the coordinator's state folder>/logs (slot_ssh knows the running one's)."""
+    from . import slot_ssh
+    return os.path.join(os.path.dirname(slot_ssh.ssh_dir()), "logs")
+
+
+def probe_health(url: str, token: str, timeout: float = HEALTH_TIMEOUT_S) -> int:
+    """GET <url>/api/lane/health with the lane token: the HTTP status, 0 for no answer."""
+    req = urllib.request.Request(url.rstrip("/") + "/api/lane/health",
+                                 headers={"X-Lane-Token": token or ""})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return int(r.status or 200)
+    except urllib.error.HTTPError as e:
+        return int(e.code)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return 0
 
 
 def free_port() -> int:
@@ -77,7 +122,9 @@ def tunnel_argv(slot: dict, local: dict) -> list:
     remote = remote_ports(slot)
     fwd = []
     for k in ("agent", "kilo", "opencode"):
-        fwd += ["-L", f"{local[k]}:127.0.0.1:{remote[k]}"]
+        # bound to this machine's loopback explicitly (never every address, whatever
+        # GatewayPorts says)
+        fwd += ["-L", f"127.0.0.1:{local[k]}:127.0.0.1:{remote[k]}"]
     return SL.ssh_cmd(slot) + ["-N", "-o", "ExitOnForwardFailure=yes",
                                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                                *fwd, str(slot["host"])]
@@ -107,6 +154,9 @@ class Tunnel:
         self.error = ""
         self.failures = 0
         self.next_try = 0.0
+        self.probed = 0.0              # last health probe
+        self.misses = 0                # health probes in a row with no answer
+        self.refreshed = -1e18         # last secrets re-read on a 401
 
     @property
     def remote(self) -> bool:
@@ -116,9 +166,11 @@ class Tunnel:
 class TunnelManager:
     def __init__(self, popen: Callable = subprocess.Popen, run: Callable = subprocess.run,
                  clock: Callable = time.time, pick_port: Callable = free_port,
-                 is_open: Callable = port_open, sleep: Callable = time.sleep):
+                 is_open: Callable = port_open, sleep: Callable = time.sleep,
+                 probe: Callable = probe_health, log_dir: Callable = default_log_dir):
         self.popen, self.run, self.clock = popen, run, clock
         self.pick_port, self.is_open, self.sleep = pick_port, is_open, sleep
+        self.probe, self.log_dir = probe, log_dir
         self._lock = threading.RLock()
         self._tunnels: dict[str, Tunnel] = {}
         self._thread: Optional[threading.Thread] = None
@@ -169,14 +221,67 @@ class TunnelManager:
         now = self.clock()
         if t.state == "up":
             alive = (not t.remote or (t.proc is not None and t.proc.poll() is None))
-            if alive and self.is_open(t.local["agent"]):
+            if not (alive and self.is_open(t.local["agent"])):
+                self._fail(t, "the ssh tunnel exited" if t.remote and t.proc is not None
+                           and t.proc.poll() is not None else "the lane agent stopped answering")
                 return
-            self._fail(t, "the ssh tunnel exited" if t.remote and t.proc is not None
-                       and t.proc.poll() is not None else "the lane agent stopped answering")
+            if now - t.probed >= HEALTH_EVERY_S:
+                self._health(t)
             return
         if now < t.next_try:
             return
         self._start(t)
+
+    def _health(self, t: Tunnel) -> None:
+        """The agent answers with the token held here: 200 fine; 401 (it restarted with a new
+        token) the secrets are read again once; no answer HEALTH_MISSES times, or a 401 the
+        new secrets do not cure, restarts the tunnel (its _start reads the secrets too)."""
+        t.probed = self.clock()
+        url = f"http://127.0.0.1:{t.local['agent']}"
+        st = self.probe(url, t.secrets.get("token", ""))
+        if st == 401:
+            self._reread(t)
+            st = self.probe(url, t.secrets.get("token", ""))
+            if st == 401:
+                self._fail(t, "the lane agent refuses the token, also after reading the "
+                              "secrets again")
+                return
+        if 200 <= st < 300:
+            t.misses = 0
+            return
+        t.misses += 1
+        if t.misses >= HEALTH_MISSES:
+            self._fail(t, f"the lane agent did not answer its health check "
+                          f"({'no answer' if not st else f'HTTP {st}'}, {t.misses} times)")
+
+    def _reread(self, t: Tunnel) -> bool:
+        """Read the slot's secrets again for a tunnel that is up: True when the token changed."""
+        t.refreshed = self.clock()
+        try:
+            secrets = self._read_secrets(t.slot)
+        except RuntimeError as e:
+            t.error = str(e)
+            return False
+        with self._lock:
+            changed = secrets.get("token") != t.secrets.get("token")
+            if t.state == "up":
+                t.secrets = secrets
+        return changed
+
+    def refresh(self, sid: str, used_token: str = "") -> bool:
+        """A lane call got 401 with `used_token` (remote_git.LaneAgent): the slot's agent
+        restarted and made a new token. True when the token held now differs from the one used
+        (read again here, at most every REFRESH_GAP_S, or by another caller meanwhile)."""
+        with self._lock:
+            t = self._tunnels.get(sid)
+            if t is None or t.state != "up":
+                return False
+            cur = t.secrets.get("token", "")
+            if used_token and cur and cur != used_token:
+                return True
+            if self.clock() - t.refreshed < REFRESH_GAP_S:
+                return False
+        return self._reread(t)
 
     def _start(self, t: Tunnel) -> None:
         t.state, t.error = "starting", ""
@@ -187,18 +292,22 @@ class TunnelManager:
             return
         if t.remote:
             local = {k: self.pick_port() for k in PORTS}
+            log, start = self._open_log(t.sid)
             try:
                 t.proc = self.popen(tunnel_argv(t.slot, local), stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=log if log is not None else subprocess.DEVNULL,
                                     **_plat.no_window_kw())
             except OSError as e:
                 self._fail(t, f"ssh could not start: {e}"[:300])
                 return
+            finally:
+                if log is not None:
+                    log.close()                 # ssh holds its own handle
             waited = 0.0
             while waited < READY_WAIT_S and not self.is_open(local["agent"]):
                 if t.proc.poll() is not None:
-                    err = (t.proc.stderr.read() if t.proc.stderr else b"") or b""
-                    self._fail(t, "ssh: " + err.decode("utf-8", "replace").strip()[-300:])
+                    self._fail(t, "ssh: " + self._log_tail(t.sid, start))
                     return
                 self.sleep(0.25)
                 waited += 0.25
@@ -213,6 +322,35 @@ class TunnelManager:
         with self._lock:
             t.local, t.secrets = local, secrets
             t.state, t.since, t.failures, t.error = "up", self.clock(), 0, ""
+            t.probed, t.misses = self.clock(), 0
+
+    # ------------------------------------------------------------------ ssh's log
+
+    def log_path(self, sid: str) -> str:
+        return os.path.join(self.log_dir(), f"lane-tunnel-{sid}.log")
+
+    def _open_log(self, sid: str) -> tuple:
+        """(file, offset this start's lines begin at) for ssh's stderr, or (None, 0). The file
+        starts over once it is over LOG_MAX_BYTES."""
+        try:
+            path = self.log_path(sid)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            mode = "wb" if os.path.isfile(path) and os.path.getsize(path) > LOG_MAX_BYTES else "ab"
+            f = open(path, mode)
+            f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} tunnel to {sid}\n".encode("utf-8"))
+            f.flush()
+            return f, f.tell()
+        except OSError:
+            return None, 0
+
+    def _log_tail(self, sid: str, start: int) -> str:
+        """What ssh wrote since `start` (its last 300 characters): the startup error."""
+        try:
+            with open(self.log_path(sid), "rb") as f:
+                f.seek(start)
+                return f.read().decode("utf-8", "replace").strip()[-300:]
+        except OSError:
+            return "(no ssh log)"
 
     def _read_secrets(self, slot: dict) -> dict:
         try:
@@ -283,12 +421,23 @@ class TunnelManager:
 MANAGER = TunnelManager()
 _BY_PROJECT: dict[str, dict] = {}
 _BY_PROJECT_LOCK = threading.Lock()
+_CONFLICTS: dict = {}               # (project, slot) -> why it has no tunnel
+
+
+def _tunnel_view(s: dict) -> dict:
+    return {k: s.get(k) for k in TUNNEL_KEYS}
 
 
 def ensure(profile) -> dict:
     """Record a profile's lane slots and configure the process-wide manager with every
     project's (a coordinator runs several projects; one project with none closes nothing of
-    another's). No-op while no project has a lane slot."""
+    another's). No-op while no project has a lane slot.
+
+    The manager has one tunnel per slot id. Two projects may share it when their settings for
+    that slot agree on everything a tunnel is made from (TUNNEL_KEYS); a project whose
+    settings differ from the project that named the slot first gets no tunnel to it (and no
+    lanes there: conflict() says why) instead of silently using the other's."""
+    global _CONFLICTS
     slots = lane_slots(profile)
     pid = str(getattr(profile, "id", "") or "")
     with _BY_PROJECT_LOCK:
@@ -299,11 +448,29 @@ def ensure(profile) -> dict:
         else:
             return slots
         union: dict = {}
-        for s in _BY_PROJECT.values():
-            union.update(s)
+        owner: dict = {}
+        conflicts: dict = {}
+        for p, ss in _BY_PROJECT.items():
+            for sid, s in ss.items():
+                if sid in union and _tunnel_view(union[sid]) != _tunnel_view(s):
+                    diff = [k for k in TUNNEL_KEYS if union[sid].get(k) != s.get(k)]
+                    conflicts[(p, sid)] = (f"slot {sid} already has a lane tunnel for project "
+                                           f"{owner[sid]} with other settings "
+                                           f"({', '.join(diff)}): make them the same in both "
+                                           f"projects, or use another slot id")
+                    continue
+                union.setdefault(sid, s)
+                owner.setdefault(sid, p)
+        _CONFLICTS = conflicts
     MANAGER.configure(union)
-    return slots
+    return {sid: s for sid, s in slots.items() if (pid, sid) not in conflicts}
 
 
-__all__ = ["TunnelManager", "MANAGER", "ensure", "lane_slots", "tunnel_argv", "secrets_argv",
-           "remote_ports", "PORTS"]
+def conflict(project: str, sid: str) -> str:
+    """Why `project` has no tunnel to `sid` ("" when it has, or never asked)."""
+    with _BY_PROJECT_LOCK:
+        return str(_CONFLICTS.get((str(project or ""), str(sid or ""))) or "")
+
+
+__all__ = ["TunnelManager", "MANAGER", "ensure", "conflict", "lane_slots", "tunnel_argv",
+           "secrets_argv", "remote_ports", "probe_health", "PORTS", "TUNNEL_KEYS"]
