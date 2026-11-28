@@ -55,14 +55,27 @@ MAX_LEAD_NOTE = 2000
 # TrackManager (tracks/manager.py). Payloads:
 #   tracks_analyze {}                          -> the deterministic analysis (read)
 #   tracks_propose {max_agents?}               -> a plan {plan_id, tracks, agents, notes}
-#   track_start    {plan_id} | {name, sprints, needs?}   create + queue (the confirm)
+#   track_start    {plan_id, names?, slots?} | {name, sprints, needs?, slot?}
+#                                              create + queue (the confirm); `slot` (or
+#                                              `slots` {track: slot} for a proposal) binds
+#                                              the track to a Studio slot, and on a slot
+#                                              with lanes on (remote_lanes on) it is a lane
+#                                              there (Distributed Foundry)
 #   track_stop     {name, reason}
 #   track_merge    {name, option?}             merge now (quiet point), or answer a
 #                                              conflict decision with `option`
 #   track_status   {}                          -> the Tracks tab's data
 #   set_max_agents {max_agents}                live cap on running sprints
+#   track_bring_home {name, force_local?}      a lane on a slot becomes a local track
+#                                              (TrackManager.bring_home); force_local = go
+#                                              on here from the last fetched commit
+#   track_set_slot {name, slot}                move a track to another Studio slot, or
+#                                              slot "" / "none" to unbind it (set_slot)
 TRACK_KINDS = ("tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
-               "track_status", "set_max_agents")
+               "track_status", "set_max_agents", "track_bring_home", "track_set_slot")
+# the heartbeat feature a router hands track_bring_home / track_set_slot to (the tracks
+# status of such a coordinator also carries each project's `slots`)
+TRACK_LANES_FEATURE = "track_lanes"
 # Queue API (2026-10-23, review A2): edits of the approved queue through the
 # engine's own methods. Order is priority (tick() walks queue positions);
 # nothing here dispatches work or invents a transition. Payloads:
@@ -281,7 +294,8 @@ class ControlChannel:
                 # lead_escalation decisions even when no project runs the lifecycle)
                 "features": (["decision_answer", "lifecycle"] if self._lifecycle_on() else
                              ["decision_answer"] if lead_on else [])
-                + ["project_pause", "tracks", "queue", "prep_queue", "build_rerun", "orders"]
+                + ["project_pause", "tracks", TRACK_LANES_FEATURE, "queue", "prep_queue",
+                   "build_rerun", "orders"]
                 + (["lead_manager"] if lead_on else [])
                 + (["project_memory"] if mem_on else [])
                 + (["playbook"] if pb_on else []),
@@ -438,11 +452,85 @@ class ControlChannel:
         out = {}
         for pid, P in sorted(self.c.projects.items()):
             try:
-                st = tm.status(P)
+                st = self._track_status_of(tm, P)
                 st["studio"]["journal"] = (st["studio"].get("journal") or [])[-40:]
                 out[pid] = st
             except Exception as e:                               # noqa: BLE001
                 out[pid] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return out
+
+    def _track_status_of(self, tm, P) -> dict:
+        """tm.status(P) plus what the Tracks tab and the router's Fleet view need for lanes on
+        slots (Distributed Foundry): each track's Studio slot (`slot`), the project's enabled
+        Studio slots with their lanes switch, OS, Studio mode and upkeep (disk %, Foundry
+        version), `remote_lanes`, the coding client kind and this machine's disk. Every extra
+        is best effort: the status itself never fails for one of them."""
+        st = tm.status(P)
+        try:
+            main = tm.main_of(P)
+            for r in st.get("tracks") or []:
+                row = self.store.track(main.id, r["name"]) or {}
+                r["slot"] = str((row.get("data") or {}).get("slot") or "")
+        except Exception:                                         # noqa: BLE001
+            pass
+        try:
+            from . import slots as SL
+            conf = SL.configured(P.profile)
+        except Exception:                                         # noqa: BLE001
+            conf = {}
+        try:
+            from . import slotkeep
+            kept = slotkeep.view(self.c, P)
+        except Exception:                                         # noqa: BLE001
+            kept = {}
+        st["slots"] = {
+            sid: {"lanes": s.get("lanes") is True, "os": str(s.get("os") or "linux"),
+                  "studio": str(s.get("studio") or "container"),
+                  **{k: (kept.get(sid) or {})[k] for k in ("disk_pct", "foundry", "behind")
+                     if (kept.get(sid) or {}).get(k) is not None}}
+            for sid, s in sorted(conf.items())}
+        try:
+            from .automation import get as auto_get
+            st["remote_lanes"] = auto_get(P, "remote_lanes") is True
+        except Exception:                                         # noqa: BLE001
+            st["remote_lanes"] = False
+        raw = getattr(P.profile, "raw", None) or {}
+        st["client_kind"] = str(((raw.get("client") or {}) if isinstance(raw, dict) else {})
+                                .get("kind") or "kilo")
+        try:
+            import shutil
+            du = shutil.disk_usage(str(P.profile.workspace))
+            st["junction"] = {"disk_pct": round(du.used * 100 / du.total) if du.total else None,
+                              "free_gb": round(du.free / 2 ** 30, 1)}
+        except Exception:                                         # noqa: BLE001
+            st["junction"] = {}
+        return st
+
+    def _start_plan_on_slots(self, tm, P, plan_id: str, names, slots: dict, actor: str) -> list:
+        """A proposal started with Studio slots picked per track ({track: slot}): the same
+        checks and record as TrackManager.start_plan, each track created with its slot."""
+        from .tracks.manager import PLAN_TTL_S, TrackError
+        P = tm.main_of(P)
+        plan = tm.plan(plan_id)
+        if not plan or plan.get("project") != P.id:
+            raise TrackError(f"no proposal {plan_id} for {P.id} (propose again)")
+        if self.clock() - float(plan.get("ts") or 0) > PLAN_TTL_S:
+            raise TrackError(f"proposal {plan_id} is older than a day; propose again")
+        if plan.get("started"):
+            raise TrackError(f"proposal {plan_id} already started")
+        unknown = sorted(set(slots) - {t["name"] for t in plan.get("tracks") or []})
+        if unknown:
+            raise TrackError(f"proposal {plan_id} has no track {', '.join(unknown)}")
+        out = []
+        for t in plan.get("tracks") or []:
+            if names and t["name"] not in names:
+                continue
+            row = tm.create(P, t["name"], t["sprints"], t.get("needs"), actor,
+                            slot=str(slots.get(t["name"]) or ""))
+            out.append(tm.start(P, row["name"], actor))
+        plan["started"] = {"ts": self.clock(), "by": actor, "tracks": [r["name"] for r in out],
+                           "slots": {k: v for k, v in slots.items() if v}}
+        self.store.set_meta(f"track_plan:{plan_id}", json.dumps(plan, default=str))
         return out
 
     def _track_action(self, a, actor):
@@ -471,11 +559,17 @@ class ControlChannel:
                                     f"{plan['agents']} agent(s), {len(plan['tracks'])} parallel "
                                     f"track(s)", plan)
             if kind == "track_start":
-                if p.get("plan_id"):
+                if p.get("plan_id") and isinstance(p.get("slots"), dict) and any(
+                        p["slots"].values()):
+                    rows = self._start_plan_on_slots(tm, P, str(p["plan_id"]),
+                                                     p.get("names") or None,
+                                                     {str(k): str(v or "") for k, v in
+                                                      p["slots"].items()}, actor)
+                elif p.get("plan_id"):
                     rows = tm.start_plan(P, str(p["plan_id"]), actor, p.get("names") or None)
                 else:
                     tm.create(P, str(p.get("name") or ""), list(p.get("sprints") or []),
-                              p.get("needs"), actor)
+                              p.get("needs"), actor, slot=str(p.get("slot") or ""))
                     rows = [tm.start(P, str(p.get("name") or "").strip().lower(), actor)]
                 return self._report(a, "applied", "started " + ", ".join(
                     f"{r['name']} ({' -> '.join(r['sprints'])})" for r in rows),
@@ -495,10 +589,26 @@ class ControlChannel:
                 return self._report(a, "applied", f"track {name} merges at the main sprint's "
                                     f"next quiet point", {"name": name, "state": r["state"]})
             if kind == "track_status":
-                return self._report(a, "applied", "ok", tm.status(P))
+                return self._report(a, "applied", "ok", self._track_status_of(tm, P))
             if kind == "set_max_agents":
                 n = tm.set_max_agents(P, p.get("max_agents"), actor)
                 return self._report(a, "applied", f"max_agents is {n}", {"max_agents": n})
+            if kind == "track_bring_home":
+                name = str(p.get("name") or "")
+                r = tm.bring_home(P, name, actor=actor, why="operator",
+                                  force_local=p.get("force_local") is True)
+                return self._report(a, "applied" if r.get("ok") else "rejected",
+                                    str(r.get("detail") or "")[:500],
+                                    {"name": name, "ok": bool(r.get("ok")),
+                                     "force_local": p.get("force_local") is True})
+            if kind == "track_set_slot":
+                name, slot = str(p.get("name") or ""), str(p.get("slot") or "")
+                row = tm.set_slot(P, name, slot, actor)
+                now = str((row.get("data") or {}).get("slot") or "")
+                return self._report(a, "applied", f"track {name} is now on {now}" if now else
+                                    f"track {name} is bound to no slot (its Studio checks run "
+                                    f"at the merge here)",
+                                    {"name": name, "slot": now, "needs": row.get("needs") or []})
         except TrackError as e:
             return self._report(a, "rejected", str(e)[:500])
         return self._report(a, "rejected", f"unsupported track action {kind!r}")

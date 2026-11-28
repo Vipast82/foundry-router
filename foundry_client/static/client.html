@@ -28,7 +28,7 @@
   button.act.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.act:disabled { opacity:.5; cursor:default; }
   label { display:block; font-size:12px; color:var(--dim); margin-top:10px; }
-  input[type=text], input[type=number], input[type=password], textarea { width:100%; background:var(--bg); color:var(--text);
+  input[type=text], input[type=number], input[type=password], textarea, select { width:100%; background:var(--bg); color:var(--text);
          border:1px solid var(--line); border-radius:5px; padding:6px 8px; font:inherit; }
   textarea { font-family:var(--code-font); font-size:12px; }
   fieldset { border:1px solid var(--line); border-radius:8px; padding:8px 12px 12px; margin:0 0 12px; background:var(--panel); }
@@ -193,15 +193,19 @@ const FIELDS = [
   ["Blender", [["components.blender.enabled", "Run Blender (blender-mcp add-on; a running Blender is adopted)", "bool"], ["components.blender.path", "blender.exe (e.g. C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe)", "text"], ["components.blender.port", "Add-on port", "number"]]],
   ["Resource watch", [["resources.enabled", "Watch memory and the development / testing jobs (training, Studio checks, test runs, builds)", "bool"], ["resources.auto_stop", "Stop a development / testing job that goes over its limit (anything else is only warned about, never touched)", "bool"], ["resources.low_ram_gb", "Warn when free RAM is below (GB, 0 = never)", "number"], ["resources.kilo_restart_gb", "Restart Kilo at the next safe point when it uses more than (GB, its whole process tree; 0 = never)", "number"], ["resources.kilo_restart_free_gb", "...and only when free RAM is below (GB, 0 = whatever is free)", "number"], ["resources.opencode_restart_gb", "Restart the OpenCode server at the next safe point when it uses more than (GB, its whole process tree; 0 = never)", "number"], ["resources.opencode_restart_free_gb", "...and only when free RAM is below (GB, 0 = whatever is free)", "number"], ["resources.interval_seconds", "Check every (seconds)", "number"], ["resources.limits.training.gb", "Training-data runs: memory limit (GB, 0 = none)", "number"], ["resources.limits.training.minutes", "Training-data runs: time limit (minutes, 0 = none)", "number"], ["resources.limits.studio_check.gb", "Scripted Studio checks: memory limit (GB, 0 = none)", "number"], ["resources.limits.studio_check.minutes", "Scripted Studio checks: time limit (minutes, 0 = none)", "number"], ["resources.limits.gate_ps1.gb", "gate.ps1 runs: memory limit (GB, 0 = none)", "number"], ["resources.limits.gate_ps1.minutes", "gate.ps1 runs: time limit (minutes, 0 = none)", "number"], ["resources.limits.lune.gb", "Lune test runs: memory limit (GB, 0 = none)", "number"], ["resources.limits.lune.minutes", "Lune test runs: time limit (minutes, 0 = none)", "number"], ["resources.limits.blender_build.gb", "Headless Blender builds: memory limit (GB, 0 = none)", "number"], ["resources.limits.blender_build.minutes", "Headless Blender builds: time limit (minutes, 0 = none)", "number"], ["resources.limits.rojo_build.gb", "rojo build: memory limit (GB, 0 = none)", "number"], ["resources.limits.rojo_build.minutes", "rojo build: time limit (minutes, 0 = none)", "number"], ["resources.limits.pytest.gb", "pytest runs: memory limit (GB, 0 = none)", "number"], ["resources.limits.pytest.minutes", "pytest runs: time limit (minutes, 0 = none)", "number"], ["resources.limits.repo_script.gb", "Game repo tools/ scripts: memory limit (GB, 0 = none)", "number"], ["resources.limits.repo_script.minutes", "Game repo tools/ scripts: time limit (minutes, 0 = none)", "number"]]],
   ["Rojo", [["components.rojo.enabled", "Run rojo serve", "bool"], ["components.rojo.path", "rojo executable (empty = find it)", "text"], ["components.rojo.project", "Project folder (empty = game folder)", "text"], ["components.rojo.port", "Port", "number"]]],
+  // Distributed Foundry: on a slot (a machine that runs Studio and lanes) this client is the
+  // lane agent the workstation's coordinator talks to through its ssh tunnel ([lane] table)
+  ["Lane agent (only on a slot)", [["lane.enabled", "This machine holds lanes for a coordinator on another machine (a slot). A lane is a track whose worktree and Kilo/OpenCode sessions live here. Off on a workstation.", "bool"], ["lane.root", "Lanes folder: the lane stores and worktrees (required when on; e.g. /srv/foundry-lanes on Linux, C:/Foundry/lanes on Windows)", "text"], ["lane.secrets_file", "Lane secrets file: where the lane token and the Kilo / OpenCode passwords are written at each start, read by the coordinator over ssh (empty = the default: /run/secrets/lane/lane.json on Linux, C:/Foundry/secrets/lane/lane.json on Windows)", "text"], ["lane.listen", "Address this client listens on: 127.0.0.1 on a machine, 0.0.0.0 only inside a container whose port is published on the host's 127.0.0.1", "select", ["127.0.0.1", "0.0.0.0", "::1", "::"]]]],
 ];
 const get = (o, p) => p.split(".").reduce((a, k) => a == null ? a : a[k], o);
 const put = (o, p, v) => { const ks = p.split("."); let a = o; for (const k of ks.slice(0, -1)) a = a[k] ??= {}; a[ks.at(-1)] = v; };
 function renderSettings() {
   if (!S.settings) return;
   const s = S.settings.settings;
-  $("#v-settings").innerHTML = `<form id="sf">${FIELDS.map(([g, fs]) => `<fieldset><legend>${esc(g)}</legend>${fs.map(([p, l, t]) => {
+  $("#v-settings").innerHTML = `<form id="sf">${FIELDS.map(([g, fs]) => `<fieldset><legend>${esc(g)}</legend>${fs.map(([p, l, t, opts]) => {
       const v = get(s, p);
       if (t === "bool") return `<label style="color:var(--text)"><input type="checkbox" name="${p}" ${v ? "checked" : ""}> ${esc(l)}</label>`;
+      if (t === "select") return `<label for="${p}">${esc(l)}</label><select id="${p}" name="${p}">${(opts.includes(v) || v == null ? opts : [v, ...opts]).map(o => `<option value="${esc(o)}" ${o === (v ?? opts[0]) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
       if (t === "list") return `<label for="${p}">${esc(l)}</label><textarea id="${p}" name="${p}" rows="3">${esc((v || []).join("\n"))}</textarea>`;
       return `<label for="${p}">${esc(l)}</label><input id="${p}" name="${p}" type="${t}" value="${esc(v ?? "")}">`;
     }).join("")}</fieldset>`).join("")}
@@ -245,9 +249,22 @@ async function renderSecrets() {
 async function renderDoctor() {
   $("#v-doctor").innerHTML = '<div class="dim">checking…</div>';
   let d; try { d = await api("doctor"); } catch (e) { $("#v-doctor").innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; return; }
-  $("#v-doctor").innerHTML = `<div class="row"><b class="${d.ok ? "ok" : "bad"}">${d.ok ? "Nothing blocks the stack" : "Something blocks the stack"}</b><span style="flex:1"></span><button class="act" id="redo">Check again</button></div>
-    <div class="checks">${d.checks.map(c => `<div class="check c-${esc(c.status)}"><span class="dot"></span><b>${esc(c.label)}</b><span class="d">${esc(c.detail)}</span></div>`).join("")}</div>`;
+  $("#v-doctor").innerHTML = `<div class="row"><b class="${d.ok ? "ok" : "bad"}">${d.ok ? "Nothing blocks the stack" : "Something blocks the stack"}</b><span style="flex:1"></span><button class="act" id="redo">Check again</button><button class="act" id="platform" title="What this machine is and which tools it has (the same as foundry-client doctor --platform)">Platform check</button></div>
+    <div class="checks">${d.checks.map(c => `<div class="check c-${esc(c.status)}"><span class="dot"></span><b>${esc(c.label)}</b><span class="d">${esc(c.detail)}</span></div>`).join("")}</div>
+    <div id="platform-out"></div>`;
   $("#redo").onclick = renderDoctor;
+  $("#platform").onclick = renderPlatform;
+}
+// GET /api/doctor/platform = doctor.platform_checks(): this machine's system and the tools a
+// workstation or a slot needs (git, ssh, node, kilo, opencode, lune ...), read-only
+async function renderPlatform() {
+  const out = $("#platform-out"); if (!out) return;
+  out.innerHTML = '<h3 style="margin-top:16px">Platform</h3><div class="dim">checking…</div>';
+  let d; try { d = await api("doctor/platform"); } catch (e) { out.innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; return; }
+  const f = d.facts || {};
+  out.innerHTML = `<h3 style="margin-top:16px">Platform</h3>
+    <div class="row"><b class="${d.ok ? "ok" : "bad"}">${d.ok ? "This machine has what Foundry needs" : "A tool Foundry needs is missing"}</b>${f.os ? `<span class="dim">${esc(f.os)} ${esc(f.release || "")} · ${esc(f.machine || "")}</span>` : ""}</div>
+    <div class="checks">${(d.checks || []).map(c => `<div class="check c-${esc(c.status)}"><span class="dot"></span><b>${esc(c.label)}</b><span class="d">${esc(c.detail)}</span></div>`).join("")}</div>`;
 }
 
 /* ------------------------------------------------------------------ logs */
