@@ -5278,7 +5278,7 @@ async function tabMachines() {
         <span class="hint">now: ${gpuNow}</span></div>
       <p class="hint">With a GPU, Studio draws on it instead of on every CPU core (slot-1 on an Intel UHD 630: ~145% CPU instead of ~1300%).
         Give the LXC the GPU in Proxmox: the LXC → Resources → Add → <b>Device Passthrough</b>, path <code>/dev/dri/renderD128</code>,
-        mode <code>0666</code>, then restart it and run the slot's installer again (<b>New code</b>).</p>
+        mode <code>0666</code>, then restart it and run the slot's installer again (no code needed: press Enter at the code question).</p>
       <h4>Resources</h4>
       <div class="row"><label title="0 = automatic: all cores but 2 with the GPU in use (Blender gets them), else a third of the host's cores (at least 4)">CPU limit (cores)</label>
         <input type="number" id="mv-cpu" min="0" max="256" value="${esc(h.cpu_limit)}" style="width:90px">
@@ -5293,7 +5293,7 @@ async function tabMachines() {
         <label>port</label><input type="number" id="mv-port" min="1" max="65535" value="${esc(v.port)}" style="width:90px"></div>
       <p class="hint">On: open <code>http://&lt;slot IP&gt;:&lt;port&gt;/</code> from your LAN (it goes straight to the Studio desktop). Off: only
         <code>ssh -L &lt;port&gt;:localhost:&lt;port&gt; studio@&lt;slot IP&gt;</code>. The slot host applies a change when its installer runs again:
-        <b>New code</b>, then <code>bash setup-host.sh</code> in the slot.</p>
+        <code>bash setup-host.sh</code> on the slot host again, pressing Enter at the code question (no code needed).</p>
       <p class="hint">Password (optional): ${v.password ? "on" : "none"}. It is the secret
         <code>SLOT_VNC_PASSWORD</code> (file <code>slot_vnc_password.txt</code>) in the game's group on Access → Secrets; the slot uses it after its
         container restarts. VNC uses only its first 8 characters.</p>
@@ -5523,7 +5523,7 @@ async function openLanesChecklist(name) {
         <div class="row">${ln.setting ? '<span class="pill ok">on (deployed)</span>' : draftLanes ? `<span class="pill warn">on in the draft, not deployed yet</span> <span class="hint">Review and deploy it on ${deployLink}.</span>`
           : dSlot ? `<button class="act primary" id="ln-set-on" type="button">Turn it on in the draft</button> <span class="hint">then deploy it on ${deployLink}</span>`
           : `<span class="hint">${esc(sid)} is not in the router's settings for ${esc(project)} (it may still be only in the coordinator's project.toml): Import it on ${deployLink} first.</span>`}</div>`)}
-      ${step(3, ln.agent === true, false, "Run the slot's installer again (it sets up the lane agent)", `<div class="hint">Do this when the slot holds no lane. Make a <b>new code</b>, run the command it shows on ${esc(name)} (${os === "windows" ? "Windows: PowerShell as administrator" : "Linux: the Proxmox host or the slot machine"}),
+      ${step(3, ln.agent === true, false, "Run the slot's installer again (it sets up the lane agent)", `<div class="hint">Do this when the slot holds no lane. On ${esc(name)} (${os === "windows" ? "Windows: PowerShell as administrator" : "Linux: the Proxmox host or the slot machine"}) run the slot's installer again and press Enter at the code question (${os === "windows" ? "<code>slot.ps1 -Repair</code>" : "<code>setup-host.sh --repair</code>"}): no code is needed, it reads the settings again with the key it has. A slot installed before v0.181.271 has no repair yet: use <b>New code and command</b> once,
         then wait: this step ticks itself when the coordinator's tunnel reaches the slot's lane agent (needs step 2 deployed).</div>
         <div class="row">${ln.agent === true ? '<span class="pill ok">the lane agent answers</span>' : `<button class="act" id="ln-code" type="button">New code and command</button> ${fleetTunnel(row.tunnel)}`}</div><div id="ln-code-out"></div>`)}
       ${step(4, ln.remote_lanes, !ln.remote_lanes && draftRemote, `Turn ${project}'s remote_lanes on`, `<div class="hint">From then on, a new track started on ${esc(sid)} (Automation → Tracks → New track → Runs on) is a lane there. Tracks already running stay where they are.</div>

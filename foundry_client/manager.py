@@ -604,7 +604,7 @@ class Manager:
         then reload Kilo at the next safe point. Never raises: {ok, error?, ...}."""
         from foundry_automation import jsonc
         cfg = self.cfg
-        path = kilo_config_path(cfg)
+        path = kilo_config_path(cfg, project)
         if not path or not os.path.isfile(path):
             return {"ok": False, "error": f"kilo.jsonc not found ({path or 'no game folder set'}); "
                                           f"set workspace.kilo_config"}

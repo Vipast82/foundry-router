@@ -5,6 +5,7 @@ Status: **approved 2026-11-27 (D1-D7 as recommended). Built, all off by default:
 - **Phase b:** v0.181.265-268, plus b-5 (Windows slots) in v0.181.270.
 - **Phases c, d and e:** v0.181.270.
 - **Phase f:** a runbook only (`docs/plans/DISTRIBUTED_FOUNDRY_CUTOVER.md`).
+- **Review fixes, installers and GUI:** v0.181.271 (§8.1; the router's Fleet → Fleet and Fleet → Setup pages).
 
 Nothing has run on a slot yet: the pilot waits for the spare slot-4.
 - **As built, phase c:** a lane's reads go through a sparse read mirror on the junction
@@ -393,6 +394,29 @@ spare Windows slot before each release that touches this code.
 | **Junction restart** | — | Sessions keep running on slots. On start the coordinator rebuilds tunnels, re-reads every remote lane's HEAD, fetches, then resumes, as it already does for local sessions after a restart |
 | **Two coordinators** | the router's one-active-workstation claim (`machines.py:282-284`) | The second stays on standby. The agent also accepts one coordinator identity at a time (the ssh key it was told about) |
 | **Slot reinstalled, same IP** | strict host-key check fails | `slot_ssh` updates from the router when the router knows the new key (`slot_ssh.py:16-18`); otherwise refused and reported |
+
+### 8.1 As built after the review (v0.181.271)
+
+A code review of v0.181.270 (2026-11-27) found these, now fixed; what they change:
+- **Bringing a lane home never loses a file.** Saving reads `git status -z` (any file name), copies files over
+  8 MB in pieces and writes `_saved.json` (saved, deleted, failed). Bring-home refuses when any file could not be
+  copied; the slot's worktree is removed only with exactly the files saved.
+- **The tunnel checks the agent itself.** Every 30 s it calls `/api/lane/health` with the token. A 401 (the agent
+  restarted with a new token) re-reads the secrets; a lasting 401, or two probes with no answer, restart the
+  tunnel. ssh's own messages go to `<state>/logs/lane-tunnel-<slot>.log`. Forwards bind `127.0.0.1` only.
+- **One writer, even after a junction restart.** An error from the slot's Kilo / OpenCode for a lane's folder is
+  `LaneDown`; the coordinator never falls back to the workstation's server for it.
+- **Fresh before it acts.** The Studio gate fetches the lane first and gates the fetched tip; coordinator writes
+  fetch first and upload a file only when the slot still has the committed version (otherwise a conflict, nothing
+  sent). Divergence is judged by ancestry, and only an unreachable slot counts as "away".
+- **The agent is not a shell.** `worktree-add` registers the lane's checks (`[[verify.checks]]`); a `verify` job
+  must name one of them with the same command, or it is refused (UNKNOWN). Git refuses options that run programs
+  or reach outside the worktree, branch switches, `reset --hard` and moving any ref but the lane's branch. Jobs end
+  with their whole process tree; a timed-out job is cancelled. The toolchain install (`rokit`, `wally`) is its own
+  job, and a failed `worktree-add` undoes itself.
+- **Nothing starts while it is off.** Tunnels and secret reads need `[automation] remote_lanes` on as well as the
+  slot's `lanes`.
+- **Commit rewording works on a lane** (`commit-tree -F -` through the lane agent).
 
 ## 9. Installing
 

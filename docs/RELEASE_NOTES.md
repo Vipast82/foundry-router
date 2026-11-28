@@ -1,3 +1,85 @@
+## v0.181.271 - Distributed Foundry review: fixes, easy installs, and a Fleet view that ties it together
+
+Victor 2026-11-27: "When Everything is built - go through and do a code review, look for gaps / bugs ... align it
+with Multiple installs, New Workstation install, Slot install / Multiple projects / ease of use, Easy to install
+clients / and Then make sure that Foundry-Router GUI is fully complete". A three-part review of v0.181.270 (code,
+installers, GUI); every remote-lane piece still ships off, and nothing has run on a slot yet.
+
+**Fixes in the lane code** (details in `docs/DISTRIBUTED_FOUNDRY.md` §8.1)
+- **Data loss:** bringing a lane home could delete files it had failed to save (a read error, a file over 8 MB, a
+  quoted name). Now every changed file is copied in full or bring-home refuses.
+- **Silent stops:**
+  - after the slot's agent restarted, every call got 401 until the coordinator restarted; the tunnel now checks
+    the agent with its token and re-reads the secrets;
+  - ssh's stderr pipe could fill and freeze the tunnel; it goes to a log file now.
+- **Two writers:** after a junction restart a lane's session could be looked up on the workstation's Kilo.
+- **Stale views:**
+  - the Studio gate could push a commit the junction did not have;
+  - coordinator writes from a stale mirror could undo a session's edit;
+  - a remote check was judged on its last 20 kB;
+  - the training export asked the slot about the mirror's path.
+- **Stalls:**
+  - a slot dying mid-fetch could hold the coordinator's tick for 30 minutes (now keepalives and 180 s);
+  - a slow `worktree-add` left the lane name stuck.
+- **Security:**
+  - the lane agent's `verify` ran any command; it now runs only the lane's registered checks;
+  - git options that run programs or reach outside the worktree are refused;
+  - paths from a slot can no longer write outside the save folder;
+  - tunnel forwards bind 127.0.0.1;
+  - the client API in a slot container answers only `/api/lane/*` from off-host;
+  - tunnels start only with `remote_lanes` on.
+- **Others:**
+  - jobs end with their whole process tree;
+  - `run_status` could report a job done before its last lines (the race behind v0.181.270's Linux CI failure);
+  - `{python}` is `python` on a Windows slot;
+  - lane keys follow persona changes, and a failed save no longer leaves the store ahead of the config;
+  - commit rewording works on a lane;
+  - a remote lane's Studio gate gets its own Lune cache.
+
+**Installs**
+- **Re-run without a code:** every installer (`workstation.sh`, `workstation.ps1`, `setup-host.sh`, `slot.ps1`)
+  repairs and upgrades an enrolled machine when you press Enter at the code question (or `--repair` / `-Repair`).
+  A code is only for the first install or a deliberate re-enrolment, and the client is restarted after new keys.
+  Passwords and your `client.toml` edits are kept.
+- **Several projects on one workstation:** "Add a workstation" with an enrolled machine's name and another project
+  adds that project. Its keys stay and cover both projects; per-project game folders and kilo.jsonc live under
+  `[workspace.projects.<id>]`. A generic `projects/_template` profile serves any game.
+- **Several slots on one host:** a second slot gets its own folder, container, VNC port, lane ports and timer.
+  Slots are no longer tied to AnimalUprising (the mirror name comes from the project).
+- **Windows:**
+  - Access → Machines asks Linux or Windows (and the ssh user) and shows the PowerShell command;
+  - `slot.ps1` re-syncs the ssh keys every 5 minutes, uses cryptographic passwords and takes `-Fingerprint`;
+  - `workstation.ps1` matches the router's version, takes `-Fingerprint`, `-Import` and `-AtBoot`, and checks
+    every command;
+  - the Windows media MCP path is `Scripts\python.exe`.
+- **Coding clients:** one `install/pins.env` pins Kilo, OpenCode, Node, rokit, Blender and PowerShell for every
+  installer, the slot image and CI, with npm integrity checked everywhere. A project on OpenCode gets an OpenCode
+  key, `opencode.jsonc` and the OpenCode server on its workstation.
+- **Junction container:** writes the Kilo config and runs `doctor --platform`. Studio-main enrols with a code.
+  The router address is required, with no built-in default.
+
+**GUI**
+- **Fleet → Fleet (new):** every machine for every project on one page, with:
+  - workstation or slot, system, Studio mode, last heard and version against the router's;
+  - disk use, and the three lane checks kept apart (keys, setting, agent answering);
+  - the tunnel, and what runs there.
+  - A "Things that do not fit together" list names mismatches, for example a project on OpenCode whose
+    workstation has the OpenCode server off.
+- **Fleet → Setup (new):** a "How it fits" picture (router, junction, slots, lanes) and five steps ticked from live
+  state with copy buttons: add a project (Kilo or OpenCode), add a workstation, add a slot (Linux or Windows), turn
+  lanes on, run doctor.
+- **Lanes checklist** for each slot (from Fleet, Setup or Access → Machines → Lanes): the four steps with live
+  ticks, and the way back.
+- **Automation → Tracks:**
+  - each track shows where it runs ("here" or "on slot-N", with its tunnel);
+  - a "Lane tunnels" card;
+  - New track has "Runs on";
+  - remote tracks have **Bring home** and **Move slot**.
+- **Settings and the client page:**
+  - slot `os` and `studio` are dropdowns;
+  - the Foundry Client page has the `[lane]` settings and Doctor → **Platform check**;
+  - the setup wizard's Game step asks Kilo or OpenCode.
+
 ## v0.181.270 - Distributed Foundry: Windows slots (b-5), Studio and Lune on the slot (c), merging by bringing a lane home (d), the junction container (e), the cut-over runbook (f)
 
 Victor 2026-11-27: "go ahead and build all the phases, and then I will make a new slot for testing when I get a chance".

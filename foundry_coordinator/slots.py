@@ -216,6 +216,9 @@ def lune_lane(worktree: str) -> str:
     `.tracks` folder (either slash, any letter case), else "main"; only [A-Za-z0-9_.-] (2026-11-14)."""
     parts = [x for x in re.split(r"[\\/]+", str(worktree or "")) if x]
     name = parts[-1] if len(parts) >= 2 and parts[-2].lower() == ".tracks" else ""
+    if not name and len(parts) >= 3 and parts[-3].lower() == ".lanes":
+        # a remote lane's read mirror <ws>/.lanes/<slot>/<lane> (Distributed Foundry phase c)
+        name = f"{parts[-2]}-{parts[-1]}"
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
     return "main" if not name.strip(".") else name
 

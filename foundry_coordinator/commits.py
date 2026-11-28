@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 from typing import Optional
 
 from .adapters.git import GitError
@@ -204,16 +203,10 @@ def reword(c, P, t: dict, spec) -> dict:
         env = dict(os.environ, GIT_AUTHOR_NAME=m["an"], GIT_AUTHOR_EMAIL=m["ae"],
                    GIT_AUTHOR_DATE=m["ad"], GIT_COMMITTER_NAME=m["cn"],
                    GIT_COMMITTER_EMAIL=m["ce"], GIT_COMMITTER_DATE=m["cd"])
-        fd, path = tempfile.mkstemp(prefix="foundry-msg-", suffix=".txt")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-                f.write(body if body.endswith("\n") else body + "\n")
-            new = _run_env(P, env, "commit-tree", m["tree"], "-p", parent, "-F", path).strip()
-        finally:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        # the message on stdin (-F -), through the workspace: a remote lane's commit-tree runs
+        # on its slot (its lane agent takes -F - only), a local track's here as before
+        new = _run_env(P, env, "commit-tree", m["tree"], "-p", parent, "-F", "-",
+                       input=body if body.endswith("\n") else body + "\n").strip()
         if not new:
             return {"skipped": f"commit-tree failed for {sha[:10]}"}
         mapping[sha] = new
@@ -244,13 +237,13 @@ def reword(c, P, t: dict, spec) -> dict:
     return {"reworded": reworded, "head": parent}
 
 
-def _run_env(P, env: dict, *args) -> str:
-    import subprocess
-    r = subprocess.run(["git", "-C", P.ws.path, *args], capture_output=True, text=True,
-                       timeout=120, env=env, encoding="utf-8", errors="replace")
-    if r.returncode != 0:
-        raise GitError(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()[:300]}")
-    return r.stdout
+def _run_env(P, env: dict, *args, input: Optional[str] = None) -> str:
+    """git in the task's workspace with `env` (Workspace._proc; a RemoteWorkspace forwards
+    only the author/committer variables to the slot)."""
+    rc, out, err = P.ws._proc(list(args), timeout=120, env=env, input=input)
+    if rc != 0:
+        raise GitError(f"git {' '.join(args)}: {(err or out).strip()[:300]}")
+    return out
 
 
 def mapped(t: dict, sha: str) -> Optional[str]:

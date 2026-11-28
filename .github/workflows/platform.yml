@@ -87,7 +87,10 @@ jobs:
           tests/coordinator/test_lane_fetch.py tests/coordinator/test_lane_b3.py
           tests/coordinator/test_lane_track.py tests/coordinator/test_lane_windows.py
           tests/coordinator/test_lane_phase_c.py tests/coordinator/test_lane_phase_d.py
-          tests/test_junction_install.py
+          tests/coordinator/test_lane_fixes_fetch.py tests/coordinator/test_lane_fixes_track.py
+          tests/coordinator/test_lane_review_followups.py
+          tests/test_junction_install.py tests/test_slot_installers.py
+          tests/client/test_workstation_install.py
       # each failing test as an annotation: readable from the public checks API without a
       # sign-in (job logs need one), so a failure on one OS can be read from the workstation
       - name: Failures as annotations
