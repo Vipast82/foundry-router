@@ -1,0 +1,66 @@
+# The Foundry junction as containers (Distributed Foundry phase e): the main workstation's role
+# on a Linux machine or a Proxmox VM, next to (or instead of) the Windows PC. Off until you move
+# the workstation here: a new junction starts on STANDBY (the router's one-active-workstation
+# rule) and runs no sprint until you press Make active on Access → Machines.
+#
+#   cd install/junction
+#   docker compose build
+#   docker compose run --rm junction install      # once: router address + one-time code
+#   docker compose up -d
+#
+# See README.md next to this file.
+services:
+  junction:
+    build:
+      context: ../..
+      dockerfile: install/junction/Dockerfile
+    image: foundry/junction:latest
+    container_name: foundry-junction
+    restart: unless-stopped
+    volumes:
+      - junction-data:/srv/foundry
+      # the coordinator drives the junction's Studio (studio-main) with `docker exec`, as it
+      # does a local Studio slot ([slots.studio-main], host empty)
+      - /var/run/docker.sock:/var/run/docker.sock
+    # the client's page and API stay on this host's loopback (ssh -L 47811:127.0.0.1:47811)
+    ports:
+      - "127.0.0.1:${JUNCTION_CLIENT_PORT:-47811}:47811"
+    environment:
+      TZ: "${TZ:-UTC}"
+
+  # The junction's Studio for main sprints: the Studio slot image with the main checkout's
+  # TEST place ([studio] main_slot = "studio-main"; LINUX_WORKSTATION_PLAN W2). It clones from
+  # the junction's game checkout, read-only. Optional: leave it stopped while main sprints use
+  # another machine's Studio.
+  studio-main:
+    build: ../../contrib/studio-slot
+    image: foundry/studio-slot:latest
+    container_name: studio-main
+    restart: unless-stopped
+    profiles: ["studio"]                 # docker compose --profile studio up -d
+    ports:
+      - "${STUDIO_MAIN_NOVNC_BIND:-127.0.0.1}:${STUDIO_MAIN_NOVNC_PORT:-6081}:6080"
+    environment:
+      GEOMETRY: "2560x1440"
+      STUDIO_OPEN: "${STUDIO_MAIN_OPEN:-}"
+      AU_SOURCE: "/srv/foundry/game/${FOUNDRY_PROJECT:-animaluprising}"
+      FOUNDRY_MCP_OFFICIAL: '["/usr/local/bin/studio-mcp-official"]'
+      FOUNDRY_MCP_COMMUNITY: '["/usr/local/bin/robloxstudio-mcp"]'
+      ROBLOX_STUDIO_NO_AUTH: "1"
+      AU_LOCK_DIR: "/home/studio/locks"
+      FOUNDRY_URL: "${FOUNDRY_URL:-http://192.168.0.112:11435}"
+      FOUNDRY_PROJECT: "${FOUNDRY_PROJECT:-animaluprising}"
+      FOUNDRY_SLOT: "studio-main"
+      FOUNDRY_SLOT_KEY_FILE: "/run/slot-key/slot-key.txt"
+    volumes:
+      - studio-main-home:/home/studio
+      - junction-data:/srv/foundry:ro
+      - ./studio-main-key:/run/slot-key:ro
+    tmpfs:
+      - "/run/secrets:mode=0700,uid=1000,gid=1000,size=1m"
+    shm_size: "2gb"
+    mem_limit: "${STUDIO_MAIN_MEM:-14g}"
+
+volumes:
+  junction-data:
+  studio-main-home:

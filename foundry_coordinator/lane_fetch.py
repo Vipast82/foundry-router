@@ -45,6 +45,8 @@ def store_url(slot: dict, project: str) -> str:
     slot whose docker runs on this machine (and in tests)."""
     host = str(slot.get("host") or "").strip()
     path = store_path(slot, project)
+    if host and slot.get("os") == "windows":
+        return f"{host}:{path}"      # scp-style: C:/ paths reach the slot's bash as they are
     return f"ssh://{host}{path}" if host else path
 
 
@@ -127,9 +129,77 @@ def create(workspace: str, slot: dict, agent, project: str, lane: str, base: str
             "detail": f"{pushed['detail']}; worktree on the slot"}
 
 
+# ---------------------------------------------------------------------------- the read mirror
+#
+# Phase c (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md, "phase c" notes): the junction keeps a
+# local worktree of each remote lane, <workspace>/.lanes/<slot>/<lane>, on branch track/<lane>,
+# moved fast-forward to the slot's tip at every fetch. It is what the lane's profile.workspace
+# points at, so every coordinator read of the worktree (plans, evidence, globs, images) works as
+# for a local track; writes and git go to the slot (RemoteWorkspace). Sparse: no docs/evidence/
+# except the lane's own sprints' folders (AU's docs/evidence is 14 GB). The sparse checkout is
+# per worktree (git sets extensions.worktreeConfig in the repo config the first time; the main
+# checkout is not sparse and does not change).
+
+MIRROR_DIR = ".lanes"
+
+
+def mirror_path(main_ws: str, sid: str, lane: str) -> str:
+    return os.path.join(os.path.realpath(main_ws), MIRROR_DIR, sid, lane)
+
+
+def _exclude_mirrors(main_ws: str) -> None:
+    """`.lanes/` in the repository's info/exclude (as `.tracks/` is)."""
+    rc, gd, _ = _git(main_ws, ["rev-parse", "--git-common-dir"], {}, 60)
+    if rc != 0:
+        return
+    gd = gd.strip()
+    path = os.path.join(gd if os.path.isabs(gd) else os.path.join(main_ws, gd), "info", "exclude")
+    try:
+        have = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+        if f"/{MIRROR_DIR}/" not in have.split("\n"):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(("" if have.endswith("\n") or not have else "\n") + f"/{MIRROR_DIR}/\n")
+    except OSError:
+        pass
+
+
+def mirror_create(main_ws: str, sid: str, lane: str, branch: str, base: str,
+                  sprints: list) -> dict:
+    """The lane's read mirror at its base: a sparse worktree on `branch` (made at `base`)."""
+    path = mirror_path(main_ws, sid, lane)
+    if os.path.isdir(path):
+        return {"ok": True, "path": path, "detail": "already there"}
+    _exclude_mirrors(main_ws)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rc, _, err = _git(main_ws, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], {}, 60)
+    args = (["worktree", "add", "-q", "--no-checkout", path, branch] if rc == 0 else
+            ["worktree", "add", "-q", "--no-checkout", "-b", branch, path, base])
+    rc, out, err = _git(main_ws, args, {}, 300)
+    if rc != 0:
+        return {"ok": False, "path": "", "detail": f"mirror worktree: {(err or out).strip()[-300:]}"}
+    pats = ["/*", "!/docs/evidence/"] + [f"/docs/evidence/{x}/" for x in sprints
+                                         if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", str(x))]
+    rc, out, err = _git(path, ["sparse-checkout", "set", "--no-cone", *pats], {}, 300)
+    if rc == 0:
+        rc, out, err = _git(path, ["checkout", "-q"], {}, 1800)
+    if rc != 0:
+        return {"ok": False, "path": path, "detail": f"mirror checkout: {(err or out).strip()[-300:]}"}
+    return {"ok": True, "path": path, "detail": f"read mirror {path} (sparse, no docs/evidence)"}
+
+
+def mirror_full(path: str) -> dict:
+    """Make a mirror a full checkout (bring home: it becomes the track's own worktree)."""
+    rc, out, err = _git(path, ["sparse-checkout", "disable"], {}, 3600)
+    return {"ok": rc == 0, "detail": (err or out).strip()[-300:] if rc else "full checkout"}
+
+
 def fetch(workspace: str, slot: dict, sid: str, project: str, lane: str,
-          branch: str = "") -> dict:
-    """Bring the lane's commits here. {"ok", "tip", "moved", "diverged", "detail"}."""
+          branch: str = "", mirror: str = "") -> dict:
+    """Bring the lane's commits here. {"ok", "tip", "moved", "diverged", "detail"}. With a
+    `mirror` (its worktree has `branch` checked out), the branch moves by a fast-forward merge
+    IN the mirror, so its files follow; a mirror with files in the way is reported, never
+    overwritten."""
     branch = branch or f"track/{lane}"
     if not _LANE_RE.match(lane or "") or not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", branch):
         return {"ok": False, "detail": f"bad lane {lane!r} or branch {branch!r}"}
@@ -157,10 +227,16 @@ def fetch(workspace: str, slot: dict, sid: str, project: str, lane: str,
             return {"ok": False, "diverged": True, "tip": tip, "detail":
                     f"{branch} here ({cur[:12]}) is not behind the slot's ({tip[:12]}): kept both "
                     f"({lref} holds the slot's)"}
-    args = ["update-ref", "-m", f"lane fetch from {sid}", href, tip] + ([cur] if cur else [""])
-    rc, out, err = _git(workspace, args, slot, 60)
-    if rc != 0:
-        return {"ok": False, "tip": tip, "detail": f"update-ref: {(err or out).strip()[-200:]}"}
+    if mirror and os.path.isdir(mirror):
+        rc, out, err = _git(mirror, ["merge", "-q", "--ff-only", tip], {}, 1800)
+        if rc != 0:
+            return {"ok": False, "tip": tip, "detail": "the read mirror did not fast-forward: "
+                    + (err or out).strip()[-300:]}
+    else:
+        args = ["update-ref", "-m", f"lane fetch from {sid}", href, tip] + ([cur] if cur else [""])
+        rc, out, err = _git(workspace, args, slot, 60)
+        if rc != 0:
+            return {"ok": False, "tip": tip, "detail": f"update-ref: {(err or out).strip()[-200:]}"}
     return {"ok": True, "tip": tip, "moved": True,
             "detail": f"{branch} {cur[:12] or '(new)'} -> {tip[:12]} from {sid}"}
 
@@ -195,5 +271,5 @@ def save_dirty(ws, dest_dir: str) -> dict:
             "detail": f"{len(saved)} of {len(rows)} changed file(s) saved"}
 
 
-__all__ = ["store_url", "store_path", "worktree_path", "push_base", "wait_job", "create",
+__all__ = ["mirror_path", "mirror_create", "mirror_full", "MIRROR_DIR", "store_url", "store_path", "worktree_path", "push_base", "wait_job", "create",
            "fetch", "save_dirty"]

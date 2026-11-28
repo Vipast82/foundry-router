@@ -47,7 +47,13 @@ ROOT=/srv/foundry ; ROUTER="" ; CODE="" ; FINGERPRINT="" ; CODE_STDIN=0 ; IMPORT
 STORE=file ; STUDIO=1 ; TOOLS=1 ; START=1 ; IMPORT_ONLY=0
 USER_NAME=foundry
 NODE_VERSION=22.21.0
-KILO_VERSION=7.8.8
+# the coding clients at the slot image's pins (contrib/studio-slot/Dockerfile): both in every
+# Foundry machine, the project picks one ([client] kind; Distributed Foundry phase e)
+KILO_VERSION=7.8.32
+OPENCODE_VERSION=2.3.2
+PWSH_VERSION=7.6.9                     # the game's gate host half (tools/gate.ps1), as in the slot image
+PWSH_SHA256=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+TOOLS_ONLY=0
 ROKIT_VERSION=1.2.0
 ROKIT_SHA256=951a7f3ec3d2a5e021fd1867d32f69f010ee4c2927f644b759578afc59c65fc0
 BLENDER_VERSION=4.5.12                 # the same build as the slots (contrib/studio-slot/Dockerfile)
@@ -64,6 +70,7 @@ while [ $# -gt 0 ]; do
         --secret-store) STORE="$2"; shift 2 ;;
         --no-studio) STUDIO=0; shift ;;
         --skip-tools) TOOLS=0; shift ;;
+        --tools-only) TOOLS_ONLY=1; shift ;;   # install the packages and tools, then stop (image builds)
         --no-start) START=0; shift ;;
         -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
@@ -112,6 +119,7 @@ fi
 echo
 echo "Foundry workstation installer"
 echo "-----------------------------"
+if [ "$TOOLS_ONLY" = 0 ]; then          # --tools-only (an image build) needs no router or code
 if [ -z "$ROUTER" ]; then ask ROUTER "Foundry router address" "http://192.168.0.112:11435"; fi
 ROUTER="${ROUTER%/}"
 case "$ROUTER" in http://*|https://*) ;; *) ROUTER="http://$ROUTER" ;; esac
@@ -134,6 +142,7 @@ elif [ "$HAVE_TTY" = 1 ]; then
     read -r -s -p "Enrollment code from Access → Machines (typing is hidden): " CODE < "$TTY"; echo
 fi
 [ -n "$CODE" ] || die "no enrollment code"
+fi
 
 bold "1/6 packages and the $USER_NAME user"
 export DEBIAN_FRONTEND=noninteractive
@@ -162,6 +171,19 @@ if [ "$TOOLS" = 1 ]; then
         npm install -g --silent "@kilocode/cli@$KILO_VERSION" >/dev/null 2>&1 || die "npm could not install Kilo"
     fi
     ok "Kilo $(kilo --version 2>/dev/null | head -1)"
+    if ! opencode --version 2>/dev/null | grep -q "$OPENCODE_VERSION"; then
+        npm install -g --silent "@opencode/cli@$OPENCODE_VERSION" >/dev/null 2>&1 || die "npm could not install OpenCode"
+    fi
+    ok "OpenCode $(opencode --version 2>/dev/null | head -1)"
+    if ! pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>/dev/null | grep -q "$PWSH_VERSION"; then
+        cd /tmp
+        curl -fsSLo pwsh.tgz "https://github.com/PowerShell/PowerShell/releases/download/v$PWSH_VERSION/powershell-$PWSH_VERSION-linux-x64.tar.gz"
+        echo "$PWSH_SHA256  pwsh.tgz" | sha256sum -c - >/dev/null || die "PowerShell's checksum does not match"
+        mkdir -p /opt/microsoft/powershell/7 && tar -xzf pwsh.tgz -C /opt/microsoft/powershell/7
+        chmod 755 /opt/microsoft/powershell/7/pwsh && ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
+        rm -f pwsh.tgz
+    fi
+    ok "PowerShell $(pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>/dev/null)"
     if ! command -v rokit >/dev/null; then
         cd /tmp
         curl -fsSLo rokit.zip "https://github.com/rojo-rbx/rokit/releases/download/v$ROKIT_VERSION/rokit-$ROKIT_VERSION-linux-x86_64.zip"
@@ -180,7 +202,11 @@ if [ "$TOOLS" = 1 ]; then
     fi
     ok "$(blender -b --version 2>/dev/null | head -1 || echo 'Blender: not runnable here')"
 else
-    warn "--skip-tools: Node, Kilo, rokit and Blender not installed"
+    warn "--skip-tools: Node, Kilo, OpenCode, PowerShell, rokit and Blender not installed"
+fi
+if [ "$TOOLS_ONLY" = 1 ]; then
+    ok "--tools-only: packages and tools are in; enrol later by running this again without it"
+    exit 0
 fi
 
 bold "2/6 enrolling with the router"

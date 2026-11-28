@@ -230,7 +230,8 @@ class GenericAdapter(ReviewContractDefaults):
             from .verify_cmd import run_check_remote
             agent = LaneAgent(lambda: lane_tunnel.MANAGER.endpoint(host, "agent"), name=host)
             lane = str(self.p.__dict__.get("track") or "")
-            return [run_check_remote(c, agent, self.p.id, lane, self.p.workspace, spec.task_id,
+            slot_wt = str(self.p.__dict__.get("remote_workspace") or self.p.workspace)
+            return [run_check_remote(c, agent, self.p.id, lane, slot_wt, spec.task_id,
                                      revision, base, self.state_dir)
                     for c in self.p.checks if c.phase == phase]
         return [run_check(c, self.p.workspace, spec.task_id, revision, base, self.state_dir,

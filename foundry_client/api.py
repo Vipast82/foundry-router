@@ -325,7 +325,7 @@ def _lane_routes(app: FastAPI, mgr, lane) -> None:
     async def lane_write(request: Request):
         b = await body_of(request)
         return await run_in_threadpool(answer, lane.write, b.get("project"), b.get("lane"),
-                                       b.get("path"), b.get("data"))
+                                       b.get("path"), b.get("data"), b.get("delete") is True)
 
     @app.post("/api/lane/run")
     async def lane_run(request: Request):

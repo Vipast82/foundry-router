@@ -29,10 +29,13 @@ class LaneDown(AgentServerError):
 
 class TunnelledClient:
     def __init__(self, sid: str, kind: str, endpoint: Callable[[str, str], Optional[dict]],
-                 provider: str = "foundry", api: str = "auto"):
+                 provider: str = "foundry", api: str = "auto", dir_map: tuple = ()):
         if kind not in KINDS:
             raise ValueError(f"no lane client kind {kind!r}")
         self.sid, self.kind = sid, kind
+        # phase c: (local read-mirror prefix, the slot's lane folder prefix): every folder
+        # argument under the first is sent as the same path under the second
+        self.dir_map = tuple(dir_map or ())
         self._endpoint = endpoint
         self.provider = provider
         self.api = api
@@ -68,15 +71,40 @@ class TunnelledClient:
                 self._key = key
             return self._inner
 
+    def slot_dir(self, value):
+        """A folder on this machine (the lane's read mirror) as the slot sees it."""
+        if not self.dir_map or not isinstance(value, str):
+            return value
+        local, remote = self.dir_map
+        v = value.replace("\\", "/")
+        lo = local.replace("\\", "/").rstrip("/")
+        if v == lo or v.lower().startswith(lo.lower() + "/"):
+            return remote.rstrip("/") + v[len(lo):]
+        return value
+
     def __getattr__(self, attr):
         if attr.startswith("_"):
             raise AttributeError(attr)
-        return getattr(self._client(), attr)
+        target = getattr(self._client(), attr)
+        if not callable(target) or not self.dir_map:
+            return target
+
+        def call(*args, **kwargs):
+            args = tuple(self.slot_dir(a) for a in args)
+            kwargs = {k: (self.slot_dir(v) if k in ("directory", "workspace") else v)
+                      for k, v in kwargs.items()}
+            return target(*args, **kwargs)
+        return call
+
+
+WINDOWS_LANES_ROOT = "C:/Foundry/lanes"          # install/slot.ps1
 
 
 def lane_root(slot: dict) -> str:
-    """The folder a slot keeps its lane worktrees in, as the slot's servers see it."""
-    return str(slot.get("lanes_root") or LANES_ROOT).rstrip("/") or LANES_ROOT
+    """The folder a slot keeps its lane worktrees in, as the slot's servers see it (forward
+    slashes on Windows too: Git for Windows, Kilo and the slot's bash all take them)."""
+    default = WINDOWS_LANES_ROOT if slot.get("os") == "windows" else LANES_ROOT
+    return str(slot.get("lanes_root") or default).replace("\\", "/").rstrip("/") or default
 
 
 def serves(root: Optional[str], directory: str) -> bool:

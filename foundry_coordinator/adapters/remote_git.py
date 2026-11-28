@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -61,11 +62,16 @@ class RemoteWorkspace(Workspace):
     """`Workspace` for a lane on a slot. `path` is the worktree's path ON THE SLOT (what the
     coding sessions get as their directory)."""
 
-    def __init__(self, agent: LaneAgent, project: str, lane: str, path: str):
+    def __init__(self, agent: LaneAgent, project: str, lane: str, path: str,
+                 mirror: str = "", on_commit=None):
         super().__init__(path)
         self.agent = agent
         self.project = project
         self.lane = lane
+        # phase c: the lane's read mirror on this machine (lane_fetch.mirror_path), where the
+        # coordinator's own reads and file writes land; on_commit(sha) brings the new tip back
+        self.mirror = mirror
+        self.on_commit = on_commit
 
     def _where(self) -> dict:
         return {"project": self.project, "lane": self.lane}
@@ -93,6 +99,57 @@ class RemoteWorkspace(Workspace):
     def write(self, rel: str, data: bytes) -> None:
         self.agent.call("write", {**self._where(), "path": rel,
                                   "data": base64.b64encode(bytes(data)).decode("ascii")})
+        if self.mirror:                         # the coordinator reads it here too
+            Workspace(self.mirror).write(rel, data)
+
+    def _upload_mirror_changes(self, paths: list) -> list:
+        """Files the coordinator wrote into the mirror (they show as changed there: sessions
+        never write in the mirror) go to the slot before a commit of those paths, so a write
+        made here is never lost. Returns the paths sent."""
+        if not self.mirror or not os.path.isdir(self.mirror):
+            return []
+        local = Workspace(self.mirror)
+        try:
+            changed = {p for _xy, p in local.status()}
+        except Exception:                                         # noqa: BLE001
+            return []
+        # a requested folder (a gate's evidence folder) covers every changed file under it
+        want = []
+        for rel in paths:
+            r = rel.replace("\\", "/").rstrip("/")
+            want += sorted(c for c in changed if c == r or c.startswith(r + "/"))
+        want = list(dict.fromkeys(want))
+        # files the slot already has with the same content (a remote gate's outputs are copied
+        # into the lane on the slot too: slots.copy_to_lane) are not sent again
+        same = set()
+        present = [r for r in want if local.read(r, max_bytes=0) is not None]
+        if present:
+            try:                                # hash only what exists on both sides
+                there = self.stat(present)
+                present = [r for r in present if (there.get(r) or {}).get("kind") == "file"]
+            except Exception:                                     # noqa: BLE001
+                present = []
+        if present:
+            try:
+                mine = local.run("hash-object", "--", *present).split()
+                theirs = self.run("hash-object", "--", *present, check=False).split()
+                if len(mine) == len(present) == len(theirs):
+                    same = {r for r, a, b in zip(present, mine, theirs) if a == b}
+            except Exception:                                     # noqa: BLE001
+                same = set()
+        sent = []
+        for r in want:
+            if r in same:
+                continue
+            data = local.read(r)
+            if data is None:                    # deleted here: delete on the slot too (add -A
+                self.agent.call("write", {**self._where(), "path": r, "data": "",   # stages it)
+                                          "delete": True})
+            else:
+                self.agent.call("write", {**self._where(), "path": r,
+                                          "data": base64.b64encode(data).decode("ascii")})
+            sent.append(r)
+        return sent
 
     def commit_paths(self, paths: list[str], message: str, env: Optional[dict] = None) -> str:
         """As Workspace.commit_paths, with the pathspec sent on stdin (the slot cannot read a
@@ -100,6 +157,7 @@ class RemoteWorkspace(Workspace):
         paths = [p for p in dict.fromkeys(paths) if p]
         if not paths:
             return ""
+        self._upload_mirror_changes(paths)
         spec = "\n".join(paths) + "\n"
         before = self.head()
         self._run_in(["add", "-A", "--pathspec-from-file=-"], spec)
@@ -118,6 +176,11 @@ class RemoteWorkspace(Workspace):
             raise GitError(f"{e} (the coordinator unstaged the {len(paths)} path(s) "
                            f"again)") from e
         after = self.head()
+        if after != before and callable(self.on_commit):
+            try:
+                self.on_commit(after)          # fetch it back, so the mirror shows the commit
+            except Exception:                                     # noqa: BLE001
+                pass
         return after if after != before else ""
 
     def _run_in(self, args: list, stdin: str, check: bool = True,

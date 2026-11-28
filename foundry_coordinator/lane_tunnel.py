@@ -39,6 +39,7 @@ from . import slots as SL
 CHECK_EVERY_S = 5.0
 BACKOFF_S = (5, 10, 20, 40, 80, 120)
 SECRETS_FILE = "/run/secrets/lane/lane.json"
+WINDOWS_SECRETS_FILE = "C:/Foundry/secrets/lane/lane.json"     # install/slot.ps1
 PORTS = {"agent": 47811, "kilo": 4096, "opencode": 4097}
 SECRETS_TIMEOUT_S = 30
 READY_WAIT_S = 10
@@ -85,8 +86,11 @@ def tunnel_argv(slot: dict, local: dict) -> list:
 def secrets_argv(slot: dict) -> list:
     """Read the slot's lane secrets: `cat` inside its container (docker exec over ssh), or on
     the host itself for a slot without a container (a Windows slot, phase b-5)."""
-    path = str(slot.get("lanes_secrets") or SECRETS_FILE)
-    if slot.get("container"):
+    path = str(slot.get("lanes_secrets") or (WINDOWS_SECRETS_FILE if slot.get("os") == "windows"
+                                              else SECRETS_FILE))
+    # a Windows slot's OpenSSH runs Git for Windows' bash (install/slot.ps1), so `cat` works
+    # there too; it has no container
+    if slot.get("container") and slot.get("os") != "windows":
         return SL.exec_argv(slot, ["cat", path])
     return SL.host_argv(slot, ["cat", path])
 

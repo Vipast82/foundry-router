@@ -66,6 +66,7 @@ SSH_DEFAULT = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept
                "-o", "ConnectTimeout=15"]
 # setup-host.sh's layout on a slot host: what a remote slot's push targets default to
 HOST_ROOT = "/srv/studio-slot"
+WINDOWS_HOST_ROOT = "C:/Foundry/studio-slot"     # install/slot.ps1 (b-5)
 DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundry": "/opt/foundry",
             "path_prefix": "/home/studio/.rokit/bin",
             "official_mcp": "/usr/local/bin/studio-mcp-official",
@@ -73,8 +74,10 @@ DEFAULTS = {"container": "", "repo": "/home/studio/work/AnimalUprising", "foundr
             "checkout_timeout_s": 600, "host": "", "ssh": SSH_DEFAULT,
             "au_push_url": "", "foundry_push_url": "", "foundry_host_dir": "",
             # Distributed Foundry phase b (lane_tunnel.py): off = Studio only, as before
-            "lanes": False, "lanes_root": "/srv/foundry-lanes", "lanes_secrets": "",
-            "agent_port": 47811, "kilo_port": 4096, "opencode_port": 4097}
+            "lanes": False, "lanes_root": "", "lanes_secrets": "",
+            "agent_port": 47811, "kilo_port": 4096, "opencode_port": 4097,
+            # b-5: a Windows slot runs Studio natively and holds lanes without Docker
+            "os": "linux", "studio": "container"}
 # 2026-11-14 item 24b: the slot's Lune spec caches ([studio_calls] shared_lune_cache), ONE FOLDER PER
 # LANE under this base: the runner keeps one entry per spec name, so lanes with different trees that
 # shared one folder would overwrite each other. In /home/studio (the persistent studio-home volume),
@@ -94,10 +97,16 @@ def configured(profile) -> dict:
         if not isinstance(cfg, dict):
             continue
         s = {**DEFAULTS, **cfg}
-        if s.get("enabled") is False or not s.get("container"):
-            continue
+        if s.get("enabled") is False or (not s.get("container") and s.get("os") != "windows"):
+            continue                # a Windows slot (b-5) has no container: Studio runs natively
         host = str(s.get("host") or "").strip()
-        if host:                    # remote: setup-host.sh's mirrors unless set explicitly
+        if host and s.get("os") == "windows":
+            # b-5: install/slot.ps1's layout; scp-style URLs (the slot's ssh shell is Git for
+            # Windows' bash, which takes C:/ paths; an ssh:// URL would make them /C:/...)
+            s["au_push_url"] = s.get("au_push_url") or f"{host}:{WINDOWS_HOST_ROOT}/AnimalUprising.git"
+            s["foundry_push_url"] = s.get("foundry_push_url") or f"{host}:{WINDOWS_HOST_ROOT}/foundry.git"
+            s["foundry_host_dir"] = s.get("foundry_host_dir") or f"{WINDOWS_HOST_ROOT}/foundry"
+        elif host:                  # remote: setup-host.sh's mirrors unless set explicitly
             s["au_push_url"] = s.get("au_push_url") or f"ssh://{host}{HOST_ROOT}/AnimalUprising.git"
             s["foundry_push_url"] = s.get("foundry_push_url") or f"ssh://{host}{HOST_ROOT}/foundry.git"
             s["foundry_host_dir"] = s.get("foundry_host_dir") or f"{HOST_ROOT}/foundry"
@@ -182,7 +191,11 @@ def host_argv(slot: dict, args: list) -> list:
 
 
 def exec_argv(slot: dict, args: list, interactive: bool = False) -> list:
-    """argv for `docker exec [-i] <container> <args>` on the slot's machine."""
+    """argv for `docker exec [-i] <container> <args>` on the slot's machine; on a Windows slot
+    (no Docker, b-5) the command runs on the host itself, in its ssh shell (Git for Windows'
+    bash, install/slot.ps1)."""
+    if slot.get("os") == "windows" and not slot.get("container"):
+        return host_argv(slot, [str(a) for a in args])
     return host_argv(slot, ["docker", "exec"] + (["-i"] if interactive else [])
                      + [slot["container"]] + [str(a) for a in args])
 
@@ -197,7 +210,7 @@ def lune_lane(worktree: str) -> str:
 
 
 def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, head: str,
-                  lune_cache: bool = False) -> list:
+                  lune_cache: bool = False, lane_worktree: str = "") -> list:
     """The host command that runs `pipeline_args` (the `studio_calls pipeline ...` argv after the
     module, with --repo set to the HOST worktree) inside the slot and copies the outputs back."""
     remote = []
@@ -212,6 +225,7 @@ def wrap_pipeline(slot: dict, pipeline_args: list, worktree: str, task: str, hea
             "--worktree", worktree, "--task", task, "--head", head,
             "--checkout-timeout", str(int(slot.get("checkout_timeout_s") or 600))] \
         + remote + (["--lune-cache-dir", SLOT_LUNE_CACHE + "/" + lune_lane(worktree)] if lune_cache else []) \
+        + (["--lane-worktree", lane_worktree] if lane_worktree else []) \
         + ["--"] + list(pipeline_args)
 
 
@@ -587,7 +601,30 @@ def run(a) -> int:
     rc = p.wait()
     copied = copy_back(c, repo, a.worktree, a.task)
     print(f"SLOT copied back {len(copied)} file(s): " + ", ".join(copied[:20]), flush=True)
+    if getattr(a, "lane_worktree", ""):
+        n = copy_to_lane(c, repo, a.lane_worktree, a.task)
+        print(f"SLOT copied {n} output path(s) into the lane on the slot", flush=True)
     return rc
+
+
+def copy_to_lane(slot, slot_repo: str, lane_wt: str, task: str) -> int:
+    """Distributed Foundry phase c: a remote lane's gate outputs also go into the lane's own
+    worktree ON the slot (the same OUTPUT_GLOBS), so the coordinator's commit of them happens
+    there without sending the files back over the network. Returns the paths copied."""
+    if not _TASK_RE.fullmatch(task or "") or not lane_wt.startswith("/"):
+        return 0
+    globs = " ".join(g.replace("{task}", task) for g in OUTPUT_GLOBS)
+    script = (f"cd {shlex.quote(slot_repo)} && shopt -s nullglob && set -- {globs}; n=0; "
+              f'for p in "$@"; do mkdir -p {shlex.quote(lane_wt)}/"$(dirname "$p")" && '
+              f'cp -a "$p" {shlex.quote(lane_wt)}/"$(dirname "$p")"/ && n=$((n+1)); done; echo "$n"')
+    try:
+        r = _docker(slot, script, timeout=600)
+    except (subprocess.TimeoutExpired, OSError):
+        return 0
+    try:
+        return int((r.stdout or b"").decode("utf-8", "replace").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 def resync(slot: dict, restart_rojo: bool = True, timeout: float = 420) -> tuple:
@@ -706,6 +743,7 @@ def main(argv=None) -> int:
     r.add_argument("--foundry-push-url", default="")
     r.add_argument("--foundry-host-dir", default="")
     r.add_argument("--lune-cache-dir", default="")
+    r.add_argument("--lane-worktree", default="")
     r.add_argument("pipeline", nargs=argparse.REMAINDER)
     fe = sub.add_parser("fetch", help="copy files Studio wrote on a slot into this worktree")
     fe.add_argument("--config", required=True)

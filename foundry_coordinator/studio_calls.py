@@ -838,6 +838,11 @@ class StudioCalls:
             from . import slots
             # 2026-11-14 item 24b: one Lune cache folder per lane on the slot (home volume)
             kw = {"lune_cache": True} if settings(P).get("shared_lune_cache") is True else {}
+            # Distributed Foundry phase c: a lane whose worktree is on this slot also gets the
+            # outputs in that worktree (P.profile.workspace is its read mirror here)
+            lane_wt = str(getattr(P.profile, "__dict__", {}).get("remote_workspace") or "")
+            if lane_wt:
+                kw["lane_worktree"] = lane_wt
             return slots.wrap_pipeline(slot, args, P.profile.workspace, tid, head or P.ws.head(),
                                        **kw)
         return _module_cmd(settings(P)["pipeline_module"]) + args

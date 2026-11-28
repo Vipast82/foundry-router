@@ -1,7 +1,16 @@
 # Distributed Foundry: coding on the slots, the workstation as the junction
 
-Status: **approved 2026-11-27 (D1-D7 as recommended). Phase a (the platform layer, both clients in
-the slot image) is built in v0.181.263; phases b-f are not started.**
+Status: **approved 2026-11-27 (D1-D7 as recommended). Built, all off by default:**
+- **Phase a:** v0.181.263.
+- **Phase b:** v0.181.265-268, plus b-5 (Windows slots) in v0.181.270.
+- **Phases c, d and e:** v0.181.270.
+- **Phase f:** a runbook only (`docs/plans/DISTRIBUTED_FOUNDRY_CUTOVER.md`).
+
+Nothing has run on a slot yet: the pilot waits for the spare slot-4.
+- **As built, phase c:** a lane's reads go through a sparse read mirror on the junction
+  (`<workspace>/.lanes/<slot>/<lane>`), not a read API at every call site.
+- **As built, phase d:** a lane merges by being brought home; the mirror becomes the merge
+  worktree of decision D4.
 The phased plan is `docs/plans/DISTRIBUTED_FOUNDRY_PLAN.md`.
 
 Every `file:line` below was read on `origin/main` at `1acbade` (v0.181.262). The OneDrive dev

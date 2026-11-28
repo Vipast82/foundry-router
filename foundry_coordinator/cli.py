@@ -961,6 +961,12 @@ def main(argv=None, clients=None, foundry=None) -> int:
     x1.add_argument("--reason", default=""); x1.add_argument("--by", default="operator")
     x1 = xs.add_parser("merge"); x1.add_argument("project"); x1.add_argument("name")
     x1.add_argument("--by", default="operator")
+    x1 = xs.add_parser("bring-home", help="a lane on a slot becomes a local track (its commits "
+                                          "fetched, uncommitted files saved here)")
+    x1.add_argument("project"); x1.add_argument("name"); x1.add_argument("--by", default="operator")
+    x1.add_argument("--force-local", action="store_true",
+                    help="the slot is away: go on here from the last commit fetched (newer work "
+                         "stays on the slot; nothing is deleted)")
     x1 = xs.add_parser("status"); x1.add_argument("project"); x1.add_argument("--json", action="store_true")
     x1 = xs.add_parser("set-max-agents"); x1.add_argument("project"); x1.add_argument("n", type=int)
     x1.add_argument("--by", default="operator")
@@ -1375,6 +1381,11 @@ def _tracks(c: Coordinator, a) -> int:
         elif a.tcmd == "stop":
             r = tm.stop(P, a.name, a.by, a.reason)
             print(f"track {r['name']} {r['state']}")
+        elif a.tcmd == "bring-home":
+            r = tm.bring_home(P, a.name, actor=a.by, why="operator",
+                              force_local=getattr(a, "force_local", False))
+            print(("OK " if r.get("ok") else "NOT YET ") + str(r.get("detail") or ""))
+            return 0 if r.get("ok") else 1
         elif a.tcmd == "merge":
             r = tm.merger.request(P, a.name, a.by)
             print(f"track {r['name']} {r['state']} (merges at the main sprint's next quiet point)")

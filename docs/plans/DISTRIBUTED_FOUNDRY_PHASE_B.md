@@ -6,10 +6,14 @@ Status: **approved 2026-11-27 with Db1-Db5 as recommended** (Victor: "Approve, b
 every slot until pressed.
 **b-3 (B2 + B6 + B7 + B8) is built in v0.181.267**, behind `[automation] remote_lanes` and the
 slot's `lanes` (both off). Its image change and the pilot (B9, release b-4) wait for the spare
-slot-4. b-4 and b-5 are not started.
-- **As built in b-3:** a remote lane is refused when the project has a custom adapter, or when
-  the lane needs Studio or Blender (phase c). Such a lane is fetched but never merged into the
-  main branch (phase d). Its local MCP servers are off on the slot.
+slot-4.
+**b-4 prep is in v0.181.268** (a lane store made when missing; the pilot prepared under
+C:\Foundry). **b-5 (the Windows slot) is in v0.181.270:** `os` / `studio` slot settings,
+`install\slot.ps1`, and Git for Windows' bash as the slot's ssh shell.
+- **As built in b-3, lifted in v0.181.270 (phases c and d):** Studio and the AU adapter now work
+  on a remote lane. Its reads go to a read mirror here, Lune and the Studio gate run on the slot,
+  and it merges by being brought home.
+- **Still refused:** Blender on a lane, and Studio on a Windows slot.
 Design: `docs/DISTRIBUTED_FOUNDRY.md` (§3, §4). Overall plan: `docs/plans/DISTRIBUTED_FOUNDRY_PLAN.md`.
 Line references are on `main` at `016931a` (v0.181.264).
 

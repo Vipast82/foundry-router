@@ -45,7 +45,7 @@ def profile(slots=None, client=None, clients=None):
     raw = {"slots": slots or {}}
     if clients:
         raw["clients"] = clients
-    p = types.SimpleNamespace(id="pilot", raw=raw,
+    p = types.SimpleNamespace(id="pilot", raw=raw, workspace="C:/AU",
                               client=client or {"kind": "kilo", "url": "http://127.0.0.1:4096",
                                                 "agent": "code"})
     p.secret = lambda table, name: ""
@@ -66,7 +66,12 @@ def test_a_lane_slot_adds_its_two_members(fm):
     assert isinstance(c, ClientSet)
     assert set(c.members) == {"default", "slot-4/kilo", "slot-4/opencode"}
     k, o = c.members["slot-4/kilo"], c.members["slot-4/opencode"]
-    assert k.lane_host == o.lane_host == "slot-4" and k.lane_root == "/srv/foundry-lanes"
+    import os
+    mirror = os.path.join(os.path.realpath("C:/AU"), ".lanes", "slot-4").replace("\\", "/")
+    # phase c: the member serves the lanes' read mirrors here; the slot sees its own folder
+    assert k.lane_host == o.lane_host == "slot-4" and k.lane_root == mirror
+    assert k.table["slot_root"] == "/srv/foundry-lanes/pilot"
+    assert k.client.dir_map == (mirror, "/srv/foundry-lanes/pilot")
     assert k.agent == "code" and o.agent == "build"
     assert fm.configured and "slot-4" in fm.configured[-1]
 
@@ -168,6 +173,31 @@ def test_folder_calls_reach_only_the_members_that_serve_the_folder():
     assert cs.owner("opencode-x", "/srv/foundry-lanes/pilot/l1").client is so
 
 
+def test_folders_under_the_mirror_reach_the_slot_as_its_own(fm):
+    tc = TunnelledClient("slot-4", "kilo", fm.endpoint,
+                         dir_map=("C:/AU/.lanes/slot-4", "/srv/foundry-lanes/pilot"))
+    assert tc.slot_dir("C:\\AU\\.lanes\\slot-4\\l1") == "/srv/foundry-lanes/pilot/l1"
+    assert tc.slot_dir("c:/au/.lanes/slot-4/l1/x") == "/srv/foundry-lanes/pilot/l1/x"
+    assert tc.slot_dir("C:/AU") == "C:/AU" and tc.slot_dir(3) == 3
+    seen = {}
+
+    class Inner:
+        def start_session(self, **kw):
+            seen.update(kw)
+            return "sid"
+
+        def dispose(self, directory):
+            seen["dispose"] = directory
+            return True
+    fm.eps[("slot-4", "kilo")] = {"url": "http://127.0.0.1:9", "password": ""}
+    tc._inner, tc._key = Inner(), ("http://127.0.0.1:9", "")
+    tc.start_session(directory="C:/AU/.lanes/slot-4/l1", title="t", persona="p", agent="code",
+                     metadata={}, permissions=[])
+    tc.dispose("C:/AU/.lanes/slot-4/l1")
+    assert seen["directory"] == "/srv/foundry-lanes/pilot/l1"
+    assert seen["dispose"] == "/srv/foundry-lanes/pilot/l1"
+
+
 def test_serves():
     assert serves("", "anything") and serves(None, "x")
     assert serves("/srv/foundry-lanes", "/srv/foundry-lanes/p/l")
@@ -186,15 +216,18 @@ def test_a_track_row_with_a_host_gets_a_remote_workspace(fm):
     from foundry_coordinator.adapters.remote_git import RemoteWorkspace
     from foundry_coordinator.tracks.manager import TrackManager
     P = types.SimpleNamespace(id="pilot")
-    row = {"name": "l1", "worktree": "/srv/foundry-lanes/pilot/l1", "data": {"host": "slot-4"}}
-    ws = TrackManager._workspace(P, row)
+    row = {"name": "l1", "worktree": "C:/AU/.lanes/slot-4/l1",
+           "data": {"host": "slot-4", "remote_worktree": "/srv/foundry-lanes/pilot/l1"}}
+    tm = TrackManager.__new__(TrackManager)
+    ws = tm._workspace(P, row)
     assert isinstance(ws, RemoteWorkspace) and ws.lane == "l1" and ws.project == "pilot"
+    assert ws.path == "/srv/foundry-lanes/pilot/l1" and ws.mirror == "C:/AU/.lanes/slot-4/l1"
     fm.eps[("slot-4", "agent")] = {"url": "http://127.0.0.1:1", "token": "T"}
     assert ws.agent.endpoint() == {"url": "http://127.0.0.1:1", "token": "T"}
-    local = TrackManager._workspace(P, {"name": "l2", "worktree": "C:/x", "data": {}})
+    local = tm._workspace(P, {"name": "l2", "worktree": "C:/x", "data": {}})
     assert type(local) is Workspace
     ex = TrackManager._track_extras(types.SimpleNamespace(workspace="C:/AU"), row)
-    assert ex["lane_host"] == "slot-4"
+    assert ex["lane_host"] == "slot-4" and ex["remote_workspace"] == "/srv/foundry-lanes/pilot/l1"
     assert TrackManager._track_extras(types.SimpleNamespace(workspace="C:/AU"),
                                       {"name": "x", "data": {}})["lane_host"] == ""
 

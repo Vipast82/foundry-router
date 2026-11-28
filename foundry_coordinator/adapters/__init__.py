@@ -87,7 +87,9 @@ def lane_members(profile) -> dict:
     if not slots:
         return {}
     from .laneclient import TunnelledClient, lane_root
+    from ..lane_fetch import MIRROR_DIR
     raw = getattr(profile, "raw", None) or {}
+    main_ws = os.path.realpath(str(getattr(profile, "workspace", "") or "."))
     oc_table = next((t for t in (raw.get("clients") or {}).values()
                      if isinstance(t, dict) and t.get("kind") == "opencode"), {})
     out = {}
@@ -100,14 +102,19 @@ def lane_members(profile) -> dict:
             # worker_client: the router key the slot's server calls with is the slot's own
             # lane key (foundry_router/lane_keys.py), not this machine's kilo / opencode key;
             # the router trusts a session's purpose only from that client (v0.181.266)
+            # phase c: a remote lane's folder on this machine is its read mirror
+            # (<workspace>/.lanes/<slot>/<lane>); the slot's is <lanes_root>/<project>/<lane>
+            local = os.path.join(main_ws, MIRROR_DIR, sid).replace("\\", "/")
+            remote = f"{lane_root(s)}/{profile.id}"
             table = {**{k: v for k, v in (src or {}).items()
                         if k in ("agent", "agents", "provider")},
-                     "kind": kind, "lane_host": sid, "lane_root": lane_root(s),
-                     "worker_client": f"{sid}-{kind}"}
+                     "kind": kind, "lane_host": sid, "lane_root": local,
+                     "slot_root": remote, "worker_client": f"{sid}-{kind}"}
             if kind == "opencode" and not table.get("agent"):
                 table["agent"] = "build"          # OpenCode's own default agent (agent_backends)
             client = TunnelledClient(sid, kind, lane_tunnel.MANAGER.endpoint,
-                                     provider=str(table.get("provider") or "foundry"))
+                                     provider=str(table.get("provider") or "foundry"),
+                                     dir_map=(local, remote))
             out[f"{sid}/{kind}"] = (client, table)
     return out
 

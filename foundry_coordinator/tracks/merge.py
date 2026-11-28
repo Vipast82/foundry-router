@@ -318,12 +318,15 @@ class MergeManager:
             return
         data = dict(row.get("data") or {})
         if data.get("host"):
-            # Distributed Foundry phase b: a lane on a slot is fetched here but not merged into
-            # the main branch until phase d (the merge worktree, design D4)
-            self.tm.lane_fetch(P, row)
-            self._wait(P, row, f"a lane on slot {data['host']} is merged from Distributed "
-                               f"Foundry phase d; its commits are on {row.get('branch')} here")
-            return
+            # Distributed Foundry phase d (design D4): a lane on a slot is brought home first:
+            # fetched, its mirror made a full checkout, and from then on merged, repaired and
+            # gated exactly as a local track. A slot that is away: the merge waits
+            home = self.tm.bring_home(P, row["name"], actor="merge", why="merge")
+            if not home.get("ok"):
+                self._wait(P, row, home.get("detail") or "the lane is not home yet")
+                return
+            row = self.store.track(P.id, row["name"]) or row
+            data = dict(row.get("data") or {})
         stage = data.get("merge_stage") or "wait"
         if _repair_running(data):
             self._drive_repair(P, row)             # the Lead repairs the conflict

@@ -1,8 +1,13 @@
 # Plan: Distributed Foundry
 
-Status: **D1-D7 and phase a approved (Victor 2026-11-27: "Approve, start a"). Phase a built in
-v0.181.263** (the slot image change is not yet built on a slot: it waits for the spare slot).
-Phases b-f each need their own go-ahead. Design: `docs/DISTRIBUTED_FOUNDRY.md` (decisions D1-D7
+Status: **every phase is built** (Victor 2026-11-27: "go ahead and build all the phases, and then I
+will make a new slot for testing"), each part off by default:
+- a: v0.181.263;
+- b: v0.181.265-268 and b-5 in .269;
+- c, d, e: v0.181.270;
+- f: the runbook `docs/plans/DISTRIBUTED_FOUNDRY_CUTOVER.md`, every step its own go-ahead.
+
+Nothing has run on a slot yet: the pilot waits for the spare slot-4. Design: `docs/DISTRIBUTED_FOUNDRY.md` (decisions D1-D7
 in its §13). Nothing in this plan touches the live coordinator, router or slots until a phase's
 cut-over step is approved on its own.
 

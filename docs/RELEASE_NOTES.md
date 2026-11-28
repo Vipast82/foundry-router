@@ -1,3 +1,73 @@
+## v0.181.270 - Distributed Foundry: Windows slots (b-5), Studio and Lune on the slot (c), merging by bringing a lane home (d), the junction container (e), the cut-over runbook (f)
+
+Victor 2026-11-27: "go ahead and build all the phases, and then I will make a new slot for testing when I get a chance".
+**Every new piece stays off:** with `[automation] remote_lanes` off, or a slot's `lanes` off, nothing changes. Nothing
+has run on a slot yet; the pilot waits for the spare slot-4.
+
+**b-5, Windows slots**
+- **New slot settings:** `os` (`linux` / `windows`) and `studio` (`container` / `native`).
+- **No Docker on a Windows slot:**
+  - it is kept without a container;
+  - its commands run on the host itself;
+  - its paths default to `C:/Foundry/lanes` and `C:/Foundry/secrets/lane/lane.json`;
+  - its git URLs are scp-style (`user@host:C:/...`).
+- **`install/slot.ps1` (new)** makes Git for Windows' bash the slot's OpenSSH shell. The coordinator's POSIX
+  commands (`cat`, `df`, git over ssh) then work on it as on a Linux slot. The script also installs the tools and
+  the pinned Kilo and OpenCode, enrols, makes the game copy and the lane store, pulls the secrets into a folder only
+  the slot's user can read, starts the lane agent on 127.0.0.1 at sign-in and runs `doctor --platform`.
+- **Not yet:** Studio on a Windows lane (its native-Studio gate is not built).
+
+**Phase c, a lane's work on its slot**
+- **A read mirror here:** each remote lane gets a sparse worktree at `<workspace>/.lanes/<slot>/<lane>` on
+  `track/<lane>`, without `docs/evidence/` except its own sprints' folders. AU's evidence folder is 14 GB. Git sets
+  `extensions.worktreeConfig` in the repo the first time; the main checkout does not change.
+  - The lane's `profile.workspace` is the mirror, so every coordinator read works as for a local track: plans,
+    evidence, globs, images, git.
+  - The mirror fast-forwards at every fetch. A mirror with files in the way is reported, never overwritten.
+- **Sessions:** the slot's Kilo / OpenCode get every folder under the mirror as the slot's own path.
+- **Writes:** `RemoteWorkspace` writes to both sides. Before a commit it uploads the coordinator's own changed files
+  from the mirror. Files the slot already has with the same content (compared by `git hash-object`) are not sent. A
+  commit is fetched back at once.
+- **Lune:** AU's Lune rows run on the slot as the lane agent's `lune` job, with the lane's own warm spec cache. They
+  are judged here as a local run; a slot that does not finish is UNKNOWN, never PASS.
+- **New lane worktrees:** `rokit install` and `wally install` run in them.
+- **Studio gate:** runs on the lane's slot as for any slot-bound track, and its outputs are also copied into the lane
+  on the slot (`slots.copy_to_lane`).
+- **Studio MCP:** a lane's kilo.jsonc points Studio MCP at the slot's own local commands; other local MCP servers
+  stay off.
+- **Lifted:** the b-3 refusals for the AU adapter and for Studio. Still refused: Blender on a lane.
+
+**Phase d, merging**
+- **Bring-home:** at merge time a remote lane is brought home. Its last commits are fetched, its uncommitted files on
+  the slot are saved to `<state>/lane-saves`, its mirror becomes a full checkout, and the row becomes a local track.
+  Merge, Lead repair, the merge gate and `studio_batch` then run exactly as for any track.
+- **After `track_merged`:** the slot's worktree is removed, but only at the tip the junction holds and with exactly
+  the files it saved.
+- **`tracks bring-home <project> <lane>` (new)** does the same by hand. `--force-local` goes on from the last
+  fetched commit when the slot is away; anything newer stays on the slot, and nothing is deleted.
+- **Slot away:** one notice after `[automation] slot_away_minutes` (30), naming the last commit here; the mark goes
+  when the slot is back. Nothing is moved by itself.
+
+**Phase e, the junction container**
+- **`install/junction/` (new):** a Debian 13 image built with `install/workstation.sh --tools-only`, an entrypoint
+  (`install` once, `run`, `doctor`, `shell`) and a compose file.
+  - The client's settings and ssh keys live in the volume.
+  - Ports are on the host's loopback.
+  - `studio-main` (the slot image for main sprints) is opt-in.
+  - A new junction starts on standby.
+- **`install/workstation.sh`:** Kilo 7.8.32 (was 7.8.8), plus OpenCode 2.3.2, PowerShell 7.6.9 and `--tools-only`.
+  A test keeps its pins equal to the slot image's.
+- **`install/workstation.ps1` (new):** the Windows junction installer, with the same Python steps (`foundry-client
+  workstation apply` / `profile`).
+
+**Phase f:** `docs/plans/DISTRIBUTED_FOUNDRY_CUTOVER.md` lists every live step, each with its own go-ahead and
+rollback.
+
+**Agent:** `write` takes `delete`, `worktree-remove` takes `saved`, and there are two new jobs, `lune` and
+`store-init`.
+
+**CI:** platform.yml runs the new lane, phase c/d and junction tests on both OSes.
+
 ## v0.181.269 - a note on a tool for every chat model: create_comic asks for characters
 
 The Media_Gen chat test (docs/MEDIA_GEN_527_CHAT_TEST.md). In round 10 and in round 12's bookshop, the chat model sent

@@ -194,31 +194,37 @@ def test_a_remote_lane_needs_both_switches(monkeypatch):
     assert tm._remote_lane_slot(P, "slot-4") == {}           # [automation] remote_lanes off
 
 
-@pytest.mark.parametrize("adapter,needs,why", [
-    ("foundry_coordinator.projects.animaluprising.adapter:AUAdapter", [], "generic adapter"),
-    ("", ["studio"], "no studio yet"),
-    ("", ["blender", "code"], "no blender yet"),
+@pytest.mark.parametrize("needs,slot,why", [
+    # phase c lifted the adapter and Studio refusals; Blender, and Studio on Windows, remain
+    (["blender", "code"], {"id": "slot-4"}, "no blender yet"),
+    (["studio"], {"id": "slot-w", "os": "windows"}, "no studio yet"),
 ])
-def test_what_a_remote_lane_cannot_do_yet_is_refused(adapter, needs, why):
+def test_what_a_remote_lane_cannot_do_yet_is_refused(needs, slot, why):
     from foundry_coordinator.tracks import manager as M
     tm = M.TrackManager.__new__(M.TrackManager)
-    P = types.SimpleNamespace(profile=types.SimpleNamespace(adapter=adapter))
+    P = types.SimpleNamespace(profile=types.SimpleNamespace(adapter=""))
     with pytest.raises(M.TrackError, match=why):
-        tm._create_remote(P, "l1", "parallel", ["T1"], needs, "op", "slot-4", {"id": "slot-4"})
+        tm._create_remote(P, "l1", "parallel", ["T1"], needs, "op", slot["id"], slot)
 
 
-def test_a_remote_lane_is_fetched_but_never_merged_before_phase_d():
+def test_a_remote_lane_brought_home_merges_as_a_local_track():
+    """Phase d replaced b-3's "never merged": once home, the merge goes on as for any track
+    (here it reaches the usual wait for a quiet main sprint)."""
     from foundry_coordinator.tracks.merge import MergeManager
-    fetched, waits = [], []
+    homed, waits = [], []
+    home = {"name": "l1", "state": "merging", "branch": "track/l1",
+            "data": {"was_host": "slot-4", "merge_stage": "wait"}}
     mm = MergeManager.__new__(MergeManager)
     mm.tm = types.SimpleNamespace(main_of=lambda P: P,
-                                  lane_fetch=lambda P, row: fetched.append(row["name"]))
+                                  bring_home=lambda P, name, actor, why: homed.append(why)
+                                  or {"ok": True, "detail": "home"},
+                                  main_quiescent=lambda P: (False, "the main sprint is busy"))
+    mm.store = types.SimpleNamespace(track=lambda pid, name: home)
     mm._wait = lambda P, row, why: waits.append(why)
-    mm.store = None
     row = {"name": "l1", "state": "merging", "branch": "track/l1",
            "data": {"host": "slot-4", "merge_stage": "wait"}}
     mm.step(types.SimpleNamespace(id="pilot"), row)
-    assert fetched == ["l1"] and "phase d" in waits[0]
+    assert homed == ["merge"] and waits == ["the main sprint is busy"]
 
 
 def test_remote_automation_setting_ships_off():

@@ -57,7 +57,8 @@ _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 MAX_READ = 8 * 1024 * 1024
 MAX_WRITE = 8 * 1024 * 1024
 MAX_GIT_OUT = 32 * 1024 * 1024
-JOBS = ("worktree-add", "worktree-remove", "verify", "store-init")
+JOBS = ("worktree-add", "worktree-remove", "verify", "store-init", "lune")
+LUNE_CACHE = "~/.cache/au-lune-spec-cache"     # one folder per lane (slots.SLOT_LUNE_CACHE)
 
 
 class LaneError(Exception):
@@ -203,9 +204,13 @@ class LaneHost:
                         "mtime_ns": st.st_mtime_ns}
         return {"stats": out}
 
-    def write(self, project: str, lane: str, path: str, data: str) -> dict:
+    def write(self, project: str, lane: str, path: str, data: str, delete: bool = False) -> dict:
         wt = self.worktree_of(project, lane)
         p = self._inside(wt, path)
+        if delete:                              # the coordinator deleted it in its read mirror
+            if os.path.isfile(p):
+                os.remove(p)
+            return {"ok": True, "deleted": True}
         raw = base64.b64decode(data or "")
         if len(raw) > MAX_WRITE:
             raise LaneError(f"{path}: {len(raw)} bytes is over the {MAX_WRITE} byte limit")
@@ -276,6 +281,8 @@ class LaneHost:
                     rc = self._verify(project, lane, args, say, run, log)
                 elif job == "store-init":
                     rc = self._store_init(project, say, run, log)
+                elif job == "lune":
+                    rc = self._lune(project, lane, args, say, run, log)
         except LaneError as e:
             _append(run["log"], f"LANE JOB FAIL: {e}")
         except Exception as e:                                    # noqa: BLE001
@@ -285,14 +292,18 @@ class LaneHost:
         run["state"] = "cancelled" if run["cancel"] else ("done" if rc == 0 else "failed")
 
     def _sub(self, argv: list, run: dict, log, cwd: Optional[str] = None,
-             timeout: float = 1800, env: Optional[dict] = None) -> int:
+             timeout: float = 1800, env: Optional[dict] = None,
+             base_env: Optional[dict] = None) -> int:
+        """`env`: variables from the coordinator (checked by env_allowed); `base_env`: this
+        agent's own environment for the child (its PATH with the toolchain), unchecked."""
         if run["cancel"]:
             return 130
         extra = {k: str(v) for k, v in (env or {}).items() if env_allowed(k)}
+        base = base_env if base_env is not None else os.environ
         try:
             p = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL,
-                                 env={**os.environ, **extra} if extra else None,
+                                 env={**base, **extra} if (extra or base_env is not None) else None,
                                  **_plat.no_window_kw())
         except FileNotFoundError as e:
             log.write(f"LANE command not found: {e}\n".encode("utf-8"))
@@ -306,6 +317,57 @@ class LaneHost:
             return 124
         finally:
             run["proc"] = None
+
+    @staticmethod
+    def _tool_path() -> str:
+        """PATH with the game toolchain (rokit's bin: lune, wally, selene, stylua)."""
+        return os.pathsep.join([os.path.expanduser("~/.rokit/bin"), os.environ.get("PATH", "")])
+
+    def _toolchain(self, wt: str, say, run, log) -> None:
+        """Best effort, after worktree-add: the worktree's rokit tools and wally packages
+        (Packages/ is not committed; Lune and Rojo need it), as entrypoint.sh does for the
+        Studio checkout. A failure is logged, never fatal: the lane still works for git."""
+        if not os.path.isfile(os.path.join(wt, "rokit.toml")):
+            return
+        env = {**os.environ, "PATH": self._tool_path()}
+        for argv in (["rokit", "install", "--no-trust-check"], ["wally", "install"]):
+            exe = shutil.which(argv[0], path=env["PATH"])
+            if not exe:
+                say(f"LANE toolchain: {argv[0]} not found (skipped)")
+                continue
+            if argv[0] == "wally" and (os.path.isdir(os.path.join(wt, "Packages"))
+                                       or not os.path.isfile(os.path.join(wt, "wally.toml"))):
+                continue
+            p = subprocess.Popen([exe, *argv[1:]], cwd=wt, stdout=log, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, env=env, **_plat.no_window_kw())
+            run["proc"] = p
+            try:
+                rc = p.wait(timeout=1800)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                rc = 124
+            run["proc"] = None
+            say(f"LANE toolchain: {' '.join(argv)} rc={rc}")
+
+    def _lune(self, project, lane, args, say, run, log) -> int:
+        """`lune run tests/lune/run.luau <args>` in the lane worktree (the AU adapter's Lune
+        rows, phase c): the lane's own warm spec cache, AU_LUNE_WORKERS as asked."""
+        wt = self.worktree_of(project, lane)
+        extra = [str(a) for a in (args.get("args") or []) if isinstance(a, (str, int))]
+        path = self._tool_path()
+        exe = shutil.which("lune", path=path)
+        if not exe:
+            say("LANE command not found: lune (rokit install)")
+            return 127
+        cache = os.path.join(os.path.expanduser(LUNE_CACHE), lane)
+        os.makedirs(cache, exist_ok=True)
+        env = {"AU_LUNE_CACHE_DIR": cache}
+        if args.get("workers"):
+            env["AU_LUNE_WORKERS"] = str(int(args["workers"]))
+        t = max(1.0, min(float(args.get("timeout") or 3600), 4 * 3600.0))
+        say(f"LANE lune {k_of(project, lane)}: {' '.join(extra) or '(suite)'}")
+        return self._sub([exe, "run", "tests/lune/run.luau", *extra], run, log, cwd=wt,
+                         timeout=t, env=env, base_env={**os.environ, "PATH": path})
 
     def _store_init(self, project, say, run, log) -> int:
         """The project's lane store, made empty when it is missing. setup-host.sh makes the
@@ -356,6 +418,7 @@ class LaneHost:
             if k in have:
                 have[k]["state"] = "held"
                 self._save(have)
+        self._toolchain(row["worktree"], say, run, log)
         say(f"LANE worktree-add OK {k}")
         return 0
 
@@ -370,9 +433,17 @@ class LaneHost:
             raise LaneError(f"lane {k}: HEAD {head[:12]} is not the fetched tip {tip[:12] or '?'}"
                             f" (fetch it first)", 409)
         dirty = self.git(project, lane, ["status", "--porcelain", "--untracked-files=all"])
-        if dirty["stdout"].strip():
-            raise LaneError(f"lane {k} has uncommitted files: save them first", 409)
-        rc = self._sub(["git", "-C", self.store(project), "worktree", "remove", wt], run, log)
+        rows = [ln[3:].strip().strip('"') for ln in dirty["stdout"].splitlines() if len(ln) > 3]
+        # `saved`: the paths the coordinator copied to its machine (bring-home saves every
+        # changed file first); only exactly those may go with the worktree, nothing else
+        saved = {str(p).replace("\\", "/") for p in (args.get("saved") or [])}
+        left = [p for p in rows if p.replace("\\", "/").rstrip("/") not in saved]
+        if left:
+            raise LaneError(f"lane {k} has uncommitted files not saved on the coordinator's "
+                            f"machine: {', '.join(left[:5])}", 409)
+        force = ["--force"] if rows else []
+        rc = self._sub(["git", "-C", self.store(project), "worktree", "remove", *force, wt],
+                       run, log)
         if rc == 0:
             self._forget(k)
             say(f"LANE worktree-remove OK {k}")

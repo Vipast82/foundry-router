@@ -387,6 +387,8 @@ AUTOMATION_DEFAULTS: dict = {
     # Distributed Foundry phase b (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B6): a track bound
     # to a slot with `lanes` on gets its worktree and sessions ON the slot. Off = as before
     "remote_lanes": False,
+    # phase d: a lane whose slot has not answered this long gets one notice (0 = never)
+    "slot_away_minutes": 30,
     # 2026-11-03 PT-3: the owner's concept-art chat drops images into an inbox folder of the
     # main checkout mid-sprint; they are the owner's deliveries, never a session's stray files
     "owner_inbox": [],
@@ -675,16 +677,22 @@ SLOT_FIELDS = [
      "runs its own lane agent, Kilo and OpenCode, and the coordinator keeps one ssh tunnel to "
      "it. Off = the slot only runs Studio, as before. Turn on only for a slot whose installer "
      "set the lane agent up.", None, None),
-    ("lanes_root", "str", "/srv/foundry-lanes", "Where the slot keeps lane stores and "
-     "worktrees, as its own servers see the path.", None, None),
+    ("lanes_root", "str", "", "Where the slot keeps lane stores and worktrees, as its own "
+     "servers see the path (empty = /srv/foundry-lanes on Linux, C:/Foundry/lanes on "
+     "Windows).", None, None),
     ("lanes_secrets", "str", "", "The slot's lane secrets file (the lane agent token and the "
-     "Kilo / OpenCode passwords, a tmpfs), read over ssh when the tunnel opens (empty = "
-     "/run/secrets/lane/lane.json).", None, None),
+     "Kilo / OpenCode passwords), read over ssh when the tunnel opens (empty = "
+     "/run/secrets/lane/lane.json, a tmpfs, on Linux; C:/Foundry/secrets/lane/lane.json, a "
+     "folder only the slot's user can read, on Windows).", None, None),
     ("agent_port", "int", 47811, "The lane agent's port on the slot host's 127.0.0.1.", None, 1),
     ("kilo_port", "int", 4096, "The slot's Kilo server port on the slot host's 127.0.0.1.",
      None, 1),
     ("opencode_port", "int", 4097, "The slot's OpenCode server port on the slot host's "
      "127.0.0.1.", None, 1),
+    ("os", "str", "linux", "The slot machine's system: linux (Studio under Vinegar/Wine in "
+     "Docker) or windows (native Studio, no Docker; install/slot.ps1).", None, None),
+    ("studio", "str", "container", "How the slot runs Studio: container (the slot image) or "
+     "native (Roblox's own Studio on a Windows slot).", None, None),
 ]
 SLOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 
@@ -710,10 +718,15 @@ def slots_table(path: str, raw) -> dict:
         if s.get("desktop_size") and not re.fullmatch(r"\d{3,4}x\d{3,4}", str(s["desktop_size"])):
             raise SettingsError(f"{path}: {where}.desktop_size: WIDTHxHEIGHT, e.g. 1920x1080",
                                 where + ".desktop_size")
+        if "os" in s and s["os"] not in ("linux", "windows"):
+            raise SettingsError(f"{path}: {where}.os: linux or windows", where + ".os")
+        if "studio" in s and s["studio"] not in ("container", "native"):
+            raise SettingsError(f"{path}: {where}.studio: container or native", where + ".studio")
         if "vnc_port" in s and not (isinstance(s["vnc_port"], int) and 1 <= s["vnc_port"] <= 65535):
             raise SettingsError(f"{path}: {where}.vnc_port: a port number (1-65535)",
                                 where + ".vnc_port")
-        if s.get("enabled", True) is not False and not str(s.get("container") or "").strip():
+        if s.get("enabled", True) is not False and not str(s.get("container") or "").strip() \
+                and s.get("os") != "windows":
             raise SettingsError(f"{path}: {where}.container is required for an enabled slot",
                                 where + ".container")
         key = (str(s.get("host") or ""), str(s.get("container") or ""))
@@ -1228,6 +1241,9 @@ _AUTO_DESC = {
                                      "Studio goes before pending main-checkout sprints.",
     "merge_red_repair": "When a track merge's Studio check is red, the Lead reopens each red "
                         "sprint on the main checkout with the failing rows as its assignment.",
+    "slot_away_minutes": "A lane on a slot whose slot has not answered for this many minutes "
+                         "gets one notice naming its last commit here. Nothing is moved by "
+                         "itself (0 = no notice).",
     "remote_lanes": "Lanes on slots (Distributed Foundry, being built): a track started with "
                     "--slot on a slot whose `lanes` setting is on keeps its worktree, coding "
                     "sessions and checks on that slot; the coordinator fetches its commits "

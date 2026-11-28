@@ -164,9 +164,17 @@ To check:
 - `tracks status` shows `on <slot> (remote)` and `lane tunnel <slot>: up`;
 - on the slot, `docker exec studio-slot tail ~/lane-agent.log`.
 
-Until phase c a lane on a slot has no Studio or Blender and needs the generic adapter. Until
-phase d it is fetched to `track/<name>` but not merged. Turn any switch off to go back: new
-lanes are then made on this machine as before.
+What a lane on a slot does (v0.181.270):
+- **Runs on the slot:** its sessions (the slot's own Kilo / OpenCode), its Lune rows, its Studio
+  gate and Studio MCP.
+- **Here:** the coordinator reads it through a sparse read mirror, `<game>/.lanes/<slot>/<lane>`.
+- **At merge time** it is brought home (`tracks bring-home` does the same by hand) and merges as a
+  local track.
+- **Not yet:** Blender on a lane, and Studio on a Windows slot.
+
+Turn any switch off to go back: new lanes are then made on this machine as before.
+**Windows slot:** `install\slot.ps1` on the VM, then the slot's `os = windows`,
+`studio = native`. Cut-over steps: `docs/plans/DISTRIBUTED_FOUNDRY_CUTOVER.md`.
 
 ## Moving a slot from this PC to Proxmox (slot-1)
 

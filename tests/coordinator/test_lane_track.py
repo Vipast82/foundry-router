@@ -67,13 +67,12 @@ def world(tmp_path, monkeypatch):
     host = L.LaneHost(str(lanes), str(tmp_path / "lane-state"))
     agent = AppAgent(host)
     monkeypatch.setattr(M.TrackManager, "_lane_agent", lambda self, sid: agent)
-    real = M.TrackManager._workspace
-
-    def ws(P_, row):
-        if (row.get("data") or {}).get("host"):
-            return RemoteWorkspace(agent, P_.id, row["name"], row["worktree"])
-        return real(P_, row)
-    monkeypatch.setattr(M.TrackManager, "_workspace", staticmethod(ws))
+    from foundry_coordinator import lane_tunnel
+    # the tunnel's endpoint for slot-4 "is up" (the agent itself is the in-process AppAgent)
+    monkeypatch.setattr(lane_tunnel.MANAGER, "endpoint",
+                        lambda sid, kind="agent": {"url": "x", "token": "LT"})
+    import foundry_coordinator.adapters.remote_git as RG
+    monkeypatch.setattr(RG, "LaneAgent", lambda endpoint, name="": agent)
     return {"c": c, "P": P, "root": root, "host": host, "agent": agent, "lanes": lanes}
 
 
@@ -81,34 +80,62 @@ def test_a_remote_lane_lives_on_the_slot(world):
     c, P = world["c"], world["P"]
     row = c.tracks.create(P, "remote1", ["T1"], actor="victor", slot="slot-4")
     assert row["data"]["host"] == "slot-4" and row["data"]["slot"] == "slot-4"
-    assert row["worktree"] == f"{world['lanes'].as_posix()}/game/remote1"
-    assert "studio" not in row["needs"]                       # no Studio on a remote lane yet
+    slot_wt = row["data"]["remote_worktree"]
+    assert slot_wt == f"{world['lanes'].as_posix()}/game/remote1"
+    assert os.path.isdir(slot_wt)                              # made by the lane agent
+    # phase c: the row's worktree is the read mirror here, on the lane's branch
+    mirror = os.path.join(os.path.realpath(world["root"]), ".lanes", "slot-4", "remote1")
+    assert row["worktree"] == os.path.realpath(mirror) and os.path.isfile(
+        os.path.join(mirror, "src", "a.txt") if os.path.exists(os.path.join(mirror, "src")) else
+        os.path.join(mirror, "tasks.json"))
+    assert subprocess.run(["git", "-C", mirror, "rev-parse", "--abbrev-ref", "HEAD"],
+                          capture_output=True, text=True).stdout.strip() == "track/remote1"
+    assert "/.lanes/" in open(os.path.join(world["root"], ".git", "info", "exclude"),
+                              encoding="utf-8").read()
     assert not os.path.isdir(os.path.join(world["root"], ".tracks", "remote1"))
-    assert os.path.isdir(row["worktree"])                      # made by the lane agent
-    # the agent config was written on the slot: local MCP servers off, remote ones as they were
-    cfg = json.load(open(os.path.join(row["worktree"], "kilo.jsonc"), encoding="utf-8"))
-    assert cfg["mcp"]["media"]["enabled"] is False and cfg["mcp"]["docs"]["enabled"] is True
-    assert row["data"]["kilo_config"].endswith("/remote1/kilo.jsonc")
+    # the agent config was written on the slot (and the mirror): local MCP servers off
+    for where in (slot_wt, mirror):
+        cfg = json.load(open(os.path.join(where, "kilo.jsonc"), encoding="utf-8"))
+        assert cfg["mcp"]["media"]["enabled"] is False and cfg["mcp"]["docs"]["enabled"] is True
+    assert row["data"]["kilo_config"] == slot_wt + "/kilo.jsonc"
     st = c.tracks.status(P)
     assert next(t for t in st["tracks"] if t["name"] == "remote1")["host"] == "slot-4"
     TP = c.tracks.track_project(P, c.store.track(P.id, "remote1"))
     assert isinstance(TP.ws, RemoteWorkspace) and TP.profile.__dict__["lane_host"] == "slot-4"
+    assert TP.ws.path == slot_wt and TP.ws.mirror == row["worktree"]
+    assert TP.profile.workspace == row["worktree"]             # reads go to the mirror
+    assert TP.profile.__dict__["remote_workspace"] == slot_wt
 
 
 def test_its_commits_come_back_and_a_stop_saves_its_files(world):
     c, P = world["c"], world["P"]
     row = c.tracks.create(P, "remote1", ["T1"], actor="victor", slot="slot-4")
-    ws = RemoteWorkspace(world["agent"], P.id, "remote1", row["worktree"])
-    ws.write("src/a.txt", b"made on the slot\n")
-    sha = ws.commit_paths(["src/a.txt"], "T1: a", env={"GIT_AUTHOR_NAME": "t",
-                                                       "GIT_AUTHOR_EMAIL": "t@example.com",
-                                                       "GIT_COMMITTER_NAME": "t",
-                                                       "GIT_COMMITTER_EMAIL": "t@example.com"})
+    slot_wt = row["data"]["remote_worktree"]
+    # a session's commit on the slot (straight into the slot's worktree, as Kilo does)
+    sess = RemoteWorkspace(world["agent"], P.id, "remote1", slot_wt)
+    sess.write("src/a.txt", b"made on the slot\n")
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    sha = sess.commit_paths(["src/a.txt"], "T1: a", env=env)
     out = c.tracks.lane_fetch(P, c.store.track(P.id, "remote1"), force=True)
     assert out["ok"] and out["moved"], out
     got = subprocess.run(["git", "-C", str(world["root"]), "rev-parse", "refs/heads/track/remote1"],
                          capture_output=True, text=True).stdout.strip()
     assert got == sha
+    # the mirror's files followed the fast-forward
+    assert open(os.path.join(row["worktree"], "src", "a.txt"), "rb").read().replace(b"\r\n", b"\n") \
+        == b"made on the slot\n"
+    # the coordinator writes a file in the MIRROR (as studio_calls / memory do) and commits it
+    # through the track's workspace: it reaches the slot's commit and comes back here
+    ws = c.tracks.track_project(P, c.store.track(P.id, "remote1")).ws
+    with open(os.path.join(row["worktree"], "docs_note.txt"), "w", encoding="utf-8") as f:
+        f.write("written here\n")
+    sha2 = ws.commit_paths(["docs_note.txt"], "coordinator note", env=env)
+    assert sha2 and sess.read("docs_note.txt").replace(b"\r\n", b"\n") == b"written here\n"
+    got = subprocess.run(["git", "-C", row["worktree"], "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    assert got == sha2                                          # fetched back at once
+    ws = sess
     ws.write("notes.txt", b"not committed\n")
     c.tracks.stop(P, "remote1", actor="victor", reason="test")
     ev = [e for e in c.store.events("game", 200) if e["kind"] == "track_lane_stopped"]
@@ -118,7 +145,7 @@ def test_its_commits_come_back_and_a_stop_saves_its_files(world):
     listed = open(os.path.join(saved, "_list.txt"), encoding="utf-8").read()
     assert "notes.txt" in listed and "kilo.jsonc" in listed
     assert open(os.path.join(saved, "notes.txt"), "rb").read() == b"not committed\n"
-    assert os.path.isdir(row["worktree"])                      # kept on the slot
+    assert os.path.isdir(slot_wt) and os.path.isdir(row["worktree"])   # both kept
 
 
 def test_what_a_remote_lane_cannot_do_yet_is_refused_before_anything_is_made(world):

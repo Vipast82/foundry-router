@@ -1557,6 +1557,9 @@ Change no code or test file in this session; if one needs changing, stop and rep
     def _lune_run(self, lune, name, args, pat, workers, edir, revision, progress=None):
         """One Lune run. Its output goes straight to the evidence log, so the
         control center can count the tests while it runs (2026-10-27)."""
+        host = str(getattr(self.p, "__dict__", {}).get("lane_host") or "")
+        if host:                    # Distributed Foundry phase c: a lane on a slot runs it there
+            return self._lune_run_remote(host, name, args, pat, workers, edir, revision, progress)
         import threading
         log = self._run_log(edir, name)
         env = dict(os.environ, AU_LUNE_WORKERS=str(workers)) if workers else None
@@ -1593,6 +1596,39 @@ Change no code or test file in this session; if one needs changing, stop and rep
         finally:
             if th is not None:
                 th.join(timeout=5)
+        if progress:
+            from ...live_tests import Counts
+            c = Counts()
+            c.feed(text + "\n")
+            progress(c, final=True)
+        ok = re.search(pat, text, re.M)
+        return VerificationResult(name, PASS if ok else FAIL, True, log,
+                                  (ok.group(0) if ok else text[-500:]), revision,
+                                  duration_ms=int((time.time() - t0) * 1000))
+
+    def _lune_run_remote(self, host, name, args, pat, workers, edir, revision, progress=None):
+        """Distributed Foundry phase c: a lane whose worktree is on a slot runs its Lune rows on
+        that slot (the lane agent's `lune` job, with the lane's own warm spec cache), so the
+        CPU stays off this machine. The log, the verdict and the live counts are made here
+        exactly as for a local run; a slot that does not finish is UNKNOWN, never PASS."""
+        from ... import lane_tunnel
+        from ...adapters.remote_git import LaneAgent
+        from ...lane_fetch import wait_job
+        log = self._run_log(edir, name)
+        agent = LaneAgent(lambda: lane_tunnel.MANAGER.endpoint(host, "agent"), name=host)
+        lane = str(self.p.__dict__.get("track") or "")
+        timeout = self._lune_timeout()
+        t0 = time.time()
+        job = wait_job(agent, self.p.id, lane, "lune",
+                       {"args": [str(a) for a in args], "workers": workers or 0,
+                        "timeout": timeout}, wait_s=float(timeout) + 120)
+        text = (job.get("output") or "").replace("\r\n", "\n")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write(text)
+        if job.get("state") in ("unreachable", "waiting") or job.get("rc") in (None, 124, 127):
+            return VerificationResult(name, UNKNOWN, True, log,
+                                      f"Lune on {host} did not finish ({job.get('state')}, rc "
+                                      f"{job.get('rc')}): {text[-300:]}", revision)
         if progress:
             from ...live_tests import Counts
             c = Counts()
