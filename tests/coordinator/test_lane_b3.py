@@ -256,10 +256,24 @@ def test_the_lane_agent_script_never_prints_a_secret():
     assert 'listen = "0.0.0.0"' in text and 'hostname = "0.0.0.0"' in text
 
 
-@pytest.mark.skipif(not __import__("shutil").which("bash"), reason="no bash")
+def _gnu_bash() -> str:
+    """A real bash, or ''. On a Windows runner `bash` can be System32's WSL launcher, which
+    only prints "no distribution installed" (in UTF-16): that is no bash."""
+    import shutil
+    exe = shutil.which("bash") or ""
+    if not exe:
+        return ""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return exe if r.returncode == 0 and b"GNU bash" in (r.stdout or b"") else ""
+
+
+@pytest.mark.skipif(not _gnu_bash(), reason="no GNU bash here")
 @pytest.mark.parametrize("script", ["lane-agent.sh", "entrypoint.sh", "proxmox/setup-host.sh"])
 def test_the_scripts_parse(script):
-    r = subprocess.run(["bash", "-n", str(SLOT / script)], capture_output=True, text=True)
+    r = subprocess.run([_gnu_bash(), "-n", str(SLOT / script)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
