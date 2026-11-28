@@ -87,7 +87,15 @@ def test_the_agent_says_when_lune_is_missing(tmp_path, monkeypatch):
             return h.run_status(body["id"], body.get("offset", 0))
     base = git(src, "rev-parse", "HEAD")
     added = wait_job(Direct(), "au", "l1", "worktree-add", {"base": base}, sleep=lambda s: None)
-    assert added["ok"] and "toolchain: rokit not found (skipped)" in added["output"]
+    # the toolchain install is its own job (review 2026-11-27): worktree-add does not wait
+    import re
+    import time
+    assert added["ok"], added
+    rid = re.search(r"LANE toolchain: started as run (\w+)", added["output"]).group(1)
+    t0 = time.time()
+    while h.run_status(rid)["state"] == "running" and time.time() - t0 < 60:
+        time.sleep(0.05)
+    assert "toolchain: rokit not found (skipped)" in h.run_status(rid)["output"]
     job = wait_job(Direct(), "au", "l1", "lune", {"args": []}, sleep=lambda s: None)
     assert job["rc"] == 127 and "not found: lune" in job["output"]
 

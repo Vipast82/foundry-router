@@ -231,8 +231,15 @@ class GenericAdapter(ReviewContractDefaults):
             agent = LaneAgent(lambda: lane_tunnel.MANAGER.endpoint(host, "agent"), name=host)
             lane = str(self.p.__dict__.get("track") or "")
             slot_wt = str(self.p.__dict__.get("remote_workspace") or self.p.workspace)
+            kw = {}
+            try:
+                from .. import slots as SL
+                if (SL.configured(self.p).get(host) or {}).get("os") == "windows":
+                    kw["slot_os"] = "windows"          # {python} there is "python"
+            except Exception:                                     # noqa: BLE001
+                pass
             return [run_check_remote(c, agent, self.p.id, lane, slot_wt, spec.task_id,
-                                     revision, base, self.state_dir)
+                                     revision, base, self.state_dir, **kw)
                     for c in self.p.checks if c.phase == phase]
         return [run_check(c, self.p.workspace, spec.task_id, revision, base, self.state_dir,
                           self.p.id) for c in self.p.checks if c.phase == phase]

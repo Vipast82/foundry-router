@@ -168,3 +168,55 @@ def test_no_os_checks_outside_the_platform_layer():
                     bad.append(f"{rel}:{line} {name}")
     assert not bad, ("use foundry_platform (is_windows(), NO_WINDOW, ...) instead of:\n"
                      + "\n".join(bad))
+
+
+# ---------------------------------------------------------------------------- kill_tree (2026-11-27)
+
+def test_kill_tree_ends_a_process_and_its_children(tmp_path):
+    import subprocess
+    import sys
+    import time
+    import foundry_platform as fp
+    marker = tmp_path / "child.pid"
+    script = ("import subprocess, sys, time; "
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
+              f"open(r'{marker}', 'w').write(str(p.pid)); time.sleep(120)")
+    proc = subprocess.Popen([sys.executable, "-c", script], **fp.group_kw())
+    t0 = time.time()
+    while not (marker.exists() and marker.read_text().strip()) and time.time() - t0 < 30:
+        time.sleep(0.1)
+    child = int(marker.read_text())
+    fp.kill_tree(proc, timeout=5)
+    assert proc.poll() is not None
+    t0 = time.time()
+    while _alive(child) and time.time() - t0 < 15:
+        time.sleep(0.2)
+    assert not _alive(child)
+    fp.kill_tree(proc)                                   # an ended process: nothing happens
+    fp.kill_tree(None)
+
+
+def _alive(pid: int) -> bool:
+    import os
+    import subprocess
+    if os.name == "nt":
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
+                           text=True)
+        return str(pid) in r.stdout
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            return f.read().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+def test_group_kw_makes_a_process_group_on_posix(monkeypatch):
+    import foundry_platform as fp
+    monkeypatch.setattr(fp.sys, "platform", "linux")
+    assert fp.group_kw() == {"start_new_session": True}
+    monkeypatch.setattr(fp.sys, "platform", "win32")
+    assert fp.group_kw() == {"creationflags": fp.CREATE_NO_WINDOW}

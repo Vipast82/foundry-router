@@ -43,20 +43,40 @@ def load_token() -> str:
     return t
 
 
+def is_loopback(addr: str) -> bool:
+    a = str(addr or "").strip().lower()
+    if a.startswith("::ffff:"):
+        a = a[7:]
+    return a == "::1" or a == "localhost" or a.startswith("127.")
+
+
 def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None,
-               lane=None, lane_token: str = "") -> FastAPI:
+               lane=None, lane_token: str = "", bind: str = "127.0.0.1") -> FastAPI:
     """`lane` (a lane.LaneHost) + `lane_token`: this machine holds lanes for a coordinator
     elsewhere (Distributed Foundry phase b). The /api/lane routes then answer, to the LANE
-    token only; the client token never opens them and the lane token opens nothing else."""
+    token only; the client token never opens them and the lane token opens nothing else.
+
+    `bind`: the address the server listens on. A slot's container binds 0.0.0.0 so docker can
+    publish the lane port on the slot host's 127.0.0.1; then only the /api/lane routes answer
+    a caller that is not on this machine's loopback (the tunnel arrives through docker's
+    bridge), and the settings page and every other route refuse it. Bound to loopback (the
+    workstation, the tray) nothing changes."""
     app = FastAPI(title="Foundry Client", docs_url=None, redoc_url=None, openapi_url=None)
     lock = threading.Lock()
+    open_bind = not is_loopback(bind)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
         host = (request.headers.get("host") or "").split(":")[0]
         if host not in HOSTS:
             return JSONResponse({"error": "local access only"}, status_code=403)
-        if request.url.path.startswith("/api/lane/"):
+        lane_path = request.url.path.startswith("/api/lane/")
+        if open_bind and not lane_path:
+            peer = request.client.host if request.client else ""
+            if not is_loopback(peer):
+                return JSONResponse({"error": "local access only (this address answers lane "
+                                              "calls only)"}, status_code=403)
+        if lane_path:
             if lane is None or not lane_token:
                 return JSONResponse({"error": "this machine holds no lanes ([lane] is off)"},
                                     status_code=404)
@@ -313,7 +333,7 @@ def _lane_routes(app: FastAPI, mgr, lane) -> None:
     async def lane_read(request: Request):
         b = await body_of(request)
         return await run_in_threadpool(answer, lane.read, b.get("project"), b.get("lane"),
-                                       b.get("path"), b.get("max_bytes"))
+                                       b.get("path"), b.get("max_bytes"), b.get("offset") or 0)
 
     @app.post("/api/lane/stat")
     async def lane_stat(request: Request):

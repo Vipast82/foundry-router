@@ -64,6 +64,7 @@ def _git(cwd: str, *args, check: bool = True, timeout: int = 300) -> subprocess.
 class TrackManager:
     def __init__(self, c, clock: Callable[[], float] = time.time):
         self._fetched: dict = {}                           # (project, lane) -> last fetch
+        self._fetch_out: dict = {}                         # (project, lane) -> its result
         self.c = c
         self.store = c.store
         self.clock = clock
@@ -289,12 +290,13 @@ class TrackManager:
         remote = str(data.get("remote_worktree") or row["worktree"])
         mirror = row["worktree"] if data.get("remote_worktree") else ""
 
-        def fetched(_sha, P=P, name=row["name"]):
+        def fetched(_sha=None, P=P, name=row["name"]):
             cur = self.store.track(P.id, name)
-            if cur:
-                self.lane_fetch(P, cur, force=True)
+            return self.lane_fetch(P, cur, force=True) if cur else {}
+        # fetch: a coordinator write is judged against the slot's newest commit, never an
+        # older mirror (2026-11-27 review)
         return RemoteWorkspace(agent, P.id, row["name"], remote, mirror=mirror,
-                               on_commit=fetched)
+                               on_commit=fetched, fetch=fetched)
 
     @staticmethod
     def _track_fields(prof, row: dict) -> dict:
@@ -567,7 +569,15 @@ class TrackManager:
             on = auto_get(P, "remote_lanes") is True
         except Exception:                                         # noqa: BLE001
             on = False
-        return {**s, "id": slot} if on else {}
+        if not on:
+            return {}
+        from .. import lane_tunnel
+        pid = str(getattr(P, "id", "") or "")
+        why = lane_tunnel.conflict(pid, slot)
+        if why:
+            # its tunnel belongs to another project with other settings for this slot id
+            raise TrackError(f"no lane on {slot} for {pid}: {why}")
+        return {**s, "id": slot}
 
     def _lane_agent(self, sid: str):
         from .. import lane_tunnel
@@ -590,14 +600,23 @@ class TrackManager:
                              f"track without lanes, or turn [automation] remote_lanes off")
         base = self.base_sha(P)
         branch = f"track/{name}"
-        res = LF.create(P.profile.workspace, s, self._lane_agent(slot), P.id, name, base, branch)
+        # the project's checks are registered with the lane: its verify job runs only those
+        res = LF.create(P.profile.workspace, s, self._lane_agent(slot), P.id, name, base, branch,
+                        checks=LF.checks_of(P.profile))
         if not res["ok"]:
             raise TrackError(f"lane {name} on {slot}: {res['detail']}")
         # phase c: the read mirror here, on the lane's branch at its base
         mir = LF.mirror_create(P.profile.workspace, slot, name, branch, base, sprints)
         if not mir["ok"]:
+            # no track row exists yet, so nothing could stop it later: the new worktree on the
+            # slot goes again (it is clean and at the base), and a retry starts fresh
+            gone = LF.discard(self._lane_agent(slot), P.id, name, base)
+            left = ("it was removed again; try again" if gone.get("ok") else
+                    f"it could not be removed there ({gone.get('state')}: "
+                    f"{(gone.get('output') or '')[-200:]}); remove {res['worktree']} on {slot} "
+                    f"with git worktree remove before reusing the name {name}")
             raise TrackError(f"lane {name}: the read mirror here: {mir['detail']} (the worktree "
-                             f"on {slot} stays; stop it with tracks stop)")
+                             f"on {slot}: {left})")
         data = {"created_ts": self.clock(), "slot": slot, "host": slot,
                 "remote_worktree": res["worktree"]}
         row = self.store.add_track(P.id, name, kind, os.path.realpath(mir["path"]), branch, base,
@@ -659,17 +678,29 @@ class TrackManager:
             return ""
         return slot_wt.rstrip("/") + "/" + name
 
-    def lane_fetch(self, P, row: dict, force: bool = False) -> dict:
+    def lane_fetch(self, P, row: dict, force: bool = False, retry_gap: float = 0) -> dict:
         """Fetch a remote lane's commits here (fast-forward only); throttled to once a minute
-        unless `force`. {} for a local track."""
+        unless `force`. {} for a local track. `retry_gap`: a forced fetch whose last try failed
+        less than that many seconds ago answers that failure again instead of trying (the merge
+        step asks every tick while a slot is away; each try can take minutes)."""
         host = str((row.get("data") or {}).get("host") or "")
         if not host:
             return {}
         P = self.main_of(P)
-        last = self._fetched.get((P.id, row["name"]), -1e18)
+        key = (P.id, row["name"])
+        last = self._fetched.get(key, -1e18)
         if not force and self.clock() - last < self.REMOTE_FETCH_EVERY_S:
             return {}
-        self._fetched[(P.id, row["name"])] = self.clock()
+        prev = self._fetch_out.get(key)
+        if retry_gap and prev is not None and not prev.get("ok") \
+                and self.clock() - last < retry_gap:
+            return {**prev, "throttled": True}
+        self._fetched[key] = self.clock()
+        out = self._lane_fetch_now(P, row, host)
+        self._fetch_out[key] = out
+        return out
+
+    def _lane_fetch_now(self, P, row: dict, host: str) -> dict:
         from .. import lane_fetch as LF
         from .. import slots as SL
         s = SL.configured(P.profile).get(host)
@@ -698,7 +729,9 @@ class TrackManager:
         notice after [automation] slot_away_minutes; its work is never moved elsewhere by itself
         (the commits since the last fetch exist only on the slot). Back: the mark goes."""
         data = row.get("data") or {}
-        if out.get("ok") or out.get("diverged"):
+        # `reached`: the slot's store answered; a failure after that (the mirror here cannot
+        # fast-forward) is not the slot being away
+        if out.get("ok") or out.get("diverged") or out.get("reached"):
             if data.get("away_since"):
                 self.store.merge_track_data(P.id, row["name"], away_since=None, away_notice=None)
                 self.store.event(P.id, "", "track_lane_back", detail={"track": row["name"],
@@ -1009,7 +1042,8 @@ class TrackManager:
         if live and why != "merge":
             return {"ok": False, "detail": f"lane {name} has a sprint in progress "
                                            f"({', '.join(live)}): bring it home when it is idle"}
-        got = self.lane_fetch(P, row, force=True)
+        # the merge step asks every tick: a slot that is away is tried at most once a minute
+        got = self.lane_fetch(P, row, force=True, retry_gap=60 if why == "merge" else 0)
         dest = os.path.join(self.c.state_dir, "lane-saves", name,
                             time.strftime("%Y%m%d-%H%M%S") + "-home")
         if got.get("ok"):
@@ -1018,9 +1052,12 @@ class TrackManager:
             except Exception as e:                                # noqa: BLE001
                 saved = {"ok": False, "detail": str(e)[:300], "files": 0}
             if not saved.get("ok"):
-                return {"ok": False, "detail": f"lane {name}: its uncommitted files on {host} "
-                                               f"could not be read ({saved.get('detail')}); "
-                                               f"nothing changed"}
+                # every changed file must be here before the lane is home: the slot's worktree
+                # is removed after the merge with exactly the saved ones
+                return {"ok": False, "detail": f"lane {name}: not every uncommitted file on "
+                                               f"{host} could be copied here "
+                                               f"({saved.get('detail')}); nothing changed "
+                                               f"(the copies so far are in {dest})"}
         elif force_local and not got.get("diverged"):
             # the owner's choice for a slot that is away: go on here from the last commit
             # fetched. Nothing is discarded: the slot's worktree stays, and it is removed only
@@ -1060,12 +1097,9 @@ class TrackManager:
             tip = r.stdout.strip()
         except Exception:                                         # noqa: BLE001
             pass
-        # the files bring-home copied here (its _list.txt): only those may go with the worktree
-        saved = []
-        listing = os.path.join(str(data.get("home_saves") or ""), "_list.txt")
-        if data.get("home_saves") and os.path.isfile(listing):
-            with open(listing, encoding="utf-8") as f:
-                saved = [ln[3:].strip() for ln in f if len(ln) > 3]
+        # the files bring-home copied here (its _saved.json: saved and deleted ones, never one
+        # it failed to copy): only those may go with the worktree
+        saved = LF.saved_list(str(data.get("home_saves") or "")) if data.get("home_saves") else []
         out = LF.wait_job(self._lane_agent(host), P.id, row["name"], "worktree-remove",
                           {"tip": tip, "saved": saved}, wait_s=600)
         self.store.merge_track_data(P.id, row["name"], slot_worktree_removed=bool(out.get("ok")))

@@ -75,7 +75,16 @@ def check(cmd, **kw):
                                  evidence=kw.get("evidence"), required=True)
 
 
+def register(lane, c):
+    """As worktree-add registers the project's checks (lane_fetch.create(checks=...))."""
+    h = lane["host"]
+    have = h.lanes()
+    have["pilot/l1"].setdefault("checks", {})[c.name] = list(c.command)
+    h._save(have)
+
+
 def remote(lane, c):
+    register(lane, c)
     return run_check_remote(c, lane["agent"], "pilot", "l1", lane["wt"], "T1", lane["base"], "",
                             lane["state"], sleep=lambda s: None)
 
@@ -132,15 +141,22 @@ def test_the_generic_adapter_sends_a_lane_on_a_slot_to_its_agent(monkeypatch):
 def test_remote_sessions_are_exported_with_their_children(tmp_path, monkeypatch):
     from foundry_coordinator import training_hook as TH
     from foundry_training.adapters import kilo as K
-    got = {"s1": {"info": {"id": "s1"}, "messages": [1], "children": ["h1"]},
+    got = {"s1": {"info": {"id": "s1"}, "messages": [1], "children": ["h1", "../../evil"]},
            "h1": {"info": {"id": "h1"}, "messages": [2], "children": []}}
-    monkeypatch.setattr(K, "from_api", lambda url, sid, pw, d: got[sid])
-    P = types.SimpleNamespace(profile=types.SimpleNamespace(workspace="/srv/x"))
-    P.profile.__dict__["lane_host"] = "slot-4"
+    dirs = []
+    monkeypatch.setattr(K, "from_api", lambda url, sid, pw, d: dirs.append(d) or got[sid])
+    # phase c: the profile's workspace is the read mirror here; the slot's server knows the
+    # lane by its folder there (review 2026-11-27: the mirror path was sent)
+    P = types.SimpleNamespace(profile=types.SimpleNamespace(workspace="C:/AU/.lanes/slot-4/l1"))
+    P.profile.__dict__.update(lane_host="slot-4", remote_workspace="/srv/x")
     ep = lambda host, kind: {"url": "http://127.0.0.1:1", "password": "p"}
     out, gaps = TH.export_remote_sessions(P, [{"session_id": "s1", "client": "kilo"}],
                                           str(tmp_path / "x"), endpoint=ep)
-    assert set(out) == {"s1", "h1"} and gaps == []
+    assert set(out) == {"s1", "h1"} and dirs == ["/srv/x", "/srv/x"]
+    # a child id from the slot names a file here: one that is not a plain id is a gap, and
+    # nothing is written outside the spool
+    assert len(gaps) == 1 and "not a session id" in gaps[0]
+    assert not (tmp_path / "evil.json").exists() and not list(tmp_path.glob("**/*evil*"))
     d = json.load(open(out["h1"], encoding="utf-8"))
     assert d["_lane_host"] == "slot-4" and os.path.basename(out["h1"]).startswith("kilo__")
     out, gaps = TH.export_remote_sessions(P, [{"session_id": "s9", "client": "opencode"}],
@@ -284,7 +300,7 @@ def test_the_scripts_parse(script):
 
 
 def test_the_agent_answers_run_status_by_post(lane):
-    rid = lane["agent"].call("run", {"project": "pilot", "lane": "l1", "job": "verify",
-                                     "args": {"argv": ["git", "--version"]}})["run_id"]
+    rid = lane["agent"].call("run", {"project": "pilot", "lane": "l1", "job": "store-init",
+                                     "args": {}})["run_id"]
     st = lane["agent"].call("run_status", {"id": rid, "offset": 0})
     assert st["id"] == rid

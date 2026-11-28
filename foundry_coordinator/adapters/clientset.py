@@ -115,17 +115,36 @@ class ClientSet(CodingClient):
         with self._lock:
             m = self._owner.get(sid)
         if m is None:
-            m = self.default
+            from .laneclient import LaneDown
+            m, down = self.default, False
             for cand in self.members.values():
                 if directory and not cand.serves(directory):
                     continue
-                ex = getattr(cand.client, "exists", None)
                 try:
+                    ex = getattr(cand.client, "exists", None)   # a tunnelled one may raise here
                     if callable(ex) and ex(sid, directory=directory):
                         m = cand
                         break
-                except Exception:                                # noqa: BLE001
+                except Exception as e:                           # noqa: BLE001
+                    if not cand.lane_host:
+                        continue
+                    # a slot's server cannot be asked now (tunnel down, its kilo restarting):
+                    # the session may well be there, so no other server is picked and nothing
+                    # is remembered; for a folder that slot serves the call fails as a
+                    # restarting server does and is tried again (2026-11-27 review: the
+                    # default server was cached as the owner, and a second writer started)
+                    if directory:
+                        if isinstance(e, LaneDown):
+                            raise
+                        raise LaneDown(f"{cand.key}: cannot tell whether session {sid} is "
+                                       f"there: {e}"[:300]) from e
+                    down = True
                     continue
+            if down and m is self.default:
+                # asked without a folder while a slot was down: an answer for now, never
+                # remembered (the session may be on that slot)
+                self._tls.last = m
+                return m
             with self._lock:
                 self._owner[sid] = m
         self._tls.last = m

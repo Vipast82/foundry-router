@@ -41,8 +41,8 @@ def fm(monkeypatch):
     return m
 
 
-def profile(slots=None, client=None, clients=None):
-    raw = {"slots": slots or {}}
+def profile(slots=None, client=None, clients=None, remote_lanes=True):
+    raw = {"slots": slots or {}, "automation": {"remote_lanes": remote_lanes}}
     if clients:
         raw["clients"] = clients
     p = types.SimpleNamespace(id="pilot", raw=raw, workspace="C:/AU",
@@ -59,6 +59,54 @@ def test_no_lane_slot_keeps_the_single_client(fm):
     c = build_client(profile({"slot-1": {"container": "x"}}))
     assert not isinstance(c, ClientSet) and c.name == "kilo"
     assert fm.configured == []
+
+
+def test_a_lane_slot_with_remote_lanes_off_adds_nothing_and_starts_no_tunnel(fm):
+    """review 2026-11-27: the slot's lanes switch alone started its tunnel (and read its
+    secrets) in a project whose [automation] remote_lanes was off."""
+    c = build_client(profile(LANE, remote_lanes=False))
+    assert not isinstance(c, ClientSet) and fm.configured == []
+    assert lane_members(profile(LANE, remote_lanes=False)) == {}
+
+
+def test_a_slot_that_cannot_be_asked_is_never_replaced_by_the_default_server():
+    """review 2026-11-27: owner() fell back to the default server when the slot's member
+    failed, and cached it: the next prompt went to a second writer on this machine."""
+    class Flaky(Rec):
+        """A slot's server that cannot be asked (its kilo restarting behind an open tunnel)."""
+
+        def exists(self, sid, directory=""):
+            self.exists_calls.append(directory)
+            raise AgentServerError("connection refused")
+    local, sk, so = Rec("kilo"), Flaky("kilo"), Flaky("opencode")
+    cs = ClientSet(local, {"slot-4/kilo": (sk, {"lane_host": "slot-4",
+                                                "lane_root": "/srv/foundry-lanes"}),
+                           "slot-4/opencode": (so, {"lane_host": "slot-4",
+                                                    "lane_root": "/srv/foundry-lanes"})},
+                   default_table={"agent": "code"})
+    with pytest.raises(LaneDown, match="cannot tell"):
+        cs.prompt("ses_1", "go", directory="/srv/foundry-lanes/pilot/l1", persona="p",
+                  agent="code")
+    assert "ses_1" not in cs._owner
+    # a tunnel that is down raises LaneDown already when the method is looked up
+    class Down:
+        name = "kilo"
+
+        def __getattr__(self, attr):
+            raise LaneDown("slot-4: the lane tunnel is down")
+    cs2 = ClientSet(local, {"slot-4/kilo": (Down(), {"lane_host": "slot-4",
+                                                     "lane_root": "/srv/foundry-lanes"})},
+                    default_table={"agent": "code"})
+    with pytest.raises(LaneDown):
+        cs2.owner("ses_2", "/srv/foundry-lanes/pilot/l1")
+    assert "ses_2" not in cs2._owner
+    # asked without a folder (worker_client_of): an answer for now, never remembered
+    assert cs2.owner("ses_3") is cs2.default and "ses_3" not in cs2._owner
+    # once the slot answers, it is found and remembered
+    sk2 = Rec("ses")
+    cs2.members["slot-4/kilo"].client = sk2
+    assert cs2.owner("ses_2", "/srv/foundry-lanes/pilot/l1").client is sk2
+    assert cs2._owner["ses_2"].client is sk2
 
 
 def test_a_lane_slot_adds_its_two_members(fm):
