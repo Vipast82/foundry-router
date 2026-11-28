@@ -110,6 +110,11 @@ def wait_job(agent, project: str, lane: str, job: str, args: dict,
 def create(workspace: str, slot: dict, agent, project: str, lane: str, base: str,
            branch: str, sleep: Callable = time.sleep) -> dict:
     """The lane's worktree on the slot. {"ok", "worktree", "detail"}."""
+    # the project's lane store first: setup-host.sh makes only the slot's own game's
+    store = wait_job(agent, project, lane, "store-init", {}, sleep=sleep)
+    if not store["ok"]:
+        return {"ok": False, "worktree": "",
+                "detail": f"lane store on the slot: {store['state']}: {store['output'][-300:]}"}
     pushed = push_base(workspace, slot, project, lane, base)
     if not pushed["ok"]:
         return {**pushed, "worktree": ""}

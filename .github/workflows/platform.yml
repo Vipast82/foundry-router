@@ -52,13 +52,15 @@ jobs:
     timeout-minutes: 20
     # the router's data folder defaults to /data (its Docker volume), which a Linux runner may
     # not create; Windows made C:\data. The router's own tests need it writable.
-    env:
-      FOUNDRY_DATA_DIR: ${{ runner.temp }}/foundry-data
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      # the runner context exists only inside steps: set the variable here
+      - name: Router data folder
+        shell: bash
+        run: echo "FOUNDRY_DATA_DIR=$RUNNER_TEMP/foundry-data" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

@@ -1,3 +1,25 @@
+## v0.181.268 - Distributed Foundry b-4 prep: a lane store is made on the slot when missing
+
+Found while preparing the b-4 pilot (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B9). Everything stays behind the same
+switches (off).
+
+- **The gap:** `setup-host.sh` makes the lane store only for the slot's own game
+  (`/srv/foundry-lanes/<FOUNDRY_PROJECT>.git`, `--shared` with its game copy). A lane of another project, such as the
+  pilot's `distributed-pilot`, would have failed: its base push needs the store to exist.
+- **The fix:**
+  - the lane agent has a new job, `store-init`, which makes `<root>/<project>.git` as an empty bare repository when
+    it is missing and leaves an existing one alone;
+  - `lane_fetch.create` runs it before the base push, which then fills the store.
+- **The pilot is ready to run, outside the repo:** the scratch repo `C:\Foundry\distributed-pilot`, its profile, and
+  the launcher `C:\Foundry\distributed-pilot-run.py`. The launcher is a separate pilot coordinator that never
+  registers an ssh key and uses the live ssh folder read-only. It waits for the spare slot-4.
+- Gate: only the two lane modules changed (`foundry_client/lane.py`, `foundry_coordinator/lane_fetch.py`). tests/client
+  and every lane test ran (the rest passed unchanged on v0.181.267: never rerun passed work).
+- **CI fix:** v0.181.267's workflows did not load. A job-level `env` cannot read `${{ runner.temp }}` (the runner
+  context exists only inside steps), so platform.yml and tests-linux.yml failed before any job ran. A first step now
+  writes `FOUNDRY_DATA_DIR=$RUNNER_TEMP/foundry-data` to `$GITHUB_ENV`. b-3's CI checks run with this release.
+- 1 test (test_lane_fetch).
+
 ## v0.181.267 - Distributed Foundry b-3: a lane's worktree, sessions and checks on its slot (all off)
 
 Release b-3 of docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md (Victor 2026-11-27: "Yes, build b-3"). **Nothing changes

@@ -77,6 +77,18 @@ def test_create_pushes_the_base_and_makes_the_worktree(world):
     assert git(r["worktree"], "rev-parse", "--abbrev-ref", "HEAD") == "track/l1"
 
 
+def test_a_missing_store_is_made_empty_first(world):
+    """setup-host.sh makes only the slot's own game's store; another project's (the pilot's)
+    is made empty and filled by the base push (v0.181.268)."""
+    import shutil
+    store = os.path.join(world["slot"]["lanes_root"], "pilot.git")
+    shutil.rmtree(store)
+    r = make(world)
+    assert r["ok"], r
+    assert git(store, "rev-parse", "refs/heads/slot/_base/l1") == world["base"]
+    assert os.path.isfile(os.path.join(r["worktree"], "a.txt"))
+
+
 def test_a_second_create_is_refused_and_the_base_never_forced(world):
     assert make(world)["ok"]
     r = make(world)

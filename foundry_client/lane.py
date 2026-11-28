@@ -57,7 +57,7 @@ _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 MAX_READ = 8 * 1024 * 1024
 MAX_WRITE = 8 * 1024 * 1024
 MAX_GIT_OUT = 32 * 1024 * 1024
-JOBS = ("worktree-add", "worktree-remove", "verify")
+JOBS = ("worktree-add", "worktree-remove", "verify", "store-init")
 
 
 class LaneError(Exception):
@@ -274,6 +274,8 @@ class LaneHost:
                     rc = self._worktree_remove(project, lane, args, say, run, log)
                 elif job == "verify":
                     rc = self._verify(project, lane, args, say, run, log)
+                elif job == "store-init":
+                    rc = self._store_init(project, say, run, log)
         except LaneError as e:
             _append(run["log"], f"LANE JOB FAIL: {e}")
         except Exception as e:                                    # noqa: BLE001
@@ -304,6 +306,19 @@ class LaneHost:
             return 124
         finally:
             run["proc"] = None
+
+    def _store_init(self, project, say, run, log) -> int:
+        """The project's lane store, made empty when it is missing. setup-host.sh makes the
+        slot's own game's store --shared with its game copy; another project's (the pilot's)
+        starts empty, and the junction's base push fills it."""
+        store = self.store(project)
+        if os.path.isdir(store):
+            say(f"LANE store-init: {store} is there")
+            return 0
+        os.makedirs(self.root, exist_ok=True)
+        rc = self._sub(["git", "init", "-q", "--bare", store], run, log)
+        say(f"LANE store-init: {store} {'made' if rc == 0 else f'FAILED rc={rc}'}")
+        return rc
 
     def _worktree_add(self, project, lane, args, say, run, log) -> int:
         """git worktree add -b <branch> <root>/<project>/<lane> <base> in the lane store."""
