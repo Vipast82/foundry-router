@@ -954,12 +954,20 @@ class MediaConfig(BaseModel):
     # Media_Gen chat test: the chat model sent create_comic without characters in
     # round 10 and the bookshop of round 12, so the comic guessed the cast and made
     # the shop bell a character. {} = no notes.
+    # v0.181.272: create_short_film. In round 14 the chat model gave a film the tone
+    # "warm and whimsical, wordless, playful" though nobody asked for a silent film;
+    # from Media_Gen 5.28.13 such a word makes the film have no spoken lines.
     tool_notes: dict[str, str] = Field(default_factory=lambda: {
         "create_comic": (
             "Always pass characters: every character who speaks or is drawn, each with "
             "a short description of its look (animal or person, colours, clothes), so "
             "every panel draws them the same. A sound such as a bell, a door or a fire "
             "goes in the panel's sfx, never as a speaker."),
+        "create_short_film": (
+            "Give the tone as a mood only (for example \"warm, playful\"). Never put "
+            "\"wordless\", \"silent\", \"no dialogue\" or \"without words\" in the tone, "
+            "story or style unless the user asked for a film with no spoken lines: "
+            "those words make the film silent."),
     })
     # The "view in 3D" page for a .glb a tool made (/media/a/<token>/view) loads
     # Google's <model-viewer> from here, in the browser of the person chatting.

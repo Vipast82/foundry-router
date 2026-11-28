@@ -37,6 +37,15 @@ def test_the_default_note_asks_for_characters_and_keeps_sounds_out():
     assert "sfx" in note and "bell" in note
 
 
+def test_the_film_note_keeps_wordless_out_of_a_talking_film():
+    """v0.181.272: round 14's chat model put "wordless" in a talking film's tone; Media_Gen
+    5.28.13 makes such a film silent."""
+    note = MediaConfig().tool_notes["create_short_film"]
+    for word in ("wordless", "silent", "no dialogue", "tone", "unless the user asked"):
+        assert word in note
+    assert len("[MCP:Media_Gen] Foundry note: " + note) < 400     # all of it in the finder
+
+
 def test_the_note_is_first_so_the_finder_shows_it(svc, client):
     _sync(svc, client, [_tool("create_comic"), _tool("generate_image", "Make a picture.")])
     comic = svc.tool_registry.get("create_comic")

@@ -1,3 +1,21 @@
+## v0.181.272 - create_short_film: no "wordless" in a talking film
+
+In round 14 of the Media_Gen chat test the chat model sent create_short_film the tone "warm and whimsical, wordless,
+playful" for "a fox finds a map", where nobody asked for a silent film. Media_Gen 5.28.12 wrote spoken lines anyway; from
+5.28.13 a tone, story or style with "wordless", "silent" or "no dialogue" gets no spoken lines, so the next such film
+would come out silent.
+
+- **`media.tool_notes`** has a second default note, for create_short_film: give the tone as a mood only, and never put
+  "wordless", "silent", "no dialogue" or "without words" in the tone, story or style unless the user asked for a film
+  with no spoken lines. Like create_comic's note it goes first in the description (271 characters with its prefix, inside the
+  tool finder's 400).
+- A router whose Media -> "notes for tools" was saved since v0.181.269 keeps the notes it saved, so this default
+  does not reach it. Add this line there if create_short_film is missing:
+
+  `create_short_film: Give the tone as a mood only (for example "warm, playful"). Never put "wordless", "silent", "no dialogue" or "without words" in the tone, story or style unless the user asked for a film with no spoken lines: those words make the film silent.`
+
+1 test.
+
 ## v0.181.271 - Distributed Foundry review: fixes, easy installs, and a Fleet view that ties it together
 
 Victor 2026-11-27: "When Everything is built - go through and do a code review, look for gaps / bugs ... align it
