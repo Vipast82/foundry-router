@@ -499,7 +499,14 @@ VIEWS.game = () => {
       <div class="row"><label>work branch</label><input id="gm-branch" value="main" style="width:160px"></div>
       <div class="row"><label>implementer persona</label><input id="gm-impl" list="gm-personas" value="Foundry-Kilo-Local" style="width:240px">
         <datalist id="gm-personas"></datalist><span class="hint">the persona that writes the code (install personas first)</span></div>
+      <div class="row"><label for="gm-client">coding client</label><select id="gm-client">
+          <option value="kilo" selected>Kilo (Kilo Code)</option><option value="opencode">OpenCode</option></select>
+        <span class="hint">the program the coding sessions run in; you can switch later on Automation → Settings</span></div>
       <button class="act primary" id="gm-add">Add the game</button></div>
+    <div class="card"><h3>How the machines fit</h3>
+      <p class="hint">One <b>workstation</b> (the junction) runs the coordinator and the game's main checkout, and is the only machine that publishes.
+        <b>Slots</b> are machines that run Studio and lanes (tracks whose worktree and sessions live there). Fleet → Setup in the full UI shows the picture and the steps, ticked as you go.</p>
+      <a class="act" href="/ui#Fleet%20setup">Open Fleet → Setup</a></div>
     ${navButtons({optional: true})}`;
 };
 BIND.game = m => {
@@ -511,7 +518,8 @@ BIND.game = m => {
     const q = s => JSON.stringify(s);
     const impl = $("#gm-impl", m).value.trim();
     if (!impl) throw new Error("name the implementer persona");
-    const toml = `schema_version = 1\nid = ${q(id)}\nname = ${q(name || id)}\n\n[workspace]\nbranch = ${q(branch)}\n\n[roles]\nimplementer = ${q(impl)}\n`;
+    const kind = $("#gm-client", m).value === "opencode" ? "opencode" : "kilo";
+    const toml = `schema_version = 1\nid = ${q(id)}\nname = ${q(name || id)}\n\n[workspace]\nbranch = ${q(branch)}\n\n[client]\nkind = ${q(kind)}\n\n[roles]\nimplementer = ${q(impl)}\n`;
     const H = {"X-Foundry-Automation": "1"};
     await api(`automation/projects/${id}/import`, {method: "POST", body: {toml}, headers: H});
     const d = await api(`automation/projects/${id}/draft`);
@@ -529,8 +537,9 @@ VIEWS.machines = () => {
     <div class="card">${s.count ? `<span class="pill ok">${s.count} machine(s)</span>` : '<span class="pill">none yet</span>'}
       ${s.ssh_keys ? `<span class="pill ok">workstation ssh key registered</span>` : '<span class="pill" title="Your main PC registers its own ssh key when its coordinator starts">no workstation ssh key yet (the main PC registers it by itself)</span>'}</div>
     <div class="card"><h3>Studio slots</h3>
-      <p class="hint">Add a slot on Access → Machines (its id, IP and place), then run the one command it shows on your Proxmox host. Guide: docs/INSTALL_SLOTS.md.</p>
-      <a class="act" href="/ui#Machines">Open Access → Machines</a></div>
+      <p class="hint">A slot is a machine that runs Studio and, once you turn them on, lanes. Add a slot on Access → Machines (its id, IP, system and place),
+        then run the one command it shows: on your Proxmox host for a Linux slot, in PowerShell (as administrator) on a Windows slot. Guide: docs/INSTALL_SLOTS.md.</p>
+      <a class="act" href="/ui#Machines">Open Access → Machines</a> <a class="act" href="/ui#Fleet%20setup">How the machines fit (Fleet → Setup)</a></div>
     <div class="card"><h3>Workstation</h3>
       <p class="hint">The workstation app (coordinator, Kilo, Studio) is installed with the Foundry Client installer from the Client tab, and its keys are made on Access → Clients &amp; Keys.</p>
       <a class="act" href="/ui#Client">Open the Client tab</a></div>

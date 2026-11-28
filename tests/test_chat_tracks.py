@@ -205,4 +205,6 @@ def test_router_validates_track_action_bodies_and_feature_gates_claims(client, c
     assert cl["actions"][0]["payload"] == {"name": "as-p4a", "sprints": ["AS-P4a"],
                                            "needs": ["blender"]}
     assert set(TRACK_ACTIONS) == {"tracks_analyze", "tracks_propose", "track_start", "track_stop",
-                                  "track_merge", "track_status", "set_max_agents"}
+                                  "track_merge", "track_status", "set_max_agents",
+                                  # Distributed Foundry: the Tracks tab's lane buttons
+                                  "track_bring_home", "track_set_slot"}

@@ -1322,6 +1322,7 @@ function slotsHtml(f) {
       const common = `id="${esc(id)}" data-act="slot-set" data-slot="${esc(sid)}" data-k="${esc(k)}" title="${esc(sf.description || "")}"`;
       let c;
       if (sf.type === "bool") c = `<label class="sw"><input type="checkbox" ${common} ${val ? "checked" : ""}>${val ? "On" : "Off"}</label>`;
+      else if (sf.enum) c = `<select ${common}>${(sf.enum.includes(val) ? sf.enum : [val, ...sf.enum]).map(o => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
       else if (sf.type === "int") c = `<input type="number" ${common} value="${esc(val ?? 0)}" step="1" ${sf.min != null ? `min="${sf.min}"` : ""}>`;
       else if (sf.type === "list") c = `<input type="text" ${common} value="${esc((val || []).join(" "))}" placeholder="space-separated">`;
       else c = `<input type="text" ${common} value="${esc(val ?? "")}">`;
@@ -1342,6 +1343,7 @@ function slotSet(t) {
   const sf = slotFields().find(x => x.key === "slots.*." + t.dataset.k); if (!sf) return;
   let v;
   if (sf.type === "bool") v = t.checked;
+  else if (sf.enum) { v = t.value; if (!sf.enum.includes(v)) return toast("Pick one of: " + sf.enum.join(", "), true); }
   else if (sf.type === "int") { v = Number(t.value || 0); if (!Number.isInteger(v)) return toast("Whole number", true); }
   else if (sf.type === "list") { const xs = t.value.split(/[\s,]+/).filter(Boolean); v = sf.item_type === "int" ? xs.map(Number) : xs;
     if (sf.item_type === "int" && v.some(x => !Number.isInteger(x))) return toast("Whole numbers", true); }
@@ -1914,21 +1916,50 @@ async function loadTracks() {
 }
 function fmtAge(s) { if (s === null || s === undefined) return "never"; s = Math.round(s); return s < 60 ? s + "s" : s < 3600 ? Math.round(s / 60) + "m" : Math.round(s / 360) / 10 + "h"; }
 function sprintPill(st) { return `<span class="pill ${STATE_CLS[st] || (st === "NOT_QUEUED" ? "" : "info")}">${esc(st || "?")}</span>`; }
+/* Distributed Foundry: a "lane" is a track whose worktree and coding sessions live on a slot
+   (a machine that runs Studio and lanes); the coordinator reaches it through one ssh tunnel
+   per slot. `t.host` is that slot ('' = here, on this workstation), `t.slot` the Studio slot
+   its checks use, `st.lane_tunnels` {slot: {state, since, error, failures}}, `st.slots` the
+   project's enabled slots {id: {lanes, os, studio, disk_pct, foundry}}. */
+const TUNNEL_CLS = {up: "ok", starting: "info", backoff: "warn", down: "bad"};
+const TUNNEL_WORDS = {up: "tunnel up", starting: "tunnel starting", backoff: "tunnel retrying", down: "tunnel down"};
+function tunnelPill(tv) {
+  if (!tv) return `<span class="pill" title="The coordinator has no tunnel to this slot (lanes off there, or not started yet)">no tunnel</span>`;
+  return `<span class="pill ${TUNNEL_CLS[tv.state] || ""}" title="${esc((tv.error ? tv.error + " · " : "") + (tv.since ? "since " + when(tv.since) : "") + (tv.failures ? " · " + tv.failures + " failed tries" : ""))}">${esc(TUNNEL_WORDS[tv.state] || tv.state || "?")}</span>`;
+}
+function hostPill(t, st) {
+  if (!t.host) return `<span class="pill" title="Its worktree and sessions are here, on this workstation (the junction)">here</span>`;
+  return `<span class="pill info" title="A lane: its worktree, Kilo/OpenCode sessions, Lune and Studio checks run on ${esc(t.host)}; its commits are fetched back here">on ${esc(t.host)}</span> ${tunnelPill(((st || {}).lane_tunnels || {})[t.host])}`;
+}
+function slotOptions(st, selected = "", here = "here (this workstation)") {
+  const slots = (st && st.slots) || {}, on = !!(st && st.remote_lanes);
+  return `<option value="" ${selected ? "" : "selected"}>${esc(here)}</option>` + Object.entries(slots).map(([sid, s]) =>
+    `<option value="${esc(sid)}" ${sid === selected ? "selected" : ""}>${esc(sid)} · ${s.lanes ? (on ? "lanes on: worktree and sessions there" : "lanes on, but remote_lanes is off: Studio checks only") : "Studio checks only"}${s.os === "windows" ? " · Windows" : ""}</option>`).join("");
+}
+function slotPickHint(st) {
+  const slots = (st && st.slots) || {};
+  if (!Object.keys(slots).length) return `<p class="hint">This project has no Studio slot switched on (Access → Machines adds one), so the track runs here.</p>`;
+  return `<p class="hint">Here: the worktree and sessions stay on this workstation. A slot: the track's Studio checks run there, and on a slot with <b>lanes on</b> (and the project's <code>remote_lanes</code> ${st.remote_lanes ? "on, as now" : "on; it is <b>off</b> now"}) the whole track is a <b>lane</b>: its worktree and Kilo/OpenCode sessions live on that slot too. One lane per slot.</p>`;
+}
 function trackCard(t, st) {
   const m = t.merge || {}, lease = t.lease ? `<span class="pill warn" title="This track holds the Studio lease for its merge gate">Studio lease</span>` : "";
   const dec = m.decision && m.decision.status === "open" ? m.decision : null;
   const b = [], name = esc(t.name);
   const btn = (act, label, title, cls = "") => `<button class="act ${cls}" type="button" data-act="${act}" data-track="${name}" title="${esc(title)}">${label}</button>`;
+  const lanesUi = !!(st && st.slots);          // a coordinator that knows lane actions
   if (t.state === "planned") b.push(btn("tr-start", "Start", "Queue its sprints on the track", "primary"));
   if (t.state === "running" && t.sprints.every(s => s.state === "COMPLETE")) b.push(btn("tr-merge", "Merge", "Merge at the main sprint's next quiet point", "primary"));
   if (t.state === "failed" && t.sprints.every(s => s.state === "COMPLETE")) b.push(btn("tr-merge", "Retry merge", "Merge again after the fix"));
+  if (lanesUi && t.host && ["planned", "running", "failed"].includes(t.state)) b.push(btn("tr-home", "Bring home", "Make this lane a local track: its last commits and uncommitted files come here, and it carries on on this workstation"));
+  if (lanesUi && ["planned", "running", "failed"].includes(t.state)) b.push(btn("tr-slot", t.slot ? "Move slot…" : "Bind to a slot…", "Change which Studio slot its checks use, or unbind it (its Studio checks then run at the merge here)"));
   if (["planned", "running", "merging", "failed"].includes(t.state)) b.push(btn("tr-stop", "Stop", "Cancel its unfinished sprints; the worktree and branch stay", "danger"));
   return `<article class="track ${esc(t.kind || "parallel")}" aria-labelledby="trk-${name}">
     <h3 id="trk-${name}"><span class="mono">${name}</span><span class="pill ${TRACK_CLS[t.state] || ""}">${esc(t.state)}</span>${lease}</h3>
     <dl class="kv">
+      <dt>Runs</dt><dd>${hostPill(t, st)}${t.slot && t.slot !== t.host ? ` <span class="pill" title="Its Studio checks and Studio tools use this slot">Studio: ${esc(t.slot)}</span>` : ""}</dd>
       <dt>Sprint</dt><dd>${t.current_sprint ? `<b class="mono">${esc(t.current_sprint)}</b>` : `<span class="hint" style="margin:0">${t.state === "merged" ? "all merged" : "none running"}</span>`}</dd>
       <dt>Needs</dt><dd>${(t.needs || []).map(n => `<span class="pill ${n === "studio" ? "warn" : ""}">${esc(n)}</span>`).join(" ") || "<span class='hint' style='margin:0'>none</span>"}</dd>
-      <dt>Worktree</dt><dd class="mono" title="${esc(t.worktree || "")}">${esc((t.worktree || "").split(/[\\/]/).slice(-2).join("/"))} <span class="hint" style="margin:0">on ${esc(t.branch || "")}${t.base ? " from " + esc(t.base) : ""}</span></dd>
+      <dt>Worktree</dt><dd class="mono" title="${esc(t.worktree || "")}">${esc((t.worktree || "").split(/[\\/]/).slice(-2).join("/"))} <span class="hint" style="margin:0">on ${esc(t.branch || "")}${t.base ? " from " + esc(t.base) : ""}${t.host ? " · a read copy here; the real worktree is on " + esc(t.host) : ""}</span></dd>
       ${m.merge_stage ? `<dt>Merge</dt><dd>${esc(m.merge_stage)}${m.merge_wait ? ` <span class="hint" style="margin:0">waiting: ${esc(m.merge_wait)}</span>` : ""}${m.gate && m.gate.result ? ` <span class="pill ${m.gate.result === "PASS" ? "ok" : "bad"}">gate ${esc(m.gate.result)}</span>` : ""}</dd>` : ""}
       ${m.failed ? `<dt>Failed</dt><dd style="color:var(--bad)">${esc(m.failed.why || "")}</dd>` : ""}
       ${m.stopped ? `<dt>Stopped</dt><dd>${esc(m.stopped.by || "")}${m.stopped.reason ? ": " + esc(m.stopped.reason) : ""}</dd>` : ""}
@@ -1954,11 +1985,12 @@ function studioTimeline(st) {
   <div class="hint">Orange: the main sprint's sessions and gates. Blue: a track's merge gate under its lease. Amber: a track waiting for Studio. Window: the last ${fmtAge(span)}.</div>
   <details><summary class="hint">Journal (${rows.length})</summary><table class="jrn"><thead><tr><th>When</th><th>Resource</th><th>Who</th><th>Event</th><th>For</th><th>Detail</th></tr></thead><tbody>${rows.slice(-40).reverse().map(r => `<tr><td class="mono">${esc(when(r.ts))}</td><td>${esc(r.resource)}</td><td class="mono">${esc(r.owner)}</td><td>${esc(r.event)}</td><td>${esc(r.purpose || "")}</td><td class="hint" style="margin:0">${esc(Object.entries(r.detail || {}).map(([k, v]) => k + "=" + (typeof v === "object" ? JSON.stringify(v) : v)).join(" "))}</td></tr>`).join("")}</tbody></table></details>`;
 }
-function planHtml(plan) {
+function planHtml(plan, st) {
   if (!plan) return "";
+  const pick = !!(st && st.slots && Object.keys(st.slots).length);
   return `<section class="dec" aria-labelledby="trplan-h"><div class="row" style="margin:0"><b id="trplan-h">Proposal ${esc(plan.plan_id)}</b><span class="pill info">${plan.agents} agent${plan.agents === 1 ? "" : "s"} of max_agents ${plan.max_agents}</span><span class="grow"></span><button class="act" type="button" data-act="tr-plan-dismiss">Dismiss</button></div>
     ${plan.main ? `<div style="margin-top:6px"><span class="hint" style="margin:0">Main checkout:</span> <span class="mono">${esc(plan.main.sprints.join(" → "))}</span></div>` : ""}
-    ${(plan.tracks || []).length ? `<ul style="margin:6px 0 0;padding-left:18px">${plan.tracks.map(t => `<li><b class="mono">${esc(t.name)}</b>: <span class="mono">${esc(t.sprints.join(" → "))}</span> <span class="hint" style="margin:0">needs ${esc((t.needs || []).join(", "))}${t.studio_at_merge ? "; Studio at merge" : ""}</span></li>`).join("")}</ul>` : `<p class="hint">No parallel track fits: every open sprint is serial with the main one, or max_agents is 1.</p>`}
+    ${(plan.tracks || []).length ? `<ul style="margin:6px 0 0;padding-left:18px">${plan.tracks.map(t => `<li><b class="mono">${esc(t.name)}</b>: <span class="mono">${esc(t.sprints.join(" → "))}</span> <span class="hint" style="margin:0">needs ${esc((t.needs || []).join(", "))}${t.studio_at_merge ? "; Studio at merge" : ""}</span>${pick ? ` <label class="fld" for="trp-slot-${esc(t.name)}" style="margin-left:6px">runs on</label> <select id="trp-slot-${esc(t.name)}" class="trp-slot" data-track="${esc(t.name)}">${slotOptions(st)}</select>` : ""}</li>`).join("")}</ul>${pick ? slotPickHint(st) : ""}` : `<p class="hint">No parallel track fits: every open sprint is serial with the main one, or max_agents is 1.</p>`}
     ${(plan.notes || []).length ? `<ul class="hint" style="margin:6px 0 0;padding-left:18px">${plan.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
     <div class="opts">${(plan.tracks || []).length ? `<button class="act primary" type="button" data-act="tr-plan-start" data-plan="${esc(plan.plan_id)}">Start these tracks</button>` : ""}</div></section>`;
 }
@@ -1982,12 +2014,24 @@ async function renderTracks() {
       <button class="act" type="button" data-act="tr-refresh">Refresh</button></div>
     ${d.source ? `<p class="hint">Reported by ${esc(d.source)} ${fmtAge(d.age_s)} ago.${st && st.main ? ` Main sprint: <b class="mono">${esc(st.main.sprint || "none")}</b>, ${st.main.quiescent ? "quiescent (a merge may land)" : esc(st.main.why || "busy")}.` : ""}</p>` : `<div class="banner">No coordinator has reported tracks yet. It needs to run with <code>--control</code> on a build with the Team Lead tracks; the chat's <code>analyze_tracks</code> works the same way.</div>`}
     ${S.tr.err ? `<div class="banner bad">${esc(S.tr.err)}</div>` : ""}
-    ${planHtml(S.tr.plan)}
+    ${planHtml(S.tr.plan, st)}
     <h2>Tracks${tracks.length ? ` (${tracks.length})` : ""}</h2>
     ${tracks.length ? `<div class="tracks">${tracks.map(t => trackCard(t, st)).join("")}</div>` : `<p class="hint">No tracks. Propose some, or ask the chat: "what can run in parallel?"</p>`}
+    ${st ? laneTunnelsCard(st) : ""}
     ${st ? `<h2>Studio</h2><div class="card">
       <div class="row" style="margin:0"><span class="pill ${st.studio.in_use ? "warn" : "ok"}">${st.studio.in_use ? "in use: " + esc(st.studio.in_use) : "idle"}</span>${st.studio.pending ? `<span class="pill info">pending: ${esc(st.studio.pending)}</span>` : ""}${st.studio.lease ? `<span class="pill warn">lease: ${esc(st.studio.lease.track)} until ${esc(when(st.studio.lease.until))}</span>` : ""}<span class="hint" style="margin:0">last main Studio call ${fmtAge(st.studio.last_main_call_age_s)} ago · idle after ${st.studio.idle_minutes} min · lease ≤ ${st.studio.max_minutes} min</span></div>
       ${studioTimeline(st.studio)}</div>` : ""}`;
+}
+function laneTunnelsCard(st) {
+  const tun = st.lane_tunnels || {}, slots = st.slots || {};
+  const ids = Array.from(new Set([...Object.keys(tun), ...Object.entries(slots).filter(([, s]) => s.lanes).map(([k]) => k)])).sort();
+  const lanesOn = (st.tracks || []).filter(t => t.host && !["merged", "stopped"].includes(t.state));
+  return `<h2 id="tr-tunnels-h">Lane tunnels</h2><div class="card" aria-labelledby="tr-tunnels-h">
+    <p class="hint" style="margin-top:0">A <b>lane</b> is a track whose worktree and sessions live on a <b>slot</b> (a machine that runs Studio and lanes). This workstation, the <b>junction</b>, keeps one ssh tunnel to each slot with lanes on, and fetches each lane's commits back through it. Remote lanes: <b>${st.remote_lanes ? "on" : "off"}</b> for this project${st.remote_lanes ? "" : " (new tracks stay here; Settings → remote_lanes)"}.</p>
+    ${ids.length ? `<table class="jrn"><thead><tr><th>Slot</th><th>Tunnel</th><th>Since</th><th>Lanes there</th><th>Problem</th></tr></thead><tbody>${ids.map(sid => {
+      const tv = tun[sid], s = slots[sid] || {}, here = lanesOn.filter(t => t.host === sid);
+      return `<tr><td><b>${esc(sid)}</b>${s.os === "windows" ? ` <span class="hint" style="margin:0">Windows</span>` : ""}${s.disk_pct != null ? ` <span class="pill ${s.disk_pct >= 85 ? "warn" : ""}" title="The slot's disk">disk ${esc(s.disk_pct)}%</span>` : ""}</td><td>${tunnelPill(tv)}</td><td class="mono">${tv && tv.since ? esc(when(tv.since)) : ""}</td><td>${here.map(t => `<span class="mono">${esc(t.name)}</span>${t.current_sprint ? ` (${esc(t.current_sprint)})` : ""}`).join(", ") || "<span class='hint' style='margin:0'>none</span>"}</td><td class="hint" style="margin:0">${esc((tv && tv.error) || "")}</td></tr>`;
+    }).join("")}</tbody></table>` : `<p class="hint">No slot has lanes on for this project, so there is no tunnel. Access → Machines → a slot's <b>Lanes</b> button walks you through turning them on.</p>`}</div>`;
 }
 async function trackAction(kind, body, okText) {
   const r = await api("actions", {method: "POST", body: {kind, project_id: S.tr.project, idempotency_key: idem(), ...body}});
@@ -2024,12 +2068,43 @@ async function trackClick(a, b) {
       else S.tr.err = done.status === "pending" ? "The coordinator has not answered yet; is it running with --control?" : `${done.status}: ${done.status_detail || ""}`;
       return refresh();
     }
-    if (a === "tr-plan-start") { await trackAction("track_start", {plan_id: b.dataset.plan}); S.tr.plan = null; return setTimeout(refresh, 2500); }
-    if (a === "tr-new") return formModal("New track", `<label class="fld" for="f-name">Name (a-z, 0-9, . _ -)</label><input id="f-name" name="name" style="width:100%" required pattern="[a-z0-9][a-z0-9._-]{0,39}"><label class="fld" for="f-sprints" style="margin-top:8px">Sprints, in order (ids, comma-separated)</label><input id="f-sprints" name="sprints" style="width:100%" required><label class="fld" for="f-needs" style="margin-top:8px">Needs (optional: studio, blender, audio, images, gpu, backend)</label><input id="f-needs" name="needs" style="width:100%">`, "Start track", async f => {
-      const sprints = String(f.get("sprints") || "").split(/[,\s]+/).filter(Boolean), needs = String(f.get("needs") || "").split(/[,\s]+/).filter(Boolean);
-      await trackAction("track_start", {name: String(f.get("name") || "").trim().toLowerCase(), sprints, ...(needs.length ? {needs} : {})});
-      setTimeout(refresh, 2500);
-    });
+    if (a === "tr-plan-start") {
+      const slots = {};
+      for (const sel of $$(".trp-slot")) if (sel.value) slots[sel.dataset.track] = sel.value;
+      const used = Object.values(slots);
+      if (new Set(used).size !== used.length) return toast("One track per slot: pick a different slot for each track", true);
+      await trackAction("track_start", {plan_id: b.dataset.plan, ...(used.length ? {slots} : {})}); S.tr.plan = null; return setTimeout(refresh, 2500);
+    }
+    if (a === "tr-new") {
+      const st = (S.tr.data.tracks || {})[S.tr.project] || null, pick = !!(st && st.slots);
+      return formModal("New track", `<label class="fld" for="f-name">Name (a-z, 0-9, . _ -)</label><input id="f-name" name="name" style="width:100%" required pattern="[a-z0-9][a-z0-9._-]{0,39}"><label class="fld" for="f-sprints" style="margin-top:8px">Sprints, in order (ids, comma-separated)</label><input id="f-sprints" name="sprints" style="width:100%" required><label class="fld" for="f-needs" style="margin-top:8px">Needs (optional: studio, blender, audio, images, gpu, backend)</label><input id="f-needs" name="needs" style="width:100%">${pick ? `<label class="fld" for="f-slot" style="margin-top:8px">Runs on</label><select id="f-slot" name="slot" style="width:100%">${slotOptions(st)}</select>${slotPickHint(st)}` : ""}`, "Start track", async f => {
+        const sprints = String(f.get("sprints") || "").split(/[,\s]+/).filter(Boolean), needs = String(f.get("needs") || "").split(/[,\s]+/).filter(Boolean);
+        const slot = String(f.get("slot") || "");
+        await trackAction("track_start", {name: String(f.get("name") || "").trim().toLowerCase(), sprints, ...(needs.length ? {needs} : {}), ...(slot ? {slot} : {})});
+        setTimeout(refresh, 2500);
+      });
+    }
+    if (a === "tr-home") {
+      const st = (S.tr.data.tracks || {})[S.tr.project] || {}, t = (st.tracks || []).find(x => x.name === name) || {};
+      const tv = (st.lane_tunnels || {})[t.host];
+      return formModal(`Bring lane ${name} home?`, `<p class="hint">Its last commits are fetched from <b>${esc(t.host || "its slot")}</b>, its uncommitted files there are saved here, and from then on the track runs on this workstation like any other track. The slot's copy stays until the track is merged. A lane with a sprint in progress is refused: wait until it is idle.</p>
+        <p class="hint">Tunnel now: ${tunnelPill(tv)}</p>
+        <label class="sw" style="margin-top:8px"><input type="checkbox" name="force_local" ${tv && tv.state === "up" ? "" : "checked"}> If ${esc(t.host || "the slot")} does not answer, go on here from the <b>last commit fetched</b></label>
+        <p class="hint">Anything newer than that commit stays on the slot (nothing is deleted); you can fetch it by hand later. Leave this off to try again when the slot is back.</p>`, "Bring home", async f => {
+        const r = await trackAction("track_bring_home", {name, ...(f.get("force_local") ? {force_local: true} : {})}, "Bringing the lane home: the coordinator applies it on its next tick.");
+        const done = await waitAction(r.action_id, 90000);
+        toast(done.status === "applied" ? (done.status_detail || "Lane is home") : `${done.status}: ${done.status_detail || "the coordinator has not answered yet"}`, done.status !== "applied");
+        setTimeout(refresh, 1000);
+      });
+    }
+    if (a === "tr-slot") {
+      const st = (S.tr.data.tracks || {})[S.tr.project] || {}, t = (st.tracks || []).find(x => x.name === name) || {};
+      return formModal(`Studio slot for ${name}`, `<label class="fld" for="f-slot">Its Studio checks and Studio tools use</label><select id="f-slot" name="slot" style="width:100%">${slotOptions(st, t.slot || "", "no slot (Studio checks run at the merge here)")}</select>
+        <p class="hint">Refused while one of its sprints holds the slot or has a Studio check running: try again when that is done.${t.host ? ` This lane's worktree and sessions stay on <b>${esc(t.host)}</b>: this changes only its Studio. To move the lane itself, bring it home first.` : ""}</p>`, "Save", async f => {
+        await trackAction("track_set_slot", {name, slot: String(f.get("slot") || "") || "none"});
+        setTimeout(refresh, 2500);
+      });
+    }
     if (a === "tr-start") { await trackAction("track_start", {name, sprints: ((S.tr.data.tracks[S.tr.project].tracks.find(t => t.name === name) || {}).sprints || []).map(s => s.task_id)}); return setTimeout(refresh, 2500); }
     if (a === "tr-merge") { await trackAction("track_merge", {name}); return setTimeout(refresh, 2500); }
     if (a === "tr-decide") { if (!confirm(`Track ${name}: ${b.dataset.opt}?`)) return; await trackAction("track_merge", {name, option: b.dataset.opt}); return setTimeout(refresh, 2500); }
@@ -2058,9 +2133,17 @@ function bdMins(m) { return m === null || m === undefined ? "?" : m < 120 ? m + 
 function seatKeep(s) {
   return s.upkeep ? `<div class="hint" style="margin:0">${s.behind ? `<span class="pill warn" title="${esc(s.behind)}">other version</span> ` : ""}${esc(s.upkeep)}</div>` : "";
 }
+// Distributed Foundry: where a seat's lane runs (s.host, '' = here) and its slot's tunnel
+// (s.lane_tunnel: "up" / "down: why" ...)
+function seatWhere(s) {
+  const bits = [];
+  if (s.host) bits.push(`<span class="pill info" title="This lane's worktree and sessions run on ${esc(s.host)}">on ${esc(s.host)}</span>`);
+  if (s.lane_tunnel) { const st = String(s.lane_tunnel).split(":")[0]; bits.push(`<span class="pill ${TUNNEL_CLS[st] || ""}" title="${esc(s.lane_tunnel)}">${esc(TUNNEL_WORDS[st] || s.lane_tunnel)}</span>`); }
+  return bits.length ? `<div style="margin-top:2px">${bits.join(" ")}</div>` : "";
+}
 function seatRow(s) {
-  if (s.idle) return `<tr><td><b>${esc(s.seat)}</b>${seatKeep(s)}</td><td><span class="pill warn">idle</span></td><td colspan="2">${esc(s.why || "")}${s.auto ? `<div class="hint" style="margin:0">${esc(s.auto)}</div>` : ""}</td></tr>`;
-  return `<tr><td><b>${esc(s.seat)}</b>${s.lane ? ` <span class="hint" style="margin:0">lane ${esc(s.lane)}</span>` : ""}${seatKeep(s)}</td><td><span class="mono">${esc(s.sprint || "")}</span> ${sprintPill(s.state)}${s.phase ? ` <span class="hint" style="margin:0">${esc(s.phase)}</span>` : ""}</td><td style="white-space:nowrap">${esc(bdMins(s.minutes))}</td><td>${esc(s.doing || "")}</td></tr>`;
+  if (s.idle) return `<tr><td><b>${esc(s.seat)}</b>${seatWhere(s)}${seatKeep(s)}</td><td><span class="pill warn">idle</span></td><td colspan="2">${esc(s.why || "")}${s.auto ? `<div class="hint" style="margin:0">${esc(s.auto)}</div>` : ""}</td></tr>`;
+  return `<tr><td><b>${esc(s.seat)}</b>${s.lane ? ` <span class="hint" style="margin:0">lane ${esc(s.lane)}</span>` : ""}${seatWhere(s)}${seatKeep(s)}</td><td><span class="mono">${esc(s.sprint || "")}</span> ${sprintPill(s.state)}${s.phase ? ` <span class="hint" style="margin:0">${esc(s.phase)}</span>` : ""}</td><td style="white-space:nowrap">${esc(bdMins(s.minutes))}</td><td>${esc(s.doing || "")}</td></tr>`;
 }
 async function renderBoard() {
   const el = $("#v-status");

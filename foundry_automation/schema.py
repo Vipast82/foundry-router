@@ -689,11 +689,14 @@ SLOT_FIELDS = [
      None, 1),
     ("opencode_port", "int", 4097, "The slot's OpenCode server port on the slot host's "
      "127.0.0.1.", None, 1),
-    ("os", "str", "linux", "The slot machine's system: linux (Studio under Vinegar/Wine in "
-     "Docker) or windows (native Studio, no Docker; install/slot.ps1).", None, None),
-    ("studio", "str", "container", "How the slot runs Studio: container (the slot image) or "
-     "native (Roblox's own Studio on a Windows slot).", None, None),
+    ("os", "enum", "linux", "The slot machine's system: linux (Studio under Vinegar/Wine in a "
+     "Docker container; setup-host.sh) or windows (Roblox's own Studio, no Docker; "
+     "install/slot.ps1).", None, None),
+    ("studio", "enum", "container", "How the slot runs Studio: container (the slot image, on "
+     "a Linux slot) or native (Roblox's own Studio, on a Windows slot).", None, None),
 ]
+# the slot fields that are a fixed choice (the Automation page draws them as a select)
+SLOT_ENUMS = {"os": ["linux", "windows"], "studio": ["container", "native"]}
 SLOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 
 
@@ -1500,7 +1503,8 @@ FIELDS: list[Field] = [
              else 0 if isinstance(v, int) and not isinstance(v, bool) else None))
       for k, v in STUDIO_CALLS_DEFAULTS.items()],
     # Studio slots (named tables) --------------------------------------------------
-    *[F(f"slots.*.{k}", t, v, d, "fast_lane", "coordinator.slots", item_type=it, min=mn)
+    *[F(f"slots.*.{k}", t, v, d, "fast_lane", "coordinator.slots", item_type=it, min=mn,
+        enum=SLOT_ENUMS.get(k))
       for k, t, v, d, it, mn in SLOT_FIELDS],
     # Blender on a slot (docs/plans/SLOT_BLENDER_PLAN.md B2) -----------------------------
     F("blender.slot", "str", "", "Blender runs on: empty = this PC; a slot id (e.g. slot-1) = "

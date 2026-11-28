@@ -746,6 +746,23 @@ table.cmp td .pf-bar { margin: 3px 0; }
   .ratio b small { font-weight:400; color:var(--dim); margin-left:6px; }
   pre.raw { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
             border-radius:6px; padding:10px; margin:8px 0 0; max-height:320px; overflow:auto; font-size:12px; }
+  /* Fleet (Distributed Foundry): the checklist steps and the "How it fits" picture */
+  .fl-steps { list-style:none; margin:8px 0 0; padding:0; display:grid; gap:8px; }
+  .fl-step { display:grid; grid-template-columns:26px minmax(0,1fr); gap:4px 10px; align-items:start;
+             background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:9px 11px; }
+  .fl-step > .fl-tick { width:22px; height:22px; border-radius:50%; display:grid; place-items:center; font-size:12px;
+                        border:1px solid var(--line); color:var(--dim); background:var(--panel); }
+  .fl-step.done > .fl-tick { background:var(--ok-bg); color:var(--ok); border-color:var(--ok); }
+  .fl-step.part > .fl-tick { background:var(--warn-bg); color:var(--warn); border-color:var(--warn); }
+  .fl-step pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
+                 border-radius:5px; padding:7px 9px; margin:6px 0 0; font-size:12px; }
+  .fl-diagram { width:100%; max-width:760px; height:auto; display:block; margin:6px 0; }
+  .fl-diagram .bx { fill:var(--panel-2); stroke:var(--line); }
+  .fl-diagram .bx.j { stroke:var(--accent); }
+  .fl-diagram .t { fill:var(--fg); font-size:13px; font-weight:600; }
+  .fl-diagram .s { fill:var(--dim); font-size:11px; }
+  .fl-diagram .ln { stroke:var(--dim); stroke-width:1.5; fill:none; }
+  .fl-diagram .ar { fill:var(--dim); }
   .plain { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
   .plain li { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; }
   .plain .hint { margin:0; }
@@ -2163,6 +2180,8 @@ const TABS = {
   "Clients & Keys": tabClients,
   "Secrets":        async () => { await tabSecrets(); await providerKeysCard(); },
   "Machines":       tabMachines,
+  "Fleet":          tabFleet,
+  "Fleet setup":    tabFleetSetup,
   "Helpers & Limits": tabLimits,
   "Alerts & digest": tabAlerts,
   "Client":         tabClient,
@@ -2176,6 +2195,8 @@ const GROUPS = [
   ["Routing",     ["Personas", "Guardrails", "Routes"]],
   // its own page (operator sign-in, drafts, deploy): the group button opens it
   ["Automation",  []],
+  // Distributed Foundry: every machine across the projects, and how the pieces fit
+  ["Fleet",       ["Fleet", "Fleet setup"]],
   ["Tools & MCP", ["Tools", "MCP Servers", "MCP Metrics", "Agents"]],
   ["Labs",        ["Research", "Benchmark", "Evals"]],
   ["Logs",        ["Usage Log", "Events", "Dev Log", "Data", "Training"]],
@@ -2185,7 +2206,7 @@ const GROUPS = [
 ];
 // Shown names where the internal key is not the plainest wording (keys stay
 // stable: timers compare `current` against them).
-const TAB_LABEL = {"Work": "Coordinator work", "Pool": "Backend pool", "Usage Log": "Request log"};
+const TAB_LABEL = {"Work": "Coordinator work", "Pool": "Backend pool", "Usage Log": "Request log", "Fleet setup": "Setup"};
 const GROUP_HELP = {
   Overview: "Is everything healthy? Key numbers and anything that needs attention, on one page.",
   Monitor: "Watch traffic as it happens: live activity, speed and latency history, cost and model comparisons.",
@@ -2195,6 +2216,7 @@ const GROUP_HELP = {
   "Tools & MCP": "Tools the models can call, the MCP servers behind them, and agents.",
   Labs: "Your own benchmark, research settings and evaluation runs for personas.",
   Logs: "Every request, event and log line, plus data export and training capture.",
+  Fleet: "Every machine for every project: workstations and slots, their versions, lanes and tunnels; and how the pieces fit.",
   Access: "Client keys and who may use what; helper capacity and limits.",
   Client: "The Foundry Client workstation app: download the installer, see connected clients, and the install guide."};
 const TAB_HELP = {
@@ -2213,6 +2235,8 @@ const TAB_HELP = {
   Agents: "Configured agents and their runs.", Research: "Web research settings.", Evals: "Persona evaluation runs and scores.",
   "Usage Log": "Every request Foundry handled.", Events: "System events and warnings.", "Dev Log": "Application log lines.",
   Data: "Export, prune or clear stored data.", Training: "Captured training data.",
+  Fleet: "One table of every workstation and slot: system, version, disk, lanes, tunnel and what runs there, with what does not fit together.",
+  "Fleet setup": "How the router, the junction (main workstation) and the slots fit, and the setup steps in order, ticked from live state.",
   "Clients & Keys": "Client keys and their scopes.", "Helpers & Limits": "Helper capacity, budgets and limits.",
   Client: "Download the Foundry Client, see which workstations run it, and how to install it."};
 const tabLabel = leaf => TAB_LABEL[leaf] || leaf;
@@ -5165,6 +5189,9 @@ async function tabMachines() {
       <div class="row"><label>game</label><select id="mc-project">${d.projects.map(p => `<option>${esc(p)}</option>`).join("")}</select>
         <label title="The slot's id, e.g. slot-2. Tracks are bound to it (tracks start ... --slot slot-2).">slot id</label><input id="mc-slot" placeholder="slot-2" style="width:110px">
         <label title="The static IP the slot's LXC will have (create-slot-lxc.sh asks for the same one).">IP</label><input id="mc-ip" placeholder="192.168.0.52" style="width:140px"></div>
+      <div class="row"><label for="mc-os" title="Linux: Studio runs in the slot container (a Proxmox LXC or a Debian 13 machine, setup-host.sh). Windows: Roblox's own Studio, no Docker (install\\slot.ps1).">system</label>
+        <select id="mc-os"><option value="linux" selected>Linux (Proxmox LXC or Debian 13)</option><option value="windows">Windows (Roblox's own Studio)</option></select>
+        <label for="mc-user" title="The account Foundry logs in as over ssh on that machine (Linux slots: studio)">ssh user</label><input id="mc-user" placeholder="studio" style="width:120px"></div>
       <div class="row"><label title="The slot's OWN place: a private experience per slot (e.g. 'Animal Uprising [SLOT-2]'). Paste its Studio link or games URL, or the place id. Never the workstation's test place or another slot's place: one edit session per place per account.">its place</label>
         <input id="mc-place" placeholder="roblox-studio:… link, https://www.roblox.com/games/<id>/…, or the place id" style="min-width:380px">
         <label title="Only needed when the link has no universe id">universe id</label><input id="mc-universe" placeholder="optional" style="width:140px"></div>
@@ -5183,13 +5210,17 @@ async function tabMachines() {
       ${claimRows ? `<div class="tscroll"><table><tr><th>game</th><th>workstation</th><th>state</th><th>last check-in</th><th></th></tr>${claimRows}</table></div>`
         : '<p class="hint">No coordinator has checked in yet (routers before v0.176.0 have no check).</p>'}</div>
     <div class="card"><h3>Add a workstation</h3>
-      <p class="hint">A Linux machine (a PC, or a Proxmox LXC) that runs the coordinator, Kilo, the game checkout and Blender:
-        <code>install/workstation.sh</code> (docs/INSTALL_WORKSTATION.md). Its code gives it three keys of its own (coordinator, Kilo,
+      <p class="hint">A workstation (the <b>junction</b>) runs the coordinator, Kilo or OpenCode, the game's main checkout and Blender, and is the
+        only machine that publishes. Linux (a PC, or a Proxmox LXC): <code>install/workstation.sh</code>; Windows (a PC):
+        <code>install\\workstation.ps1</code> (docs/INSTALL_WORKSTATION.md). Its code gives it three keys of its own (coordinator, Kilo,
         relay) and the game's clone settings (<code>workspace.clone_url</code>, <code>workspace.repo_key_secret</code>).</p>
       <div class="row"><label>game</label><select id="mw-project">${d.projects.map(p => `<option>${esc(p)}</option>`).join("")}</select>
         <label title="A short name; its keys are <name>, <name>-kilo and <name>-relay">name</label><input id="mw-name" placeholder="ws-linux" style="width:130px">
         <label title="Its static IP (needed for a Studio here)">IP</label><input id="mw-ip" placeholder="192.168.0.120" style="width:140px">
         <label>note</label><input id="mw-note" placeholder="e.g. Proxmox node 3" style="width:180px"></div>
+      <div class="row"><label for="mw-os">system</label>
+        <select id="mw-os"><option value="linux" selected>Linux (a PC or a Proxmox LXC)</option><option value="windows">Windows (a PC)</option></select>
+        <label for="mw-user" title="The account the coordinator runs as on that machine (its ssh login)">ssh user</label><input id="mw-user" placeholder="foundry" style="width:120px"></div>
       <div class="row"><label title="Main sprints need a Studio. On Linux it runs in the Studio slot container on this same machine (a slot named <name>-studio). Main sprints use it once Automation → Settings → studio.main_slot names it.">a Studio for main sprints here</label>
         <label class="sw"><input type="checkbox" id="mw-studio" checked>On</label>
         <label title="The place this Studio opens: the main checkout's TEST place (never LIVE)">its place</label>
@@ -5207,37 +5238,25 @@ async function tabMachines() {
       <div class="row"><label title="How long a new enrollment code works">code valid for (minutes)</label><input type="number" id="mc-mins" min="5" max="1440" value="${esc(d.settings.code_minutes)}" style="width:90px">
         <button class="act primary" id="mc-save">Save</button></div></div>
     <div class="card"><h3>Recent events</h3>${ev ? `<div class="tscroll"><table>${ev}</table></div>` : '<p class="hint">None.</p>'}</div>`;
-  const showCode = (title, r) => {
-    const i = r.install || {};
-    const body = openModal(title, `
-      <p>Enrollment code (works once, until ${when(r.code_expires)}):</p>
-      <div class="row"><code style="font-size:20px;letter-spacing:1px">${esc(r.code)}</code> <button class="act" id="mc-copy">Copy</button></div>
-      <h4>Easiest: create the LXC and install in one go</h4>
-      <p class="hint">In the Proxmox <b>host</b> shell (Datacenter → node → Shell). It asks for the IP, sizes, the router address (<code>${esc(i.router_url || "")}</code>) and this code.</p>
-      <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(i.proxmox_host || "")}</pre>
-      <h4>Or: an LXC / Debian 13 machine you made yourself</h4>
-      <p class="hint">As root inside it (needs nesting + keyctl on Proxmox).</p>
-      <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(i.inside_lxc || "")}</pre>
-      <p class="hint">${(r.machine || {}).kind === "workstation"
-        ? "The installer stores the keys, clones Foundry and the game, starts the Foundry Client as a service and runs doctor. With a Studio here it also builds the Studio container (20-40 min) and prints how to sign Studio in once. Moving the work over: docs/INSTALL_WORKSTATION.md."
-        : "After the build (20-40 min) the installer prints how to sign Studio in once. That is the only step left."}</p>`);
-    $("#mc-copy", body).onclick = () => navigator.clipboard.writeText(r.code).then(() => toast("Code copied"), () => toast("Select and copy it", true));
-  };
+  const showCode = (title, r, os) => showInstallCode(title, r, os);
+  const osOf = m => String((m && (m.os || (m.settings || {}).os)) || "linux");
   $("#mc-add").onclick = () => {
-    const place = $("#mc-place").value.trim();
+    const place = $("#mc-place").value.trim(), os = $("#mc-os").value, user = $("#mc-user").value.trim();
     const body = {kind: "slot", project: $("#mc-project").value, slot: $("#mc-slot").value.trim(), ip: $("#mc-ip").value.trim(),
                   note: $("#mc-note").value, rojo_never_place_ids: $("#mc-never").value.trim(),
-                  vnc_lan: $("#mc-vnc-lan").checked, vnc_port: Number($("#mc-vnc-port").value || 6080)};
+                  vnc_lan: $("#mc-vnc-lan").checked, vnc_port: Number($("#mc-vnc-port").value || 6080), os};
+    if (user) { body.ssh_user = user; body.user = user; }
     if (/^\d+$/.test(place)) body.place_id = place; else if (place) body.place_link = place;
     if ($("#mc-universe").value.trim()) body.universe_id = $("#mc-universe").value.trim();
-    api("machines", {method: "POST", body}).then(r => { render(); showCode(`Slot ${r.machine.name} added`, r); }).catch(e => toast(e.message, true));
+    api("machines", {method: "POST", body}).then(r => { render(); showCode(`Slot ${r.machine.name} added`, r, osOf(r.machine) === "windows" ? "windows" : os); }).catch(e => toast(e.message, true));
   };
   $("#mc-save").onclick = () => api("machines/settings", {method: "POST", body: {slot_ssh_keys: $("#mc-keys").value,
     code_minutes: Number($("#mc-mins").value)}}).then(() => { toast("Saved"); render(); }).catch(e => toast(e.message, true));
   document.querySelectorAll("[data-mc-code]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcCode;
     if (!confirm(`Make a new enrollment code for ${n}? Installing with it gives ${n} a new key (the old one stops working).`)) return;
-    api(`machines/${encodeURIComponent(n)}/code`, {method: "POST"}).then(r => { render(); showCode(`New code for ${n}`, r); }).catch(e => toast(e.message, true));
+    const m0 = d.machines.find(x => x.name === n);
+    api(`machines/${encodeURIComponent(n)}/code`, {method: "POST"}).then(r => { render(); showCode(`New code for ${n}`, r, osOf(r.machine || m0)); }).catch(e => toast(e.message, true));
   });
   document.querySelectorAll("[data-mc-vnc]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcVnc, m = d.machines.find(x => x.name === n) || {}, v = m.vnc || {lan: true, port: 6080};
@@ -5293,14 +5312,15 @@ async function tabMachines() {
     };
   });
   $("#mw-add").onclick = () => {
-    const place = $("#mw-place").value.trim(), studio = $("#mw-studio").checked;
+    const place = $("#mw-place").value.trim(), studio = $("#mw-studio").checked, os = $("#mw-os").value, user = $("#mw-user").value.trim();
     const body = {kind: "workstation", project: $("#mw-project").value, name: $("#mw-name").value.trim(),
-                  ip: $("#mw-ip").value.trim(), note: $("#mw-note").value, studio};
+                  ip: $("#mw-ip").value.trim(), note: $("#mw-note").value, studio, os};
+    if (user) body.ssh_user = user;
     if (studio) {
       if (/^\d+$/.test(place)) body.place_id = place; else if (place) body.place_link = place;
       if ($("#mw-universe").value.trim()) body.universe_id = $("#mw-universe").value.trim();
     }
-    api("machines", {method: "POST", body}).then(r => { render(); showCode(`Workstation ${r.machine.name} added`, r); }).catch(e => toast(e.message, true));
+    api("machines", {method: "POST", body}).then(r => { render(); showCode(`Workstation ${r.machine.name} added`, r, osOf(r.machine) === "windows" ? "windows" : os); }).catch(e => toast(e.message, true));
   };
   document.querySelectorAll("[data-wc-active]").forEach(b => b.onclick = () => {
     const [project, client] = b.dataset.wcActive.split("|");
@@ -5316,16 +5336,9 @@ async function tabMachines() {
     if (confirm(`Remove ${n}'s ssh key? Slots stop allowing it within 5 minutes. If ${n}'s coordinator is still running, it registers again.`))
       api(`machines/workstations/${encodeURIComponent(n)}`, {method: "DELETE"}).then(() => { toast("Removed"); render(); }).catch(e => toast(e.message, true));
   });
-  document.querySelectorAll("[data-mc-lanes]").forEach(b => b.onclick = () => {
-    const n = b.dataset.mcLanes, on = b.dataset.on === "1";
-    const msg = on
-      ? `Turn lanes off for ${n}? Its two lane keys (${n}-kilo, ${n}-opencode) and their values are deleted; its Kilo and OpenCode can no longer call the router.`
-      : `Turn lanes on for ${n}? This makes two client keys, ${n}-kilo and ${n}-opencode, with the personas the kilo and opencode keys have now, and puts their values in the secret store (group lane-${n}) for ${n}'s own key to pull. Nothing uses them until the slot runs its lane agent.`;
-    if (!confirm(msg)) return;
-    api(`machines/${encodeURIComponent(n)}/lanes`, {method: "POST", body: {on: !on}})
-      .then(r => { toast(on ? "Lanes off: keys deleted" : (r.changed ? "Lanes on: keys made" : "Lanes were already on")); render(); })
-      .catch(e => toast(e.message, true));
-  });
+  // the Lanes button opens the step-by-step checklist (lane keys, the slot's lanes setting,
+  // the installer again, the project's remote_lanes; and the reverse to turn them off)
+  document.querySelectorAll("[data-mc-lanes]").forEach(b => b.onclick = () => openLanesChecklist(b.dataset.mcLanes).catch(e => toast(e.message, true)));
   document.querySelectorAll("[data-mc-revoke]").forEach(b => b.onclick = () => {
     const n = b.dataset.mcRevoke;
     if (confirm(`Revoke ${n}? Its key stops working now; the slot deletes its secret files at its next pull.`))
@@ -5335,6 +5348,301 @@ async function tabMachines() {
     const n = b.dataset.mcDel;
     if (confirm(`Delete ${n}? Its key and its slot settings are removed (the LXC itself is not touched).`))
       api(`machines/${encodeURIComponent(n)}`, {method: "DELETE"}).then(() => { toast("Deleted"); render(); }).catch(e => toast(e.message, true));
+  });
+}
+
+/* ------------------------------------------------------------ fleet -- */
+// Fleet (Distributed Foundry, fleet.py GET /admin/api/fleet): every machine across all
+// projects in one table. Words: a slot = a machine that runs Studio and lanes; a lane = a
+// track whose worktree and sessions live on a slot; the junction = the main workstation
+// (coordinator, main checkout, the only machine that publishes).
+const FLEET_TICK = {true: ["ok", "✓"], false: ["bad", "✗"], null: ["", "?"]};
+function fleetTick(v, label, title) {
+  const [cls, mark] = FLEET_TICK[v === true ? "true" : v === false ? "false" : "null"];
+  return `<span class="pill ${cls}" title="${esc(title)}">${mark} ${esc(label)}</span>`;
+}
+function fleetAgo(ts) {
+  if (!ts) return "never";
+  const d = Math.max(0, Date.now() / 1000 - ts);
+  return d < 90 ? Math.round(d) + " s ago" : d < 5400 ? Math.round(d / 60) + " min ago" : d < 172800 ? Math.round(d / 3600) + " h ago" : Math.round(d / 86400) + " days ago";
+}
+const FLEET_TUNNEL = {up: ["ok", "tunnel up"], starting: ["", "tunnel starting"], backoff: ["warn", "tunnel retrying"], down: ["bad", "tunnel down"]};
+function fleetTunnel(t) {
+  if (!t) return '<span class="hint">no tunnel</span>';
+  const [cls, w] = FLEET_TUNNEL[t.state] || ["", t.state || "?"];
+  return `<span class="pill ${cls}" title="${esc((t.error ? t.error + " · " : "") + (t.since ? "since " + _tsText(t.since) : ""))}">${esc(w)}</span>`;
+}
+// the Automation page's draft API (needs its X-Foundry-Automation header)
+function autoApi(path, opts = {}) {
+  const headers = {"Content-Type": "application/json", "X-Foundry-Automation": "1"};
+  const k = _adminKey(); if (k) headers["Authorization"] = "Bearer " + k;
+  return api(path, {...opts, headers});
+}
+// change one project's automation settings in its DRAFT (the owner reviews and deploys it on
+// the Automation page); `mutate(settings)` edits them in place and may throw to refuse
+async function automationDraftEdit(project, mutate) {
+  const p = encodeURIComponent(project);
+  const d = await autoApi(`automation/projects/${p}/draft`, {method: "GET"});
+  const doc = JSON.parse(JSON.stringify(d.doc || {}));
+  doc.settings = doc.settings || {};
+  mutate(doc.settings);
+  const r = await autoApi(`automation/projects/${p}/draft`, {method: "PUT", body: {doc, etag: d.etag}});
+  const v = r.validation || {};
+  if (v.ok === false) throw new Error("Saved to the draft, but the draft does not check out yet: " + (v.errors || []).map(e => `${e.path}: ${e.message}`).join("; ") + " (fix it on Automation → Settings)");
+  return r;
+}
+function copyBtn(text) { return `<button class="act" type="button" data-copy="${esc(text)}">Copy</button>`; }
+function bindCopy(root) {
+  root.querySelectorAll("[data-copy]").forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.copy)
+    .then(() => toast("Copied"), () => toast("Select and copy it", true)));
+}
+// what to run where with a new enrollment code; `os` "windows" shows the Windows command
+// (install-commands key "windows", from routers that have it), else the Linux ones
+function installHtml(r, os) {
+  const i = r.install || {}, kind = (r.machine || {}).kind;
+  const when = ts => ts ? esc(_tsText(ts)) : "";
+  const pre = c => `<pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(c)}</pre><div class="row">${copyBtn(c)}</div>`;
+  let cmds;
+  if (os === "windows" && i.windows) {
+    const list = typeof i.windows === "string" ? [["", i.windows]] : Object.entries(i.windows);
+    cmds = `<h4>On the Windows machine</h4>
+      <p class="hint">In PowerShell, run as administrator. It asks for the router address (<code>${esc(i.router_url || "")}</code>) and this code.</p>
+      ${list.map(([k, c]) => (k ? `<p class="hint">${esc(k.replace(/_/g, " "))}:</p>` : "") + pre(String(c))).join("")}`;
+  } else if (os === "windows") {
+    cmds = `<h4>On the Windows machine</h4>
+      <p class="hint">This router does not list a Windows command yet. On the Windows machine, run
+      <code>${kind === "workstation" ? "install\\workstation.ps1" : "install\\slot.ps1"}</code> from the Foundry release that matches this router
+      (in PowerShell, as administrator), and give it the router address (<code>${esc(i.router_url || "")}</code>) and this code.</p>`;
+  } else {
+    cmds = `<h4>Easiest: create the LXC and install in one go</h4>
+      <p class="hint">In the Proxmox <b>host</b> shell (Datacenter → node → Shell). It asks for the IP, sizes, the router address (<code>${esc(i.router_url || "")}</code>) and this code.</p>
+      ${pre(i.proxmox_host || "")}
+      <h4>Or: an LXC / Debian 13 machine you made yourself</h4>
+      <p class="hint">As root inside it (needs nesting + keyctl on Proxmox).</p>
+      ${pre(i.inside_lxc || "")}`;
+  }
+  return `<p>Enrollment code (works once, until ${when(r.code_expires)}):</p>
+    <div class="row"><code style="font-size:20px;letter-spacing:1px">${esc(r.code)}</code> ${copyBtn(r.code)}</div>
+    ${cmds}
+    <p class="hint">${kind === "workstation"
+      ? "The installer stores the keys, clones Foundry and the game, starts the Foundry Client as a service and runs doctor. With a Studio here it also builds the Studio container (20-40 min) and prints how to sign Studio in once. Moving the work over: docs/INSTALL_WORKSTATION.md."
+      : os === "windows" ? "The installer sets up Git, Node, Kilo, OpenCode and the lane agent, enrols with the code and runs doctor --platform. Sign Studio in once on that machine."
+      : "After the build (20-40 min) the installer prints how to sign Studio in once. That is the only step left."}</p>`;
+}
+function showInstallCode(title, r, os) { bindCopy(openModal(title, installHtml(r, os))); }
+
+function fleetRow(r) {
+  const ws = r.kind === "workstation";
+  const role = ws ? (r.active_for.length ? `<span class="pill ok" title="Runs these projects' sprints: the coordinator, the main checkout, and the only machine that publishes">junction</span>`
+                                         : r.standby_for.length ? `<span class="pill warn" title="Waits on standby: another workstation runs the sprints">standby</span>` : `<span class="pill">workstation</span>`)
+                  : `<span class="pill" title="A machine that runs Studio and lanes">slot</span>`;
+  const projs = ws ? [...r.active_for.map(p => `<b>${esc(p)}</b>`), ...r.standby_for.map(p => `${esc(p)} <span class="hint">(standby)</span>`),
+                      ...r.projects.filter(p => !r.active_for.includes(p) && !r.standby_for.includes(p)).map(esc)].join(", ")
+                   : r.projects.map(esc).join(", ");
+  const sys = [r.os ? (r.os === "windows" ? "Windows" : r.os === "linux" ? "Linux" : esc(r.os)) : '<span class="hint">system not reported</span>',
+               r.studio ? `<div class="hint">Studio: ${esc(r.studio === "container" ? "in the slot container" : r.studio === "native" ? "Roblox's own" : r.studio)}</div>` : ""].join("");
+  const ver = r.version ? `<span class="pill ${r.version_ok === false ? "warn" : "ok"}" title="${esc(r.version_from)}">v${esc(r.version)}</span>` : '<span class="hint">not reported</span>';
+  const ln = r.lanes;
+  const lanes = ln ? [fleetTick(ln.keys, "lane keys", "Step 1: the slot's own model keys for its Kilo and OpenCode (Lanes button)"),
+                      fleetTick(ln.setting, "lanes setting", `Step 2: slots.${r.slot}.lanes on in the project's automation settings`),
+                      fleetTick(ln.agent, "agent answers", "Step 3: the coordinator's tunnel to the slot's lane agent is up (? = no coordinator reported a tunnel)")].join(" ")
+                   + `<div class="hint">remote lanes ${ln.remote_lanes ? "on" : "off"} for ${esc(r.projects[0] || "its project")}</div>`
+                 : '<span class="hint">—</span>';
+  const run = (r.running || []).map(x => `<div><span class="mono">${esc(x.track === "main" ? "main checkout" : x.track)}</span>${x.sprint ? ` · <span class="mono">${esc(x.sprint)}</span>` : ""} <span class="hint">${esc(x.project)}${x.studio_only ? ", Studio only" : x.lane ? ", lane" : ""}</span></div>`).join("") || '<span class="hint">nothing</span>';
+  return `<tr><td class="nw"><b>${esc(r.name)}</b> ${role}<div class="hint">${esc(r.host || r.enrolled_hostname || "")}${r.note ? " · " + esc(r.note) : ""}</div></td>
+    <td>${projs || '<span class="hint">none</span>'}</td>
+    <td class="nw">${sys}</td>
+    <td class="nw">${r.state ? `<span class="pill ${/connected|reporting|checked in/.test(r.state) ? "ok" : /revoked|not reporting/.test(r.state) ? "bad" : "warn"}">${esc(r.state)}</span>` : ""}
+      <div class="hint">${r.enrolled_ts ? "enrolled " + esc(_tsText(r.enrolled_ts)) + "<br>" : ""}last heard ${esc(fleetAgo(r.last_seen))}</div></td>
+    <td class="nw">${ver}</td>
+    <td class="nw">${r.disk_pct != null ? `<span class="pill ${r.disk_pct >= 90 ? "bad" : r.disk_pct >= 85 ? "warn" : ""}">${esc(r.disk_pct)}%</span>` : '<span class="hint">—</span>'}</td>
+    <td>${lanes}</td>
+    <td class="nw">${ws ? '<span class="hint">—</span>' : fleetTunnel(r.tunnel)}</td>
+    <td>${run}</td>
+    <td class="nw">${!ws && r.source === "machines" ? `<button class="act" data-fl-lanes="${esc(r.name)}" title="Turn lanes on or off for this slot, step by step">Lanes…</button> ` : ""}<button class="act" data-fl-machines="${esc(r.name)}" title="Access → Machines: its settings, codes and keys">Settings</button>
+      <a class="act" href="${esc(r.links.tracks)}" title="Automation → Tracks">Tracks</a></td></tr>`;
+}
+async function tabFleet() {
+  const d = await api("fleet");
+  const rows = d.machines || [], warns = d.warnings || [];
+  $("#main").innerHTML = `
+    <h2>Fleet</h2>
+    <p class="hint">Every machine that works for Foundry, for every project, on one page. The <b>junction</b> is your main workstation: it runs the
+      coordinator and the game's main checkout, and it is the only machine that publishes. A <b>slot</b> is a machine that runs Studio and
+      <b>lanes</b>: tracks whose worktree and Kilo/OpenCode sessions live on that slot. This router runs <b>v${esc(d.router_version)}</b>.
+      New here? <button class="act" id="fl-setup" type="button">Fleet → Setup</button> explains how it fits together.</p>
+    ${warns.length ? `<div class="card"><h3>Things that do not fit together (${warns.length})</h3><ul style="margin:4px 0 0;padding-left:18px">${warns.map(w => `<li>${esc(w.text)}${w.machine && rows.some(r => r.name === w.machine && r.kind === "slot" && r.source === "machines") && /lane/.test(w.kind) ? ` <button class="act" data-fl-lanes="${esc(w.machine)}">Lanes…</button>` : ""}</li>`).join("")}</ul></div>`
+                   : `<div class="card"><span class="pill ok">all consistent</span> <span class="hint">No setting contradicts another one.</span></div>`}
+    <div class="card"><h3>Machines (${rows.length})</h3>
+      ${rows.length ? `<div class="tscroll"><table><tr><th>machine</th><th>projects</th><th>system</th><th>enrolled · last heard</th><th>Foundry</th><th>disk</th><th title="A slot holds lanes when all three are ✓ and the project's remote_lanes is on">lanes</th><th>tunnel</th><th>running there</th><th></th></tr>${rows.map(fleetRow).join("")}</table></div>`
+                    : `<p class="hint">No machine yet. Access → Machines adds slots and workstations; a workstation also shows up here when its coordinator checks in.</p>`}</div>
+    <div class="card"><h3>Projects</h3>
+      ${(d.projects || []).length ? `<div class="tscroll"><table><tr><th>project</th><th>coding client</th><th>junction</th><th>remote lanes</th><th>slots</th><th>coordinator report</th></tr>${d.projects.map(p => `<tr>
+        <td class="nw"><b>${esc(p.id)}</b></td><td class="nw">${p.client_kind === "opencode" ? "OpenCode" : p.client_kind === "kilo" ? "Kilo" : esc(p.client_kind)}</td>
+        <td class="nw">${p.workstation ? esc(p.workstation) : '<span class="hint">no workstation checked in</span>'}</td>
+        <td class="nw">${p.remote_lanes ? '<span class="pill ok">on</span>' : '<span class="pill">off</span>'}</td>
+        <td>${Object.entries(p.slots || {}).map(([sid, s]) => `<span class="pill ${s.lanes && s.enabled ? "ok" : ""}" title="${s.enabled ? "" : "switched off · "}${s.lanes ? "lanes on" : "Studio only"}">${esc(sid)}${s.lanes ? " · lanes" : ""}${s.os === "windows" ? " · Windows" : ""}</span>`).join(" ") || '<span class="hint">none</span>'}</td>
+        <td class="nw hint">${p.reported ? esc(fleetAgo(d.now - (p.coordinator_age_s || 0))) : "none yet"}</td></tr>`).join("")}</table></div>` : '<p class="hint">No project yet: the setup wizard adds one (its Game step).</p>'}</div>
+    <div class="row"><button class="act" id="fl-refresh" type="button">Refresh</button>
+      <a class="act" href="${esc((d.links || {}).tracks || "/ui/automation#tracks")}">Automation → Tracks</a>
+      <button class="act" type="button" data-fl-machines="">Access → Machines</button></div>`;
+  bindFleet($("#main"));
+}
+function bindFleet(root) {
+  root.querySelectorAll("[data-fl-lanes]").forEach(b => b.onclick = () => openLanesChecklist(b.dataset.flLanes).catch(e => toast(e.message, true)));
+  root.querySelectorAll("[data-fl-machines]").forEach(b => b.onclick = () => { closeModal(); current = "Machines"; render(); });
+  const s = $("#fl-setup", root); if (s) s.onclick = () => { current = "Fleet setup"; render(); };
+  const rf = $("#fl-refresh", root); if (rf) rf.onclick = () => render();
+}
+
+// The Lanes checklist of one slot (from the Fleet row or Access → Machines → Lanes): the four
+// steps to hold lanes, each ticked from live state, and the reverse to turn them off.
+async function openLanesChecklist(name) {
+  const [fl, mc] = await Promise.all([api("fleet", {method: "GET"}), api("machines", {method: "GET"})]);
+  const m = (mc.machines || []).find(x => x.name === name && x.kind === "slot");
+  if (!m) throw new Error(`${name} is not a Studio slot on Access → Machines`);
+  const row = (fl.machines || []).find(r => r.name === name && r.kind === "slot") || {};
+  const project = m.project, sid = m.slot || m.name;
+  const proj = (fl.projects || []).find(p => p.id === project) || {};
+  let dset = null;
+  try { dset = ((await autoApi(`automation/projects/${encodeURIComponent(project)}/draft`, {method: "GET"})).doc || {}).settings || {}; } catch (e) { dset = null; }
+  const ln = row.lanes || {keys: !!(m.lanes || {}).on, setting: (m.settings || {}).lanes === true, agent: null, remote_lanes: !!proj.remote_lanes};
+  const dSlot = dset && (dset.slots || {})[sid];
+  const draftLanes = !!(dSlot && dSlot.lanes === true), draftRemote = !!(dset && (dset.automation || {}).remote_lanes === true);
+  const os = String((m.settings || {}).os || m.os || "linux");
+  const lanesHere = (row.running || []).filter(x => x.lane);
+  const step = (n, done, part, title, body) => `<li class="fl-step ${done ? "done" : part ? "part" : ""}"><span class="fl-tick" aria-label="${done ? "done" : part ? "half done" : "to do"}">${done ? "✓" : n}</span><div><b>${esc(title)}</b>${body}</div></li>`;
+  const deployLink = `<a href="/ui/automation#settings">Automation → Settings</a>`;
+  const html = `
+    <p class="hint">A <b>lane</b> is a track whose worktree and Kilo/OpenCode sessions live on this slot instead of on your workstation (the junction).
+      ${esc(name)} holds lanes for <b>${esc(project)}</b> when all four steps are done. Nothing changes for tracks that are already running.</p>
+    <ol class="fl-steps">
+      ${step(1, ln.keys, false, "Lane keys for the slot's Kilo and OpenCode", `<div class="hint">Two client keys, ${esc(sid)}-kilo and ${esc(sid)}-opencode, with the personas your kilo and opencode keys have now. Their values go into the secret store for the slot to pull, so the secret store must be <b>unlocked</b> (Access → Secrets).</div>
+        <div class="row">${ln.keys ? '<span class="pill ok">keys made</span>' : '<button class="act primary" id="ln-keys-on" type="button">Make the lane keys</button>'}</div>`)}
+      ${step(2, ln.setting, !ln.setting && draftLanes, `slots.${sid}.lanes on in ${project}'s settings`, `<div class="hint">Tells the coordinator this slot can hold lanes.</div>
+        <div class="row">${ln.setting ? '<span class="pill ok">on (deployed)</span>' : draftLanes ? `<span class="pill warn">on in the draft, not deployed yet</span> <span class="hint">Review and deploy it on ${deployLink}.</span>`
+          : dSlot ? `<button class="act primary" id="ln-set-on" type="button">Turn it on in the draft</button> <span class="hint">then deploy it on ${deployLink}</span>`
+          : `<span class="hint">${esc(sid)} is not in the router's settings for ${esc(project)} (it may still be only in the coordinator's project.toml): Import it on ${deployLink} first.</span>`}</div>`)}
+      ${step(3, ln.agent === true, false, "Run the slot's installer again (it sets up the lane agent)", `<div class="hint">Do this when the slot holds no lane. Make a <b>new code</b>, run the command it shows on ${esc(name)} (${os === "windows" ? "Windows: PowerShell as administrator" : "Linux: the Proxmox host or the slot machine"}),
+        then wait: this step ticks itself when the coordinator's tunnel reaches the slot's lane agent (needs step 2 deployed).</div>
+        <div class="row">${ln.agent === true ? '<span class="pill ok">the lane agent answers</span>' : `<button class="act" id="ln-code" type="button">New code and command</button> ${fleetTunnel(row.tunnel)}`}</div><div id="ln-code-out"></div>`)}
+      ${step(4, ln.remote_lanes, !ln.remote_lanes && draftRemote, `Turn ${project}'s remote_lanes on`, `<div class="hint">From then on, a new track started on ${esc(sid)} (Automation → Tracks → New track → Runs on) is a lane there. Tracks already running stay where they are.</div>
+        <div class="row">${ln.remote_lanes ? '<span class="pill ok">on (deployed)</span>' : draftRemote ? `<span class="pill warn">on in the draft, not deployed yet</span> <span class="hint">Deploy it on ${deployLink}.</span>`
+          : dset ? `<button class="act primary" id="ln-remote-on" type="button">Turn it on in the draft</button> <span class="hint">then deploy it on ${deployLink}</span>` : `<span class="hint">Set <code>remote_lanes</code> on ${deployLink}.</span>`}</div>`)}
+    </ol>
+    <details style="margin-top:12px"><summary><b>Turning lanes off</b> (the same steps backwards)</summary>
+      <ol class="fl-steps">
+        ${step(1, !lanesHere.length, false, "Bring its running lanes home first", `<div class="hint">${lanesHere.length ? `Running on ${esc(sid)} now: ${lanesHere.map(x => `<span class="mono">${esc(x.track)}</span>${x.sprint ? " (" + esc(x.sprint) + ")" : ""}`).join(", ")}. On Automation → Tracks, press <b>Bring home</b> on each: its commits and uncommitted files come back to the workstation.` : "No lane runs on this slot."}</div>
+          ${lanesHere.length ? `<div class="row"><a class="act" href="/ui/automation#tracks">Automation → Tracks</a></div>` : ""}`)}
+        ${step(2, !ln.remote_lanes, false, `${project}'s remote_lanes off (only if no other slot should hold lanes)`, `<div class="row">${ln.remote_lanes ? (dset ? '<button class="act" id="ln-remote-off" type="button">Turn it off in the draft</button>' : "") + ` <span class="hint">then deploy on ${deployLink}</span>` : '<span class="pill">off</span>'}</div>`)}
+        ${step(3, !ln.setting, false, `slots.${sid}.lanes off`, `<div class="row">${ln.setting ? (dSlot ? '<button class="act" id="ln-set-off" type="button">Turn it off in the draft</button>' : "") + ` <span class="hint">then deploy on ${deployLink}</span>` : '<span class="pill">off</span>'}</div>`)}
+        ${step(4, !ln.keys, false, "Delete the lane keys", `<div class="hint">Its Kilo and OpenCode can no longer call the router.</div><div class="row">${ln.keys ? '<button class="act danger" id="ln-keys-off" type="button">Delete the lane keys</button>' : '<span class="pill">none</span>'}</div>`)}
+      </ol></details>
+    <div class="row" style="margin-top:12px"><button class="act" id="ln-recheck" type="button">Check again</button><span class="hint">The ticks come from the router's settings and the coordinator's last report.</span></div>`;
+  const body = openModal(`Lanes on ${name}`, html);
+  const again = () => openLanesChecklist(name).catch(e => toast(e.message, true));
+  const on = (id, fn) => { const b = $("#" + id, body); if (b) b.onclick = () => fn(b).catch(e => toast(e.message, true)); };
+  const n = name, setKeys = v => api(`machines/${encodeURIComponent(n)}/lanes`, {method: "POST", body: {on: v}});
+  on("ln-recheck", async () => again());
+  on("ln-keys-on", async () => { await setKeys(true); toast("Lane keys made"); again(); });
+  on("ln-keys-off", async () => {
+    if (!confirm(`Delete ${name}'s two lane keys (${sid}-kilo, ${sid}-opencode) and their values? Its Kilo and OpenCode can no longer call the router.`)) return;
+    await setKeys(false); toast("Lane keys deleted"); again();
+  });
+  const slotSet = v => automationDraftEdit(project, s => {
+    const slots = s.slots || {};
+    if (!slots[sid]) throw new Error(`${sid} is not in ${project}'s router settings: import it on the Automation page first`);
+    slots[sid].lanes = v; s.slots = slots;
+  }).then(() => { toast(`slots.${sid}.lanes ${v ? "on" : "off"} in the draft: deploy it on Automation → Settings`); again(); });
+  const remoteSet = v => automationDraftEdit(project, s => { s.automation = {...(s.automation || {}), remote_lanes: v}; })
+    .then(() => { toast(`remote_lanes ${v ? "on" : "off"} in ${project}'s draft: deploy it on Automation → Settings`); again(); });
+  on("ln-set-on", async () => slotSet(true));
+  on("ln-set-off", async () => slotSet(false));
+  on("ln-remote-on", async () => remoteSet(true));
+  on("ln-remote-off", async () => remoteSet(false));
+  on("ln-code", async () => {
+    if (!confirm(`Make a new enrollment code for ${name}? Installing with it gives ${name} a new key (the old one stops working). Do it when the slot holds no lane.`)) return;
+    const r = await api(`machines/${encodeURIComponent(name)}/code`, {method: "POST"});
+    const out = $("#ln-code-out", body); out.innerHTML = installHtml(r, os); bindCopy(out);
+  });
+}
+
+// Fleet → Setup: how the pieces fit, then the steps in order, each ticked from live state
+function fleetDiagram() {
+  return `<svg class="fl-diagram" viewBox="0 0 760 250" role="img" aria-labelledby="fl-dg-t">
+    <title id="fl-dg-t">The router serves everything; the junction runs the coordinator and the main checkout and publishes; slots run lanes</title>
+    <defs><marker id="fl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ar" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+    <rect class="bx" x="10" y="85" width="170" height="80" rx="8"/>
+    <text class="t" x="95" y="112" text-anchor="middle">Router</text>
+    <text class="s" x="95" y="132" text-anchor="middle">personas · keys · secrets</text>
+    <text class="s" x="95" y="148" text-anchor="middle">this web page</text>
+    <rect class="bx j" x="240" y="55" width="230" height="140" rx="8"/>
+    <text class="t" x="355" y="82" text-anchor="middle">Workstation (the junction)</text>
+    <text class="s" x="355" y="104" text-anchor="middle">coordinator: queue, reviews, merges</text>
+    <text class="s" x="355" y="122" text-anchor="middle">the game's main checkout</text>
+    <text class="s" x="355" y="140" text-anchor="middle">Kilo or OpenCode for main sprints</text>
+    <text class="s" x="355" y="158" text-anchor="middle">the only machine that publishes</text>
+    <rect class="bx" x="530" y="15" width="220" height="100" rx="8"/>
+    <text class="t" x="640" y="40" text-anchor="middle">Slot (Linux or Windows)</text>
+    <text class="s" x="640" y="60" text-anchor="middle">lanes: a worktree per lane</text>
+    <text class="s" x="640" y="76" text-anchor="middle">Kilo / OpenCode sessions · Lune</text>
+    <text class="s" x="640" y="92" text-anchor="middle">Studio and its checks</text>
+    <rect class="bx" x="530" y="140" width="220" height="80" rx="8"/>
+    <text class="t" x="640" y="165" text-anchor="middle">More slots…</text>
+    <text class="s" x="640" y="185" text-anchor="middle">one lane per slot at a time</text>
+    <path class="ln" d="M180,125 L238,125" marker-end="url(#fl-arrow)" marker-start="url(#fl-arrow)"/>
+    <path class="ln" d="M470,105 L528,70" marker-end="url(#fl-arrow)"/>
+    <path class="ln" d="M470,145 L528,180" marker-end="url(#fl-arrow)"/>
+    <text class="s" x="498" y="128" text-anchor="middle">ssh</text>
+    <text class="s" x="498" y="142" text-anchor="middle">tunnel</text>
+  </svg>`;
+}
+async function tabFleetSetup() {
+  const d = await api("fleet");
+  const rows = d.machines || [], projs = d.projects || [];
+  const slots = rows.filter(r => r.kind === "slot"), wss = rows.filter(r => r.kind === "workstation");
+  const junction = wss.some(r => r.active_for.length);
+  const slotOk = slots.some(r => r.state === "connected");
+  const lanesOk = slots.some(r => r.lanes && r.lanes.keys && r.lanes.setting && r.lanes.agent && r.lanes.remote_lanes);
+  const step = (n, done, title, body) => `<li class="fl-step ${done ? "done" : ""}"><span class="fl-tick" aria-label="${done ? "done" : "to do"}">${done ? "✓" : n}</span><div><b>${esc(title)}</b>${body}</div></li>`;
+  const cmd = c => `<pre>${esc(c)}</pre><div class="row">${copyBtn(c)}</div>`;
+  $("#main").innerHTML = `
+    <h2>Setup: how the pieces fit</h2>
+    <div class="card"><h3>How it fits</h3>
+      ${fleetDiagram()}
+      <ul class="hint" style="margin:6px 0 0;padding-left:18px">
+        <li><b>Router</b>: this page. It holds the personas, the keys and the secrets, and every machine enrols with it.</li>
+        <li><b>Junction</b>: your main workstation. Its coordinator keeps the queue, the reviews and the merges, works in the game's main checkout, and is the only machine that publishes.</li>
+        <li><b>Slot</b>: a machine that runs Studio and lanes. A <b>lane</b> is a track whose worktree, Kilo or OpenCode sessions, Lune runs and Studio checks all happen on that slot; the junction reaches it through one ssh tunnel and fetches its commits back.</li>
+        <li>Everything new is off until you turn it on, and a slot without lanes still runs Studio checks as before.</li></ul></div>
+    <div class="card"><h3>Steps, in order</h3>
+      <ol class="fl-steps">
+        ${step(1, projs.length > 0, "Add a project, and pick its coding client", `<div class="hint">A project is one game. Its coding client is <b>Kilo</b> (Kilo Code) or <b>OpenCode</b>: the program the coding sessions run in. You can switch later; the coordinator picks it up at its next reload.</div>
+          ${projs.length ? `<div class="tscroll"><table><tr><th>project</th><th>coding client</th><th></th></tr>${projs.map(p => `<tr><td class="nw"><b>${esc(p.id)}</b></td>
+            <td class="nw"><select data-fs-kind="${esc(p.id)}" aria-label="Coding client for ${esc(p.id)}"><option value="kilo" ${p.client_kind === "kilo" ? "selected" : ""}>Kilo</option><option value="opencode" ${p.client_kind === "opencode" ? "selected" : ""}>OpenCode</option></select></td>
+            <td class="nw"><button class="act" data-fs-kind-save="${esc(p.id)}" type="button">Save to the draft</button></td></tr>`).join("")}</table></div>
+            <p class="hint">Saving writes <code>[client] kind</code> into the project's draft; deploy it on <a href="/ui/automation#settings">Automation → Settings</a>. A project on OpenCode also needs the OpenCode server on in its workstation's Foundry Client (Settings → OpenCode server).</p>` : ""}
+          <div class="row"><a class="act" href="/ui/setup#game">Add a game (setup wizard)</a></div>`)}
+        ${step(2, junction, "Add a workstation (the junction)", `<div class="hint">${junction ? `Running the sprints: ${wss.filter(r => r.active_for.length).map(r => `<b>${esc(r.name)}</b> (${r.active_for.map(esc).join(", ")})`).join(", ")}.` : "No workstation has checked in yet."}
+          On a Windows PC: the Foundry Client installer (the Client tab), or <code>install\\workstation.ps1</code>. On Linux: Access → Machines → <b>Add a workstation</b>, then the command it shows.</div>
+          <div class="row"><button class="act" data-fl-machines="" type="button">Access → Machines</button></div>`)}
+        ${step(3, slotOk, "Add a slot (Linux or Windows)", `<div class="hint">${slots.length ? `Slots: ${slots.map(r => `<b>${esc(r.name)}</b> <span class="pill ${r.state === "connected" ? "ok" : "warn"}">${esc(r.state || "?")}</span>`).join(" ")}.` : "No slot yet."}
+          Access → Machines → <b>Add a Studio slot</b>: its id, IP, system (Linux or Windows) and its own place. You get a one-time code and the command to run on that machine (Linux: the Proxmox host shell; Windows: PowerShell as administrator).</div>
+          <div class="row"><button class="act" data-fl-machines="" type="button">Access → Machines</button></div>`)}
+        ${step(4, lanesOk, "Turn lanes on for a slot", `<div class="hint">Four small steps per slot (lane keys, the slot's lanes setting, the installer again, the project's remote_lanes). The checklist ticks each one from live state.</div>
+          <div class="row">${slots.filter(r => r.source === "machines").map(r => `<button class="act" data-fl-lanes="${esc(r.name)}" type="button">Lanes on ${esc(r.name)}…</button>`).join(" ") || '<span class="hint">Add a slot first.</span>'}</div>`)}
+        ${step(5, false, "Run doctor on each machine", `<div class="hint">One line per check, in plain words. On every workstation and slot:</div>
+          ${cmd("foundry-client doctor")}
+          <div class="hint">What the machine is and which tools it has (Git, ssh, Node, Kilo, OpenCode, Lune…), also without a running client; the Foundry Client page has the same as Doctor → <b>Platform check</b>:</div>
+          ${cmd("foundry-client doctor --platform")}`)}
+      </ol></div>`;
+  const root = $("#main");
+  bindFleet(root); bindCopy(root);
+  root.querySelectorAll("[data-fs-kind-save]").forEach(b => b.onclick = () => {
+    const p = b.dataset.fsKindSave, sel = root.querySelector(`[data-fs-kind="${CSS.escape(p)}"]`);
+    automationDraftEdit(p, s => { s.client = {...(s.client || {}), kind: sel.value}; })
+      .then(() => toast(`${p}: coding client ${sel.value === "opencode" ? "OpenCode" : "Kilo"} in the draft. Deploy it on Automation → Settings.`))
+      .catch(e => toast(e.message, true));
   });
 }
 

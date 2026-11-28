@@ -133,6 +133,12 @@ def create_app(mgr: Manager, token: str, cfg_path: Optional[Path] = None,
     def run_doctor():
         return doctor.run(mgr)
 
+    @app.get("/api/doctor/platform")
+    def run_platform_doctor():
+        """The Doctor tab's Platform check: `doctor --platform` (this machine's system and the
+        tools a workstation or a slot needs), read-only."""
+        return doctor.platform_checks()
+
     @app.post("/api/router-link/check")
     def check_link():
         return mgr.link.poll()

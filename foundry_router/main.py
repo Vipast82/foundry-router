@@ -893,6 +893,8 @@ def create_app(config_path: Optional[Path] = None,
     app.include_router(secrets_router)
     from .machines import router as machines_router
     app.include_router(machines_router)
+    from .fleet import router as fleet_router
+    app.include_router(fleet_router)
     from .provider_keys import router as provider_keys_router
     app.include_router(provider_keys_router)
     from .backup import router as backup_router

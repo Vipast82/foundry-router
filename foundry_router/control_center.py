@@ -216,7 +216,7 @@ ACTION_KINDS = ("answer_question", "reply_permission", "approve_review", "reject
                 "lead_case_pause", "lead_case_takeover", "lead_case_instruct", "lead_case_resume",
                 "assistant_plan", "assistant_run", "client_restart", "client_reload_kilo_config",
                 "tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
-                "track_status", "set_max_agents",
+                "track_status", "set_max_agents", "track_bring_home", "track_set_slot",
                 "client_service_enable",
                 "memory_add", "memory_edit", "playbook_add", "playbook_edit",
                 "queue_approve", "queue_reorder", "queue_deps", "queue_requeue",
@@ -249,7 +249,16 @@ MAX_PREP_PATCH = 2_000_000
 # TRACK_KINDS has the payloads). The coordinator's heartbeat carries `tracks`
 # {project: status} for the Automation page's Tracks tab (tracks_view).
 TRACK_ACTIONS = ("tracks_analyze", "tracks_propose", "track_start", "track_stop", "track_merge",
-                 "track_status", "set_max_agents")
+                 "track_status", "set_max_agents", "track_bring_home", "track_set_slot")
+# Distributed Foundry (lanes on slots), the Tracks tab's buttons:
+#   track_bring_home {name, force_local?: bool}  a lane on a slot becomes a local track
+#                    (force_local = go on here from the last commit fetched; the slot is away)
+#   track_set_slot   {name, slot}   move a track to another Studio slot ("" / "none" unbinds)
+#   track_start      also takes `slot` (one track) or `slots` {track: slot} (a proposal)
+# handed only to a coordinator that declares `track_lanes` (an older one would refuse them)
+TRACK_LANE_ACTIONS = ("track_bring_home", "track_set_slot")
+TRACK_LANES_FEATURE = "track_lanes"
+TRACK_SLOT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 TRACK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 TRACK_PLAN_RE = re.compile(r"^trp-[0-9a-f]{12}$")
 MAX_TRACK_SPRINTS = 20
@@ -361,6 +370,7 @@ FEATURE_GATED_ACTIONS = {"decision_answer": "decision_answer", "project_pause": 
                          "project_resume": "project_pause",
                          **{k: "lead_manager" for k in LEAD_ACTIONS},
                          **{k: "tracks" for k in TRACK_ACTIONS},
+                         **{k: TRACK_LANES_FEATURE for k in TRACK_LANE_ACTIONS},
                          **{k: "project_memory" for k in MEMORY_ACTIONS},
                          **{k: "playbook" for k in PLAYBOOK_ACTIONS},
                          **{k: "queue" for k in QUEUE_ACTIONS},
@@ -3292,10 +3302,38 @@ class ControlCenter:
     def _track_payload(kind: str, body: dict) -> tuple[dict, str]:
         """(payload, summary) of a track action, validated; ControlError otherwise."""
         name = _s(body.get("name"), 40).strip().lower()
-        if kind in ("track_stop", "track_merge") or (kind == "track_start"
-                                                     and not body.get("plan_id")):
+        if kind in ("track_stop", "track_merge", *TRACK_LANE_ACTIONS) or (
+                kind == "track_start" and not body.get("plan_id")):
             if not TRACK_NAME_RE.match(name):
                 raise ControlError("name: 1-40 characters of a-z, 0-9, '.', '_' or '-'")
+
+        def slot_of(v, what: str = "slot", unbind: bool = False) -> str:
+            """A Studio slot id ('' = none); `unbind` also takes 'none' / '-' (= '')."""
+            if v is None or v == "":
+                return ""
+            if not isinstance(v, str):
+                raise ControlError(f"{what}: a slot id such as slot-2")
+            v = v.strip()
+            if unbind and v.lower() in ("none", "-", "here"):
+                return ""
+            if not TRACK_SLOT_RE.match(v):
+                raise ControlError(f"{what}: a slot id such as slot-2 (letters, digits, _ and -)")
+            return v
+        if kind == "track_bring_home":
+            fl = body.get("force_local", False)
+            if not isinstance(fl, bool):
+                raise ControlError("force_local must be true or false")
+            p = {"name": name}
+            if fl:
+                p["force_local"] = True
+            return p, (f"bring lane {name} home from the last commit fetched (its slot is away)"
+                       if fl else f"bring lane {name} home")
+        if kind == "track_set_slot":
+            if "slot" not in body:
+                raise ControlError("slot: a slot id, or \"none\" to unbind the track")
+            slot = slot_of(body.get("slot"), unbind=True)
+            return {"name": name, "slot": slot or "none"}, (
+                f"move track {name} to {slot}" if slot else f"unbind track {name} from its slot")
         if kind == "tracks_analyze":
             return {}, "analyze the sprint plans for parallel tracks"
         if kind == "track_status":
@@ -3324,8 +3362,21 @@ class ControlCenter:
                 p = {"plan_id": plan_id}
                 if names:
                     p["names"] = names[:MAX_TRACK_SPRINTS]
+                slots = body.get("slots")
+                if slots is not None:
+                    if not isinstance(slots, dict) or len(slots) > MAX_TRACK_SPRINTS or any(
+                            not isinstance(k, str) or not TRACK_NAME_RE.match(k)
+                            for k in slots):
+                        raise ControlError("slots must map track names to slot ids")
+                    slots = {k: slot_of(v, f"slots.{k}") for k, v in slots.items()}
+                    used = [v for v in slots.values() if v]
+                    if len(used) != len(set(used)):
+                        raise ControlError("slots: one track per slot")
+                    if used:
+                        p["slots"] = {k: v for k, v in slots.items() if v}
+                on = ", ".join(f"{k} on {v}" for k, v in (p.get("slots") or {}).items())
                 return p, f"start the tracks of proposal {plan_id}" + (
-                    f" ({', '.join(names)})" if names else "")
+                    f" ({', '.join(names)})" if names else "") + (f"; {on}" if on else "")
             sprints = body.get("sprints")
             if not isinstance(sprints, list) or not sprints or len(sprints) > MAX_TRACK_SPRINTS \
                     or any(not isinstance(x, str) or not x.strip() for x in sprints):
@@ -3336,7 +3387,11 @@ class ControlCenter:
                 if not isinstance(needs, list) or any(not isinstance(x, str) for x in needs):
                     raise ControlError("needs must be a list of strings")
                 p["needs"] = [_s(x, 20) for x in needs][:8]
-            return p, f"start track {name}: {' -> '.join(p['sprints'])}"
+            slot = slot_of(body.get("slot"))
+            if slot:
+                p["slot"] = slot
+            return p, f"start track {name}: {' -> '.join(p['sprints'])}" + (
+                f" on {slot}" if slot else "")
         if kind == "track_stop":
             reason = _s(body.get("reason"), 500)
             return {"name": name, "reason": reason}, f"stop track {name}" + (
