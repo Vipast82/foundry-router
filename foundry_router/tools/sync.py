@@ -252,6 +252,45 @@ class ToolRegistry:
         # (server, tool) scoped grants already reported missing — so the
         # drop-and-log for a vanished scoped tool fires once, not per request.
         self._logged_missing_scoped: set[tuple[str, str]] = set()
+        # v0.181.269: media.tool_notes (tool name -> note), read at every sync and
+        # by refresh_notes(); main.py sets it. The server's own text is kept so a
+        # changed or removed note is applied without a sync.
+        self.notes_source = None
+        self._mcp_base: dict[str, str] = {}
+
+    # -- tool notes (v0.181.269) --------------------------------------------------
+
+    def _notes(self) -> dict:
+        try:
+            notes = self.notes_source() if callable(self.notes_source) else None
+        except Exception:                                         # noqa: BLE001
+            return {}
+        return notes if isinstance(notes, dict) else {}
+
+    @staticmethod
+    def _with_note(base: str, note) -> str:
+        """The note goes first, after the "[MCP:server]" prefix: the tool finder
+        shows only a description's first 400 characters (create_comic's is 777)."""
+        note = str(note or "").strip()
+        if not note:
+            return base
+        head, sep, rest = base.partition("] ")
+        if base.startswith("[MCP:") and sep:
+            return f"{head}] Foundry note: {note}\n{rest}"
+        return f"Foundry note: {note}\n{base}"
+
+    def refresh_notes(self) -> int:
+        """Apply the current notes to the synced MCP tools; how many changed."""
+        notes, n = self._notes(), 0
+        for name, td in list(self.tools.items()):
+            base = self._mcp_base.get(name)
+            if td.kind != "mcp" or base is None:
+                continue
+            desc = self._with_note(base, notes.get(td.mcp_tool or name))
+            if desc != td.description:
+                td.description = desc
+                n += 1
+        return n
 
     # -- queries -------------------------------------------------------------------
 
@@ -462,14 +501,18 @@ class ToolRegistry:
 
             # 3: MCP manifests — self-describing, names/descriptions pass through
             manifests = await self.mcp.list_all()
+            notes = self._notes()
+            new_base: dict[str, str] = {}
             for server, tools in manifests.items():
                 for t in tools:
                     name = t["name"]
                     if name in new_tools:
                         name = f"{server}_{name}"
+                    base = f"[MCP:{server}] {t['description']}"
+                    new_base[name] = base
                     new_tools[name] = ToolDef(
                         name=name, kind="mcp",
-                        description=f"[MCP:{server}] {t['description']}",
+                        description=self._with_note(base, notes.get(t["name"])),
                         parameters=t["input_schema"],
                         server=server, mcp_tool=t["name"],
                         disabled=name in disabled,
@@ -492,6 +535,7 @@ class ToolRegistry:
                                   f" ~{len(changed)}",
                                   f"added={added} removed={removed} changed={changed}")
             self.tools = new_tools
+            self._mcp_base = new_base
             from ..db import utcnow
             self.last_sync = utcnow()
             return {"added": added, "removed": removed, "changed": changed,

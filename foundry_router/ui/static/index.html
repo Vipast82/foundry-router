@@ -9482,6 +9482,7 @@ function mediaCard(md) {
     <div class="row"><label title="Tools whose jobs take longer than any chat can wait (a 3D model takes 10-25 minutes, a finished video 20 minutes and more). The reply says the job is queued and the person asks later; nothing holds the chat open. A queued reply whose own estimate is longer than the wait above is not waited for either. Comma-separated.">never wait for</label><input id="md-nowait" size="60" value="${esc((c.job_no_wait_tools || []).join(", "))}" placeholder="no tools">
       <label title="The script the 'view in 3D' page loads to show a .glb a tool made (Google model-viewer), in the browser of the person chatting. Empty = no viewer: a 3D model is a download link only.">3D viewer script</label><input id="md-viewer" size="44" value="${esc(c.model_viewer_url || "")}" placeholder="none: download link only"></div>
     <div class="row"><label title="Tools whose replies list files rather than make them (Media_Gen: list_assets, search_library). Their links stay links in the reply for the model to pass on; nothing is copied or shown under the reply. Comma-separated.">never copy files from</label><input id="md-nofetch" size="60" value="${esc((c.no_fetch_tools || []).join(", "))}" placeholder="no tools"></div>
+    <div class="row"><label title="A note added to a tool's description for every chat model that sees the tool, one per line as 'tool: note' (create_comic: always pass characters with a short description of each). Applied when saved. Empty = no notes.">notes for tools</label><textarea id="md-notes" rows="3" cols="80" placeholder="tool: note (one per line)">${esc(Object.entries(c.tool_notes || {}).map(([k, v]) => `${k}: ${v}`).join("\n"))}</textarea></div>
     <p class="hint">A timeout is never resubmitted, the same request within ${c.dedupe_minutes} min returns the existing job, and a refused or unavailable model fails without falling back to another model or provider. Kilo/Cline save results into the project via the local media adapter (contrib/media-adapter).</p>
     ${jobs ? `<table><tr><th>time (UTC)</th><th>client</th><th>model</th><th>status</th><th>prompt</th><th>time</th><th>result</th></tr>${jobs}</table>` : '<p class="hint">No image jobs yet.</p>'}
   </div>`;
@@ -9507,6 +9508,7 @@ function bindMediaCard() {
         video_html: $("#md-vid").checked, audio_html: $("#md-aud").checked,
         tool_fetch_no_store: $("#md-nostore").checked,
         job_no_wait_tools: $("#md-nowait").value, no_fetch_tools: $("#md-nofetch").value,
+        tool_notes: $("#md-notes").value,
         model_viewer_url: $("#md-viewer").value.trim()}});
       toast("Image settings saved"); render();
     } catch (e) { toast(e.message, true); }

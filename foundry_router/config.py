@@ -949,6 +949,18 @@ class MediaConfig(BaseModel):
     # game library" copied every picture and 12 MB GLB in the listing).
     no_fetch_tools: list[str] = Field(default_factory=lambda: [
         "list_assets", "search_library", "media_list_jobs", "list_voices", "media_status"])
+    # v0.181.269: a note added to a tool's description, by tool name, for every
+    # chat model that sees the tool (tool sync, the tool finder, direct mode). The
+    # Media_Gen chat test: the chat model sent create_comic without characters in
+    # round 10 and the bookshop of round 12, so the comic guessed the cast and made
+    # the shop bell a character. {} = no notes.
+    tool_notes: dict[str, str] = Field(default_factory=lambda: {
+        "create_comic": (
+            "Always pass characters: every character who speaks or is drawn, each with "
+            "a short description of its look (animal or person, colours, clothes), so "
+            "every panel draws them the same. A sound such as a bell, a door or a fire "
+            "goes in the panel's sfx, never as a speaker."),
+    })
     # The "view in 3D" page for a .glb a tool made (/media/a/<token>/view) loads
     # Google's <model-viewer> from here, in the browser of the person chatting.
     # "" = no viewer: the 3D model is a download link only.

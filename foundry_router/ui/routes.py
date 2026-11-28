@@ -1803,6 +1803,24 @@ async def set_media(request: Request):
             if not isinstance(names, list):
                 return JSONResponse({"error": f"{key} must be a list"}, status_code=400)
             updates[key] = [str(n).strip() for n in names if str(n).strip()]
+    if "tool_notes" in body:
+        # v0.181.269: {tool: note}, or text with one "tool: note" per line
+        notes = body["tool_notes"]
+        if isinstance(notes, str):
+            parsed = {}
+            for line in notes.splitlines():
+                if not line.strip():
+                    continue
+                tool, sep, note = line.partition(":")
+                if not sep or not tool.strip() or not note.strip():
+                    return JSONResponse({"error": f"tool_notes: {line.strip()!r} is not "
+                                                  "'tool: note'"}, status_code=400)
+                parsed[tool.strip()] = note.strip()
+            notes = parsed
+        if not isinstance(notes, dict):
+            return JSONResponse({"error": "tool_notes must be {tool: note}"}, status_code=400)
+        updates["tool_notes"] = {str(k).strip(): str(v).strip() for k, v in notes.items()
+                                 if str(k).strip() and str(v).strip()}
     if "attachments_fetch_hosts" in body:
         hosts = body["attachments_fetch_hosts"]
         if isinstance(hosts, str):
@@ -1828,6 +1846,11 @@ async def set_media(request: Request):
     def mutate(raw):
         raw.setdefault("media", {}).update(updates)
     cfg = svc.config_store.save(mutate)
+    if "tool_notes" in updates:
+        try:
+            svc.tool_registry.refresh_notes()          # applied now, not at the next sync
+        except Exception:                                         # noqa: BLE001
+            pass
     return {"ok": True, "media": cfg.media.model_dump()}
 
 

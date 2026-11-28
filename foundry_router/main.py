@@ -103,6 +103,8 @@ class Services:
         self.agents = AgentManager(cfg.agents, self.http, db)
         self.mcp.agents = self.agents
         self.tool_registry = ToolRegistry(db, self.registry, self.mcp)
+        self.tool_registry.notes_source = (                  # v0.181.269
+            lambda: getattr(self.config_store.config.media, "tool_notes", None) or {})
         self.meridian_usage = MeridianUsage(cfg.meridian, self.http, db)
         self.cliproxy_usage = CliproxyUsage(
             lambda: self.config_store.config.subscription_usage, self.http, db)

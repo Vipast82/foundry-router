@@ -1,3 +1,23 @@
+## v0.181.269 - a note on a tool for every chat model: create_comic asks for characters
+
+The Media_Gen chat test (docs/MEDIA_GEN_527_CHAT_TEST.md). In round 10 and in round 12's bookshop, the chat model sent
+create_comic without `characters`. The comic then guessed the cast from the speakers, and in round 12 it made the shop
+bell ("TING-A-LING!") a character with guessed looks. Victor approved a note asking for characters in the next release
+(2026-11-28).
+
+- **`media.tool_notes`** (new): a note per tool name, added to that tool's description wherever a chat model sees it
+  (tool sync, the tool finder's matches, direct mode's tool list). Default, for create_comic: "Always pass characters:
+  every character who speaks or is drawn, each with a short description of its look (animal or person, colours,
+  clothes), so every panel draws them the same. A sound such as a bell, a door or a fire goes in the panel's sfx,
+  never as a speaker."
+- **The note goes first**, right after "[MCP:Media_Gen]": the tool finder shows only a description's first 400
+  characters, and create_comic's own description is 777.
+- **A setting with a UI control:** Media -> "notes for tools", one "tool: note" per line; POST /admin/api/config/media
+  `tool_notes` takes that text or a {tool: note} object. A line without "tool: note" is refused. Saving applies the
+  notes to the synced tools at once, without waiting for the next tool sync; {} removes them.
+- A tool renamed for a name clash (Media_Gen_create_comic) keeps its note, which goes by the tool's own name.
+- 5 tests.
+
 ## v0.181.268 - Distributed Foundry b-4 prep: a lane store is made on the slot when missing
 
 Found while preparing the b-4 pilot (docs/plans/DISTRIBUTED_FOUNDRY_PHASE_B.md B9). Everything stays behind the same
